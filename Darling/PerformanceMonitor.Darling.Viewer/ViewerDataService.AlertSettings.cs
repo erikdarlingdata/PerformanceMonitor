@@ -74,7 +74,9 @@ public sealed partial class ViewerDataService
         /* #3444: V122's PostgreSQL Deadlocks/Blocking count thresholds, APPENDED for the same reason. */
         "pg_deadlock_count_threshold, pg_blocking_count_threshold, " +
         /* #3466: V124's fleet-sweep cadence knobs, APPENDED for the same reason. */
-        "fleet_sweep_enabled, fleet_sweep_interval_minutes";
+        "fleet_sweep_enabled, fleet_sweep_interval_minutes, " +
+        /* #3528: V126's store-disk-warn GB floor, APPENDED for the same reason. */
+        "self_disk_free_warn_gb";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -91,7 +93,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66,
+        $63, $64, $65, $66, $67,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -160,6 +162,7 @@ ON CONFLICT (id) DO UPDATE SET
     pg_blocking_count_threshold = EXCLUDED.pg_blocking_count_threshold,
     fleet_sweep_enabled = EXCLUDED.fleet_sweep_enabled,
     fleet_sweep_interval_minutes = EXCLUDED.fleet_sweep_interval_minutes,
+    self_disk_free_warn_gb = EXCLUDED.self_disk_free_warn_gb,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -257,6 +260,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PgBlockingCountThreshold });      // $64 (#3444, V122)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.FleetSweepEnabled });            // $65 (#3466, V124)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FleetSweepIntervalMinutes });     // $66 (#3466, V124)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.SelfDiskFreeWarnGb });            // $67 (#3528, V126)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -338,6 +342,8 @@ ON CONFLICT (id) DO UPDATE SET
         /* #3466 fleet-sweep cadence knobs appended (V124) at ordinals 64-65. */
         FleetSweepEnabled = reader.GetBoolean(64),
         FleetSweepIntervalMinutes = reader.GetInt32(65),
+        /* #3528 store-disk-warn GB floor appended (V126) at ordinal 66. */
+        SelfDiskFreeWarnGb = reader.GetInt32(66),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -391,6 +397,15 @@ public sealed class AlertSettingsRow
 
     /* #2107 (V55): the previously-hardcoded thresholds; defaults are the constants they replaced. */
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#3528 (V126): the Store Disk Pressure warning's GB floor — the percent above additionally
+    /// requires free space below this many GB before the alert fires (an AND qualifier, the PVS floor's
+    /// composition); 0 removes the floor. The default mirrors the V126 DDL default and the shipped constant
+    /// (<c>DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb</c>) as a literal, like its percent sibling above:
+    /// the constant lives on the SERVICE assembly the viewer does not reference, and
+    /// <c>SelfDiskWarnGbFloorRungTests</c> pins the two equal so a moved shipped default cannot leave this
+    /// row seeding a floor no surface reports.</summary>
+    public int SelfDiskFreeWarnGb { get; set; } = 50;
     public int CollectionStaleMinutes { get; set; } = 30;
     public int CollectionFailureThreshold { get; set; } = 10;
     public int DiskCriticalFreePercent { get; set; } = 3;
@@ -527,6 +542,7 @@ public sealed class AlertSettingsRow
             && AgDisconnectRefireMinutes == other.AgDisconnectRefireMinutes
             && DatabaseStateEnabled == other.DatabaseStateEnabled
             && SelfDiskFreeWarnPercent == other.SelfDiskFreeWarnPercent
+            && SelfDiskFreeWarnGb == other.SelfDiskFreeWarnGb
             && CollectionStaleMinutes == other.CollectionStaleMinutes
             && CollectionFailureThreshold == other.CollectionFailureThreshold
             && DiskCriticalFreePercent == other.DiskCriticalFreePercent

@@ -1014,11 +1014,12 @@ SELECT
            StorageVersion.SchemaVersion rather than falling through to 125 and showing a spurious
            upgrade banner on a store that is current.
 
-           The reason to gate is that standing invariant rather than a viewer read that would throw:
-           nothing in the viewer reads this column yet — the knob is backend-first (store plane + the
-           two MCP tools), and the Settings window's box follows in the viewer pass. The column is
-           named only in the probe line, not this prose, per the V71 finding: the coverage ratchet
-           strips information_schema lines but cannot strip a comment. */
+           The gate earns its place beyond that standing invariant since the viewer pass (#3563): the
+           alert-settings select now names the column, so a viewer pointed below this rung would throw
+           a raw 42703 when the Settings window prefills — the knob landed backend-first, and the
+           Settings window's box is wired now. The column is named only in the probe line, not this
+           prose, per the V71 finding: the coverage ratchet strips information_schema lines but cannot
+           strip a comment. */
         if (hasSelfDiskWarnGbFloor)
         {
             return 126;

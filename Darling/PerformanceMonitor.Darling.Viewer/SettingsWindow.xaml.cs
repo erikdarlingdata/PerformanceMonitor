@@ -751,6 +751,7 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.Text = r.DiskCriticalFreePercent.ToString(CultureInfo.InvariantCulture);
         AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
+        AlertSelfDiskWarnGbBox.Text = r.SelfDiskFreeWarnGb.ToString(CultureInfo.InvariantCulture);
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
@@ -882,6 +883,10 @@ public partial class SettingsWindow : Window
             row.DiskCriticalFreeGb = critGb;
         if (int.TryParse(AlertSelfDiskWarnPercentBox.Text, out var selfDiskPct) && selfDiskPct is >= 0 and <= 100)
             row.SelfDiskFreeWarnPercent = selfDiskPct;
+        /* #3528: validated to the same bound DarlingAlertSettings clamps (Math.Max(0, ...)) and the MCP
+           writer accepts ([0, int.MaxValue]) — 0 is IN range because it removes the floor. */
+        if (int.TryParse(AlertSelfDiskWarnGbBox.Text, out var selfDiskGb) && selfDiskGb >= 0)
+            row.SelfDiskFreeWarnGb = selfDiskGb;
         if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
             row.CollectionStaleMinutes = staleMin;
         if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
@@ -1013,6 +1018,10 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.Text = "3";
         AlertDiskCriticalGbBox.Text = "2";
         AlertSelfDiskWarnPercentBox.Text = "10";
+        /* #3528: the shipped GB floor (DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb) as a literal — the
+           constant lives on the Service assembly the viewer does not reference, and the V126 rung test
+           pins this literal equal to it. */
+        AlertSelfDiskWarnGbBox.Text = "50";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
         /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored default — it is
@@ -1158,6 +1167,7 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalPercentBox.IsEnabled = enabled;
         AlertDiskCriticalGbBox.IsEnabled = enabled;
         AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
+        AlertSelfDiskWarnGbBox.IsEnabled = enabled;
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;

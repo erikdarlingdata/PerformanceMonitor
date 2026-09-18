@@ -746,11 +746,53 @@ public sealed class FleetRollup
             /* Online and stale: the band is the headline. A healthy card gets an all-clear rather than
                BuildReason's "Needs attention" fallback, which is written for a ranking that only ever holds
                problem servers and on a grid showing EVERY server would say the opposite of the truth. */
-            _ => band == FleetHealthBand.Healthy
-                ? "Healthy — every metric on this card is inside its threshold"
-                : WithReason(ServerHealthClassifier.BandLabel(band), " — ", s),
+            _ => BandHeadline(band, s),
         };
     }
+
+    /// <summary>
+    /// The band label, qualified by measured-metric coverage when the band folded over unmeasured metrics
+    /// (#3528). The fold behind the band SKIPS Unknown, so an online server with five of six metrics
+    /// structurally Unknown still bands Healthy — and this headline claimed "every metric on this card is
+    /// inside its threshold" for it, an affirmative statement about five readings that were never taken.
+    /// The qualifier is the web fleet card's, wording and gate alike ("1 of 6 measured", only when measured
+    /// &lt; total), so the two surfaces read alike; a fully-measured card is unchanged.
+    /// </summary>
+    private static string BandHeadline(FleetHealthBand band, ServerSummaryItem s)
+    {
+        var coverage = MeasuredCoveragePhrase(s);
+
+        if (band == FleetHealthBand.Healthy)
+        {
+            /* The all-clear's "every metric" claim is earned only at full coverage — at partial coverage
+               the coverage IS the headline's second half, because the claim it replaces is false. */
+            return coverage.Length == 0
+                ? "Healthy — every metric on this card is inside its threshold"
+                : "Healthy — " + coverage;
+        }
+
+        /* The guarded reason-append stays WithReason's (one copy — its own doc says why); the qualifier
+           rides after whatever it produced: beside a named reason as a second " · " phrase (the web status
+           line's list separator), else straight after the bare label. */
+        var label = ServerHealthClassifier.BandLabel(band);
+        var headline = WithReason(label, " — ", s);
+        if (coverage.Length == 0)
+        {
+            return headline;
+        }
+
+        return headline.Equals(label, StringComparison.Ordinal)
+            ? label + " — " + coverage
+            : headline + " · " + coverage;
+    }
+
+    /// <summary>"N of M measured" when the card banded over unmeasured metrics, else "" — the web fleet
+    /// card's wording and gate (<c>metric_count &gt; 0 &amp;&amp; measured_metric_count &lt;
+    /// metric_count</c>), over the card's own counts.</summary>
+    private static string MeasuredCoveragePhrase(ServerSummaryItem s) =>
+        s.MetricCount > 0 && s.MeasuredMetricCount < s.MetricCount
+            ? $"{s.MeasuredMetricCount} of {s.MetricCount} measured"
+            : "";
 
     /// <summary>
     /// A headline plus what the card can actually name — or the headline alone when it can name nothing.

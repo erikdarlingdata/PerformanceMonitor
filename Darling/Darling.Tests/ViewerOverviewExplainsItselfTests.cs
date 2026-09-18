@@ -121,6 +121,78 @@ public sealed class ViewerOverviewExplainsItselfTests
         Assert.Contains("Healthy", tooltip, StringComparison.Ordinal);
     }
 
+    // ── The band label carries the measured-metric qualifier (#3528 / #3563) ───────────────────────
+
+    /// <summary>A card whose six severities all carry real readings — the only shape that earns the
+    /// unqualified all-clear. Deadlocks need a non-zero window to band (a zero window reads Unknown).</summary>
+    private static ServerSummaryItem FullyMeasured(string name = "f1", int id = 7) =>
+        new()
+        {
+            DisplayName = name,
+            ServerId = id,
+            IsOnline = true,
+            CpuPercent = 50,
+            TotalThreads = 512,
+            CurrentWorkers = 100,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };
+
+    /// <summary>
+    /// The #3528 card: the band's fold SKIPS Unknown, so an online PostgreSQL target with five of six
+    /// metrics structurally Unknown still bands Healthy — and this tooltip claimed "every metric on this
+    /// card is inside its threshold" for it, an affirmative statement about five readings that were never
+    /// taken. The web fleet card says "1 of 6 measured" (#3562); the WPF card's band label now says the
+    /// same, wording and gate alike, so the two surfaces read alike.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_QualifiesAHealthyBand_ThatFoldedOverUnmeasuredMetrics()
+    {
+        /* No CPU/threads snapshot, DMV-sourced memory/blocking/deadlocks nulled by the engine — only the
+           collector row measured. The same shape DarlingFleetReader's card serializes as 1-of-6. */
+        var pg = Healthy();
+        pg.IsPostgres = true;
+
+        Assert.Equal(1, pg.MeasuredMetricCount);
+        Assert.Equal(6, pg.MetricCount);
+        Assert.StartsWith("Healthy — 1 of 6 measured", pg.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("every metric on this card", pg.StatusTooltip, StringComparison.Ordinal);
+
+        /* The counts are the shared classifier's own fold over the card's metrics — the service's
+           measured_metric_count / metric_count pair, not a viewer re-derivation. */
+        Assert.Equal(
+            ServerHealthClassifier.MeasuredMetricCounts(pg.ToHealthMetrics()),
+            (pg.MeasuredMetricCount, pg.MetricCount));
+    }
+
+    /// <summary>The all-clear's "every metric" claim survives — but only where it is true. A fully-measured
+    /// healthy card is unchanged by #3563, which is what keeps the qualifier a qualifier rather than a new
+    /// line every green card carries.</summary>
+    [Fact]
+    public void TheCardsTooltip_KeepsTheUnqualifiedAllClear_WhenEveryMetricIsMeasured()
+    {
+        var card = FullyMeasured();
+
+        Assert.Equal(6, card.MeasuredMetricCount);
+        Assert.Equal(6, card.MetricCount);
+        Assert.StartsWith(
+            "Healthy — every metric on this card is inside its threshold", card.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("measured", card.StatusTooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>A partially-measured PROBLEM card keeps its reason and gains the qualifier beside it — the
+    /// web card appends the coverage to every card it is short on, not just the green ones, and the reason
+    /// must stay the ranking's sentence verbatim (the drift-prevention this file pins).</summary>
+    [Fact]
+    public void TheCardsTooltip_CarriesTheQualifierBesideTheReason_OnAPartiallyMeasuredProblemCard()
+    {
+        /* Busy(): CPU, memory, blocking and collectors measured; threads and deadlocks Unknown. */
+        var card = Busy();
+
+        Assert.Equal(4, card.MeasuredMetricCount);
+        Assert.StartsWith("Critical — CPU 96%, Blocking 6 · 4 of 6 measured", card.StatusTooltip, StringComparison.Ordinal);
+        Assert.Contains(FleetRollup.BuildReason(card), card.StatusTooltip, StringComparison.Ordinal);
+    }
+
     /// <summary>Offline and awaiting-first-collection already come back as whole sentences naming themselves, so
     /// the band label is not stamped in front of them a second time.</summary>
     [Fact]

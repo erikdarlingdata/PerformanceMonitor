@@ -344,10 +344,13 @@ public sealed class FleetSweepCadenceKnobRungTests
             .Max();
         Assert.Equal(command.Parameters.Count, highestPlaceholder);
 
-        /* The two new columns ride at the END — appended, the rule every knob rung on this table follows,
-           so every earlier ordinal keeps its column. */
-        Assert.False(Assert.IsType<NpgsqlParameter<bool>>(command.Parameters[^2]).TypedValue);
-        Assert.Equal(240, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^1]).TypedValue);
+        /* The two columns ride at THEIR appended ordinals ($65/$66) — fixed forever by the append rule,
+           which is what keeps every earlier ordinal on its column. Not `[^1]`/`[^2]` any more: that
+           end-anchored form asserted these are the NEWEST bound columns, which stopped being true when the
+           viewer pass appended V126's floor ($67) — the top-of-bind claim moved to
+           SelfDiskWarnGbFloorRungTests the way the probe's top-arm claims hand off between rung files. */
+        Assert.False(Assert.IsType<NpgsqlParameter<bool>>(command.Parameters[64]).TypedValue);
+        Assert.Equal(240, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[65]).TypedValue);
     }
 
     /// <summary>Non-overlapping occurrences of <paramref name="needle"/>.</summary>
