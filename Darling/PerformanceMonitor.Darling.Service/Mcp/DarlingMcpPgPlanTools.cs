@@ -53,7 +53,7 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum plan shapes to return. Default 10.")] int limit = 10,
-        [Description("Only return plans for this queryid, as a string. Optional.")] string? query_id = null,
+        [Description("Only return plans for this queryid, as a string. Optional. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")] string? query_id = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -87,17 +87,16 @@ public sealed class DarlingMcpPgPlanTools
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
 
+            /* The queryid pin travels INTO the SQL (#3533). It used to be applied here, over a fetched
+               top-duration page, which made every plan ranked below the page unfindable and then reported
+               the miss as "not captured" — the predicate has to run where the rows are. */
             var rows = await DarlingPgPlanCaptureReader.GetPgPlanCaptureAsync(
-                postgres, resolved.ServerId, start, now, wantedQueryId is null ? limit : limit * 10);
-
-            if (wantedQueryId is not null)
-            {
-                rows = rows.Where(r => r.QueryId == wantedQueryId.Value).Take(limit).ToList();
-            }
+                postgres, resolved.ServerId, start, now, limit, wantedQueryId);
 
             if (rows.Count == 0)
             {
-                return await NoPlansStatusAsync(postgres, resolved.ServerId, resolved.ServerName, wantedQueryId);
+                return await NoPlansStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back);
             }
 
             return BuildPlansJson(resolved.ServerName, hours_back, rows, limit);
@@ -259,7 +258,7 @@ public sealed class DarlingMcpPgPlanTools
     /// the threshold" become a true statement rather than a guess.</para>
     /// </summary>
     private static async Task<string> NoPlansStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId)
+        NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId, int hoursBack)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_plan_capture");
@@ -291,17 +290,37 @@ public sealed class DarlingMcpPgPlanTools
                 + "satisfied or not, in the order they have to be fixed in.");
         }
 
-        var subject = wantedQueryId is null ? "any statement" : "this statement";
-
-        return McpHelpers.Status(
-            "empty",
-            $"Capture is configured on this server and no plan was captured for {subject} in this window. "
-            + "Two things produce that and they are different: the statement never ran longer than "
-            + "auto_explain.log_min_duration, which is the healthy answer and means it is not the query to "
-            + "look at; or a plan was captured earlier and has aged out, which plan_content_retention_days "
-            + "governs — widen hours_back to tell those apart, because a plan that exists further back will "
-            + "reappear and one that never existed will not.");
+        return McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack));
     }
+
+    /// <summary>
+    /// The empty answer once capture is known to be configured, split by whether a queryid was asked for.
+    ///
+    /// <para>The queryid arm changed with #3533 and its honesty depends on the reader: the filter now runs
+    /// in the SQL over every capture in the window, so "no plan for this statement was captured" is a fact
+    /// rather than a statement about a fetched page. The text this replaced said the query was "not the
+    /// query to look at" — over a top-N page that was an invented verdict, and even over the whole window
+    /// it collapses three different causes into the most reassuring one.</para>
+    /// </summary>
+    internal static string NoPlanCapturedMessage(long? wantedQueryId, int hoursBack) => wantedQueryId is null
+        ? $"Capture is configured on this server and nothing was captured in the last {hoursBack} hour(s) — "
+          + "this read has no filter, so that is a fact about every statement, not about a page of them. "
+          + "Two things produce it and they are different: no statement ran longer than "
+          + "auto_explain.log_min_duration, which is the healthy answer on a server whose statements are "
+          + "all fast; or plans were captured earlier and have aged out, which plan_content_retention_days "
+          + "governs — widen hours_back to tell those apart, because a plan that exists further back will "
+          + "reappear and one that never existed will not."
+        : $"Every capture in the last {hoursBack} hour(s) was searched for this query_id — the whole "
+          + "window, in the store, not a top-N page — and none matches, so no plan for this statement was "
+          + "captured in this window. That has three different causes with three different remedies: the "
+          + "statement did not run in this window at all, which get_pg_top_queries can confirm from its "
+          + "call counts; it ran but never crossed auto_explain.log_min_duration, so auto_explain never "
+          + "wrote a plan — the healthy reading for a statement that is fast HERE, not a verdict about it "
+          + "at other times; or capture was not working when it ran — get_pg_plan_capture_readiness "
+          + "reports every precondition with the remedy beside it, and its facets are the latest reading "
+          + "rather than the window's history, so a server that is ready now can still have missed an "
+          + "earlier run. A plan captured before this window has aged out under "
+          + "plan_content_retention_days; widen hours_back to reach further back.";
 
     /// <summary>
     /// The unsatisfied readiness facets, newest reading per facet. Read directly rather than through the

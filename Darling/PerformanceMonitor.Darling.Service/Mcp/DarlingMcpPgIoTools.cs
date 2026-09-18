@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -33,7 +34,7 @@ public sealed class DarlingMcpPgIoTools
     /// </summary>
     internal static string ContextMeaning(string? context) => DarlingPgIoReader.ContextMeaning(context);
 
-    [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby.")]
+    [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby.")]
     public static async Task<string> GetPgIoStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -79,108 +80,163 @@ public sealed class DarlingMcpPgIoTools
                 }, McpHelpers.JsonOptions);
             }
 
-            var totalReads = rows.Sum(r => r.Reads);
-            var totalReadTime = rows.Sum(r => r.ReadTimeMs);
+            /* Asked of the server's OWN configuration rather than inferred from the zeros, exactly as the
+               trend sibling asks it (#3536): the two readings a zero latency permits — "the disk is
+               instant" and "nobody is timing it" — are not distinguishable in the counters, and
+               track_io_timing is OFF by default, so the zeros are the ordinary case rather than a fault. */
+            var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
+                postgres, resolved.ServerId, windowEnd);
 
-            var combinations = rows.Select(r =>
-            {
-                var accesses = r.Reads + r.Hits;
-                return new
-                {
-                    backend_type = r.BackendType,
-                    object_type = r.ObjectType,
-                    context = r.Context,
-                    context_meaning = ContextMeaning(r.Context),
-                    reads = r.Reads,
-                    read_time_ms = Math.Round(r.ReadTimeMs, 1),
-                    /* Per-read latency is the figure that separates "a lot of I/O" from "slow I/O", and
-                       they have completely different remedies. */
-                    avg_read_ms = r.Reads > 0 ? Math.Round(r.ReadTimeMs / r.Reads, 3) : (double?)null,
-                    hits = r.Hits,
-                    /* A hit ratio scoped to this combination, which is the only scope where it means
-                       anything: a server-wide ratio averages bulkread's deliberate misses together with
-                       normal-context misses and understates both. */
-                    hit_pct = accesses > 0 ? Math.Round((double)r.Hits / accesses * 100, 1) : (double?)null,
-                    pct_of_total_reads = totalReads > 0 ? Math.Round((double)r.Reads / totalReads * 100, 1) : 0,
-                    pct_of_total_read_time = totalReadTime > 0 ? Math.Round(r.ReadTimeMs / totalReadTime * 100, 1) : 0,
-                    extends = r.Extends,
-                    extend_time_ms = Math.Round(r.ExtendTimeMs, 1),
-                    evictions = r.Evictions,
-                    /* Ring-buffer reuse, NOT eviction pressure. Conflating the two is the standard
-                       misreading of this view: reuses are a bulk operation recycling its OWN buffers. */
-                    reuses = r.Reuses,
-                    writes = r.WriteCountersTracked ? r.Writes : (long?)null,
-                    write_time_ms = r.WriteCountersTracked ? Math.Round(r.WriteTimeMs, 1) : (double?)null,
-                    write_counters_tracked = r.WriteCountersTracked,
-                    /* The block size an operation moves. Gone from 18, where a read is no longer one
-                       block, so it is null there and read_bytes below is measured instead of derived. */
-                    block_bytes = r.OpBytes > 0 ? r.OpBytes : (long?)null,
-                    /* One name for the volume answer, and bytes_source says how it was arrived at. From 18
-                       these are measured totals; below 18 they are reads x block size. Never both, and
-                       never silently swapped: the two are different quantities, and on 18 the old estimate
-                       would UNDERCOUNT because a vectored read covers several blocks. */
-                    read_bytes = r.ByteCountersTracked
-                        ? r.ReadBytes
-                        : (r.OpBytes > 0 ? r.Reads * r.OpBytes : (decimal?)null),
-                    write_bytes = r.ByteCountersTracked
-                        ? r.WriteBytes
-                        : (r.OpBytes > 0 && r.WriteCountersTracked ? r.Writes * r.OpBytes : (decimal?)null),
-                    extend_bytes = r.ByteCountersTracked ? r.ExtendBytes : (decimal?)null,
-                    bytes_source = r.ByteCountersTracked
-                        ? "measured"
-                        : (r.OpBytes > 0 ? "estimated_from_block_size" : "unavailable"),
-                    stats_reset = r.StatsReset,
-                };
-            })
-            .ToList();
-
-            var anyWritesTracked = rows.Any(r => r.WriteCountersTracked);
-            /* #2655: PostgreSQL 18 replaced op_bytes with measured byte totals. Said once at the top for
-               the same reason the write flag is: a caller has to know which quantity it is reading before
-               it compares two servers, and the two are not comparable. */
-            var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
-            var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
-
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                status = "io_activity",
-                combination_count = combinations.Count,
-                total_reads = totalReads,
-                total_read_time_ms = Math.Round(totalReadTime, 1),
-                busiest_by_read_time = $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}",
-                /* Said once at the top rather than repeated per row: on Aurora this is false everywhere,
-                   and a caller needs to know the write side is unmeasured before it concludes anything
-                   from the absence of writes. */
-                write_counters_tracked_anywhere = anyWritesTracked,
-                bytes_source = bytesMeasured
-                    ? "measured"
-                    : (bytesEstimated ? "estimated_from_block_size" : "unavailable"),
-                note = anyWritesTracked
-                    ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
-                    + "produce a negative figure."
-                    : "All counters are windowed differences. This server tracks NO write counters — the "
-                    + "signature of Amazon Aurora, where backends do not write data files and the storage "
-                    + "layer does. Absent writes here mean unmeasured, not zero.",
-                bytes_note = bytesMeasured
-                    ? "Byte totals are MEASURED, from PostgreSQL 18's read_bytes/write_bytes/extend_bytes. "
-                      + "They are not comparable with the figures a pre-18 server reports, which are "
-                      + "reads x block size - 18 reads several blocks per operation, so the older estimate "
-                      + "undercounts."
-                    : (bytesEstimated
-                        ? "Byte totals are ESTIMATED as count x block_bytes, which is exact below "
-                          + "PostgreSQL 18 because one operation moves one block. PostgreSQL 18 measures "
-                          + "them directly instead."
-                        : "This server reports no byte figures at all: op_bytes is absent and the measured "
-                          + "columns PostgreSQL 18 replaced it with are not being collected. The counts and "
-                          + "times above are unaffected."),
-                combinations,
-            }, McpHelpers.JsonOptions);
+            return BuildIoJson(resolved.ServerName, hours_back, rows, timingSetting);
         }
         catch (Exception ex)
         {
             return McpHelpers.Status("error", $"Reading PostgreSQL I/O stats failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the same
+    /// reason the plan tools' <c>BuildPlansJson</c> is separate.
+    ///
+    /// <para><c>timingSetting</c> is the target's own <c>track_io_timing</c> from <c>pg_server_config</c>,
+    /// or null when the configuration has not been collected — in which case whether any non-zero time
+    /// appears in the window is the only evidence available and is used, stated as inference.</para>
+    /// </summary>
+    internal static string BuildIoJson(
+        string serverName,
+        int hoursBack,
+        IReadOnlyList<DarlingPgIoReader.PgIoRow> rows,
+        bool? timingSetting)
+    {
+        var timingObserved = rows.Any(r => r.ReadTimeMs > 0 || r.WriteTimeMs > 0);
+        var timingTracked = timingSetting ?? timingObserved;
+
+        var totalReads = rows.Sum(r => r.Reads);
+        var totalReadTime = rows.Sum(r => r.ReadTimeMs);
+
+        var combinations = rows.Select(r =>
+        {
+            var accesses = r.Reads + r.Hits;
+            return new
+            {
+                backend_type = r.BackendType,
+                object_type = r.ObjectType,
+                context = r.Context,
+                context_meaning = ContextMeaning(r.Context),
+                reads = r.Reads,
+                /* Every time figure is null when the server does not measure I/O time (#3536), rather
+                   than the 0.0 the arithmetic produces: that zero is a fact about the configuration, and
+                   printed as a time it is the most reassuring wrong number here. */
+                read_time_ms = timingTracked ? Math.Round(r.ReadTimeMs, 1) : (double?)null,
+                /* Per-read latency is the figure that separates "a lot of I/O" from "slow I/O", and
+                   they have completely different remedies. */
+                avg_read_ms = timingTracked && r.Reads > 0 ? Math.Round(r.ReadTimeMs / r.Reads, 3) : (double?)null,
+                hits = r.Hits,
+                /* A hit ratio scoped to this combination, which is the only scope where it means
+                   anything: a server-wide ratio averages bulkread's deliberate misses together with
+                   normal-context misses and understates both. */
+                hit_pct = accesses > 0 ? Math.Round((double)r.Hits / accesses * 100, 1) : (double?)null,
+                pct_of_total_reads = totalReads > 0 ? Math.Round((double)r.Reads / totalReads * 100, 1) : 0,
+                pct_of_total_read_time = timingTracked
+                    ? (totalReadTime > 0 ? Math.Round(r.ReadTimeMs / totalReadTime * 100, 1) : 0)
+                    : (double?)null,
+                extends = r.Extends,
+                extend_time_ms = timingTracked ? Math.Round(r.ExtendTimeMs, 1) : (double?)null,
+                evictions = r.Evictions,
+                /* Ring-buffer reuse, NOT eviction pressure. Conflating the two is the standard
+                   misreading of this view: reuses are a bulk operation recycling its OWN buffers. */
+                reuses = r.Reuses,
+                writes = r.WriteCountersTracked ? r.Writes : (long?)null,
+                write_time_ms = timingTracked && r.WriteCountersTracked ? Math.Round(r.WriteTimeMs, 1) : (double?)null,
+                write_counters_tracked = r.WriteCountersTracked,
+                /* The block size an operation moves. Gone from 18, where a read is no longer one
+                   block, so it is null there and read_bytes below is measured instead of derived. */
+                block_bytes = r.OpBytes > 0 ? r.OpBytes : (long?)null,
+                /* One name for the volume answer, and bytes_source says how it was arrived at. From 18
+                   these are measured totals; below 18 they are reads x block size. Never both, and
+                   never silently swapped: the two are different quantities, and on 18 the old estimate
+                   would UNDERCOUNT because a vectored read covers several blocks. */
+                read_bytes = r.ByteCountersTracked
+                    ? r.ReadBytes
+                    : (r.OpBytes > 0 ? r.Reads * r.OpBytes : (decimal?)null),
+                write_bytes = r.ByteCountersTracked
+                    ? r.WriteBytes
+                    : (r.OpBytes > 0 && r.WriteCountersTracked ? r.Writes * r.OpBytes : (decimal?)null),
+                extend_bytes = r.ByteCountersTracked ? r.ExtendBytes : (decimal?)null,
+                bytes_source = r.ByteCountersTracked
+                    ? "measured"
+                    : (r.OpBytes > 0 ? "estimated_from_block_size" : "unavailable"),
+                stats_reset = r.StatsReset,
+            };
+        })
+        .ToList();
+
+        var anyWritesTracked = rows.Any(r => r.WriteCountersTracked);
+        /* #2655: PostgreSQL 18 replaced op_bytes with measured byte totals. Said once at the top for
+           the same reason the write flag is: a caller has to know which quantity it is reading before
+           it compares two servers, and the two are not comparable. */
+        var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
+        var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            status = "io_activity",
+            combination_count = combinations.Count,
+            total_reads = totalReads,
+            total_read_time_ms = timingTracked ? Math.Round(totalReadTime, 1) : (double?)null,
+            /* The key survives untracked timing for the web tile's sake; busiest_basis beside it says
+               what the ranking actually used. The reader orders by read time and then by read count, so
+               over a store of zero times the count IS the ordering rather than a tiebreak. */
+            busiest_by_read_time = $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}",
+            busiest_basis = timingTracked
+                ? "total read time (read_time_ms), then read count"
+                : "read count (reads) — this server does not measure I/O time, so every read-time figure "
+                  + "is zero in the store and cannot rank anything; the ordering falls back to the counter "
+                  + "that exists",
+            /* Said once at the top rather than repeated per row: on Aurora this is false everywhere,
+               and a caller needs to know the write side is unmeasured before it concludes anything
+               from the absence of writes. */
+            write_counters_tracked_anywhere = anyWritesTracked,
+            io_timing_tracked = timingTracked,
+            io_timing_source = timingSetting is null
+                ? "inferred from the data - this server's configuration has not been collected, so "
+                  + "track_io_timing is unknown and the answer here is simply whether any non-zero I/O "
+                  + "time appears in the window"
+                : "the target's own track_io_timing, as collected into pg_server_config",
+            bytes_source = bytesMeasured
+                ? "measured"
+                : (bytesEstimated ? "estimated_from_block_size" : "unavailable"),
+            note = anyWritesTracked
+                ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
+                + "produce a negative figure."
+                : "All counters are windowed differences. This server tracks NO write counters — the "
+                + "signature of Amazon Aurora, where backends do not write data files and the storage "
+                + "layer does. Absent writes here mean unmeasured, not zero.",
+            timing_note = timingTracked
+                ? "read_time_ms, avg_read_ms, write_time_ms and extend_time_ms are measured I/O times: "
+                  + "this server has track_io_timing on."
+                : "read_time_ms, avg_read_ms, write_time_ms, extend_time_ms and the read-time shares are "
+                  + "NULL throughout because this server does not measure I/O time. track_io_timing is off "
+                  + "by DEFAULT in PostgreSQL, so this is the ordinary configuration rather than a fault - "
+                  + "but it means the operation counts are the only I/O evidence here, and nothing in this "
+                  + "store can say whether the storage is slow. Turning it on costs a clock read per "
+                  + "operation; measure that on the platform before enabling it fleet-wide.",
+            bytes_note = bytesMeasured
+                ? "Byte totals are MEASURED, from PostgreSQL 18's read_bytes/write_bytes/extend_bytes. "
+                  + "They are not comparable with the figures a pre-18 server reports, which are "
+                  + "reads x block size - 18 reads several blocks per operation, so the older estimate "
+                  + "undercounts."
+                : (bytesEstimated
+                    ? "Byte totals are ESTIMATED as count x block_bytes, which is exact below "
+                      + "PostgreSQL 18 because one operation moves one block. PostgreSQL 18 measures "
+                      + "them directly instead."
+                    : "This server reports no byte figures at all: op_bytes is absent and the measured "
+                      + "columns PostgreSQL 18 replaced it with are not being collected. The counts and "
+                      + "times above are unaffected."),
+            combinations,
+        }, McpHelpers.JsonOptions);
     }
 }
