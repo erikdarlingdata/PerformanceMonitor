@@ -50,8 +50,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// auth store no secret; a service principal stores its client secret exactly like a SQL password; the INTERACTIVE
 /// Entra modes (MFA / device-code / default-credential) are rejected (<c>status:"invalid"</c>) — they need a broker
 /// or a signed-in user and cannot run headless, whereas ServicePrincipal and ManagedIdentity are non-interactive
-/// and supported (#3484). The whole call returns <c>{added, skipped, failed, results:[...]}</c>. <b>remove_server</b>
-/// resolves a name through the SAME <see cref="DarlingServerResolver"/> the read tools use and DELETEs the
+/// and supported (#3484). A server whose probed connection lands in a database another registration already
+/// covers is refused as <c>status:"collides"</c> (#2280). The whole call returns
+/// <c>{requested, added, skipped, collided, failed, results:[...]}</c>, and the four counters SUM to
+/// <c>requested</c> — every per-row status is mapped to exactly one of them by <see cref="CounterOfStatus"/>
+/// (#3541 A14: <c>collides</c> used to land in no counter, so a batch with a collided server summarised as
+/// <c>failed: 0</c> and the server went silently unmonitored under a clean summary). <b>remove_server</b> reads the
+/// SAME <c>servers</c> registry the read tools resolve against, but with a stricter rule than theirs: an exact
+/// match, or a partial match ONLY when it is unique — an ambiguous partial is refused with the candidates named,
+/// because a first-wins partial on a DELETE removes whichever sibling sorts first. It then DELETEs the
 /// <c>config.config_monitored_servers</c> row.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
@@ -97,13 +104,18 @@ public sealed class DarlingMcpServerAdminTools
         "status \"connection_failed\" and does NOT stop the rest of the batch. The INTERACTIVE Microsoft Entra modes " +
         "(MFA / device-code / default-credential) are rejected (status \"invalid\") — they need a broker or a " +
         "signed-in user and cannot run headless; ServicePrincipal and ManagedIdentity are non-interactive and are " +
-        "supported. A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service " +
-        "identity) and is never " +
-        "returned. Returns {added:N, skipped:N, failed:N, results:[{server, status:\"added\"|\"duplicate\"|" +
-        "\"connection_failed\"|\"invalid\", detail}]}, where an added server's detail reports what the probe found " +
-        "— for a PostgreSQL target that includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL " +
-        "collectors apply to it. NOTE: the password travels to this endpoint in the request; " +
-        "on a LAN use the documented TLS reverse proxy.")]
+        "supported. A server whose probed connection lands in a database that ANOTHER monitored server already " +
+        "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
+        "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
+        "A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service identity) and " +
+        "is never returned. Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"invalid\", detail}]}. requested is " +
+        "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
+        "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\" and " +
+        "\"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
+        "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
+        "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
+        "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy.")]
     public static Task<string> AddServers(
         NpgsqlDataSource postgres,
         [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields), e.g. [{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\",\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\",\"trust_server_certificate\":true}].")] string servers_json) =>
@@ -157,7 +169,7 @@ public sealed class DarlingMcpServerAdminTools
                 var probeResult = await probe(entry.ProbeConfig, cancellationToken);
                 if (!probeResult.Success)
                 {
-                    results.Add(new ServerResult(entry.Order, entry.DisplayName, "connection_failed",
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.ConnectionFailed,
                         string.IsNullOrWhiteSpace(probeResult.Error)
                             ? "Could not connect to the server."
                             : $"Could not connect: {probeResult.Error}"));
@@ -176,7 +188,7 @@ public sealed class DarlingMcpServerAdminTools
                 var collision = ActualIdentityCollision(entry, probeResult.ConnectedDatabase, claimed);
                 if (collision is not null)
                 {
-                    results.Add(new ServerResult(entry.Order, entry.DisplayName, "collides", collision));
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, collision));
                     continue;
                 }
 
@@ -185,7 +197,7 @@ public sealed class DarlingMcpServerAdminTools
                    leaves this method — it is not logged, not echoed in a result. */
                 var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
                 await InsertServerAsync(postgres, entry, encryptedPassword, cancellationToken);
-                results.Add(new ServerResult(entry.Order, entry.DisplayName, "added", DescribeProbe(probeResult)));
+                results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
             }
 
             return Aggregate(results);
@@ -197,15 +209,19 @@ public sealed class DarlingMcpServerAdminTools
     }
 
     [McpServerTool(Name = "remove_server"), Description(
-        "Removes a monitored SQL Server from the fleet by name (the display name or address, resolved the same way " +
-        "the read tools resolve server_name — exact match first, then partial, against the storage name and the " +
-        "display name). Deletes the server's definition from the central monitoring store; the running service " +
-        "drops it from its collection set within one sweep. Already-collected historical data is NOT deleted. " +
-        "Returns {status:\"removed\", server} on success, or {status:\"not_found\", ...} when no monitored server " +
-        "matches the name.")]
+        "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
+        "list_servers reports them). Matching is exact first (case-insensitive, against the storage name and the " +
+        "display name); a PARTIAL match is honored ONLY when exactly one registered server contains the text. When " +
+        "the name is ambiguous — an exact name shared by two registrations, or a fragment such as \"-01\" that " +
+        "several servers contain — NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
+        "display_name}], message}; re-issue with one candidate's full name. Deletes the server's definition from the " +
+        "central monitoring store; the running service drops it from its collection set within one sweep. " +
+        "Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, matched_by:\"exact\"|" +
+        "\"partial\"} on success, {status:\"ambiguous\", ...} as above, or {status:\"not_found\", ...} when no " +
+        "registered server matches the name (the message lists the servers that are registered).")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
-        [Description("The name of the monitored server to remove — its display name or address (as list_servers / get_alert_history report it).")] string server_name)
+        [Description("The name of the monitored server to remove — its display name or storage name / address (as list_servers / get_alert_history report it). A partial name is accepted only when it matches exactly one server.")] string server_name)
     {
         try
         {
@@ -214,14 +230,38 @@ public sealed class DarlingMcpServerAdminTools
                 return Outcome("invalid", "server_name is required.");
             }
 
-            /* Resolve through the SAME resolver the read tools use, against the servers registry (the id it returns
-               is the shared-identity server_id that keys config_monitored_servers). A miss returns the resolver's
-               available-servers listing — surfaced as not_found here. */
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
-            if (error != null)
+            /* The SAME registry rows the read tools resolve against (the id is the shared-identity server_id that
+               keys config_monitored_servers), but NOT the same rule. The read resolver's first-wins partial match
+               is the right convenience for a read — an agent that lands on the wrong sibling sees its name in the
+               payload and re-asks. On a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
+               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
+               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
+            var servers = await DarlingServerResolver.LoadEnabledAsync(postgres);
+            var target = ResolveForRemoval(servers, server_name);
+
+            if (target.Candidates.Count == 0)
             {
-                return Outcome("not_found", error);
+                /* No exact and no partial match at all: the resolver's own miss message (the available-servers
+                   listing, plus the #2339 peer disclosure) is the right answer here too, and with zero candidates
+                   it cannot resolve to anything, so reusing it cannot pick a server this method declined to. */
+                var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                return Outcome("not_found", missMessage ?? $"Could not resolve server '{server_name}'.");
             }
+
+            if (target.Candidates.Count > 1)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "ambiguous",
+                    message = $"'{server_name}' matches {target.Candidates.Count} registered servers " +
+                              $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                              "nothing was removed. Re-issue remove_server with ONE candidate's full name.",
+                    matched_by = target.MatchedBy,
+                    candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+                }, McpHelpers.JsonOptions);
+            }
+
+            var resolved = target.Candidates[0];
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -229,7 +269,7 @@ public sealed class DarlingMcpServerAdminTools
             var affected = await command.ExecuteNonQueryAsync();
 
             return affected > 0
-                ? JsonSerializer.Serialize(new { status = "removed", server = resolved.ServerName }, McpHelpers.JsonOptions)
+                ? JsonSerializer.Serialize(new { status = "removed", server = resolved.ServerName, matched_by = target.MatchedBy }, McpHelpers.JsonOptions)
                 : Outcome("not_found",
                     $"'{resolved.ServerName}' is registered but has no monitored-server definition to remove (it may have been added only via darling.json, or already removed).");
         }
@@ -250,9 +290,115 @@ public sealed class DarlingMcpServerAdminTools
     internal sealed record ParsedServerEntry(
         int Order, string DisplayName, string StorageKey, MonitoredServer ProbeConfig, string? PlaintextPassword);
 
-    /// <summary>One per-server outcome (<c>added</c> / <c>duplicate</c> / <c>connection_failed</c> / <c>invalid</c>)
-    /// with a human-readable <see cref="Detail"/>; <see cref="Order"/> restores input order in the aggregate.</summary>
+    /// <summary>One per-server outcome (a <see cref="AddStatus"/> value) with a human-readable <see cref="Detail"/>;
+    /// <see cref="Order"/> restores input order in the aggregate.</summary>
     internal sealed record ServerResult(int Order, string Server, string Status, string Detail);
+
+    /// <summary>
+    /// The per-row <c>status</c> vocabulary of <c>add_servers</c> — the five outcomes an entry can have, as
+    /// constants so a new one cannot be introduced as a bare literal at a result site without also being placed in
+    /// <see cref="CounterOfStatus"/> (the test census walks these fields and demands each has a counter).
+    /// </summary>
+    internal static class AddStatus
+    {
+        /// <summary>Probed, reachable, INSERTed — the server is now monitored.</summary>
+        public const string Added = "added";
+
+        /// <summary>A case-variant or exact duplicate of an existing server or an earlier entry in the batch; skipped
+        /// without a probe (#1549).</summary>
+        public const string Duplicate = "duplicate";
+
+        /// <summary>Probed, but its connection reached a database another registration already covers (#2280); NOT
+        /// added.</summary>
+        public const string Collides = "collides";
+
+        /// <summary>The in-process probe could not connect; NOT added, the batch continued.</summary>
+        public const string ConnectionFailed = "connection_failed";
+
+        /// <summary>Structurally invalid (a bad field, an unsupported auth mode); NOT added, never probed.</summary>
+        public const string Invalid = "invalid";
+    }
+
+    /// <summary>
+    /// Which summary counter each per-row status is counted under — the whole of the "writes report what happened"
+    /// contract for this tool (#3541 A14). Every status maps to exactly one counter and every result is counted
+    /// once, so <c>added + skipped + collided + failed == requested</c> by construction rather than by luck.
+    ///
+    /// <para>The defect this replaces: the counters were three ad-hoc <c>Count(...)</c> filters naming four of the
+    /// five statuses, and the fifth — <see cref="AddStatus.Collides"/>, added by #2280 after the counters were
+    /// written — fell into none of them. A batch of three with one collision summarised as
+    /// <c>{added: 2, skipped: 0, failed: 0}</c>: an agent reading the summary saw a clean run, and the collided
+    /// server was silently not monitored. A map the aggregator REFUSES to serialize without makes the next new
+    /// status a hard error at the first call instead of a silent hole.</para>
+    ///
+    /// <para><c>collided</c> is its own counter rather than a kind of <c>failed</c> because the remedy differs:
+    /// a failed entry is retried after fixing the connection or the fields; a collided one must NOT be retried as
+    /// sent — it needs a different Initial Catalog or no registration at all, and folding it into <c>failed</c>
+    /// would invite exactly the retry the refusal exists to prevent.</para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CounterOfStatus = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [AddStatus.Added] = "added",
+        [AddStatus.Duplicate] = "skipped",
+        [AddStatus.Collides] = "collided",
+        [AddStatus.ConnectionFailed] = "failed",
+        [AddStatus.Invalid] = "failed",
+    };
+
+    /// <summary>
+    /// The outcome of matching a <c>remove_server</c> name against the registry: the rows it matched and HOW.
+    /// Zero candidates is a miss, one is the row to delete, more than one is a refusal.
+    /// </summary>
+    internal sealed record RemovalTarget(IReadOnlyList<DarlingServerResolver.RegisteredServer> Candidates, string MatchedBy);
+
+    /// <summary>
+    /// The matching rule for a DELETE, over the same registry rows the read resolver uses: every exact match
+    /// (storage name OR display name, case-insensitive, trimmed) if there are any; otherwise every partial
+    /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
+    /// choose among equals.
+    ///
+    /// <para><b>Why not the read resolver's rule.</b> <see cref="DarlingServerResolver"/> is first-wins on a partial
+    /// match, ordered by storage name. For a read that is a convenience: the answer names the server it resolved
+    /// to, and a caller who meant the other one re-asks having lost nothing. For a delete the same rule removed
+    /// <c>-01</c> when the caller typed <c>-01</c> meaning <c>-01</c>, and removed it just the same when the caller
+    /// typed a fragment that <c>-01</c> and <c>-02</c> both contain — a coin the caller did not know was being
+    /// flipped. The read tools keep their rule; this write does not borrow it.</para>
+    ///
+    /// <para><b>Why partial matching survives at all.</b> The description has promised it since the tool shipped
+    /// ("resolved the same way the read tools resolve server_name"), display names are what an operator knows a
+    /// server by, and a unique partial is unambiguous — refusing it would be refusing something the tool CAN
+    /// honor. The rule the contract asks for is "refuse what you cannot honor", and what cannot be honored here is
+    /// a choice, not a fragment.</para>
+    ///
+    /// <para><b>Exact matches are collected, not first-taken.</b> <c>display_name</c> is not unique in the registry,
+    /// so two registrations can share one display name exactly; picking the first would be the same coin under a
+    /// better-looking name. Two rows matching exactly is reported as ambiguous with <c>matched_by: "exact"</c>, and
+    /// the caller disambiguates on the storage name, which IS unique.</para>
+    /// </summary>
+    internal static RemovalTarget ResolveForRemoval(IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName)
+    {
+        var name = (serverName ?? string.Empty).Trim();
+        if (name.Length == 0)
+        {
+            return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
+        }
+
+        var exact = servers
+            .Where(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (exact.Count > 0)
+        {
+            return new RemovalTarget(exact, "exact");
+        }
+
+        var partial = servers
+            .Where(s => s.ServerName.Contains(name, StringComparison.OrdinalIgnoreCase)
+                     || (s.DisplayName?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false))
+            .ToList();
+
+        return new RemovalTarget(partial, partial.Count == 0 ? "none" : "partial");
+    }
 
     /// <summary>
     /// PURE structural validation of the <c>servers_json</c> request — no store, no probe, no crypto — so the
@@ -311,13 +457,13 @@ public sealed class DarlingMcpServerAdminTools
     {
         if (node is not JsonObject obj)
         {
-            return (null, new ServerResult(index, $"(entry {index + 1})", "invalid", "Each entry must be a JSON object."));
+            return (null, new ServerResult(index, $"(entry {index + 1})", AddStatus.Invalid, "Each entry must be a JSON object."));
         }
 
         var host = TryGetString(obj, "host");
         var label = string.IsNullOrWhiteSpace(host) ? $"(entry {index + 1})" : host!.Trim();
 
-        ServerResult Invalid(string message) => new(index, label, "invalid", message);
+        ServerResult Invalid(string message) => new(index, label, AddStatus.Invalid, message);
 
         if (string.IsNullOrWhiteSpace(host))
         {
@@ -541,7 +687,7 @@ public sealed class DarlingMcpServerAdminTools
             }
             else
             {
-                duplicates.Add(new ServerResult(entry.Order, entry.DisplayName, "duplicate",
+                duplicates.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Duplicate,
                     "Already monitored (or a duplicate of an earlier entry in this batch); skipped."));
             }
         }
@@ -654,15 +800,45 @@ ON CONFLICT (server_id) DO NOTHING";
         return DarlingSecrets.Protect(plaintextPassword);
     }
 
-    /// <summary>Builds the <c>{added, skipped, failed, results}</c> envelope, results in input order.</summary>
-    private static string Aggregate(List<ServerResult> results)
+    /// <summary>
+    /// Builds the <c>{requested, added, skipped, collided, failed, results}</c> envelope, results in input order,
+    /// every result counted under the ONE counter <see cref="CounterOfStatus"/> names for its status.
+    ///
+    /// <para>A status the map does not know is thrown on, not dropped: the caller's catch turns it into the tool's
+    /// error envelope, which is a loud wrong answer where the old shape gave a quiet one. It cannot fire in
+    /// production while the census test holds (every <see cref="AddStatus"/> constant is mapped), and if a future
+    /// status is added as a literal and the test is skipped, the first real call says so instead of summarising
+    /// the batch short.</para>
+    /// </summary>
+    internal static string Aggregate(List<ServerResult> results)
     {
         var ordered = results.OrderBy(r => r.Order).ToList();
+        var counters = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["added"] = 0,
+            ["skipped"] = 0,
+            ["collided"] = 0,
+            ["failed"] = 0,
+        };
+
+        foreach (var result in ordered)
+        {
+            if (!CounterOfStatus.TryGetValue(result.Status, out var counter))
+            {
+                throw new InvalidOperationException(
+                    $"add_servers produced status '{result.Status}' for '{result.Server}', which no summary counter accounts for.");
+            }
+
+            counters[counter]++;
+        }
+
         return JsonSerializer.Serialize(new
         {
-            added = ordered.Count(r => r.Status == "added"),
-            skipped = ordered.Count(r => r.Status == "duplicate"),
-            failed = ordered.Count(r => r.Status is "connection_failed" or "invalid"),
+            requested = ordered.Count,
+            added = counters["added"],
+            skipped = counters["skipped"],
+            collided = counters["collided"],
+            failed = counters["failed"],
             results = ordered.Select(r => new { server = r.Server, status = r.Status, detail = r.Detail }),
         }, McpHelpers.JsonOptions);
     }

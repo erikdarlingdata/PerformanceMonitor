@@ -533,13 +533,26 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
-    /// Mutes a finding pattern so it won't appear in future runs.
+    /// Mutes a finding pattern so it won't appear in future runs. Returns whether the registry row was written
+    /// (<see cref="PgFindingStore.MuteStoryAsync"/> logs and returns <c>false</c> on a store failure), so the
+    /// MCP mute verb reports what happened rather than what it asked for (#3541 A14). The Lite twin returns
+    /// <c>Task</c> because its store throws instead of swallowing; the caller-visible contract is the same —
+    /// a mute that did not land is never reported as one that did.
     /// </summary>
-    public async Task MuteFindingAsync(AnalysisFinding finding, string? reason = null)
+    public async Task<bool> MuteFindingAsync(AnalysisFinding finding, string? reason = null)
     {
-        await _findingStore.MuteStoryAsync(
+        return await _findingStore.MuteStoryAsync(
             finding.ServerId, finding.StoryPathHash, finding.StoryPath, reason);
     }
+
+    /// <summary>
+    /// How many stored findings carry <paramref name="storyPathHash"/> for one server (or fleet-wide when
+    /// <paramref name="serverId"/> is null / the all-servers sentinel 0) — the mute verb's <c>matched_now</c>
+    /// disclosure (#3541 A14). A pass-through to <see cref="PgFindingStore.CountStoredFindingsAsync"/>; see its
+    /// note for why this is reported beside the mute and not used to refuse it.
+    /// </summary>
+    public Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default) =>
+        _findingStore.CountStoredFindingsAsync(serverId, storyPathHash, cancellationToken);
 
     /// <summary>
     /// Cleans up old findings beyond the retention period.

@@ -20,6 +20,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -208,6 +209,38 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("EXCLUDES DISMISSED ALERTS", description, StringComparison.Ordinal);
         Assert.Contains("dismissed_excluded_count", description, StringComparison.Ordinal);
         Assert.Contains("include_dismissed", description, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3541 A14 rider (from #3594's residuals): the web mirror of this read could NOT lift the dismissed
+    /// filter. <c>/api/read/get_alert_history</c> dispatched without <c>include_dismissed</c> and its
+    /// <c>/api/catalog</c> entry did not advertise it, so a browser or API caller received
+    /// <c>dismissed_excluded_count</c> — "N rows were hidden" — with no wire key to un-hide them. Both halves
+    /// are pinned: the catalog names the parameter as an optional boolean defaulting to the tool's own default,
+    /// and the dispatch passes it BY NAME from the query string through the same <c>QueryBool</c> every other
+    /// optional boolean uses (source-text pin, because the dispatch is a lambda over an HttpContext and the
+    /// tool would need a store to observe the flag downstream).
+    /// </summary>
+    [Fact]
+    public void WebRead_GetAlertHistory_AdvertisesAndDispatchesIncludeDismissed()
+    {
+        var descriptor = DarlingWebEndpoints.CatalogDescriptors["get_alert_history"];
+        var param = descriptor.Params.Single(p => p.Name == "include_dismissed");
+        Assert.Equal("bool", param.Type);
+        Assert.False(param.Required);
+        Assert.Equal(false, param.Default);
+
+        /* The catalog prose says what the flag does — the description is the only thing a web caller reads. */
+        Assert.Contains("include_dismissed", descriptor.Description, StringComparison.Ordinal);
+        Assert.Contains("dismissed", descriptor.Description, StringComparison.Ordinal);
+
+        /* And the dispatch line carries it, by name, off the query string. */
+        var source = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
+        var dispatchLine = source.Split('\n').Single(l =>
+            l.Contains("DarlingMcpAlertTools.GetAlertHistory(", StringComparison.Ordinal));
+        Assert.Contains("include_dismissed: QueryBool(c,", dispatchLine, StringComparison.Ordinal);
+        Assert.Contains("as_of: AsOf(c)", dispatchLine, StringComparison.Ordinal);
     }
 
     /// <summary>

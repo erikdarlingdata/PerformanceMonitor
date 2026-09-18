@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -42,7 +43,8 @@ namespace Darling.Tests;
 /// directly (not over the wire) — get_analysis_findings round-trips the finding through Lite's
 /// envelope, the empty server returns the #1224 "empty" Status envelope, partial-name and
 /// unknown-name resolution behave, mute_analysis_finding writes the mute row and returns the
-/// muted envelope, and the mute registry then filters the same story from a subsequent
+/// muted envelope (with #3541 A14's registered / matched_now disclosure, and the muted_unmatched
+/// status for a hash no stored finding carries), and the mute registry then filters the same story from a subsequent
 /// analysis-run save (the exact mechanism analyze_server runs through).
 /// </summary>
 [Collection("live-postgres")]
@@ -83,6 +85,29 @@ public sealed class DarlingMcpToolsTests
         Assert.NotNull(typeof(DarlingMcpTools).GetCustomAttribute<McpServerToolTypeAttribute>());
         Assert.All(toolMethods, m => Assert.True(m.IsStatic, $"{m.Name} must be static for WithGeminiCompatibleTools"));
         Assert.All(toolMethods, m => Assert.Equal(typeof(Task<string>), m.ReturnType));
+    }
+
+    /// <summary>
+    /// #3541 A14: the mute verb's description promises the disclosure the payload now carries — on Darling in
+    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>), and the instruction
+    /// table row agrees. The live round-trip below is what proves the numbers; this is what a caller reads
+    /// before deciding to trust them.
+    /// </summary>
+    [Fact]
+    public void MuteAnalysisFinding_Description_NamesRegistered_MatchedNow_AndTheUnmatchedStatus()
+    {
+        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "mute_analysis_finding");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash", "\"error\"" })
+        {
+            Assert.Contains(token, description, StringComparison.Ordinal);
+        }
+
+        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `mute_analysis_finding` |", StringComparison.Ordinal));
+        Assert.Contains("`matched_now`", row, StringComparison.Ordinal);
+        Assert.Contains("`muted_unmatched`", row, StringComparison.Ordinal);
     }
 
     /* ---------------- ungated: config + hosting pins ---------------- */
@@ -493,7 +518,10 @@ public sealed class DarlingMcpToolsTests
             Assert.Contains(TestServerName, unknown, StringComparison.Ordinal);
 
             /* ---- mute via the tool: the muted envelope comes back and the row lands in
-                    analysis_muted under the resolved server id. */
+                    analysis_muted under the resolved server id. #3541 A14: the envelope now says what the
+                    write DID — registered, and matched_now counted in the mute's scope. TestStoryHash sits on
+                    exactly two persisted rows for this server (the planted chain and its second cycle), so
+                    the number is a fact of the rows above, not of the analyser. */
             var muteJson = await DarlingMcpTools.MuteAnalysisFinding(
                 analysisService, postgres, TestStoryHash, TestServerName, "an4 e2e mute");
 
@@ -503,6 +531,30 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(TestStoryHash, doc.RootElement.GetProperty("story_path_hash").GetString());
                 Assert.Equal(TestServerName, doc.RootElement.GetProperty("server").GetString());
                 Assert.Equal("an4 e2e mute", doc.RootElement.GetProperty("reason").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.Equal(2, doc.RootElement.GetProperty("matched_now").GetInt64());
+            }
+
+            /* ---- #3541 A14, THE case: a hash no stored finding carries. Registered (pattern registry — it
+                    bites if the pattern ever appears) but reported as muted_unmatched with matched_now 0,
+                    where the old envelope said "muted" and nothing else. */
+            var unmatchedJson = await DarlingMcpTools.MuteAnalysisFinding(
+                analysisService, postgres, "an4-mcp-e2e-never-seen-hash", TestServerName, "an4 e2e unmatched mute");
+
+            using (var doc = JsonDocument.Parse(unmatchedJson))
+            {
+                Assert.Equal("muted_unmatched", doc.RootElement.GetProperty("status").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.Equal(0, doc.RootElement.GetProperty("matched_now").GetInt64());
+                Assert.Contains("no stored finding", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+            }
+
+            using (var unmatchedCount = new NpgsqlCommand(
+                "SELECT COUNT(*) FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
+            {
+                unmatchedCount.Parameters.AddWithValue(TestServerId);
+                unmatchedCount.Parameters.AddWithValue("an4-mcp-e2e-never-seen-hash");
+                Assert.Equal(1L, await unmatchedCount.ExecuteScalarAsync(ct));
             }
 
             using (var muteCount = new NpgsqlCommand(
@@ -521,8 +573,12 @@ public sealed class DarlingMcpToolsTests
 
             using (var doc = JsonDocument.Parse(allServersJson))
             {
-                Assert.Equal("muted", doc.RootElement.GetProperty("status").GetString());
+                /* No persisted row carries AllServersStoryHash anywhere in the store, so fleet-wide it is
+                   unmatched too — the scope of the count follows the scope of the mute. */
+                Assert.Equal("muted_unmatched", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal("(all servers)", doc.RootElement.GetProperty("server").GetString());
+                Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.Equal(0, doc.RootElement.GetProperty("matched_now").GetInt64());
             }
 
             using (var nullCount = new NpgsqlCommand(
