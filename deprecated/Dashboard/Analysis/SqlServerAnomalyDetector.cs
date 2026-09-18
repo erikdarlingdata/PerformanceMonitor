@@ -35,7 +35,12 @@ public class SqlServerAnomalyDetector
     /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
-    /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    /// input; matches the FactScorer WaitProfileRatioFloor. Still uncalibrated as of the 2026-09 dogfood
+    /// measurement (#3538 A5, #3616), which read each wait TYPE's fraction of a 4-hour window on the
+    /// Darling store and not the all-types ms/sec peak-over-baseline ratio this cutoff gates; unmeasured
+    /// on the Dashboard tier altogether (no Full-edition store was in that pass). The read that would
+    /// calibrate it is that ratio's own distribution over a fleet, one more column on the same pass.
+    /// Mirrors PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.DefaultRatioThreshold (#3653).
     /// </summary>
     private const double DefaultRatioThreshold = 4.0;
 
@@ -71,7 +76,9 @@ public class SqlServerAnomalyDetector
     // all-types wait ms/sec (PEAK across collections, matching the z-detectors) is compared to the
     // WaitMsPerSec baseline. DefaultRatioThreshold and the FactScorer wait slope are on the HONEST
     // per-second scale now (the old 5×/20× was calibrated to a ~240×-inflated per-hour-vs-per-interval
-    // input) — a sensible starting point; CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    // input) — a sensible starting point, still uncalibrated: see DefaultRatioThreshold for what the
+    // 2026-09 fleet pass measured instead, that it never reached the Dashboard tier, and which read would
+    // calibrate these. The fallback exceedance is what a YOUNG store produces, and no measured store was one.
     private const double WaitProfileFallbackMsPerSec = 250.0;  // untrustworthy-baseline absolute bar
     private const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 

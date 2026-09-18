@@ -26,6 +26,20 @@ namespace PerformanceMonitorDashboard.Services
         // Blocking, deadlock, and lock-wait data access.
         // ============================================
 
+                /// <summary>
+                /// The row cap every blocking / deadlock read in this file applies (#3653, #3594's class): the
+                /// four <c>TOP (100)</c> literals below, and the DMV merge's re-cap. It is the GRID's
+                /// cap — the readers were written for the WPF grids and the MCP tools read through them — so
+                /// <c>get_blocking</c> / <c>get_deadlocks</c> can never see more than this many rows of a
+                /// window however many it holds, and used to publish that capped count under a <c>total_*</c>
+                /// name. The tools now name this bound as <c>limit_applied_by_reader</c>
+                /// and report <c>truncated</c> as null when the reader filled to it (a window holding exactly
+                /// this many rows is indistinguishable from a busier one). Named rather than threaded through
+                /// the readers as a parameter: the Dashboard is on bug-fix support, and a parameterised cap
+                /// is the Lite/Darling page dialect, not a bug fix. A source pin holds the literals to it.
+                /// </summary>
+                public const int EventGridCap = 100;
+
                 public async Task<List<BlockingEventItem>> GetBlockingEventsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, bool includeReport = true)
                 {
                     var items = new List<BlockingEventItem>();
@@ -206,7 +220,7 @@ namespace PerformanceMonitorDashboard.Services
                 /// </summary>
                 private async Task AppendDmvBlockingGridItemsAsync(List<BlockingEventItem> items, int hoursBack, DateTime? fromDate, DateTime? toDate)
                 {
-                    const int gridCap = 100;
+                    const int gridCap = EventGridCap;
                     string window = (fromDate.HasValue && toDate.HasValue)
                         ? "d.collection_time >= @from_date AND d.collection_time <= @to_date"
                         : "d.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())";

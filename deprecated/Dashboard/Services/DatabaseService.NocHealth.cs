@@ -871,26 +871,44 @@ namespace PerformanceMonitorDashboard.Services
         }
 
         /// <summary>
-        /// Gets recent poison wait deltas (THREADPOOL, RESOURCE_SEMAPHORE, RESOURCE_SEMAPHORE_QUERY_COMPILE)
-        /// from collected wait stats. Returns entries where avg ms per wait exceeds zero.
+        /// The poison wait types' (THREADPOOL, RESOURCE_SEMAPHORE, RESOURCE_SEMAPHORE_QUERY_COMPILE) wait
+        /// ACCUMULATED over the alert window, one row per type, from collected wait stats.
+        /// <para>#3653 (#3593's class). Until then this read returned the newest three collector rows with
+        /// <c>waiting_tasks_count_delta &gt; 0</c> and the alert loop judged each row's avg-ms-per-wait against a
+        /// 500 ms bar — a statement about how long ONE wait lasted in ONE collector interval, with no volume
+        /// floor. One 600 ms wait paged; a THREADPOOL storm of thousands of 50 ms waits (500 seconds of worker
+        /// starvation a minute) averaged 50 ms and never did. The shared engine measured this on 43 SQL Server
+        /// primaries over 4 days and moved to a window SUM graded against
+        /// <see cref="PerformanceMonitor.Alerting.PoisonWaitEvaluator"/>'s bars; this is that read in the
+        /// Dashboard's own T-SQL. The window is bound from <see cref="PoisonWaitEvaluator.WindowMinutes"/> so the
+        /// read's cutoff and the evaluator's denominator are one number by construction (it was a literal 10 here
+        /// before, the same figure).</para>
+        /// <para>What changed in the text and why: <c>SUM</c> per type over the window instead of <c>TOP (3)</c>
+        /// newest rows (a limit on a sum is an undercount); the <c>waiting_tasks_count_delta &gt; 0</c> filter is
+        /// gone (a row with wait time and no completed tasks is a task still waiting across the interval boundary
+        /// — evidence, not noise); the avg is computed over the window's sums for the alert card's detail fields
+        /// only — nothing grades on it any more. Ordered by accumulated wait descending so the first row is the
+        /// worst, which is the row the loop mutes and headlines on. The row shape is still <see cref="PoisonWaitDelta"/> (kept for this
+        /// loop by #3593) with DeltaMs / DeltaTasks now meaning the window's sums. At the collector's one-minute
+        /// cadence this touches at most ~10 x 3 rows per pass.</para>
         /// </summary>
         private async Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(SqlConnection connection)
         {
             const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-                SELECT TOP (3)
+                SELECT
                     wait_type,
-                    wait_time_ms_delta,
-                    waiting_tasks_count_delta,
+                    wait_time_ms_delta = SUM(wait_time_ms_delta),
+                    waiting_tasks_count_delta = SUM(waiting_tasks_count_delta),
                     avg_ms_per_wait =
-                        CASE WHEN waiting_tasks_count_delta > 0
-                        THEN CAST(CAST(wait_time_ms_delta AS decimal(19, 2)) / waiting_tasks_count_delta AS decimal(18, 4))
+                        CASE WHEN SUM(waiting_tasks_count_delta) > 0
+                        THEN CAST(CAST(SUM(wait_time_ms_delta) AS decimal(19, 2)) / SUM(waiting_tasks_count_delta) AS decimal(18, 4))
                         ELSE 0 END
                 FROM collect.wait_stats
                 WHERE wait_type IN (N'THREADPOOL', N'RESOURCE_SEMAPHORE', N'RESOURCE_SEMAPHORE_QUERY_COMPILE')
-                AND waiting_tasks_count_delta > 0
-                AND collection_time >= DATEADD(MINUTE, -10, SYSDATETIME())
-                ORDER BY collection_time DESC
+                AND collection_time >= DATEADD(MINUTE, -@window_minutes, SYSDATETIME())
+                GROUP BY wait_type
+                ORDER BY SUM(wait_time_ms_delta) DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 
             var results = new List<PoisonWaitDelta>();
@@ -899,6 +917,7 @@ namespace PerformanceMonitorDashboard.Services
             {
                 using var cmd = new SqlCommand(query, connection);
                 cmd.CommandTimeout = 10;
+                cmd.Parameters.Add(new SqlParameter("@window_minutes", SqlDbType.Int) { Value = PoisonWaitEvaluator.WindowMinutes });
                 using var reader = await cmd.ExecuteReaderAsync();
 
                 while (await reader.ReadAsync())
@@ -906,8 +925,8 @@ namespace PerformanceMonitorDashboard.Services
                     results.Add(new PoisonWaitDelta
                     {
                         WaitType = reader.GetString(0),
-                        DeltaMs = Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
-                        DeltaTasks = Convert.ToInt64(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture),
+                        DeltaMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
+                        DeltaTasks = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture),
                         AvgMsPerWait = Convert.ToDouble(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture)
                     });
                 }

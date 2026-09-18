@@ -72,10 +72,10 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history showing what alerts fired, when, notification type, and whether email was sent successfully.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history showing what alerts fired, when, notification type, and whether email was sent successfully. alerts_returned is the page size, not the window's total; truncated is true when the window held more alerts than limit (newest first).")]
     public static Task<string> GetAlertHistory(
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50)
+        [Description("Maximum rows. Default 50. When the window holds more, the newest limit are returned and truncated is true.")] int limit = 50)
     {
         try
         {
@@ -91,17 +91,25 @@ public sealed class McpAlertTools
                 return Task.FromResult("Alert service not initialized. Connect to a server first.");
             }
 
-            var alerts = service.GetAlertHistory(hours_back, limit);
+            /* #3653 (#3594's class): the count used to be published under a `total_*` name after the store had already
+               applied `limit` — a 50-row page of a 300-alert day read as 50 alerts. Fetch one past the limit so
+               truncation is OBSERVED (the extra row came back) rather than inferred from a count that merely reached the limit, which
+               cannot tell a window holding exactly `limit` alerts from a busier one; then trim to the page. */
+            var fetched = service.GetAlertHistory(hours_back, limit + 1);
 
-            if (alerts.Count == 0)
+            if (fetched.Count == 0)
             {
                 return Task.FromResult("No alerts found in the specified time range.");
             }
 
+            var truncated = fetched.Count > limit;
+            var alerts = truncated ? fetched.GetRange(0, limit) : fetched;
+
             var result = new
             {
                 hours_back,
-                total_alerts = alerts.Count,
+                alerts_returned = alerts.Count,
+                truncated,
                 note = "Alert history is in-memory and resets when the application restarts.",
                 alerts = alerts.Select(a => new
                 {

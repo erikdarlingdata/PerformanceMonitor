@@ -425,7 +425,7 @@ namespace PerformanceMonitorDashboard
             if (NotifyOnHighCpuCheckBox.IsChecked == true)
                 parts.Add($"CPU > {CpuThresholdTextBox.Text}%");
             if (NotifyOnPoisonWaitsCheckBox.IsChecked == true)
-                parts.Add($"poison waits >= {PoisonWaitThresholdTextBox.Text}ms avg");
+                parts.Add($"poison waits >= {PerformanceMonitor.Alerting.PoisonWaitEvaluator.WarningAvgWaiters * PerformanceMonitor.Alerting.PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PerformanceMonitor.Alerting.PoisonWaitEvaluator.WindowMinutes}m"); // #3653: the shared bar, not the retired ms box
             if (NotifyOnLongRunningQueriesCheckBox.IsChecked == true)
                 parts.Add($"queries > {LongRunningQueryThresholdTextBox.Text}min");
             if (NotifyOnTempDbSpaceCheckBox.IsChecked == true)
@@ -455,7 +455,7 @@ namespace PerformanceMonitorDashboard
             CpuThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnHighCpuCheckBox.IsChecked == true;
             CpuAlertModeBox.IsEnabled = notificationsEnabled && NotifyOnHighCpuCheckBox.IsChecked == true;
             NotifyOnPoisonWaitsCheckBox.IsEnabled = notificationsEnabled;
-            PoisonWaitThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnPoisonWaitsCheckBox.IsChecked == true;
+            /* #3653: PoisonWaitThresholdTextBox stays disabled — the retired avg-ms bar (see the XAML note). */
             NotifyOnLongRunningQueriesCheckBox.IsEnabled = notificationsEnabled;
             LongRunningQueryThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnLongRunningQueriesCheckBox.IsChecked == true;
             NotifyOnTempDbSpaceCheckBox.IsEnabled = notificationsEnabled;
