@@ -114,7 +114,14 @@ public sealed class DarlingWorker : BackgroundService
 
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
        and a stuck policy job takes hours to matter, so hourly is ample and cheap (one job_stats read + at most
-       one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
+       one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence.
+
+       The PHASE of that hour is not this constant's to choose and is not chosen by "UtcNow + interval" any
+       more (#3575): the compression policies this check watches fire at :MM:00 of the wall clock on a fixed
+       schedule (#3035), and a check scheduled from the instant of its previous fire slips a few seconds
+       every hour and eventually samples one of those :00 instants — which is where a production store's
+       false page came from. TimescaleSupport.NextCompressionCheckUtc snaps each due time to :30 past its
+       minute, so this interval sets how OFTEN and that phase sets WHEN in the minute. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
@@ -475,8 +482,12 @@ public sealed class DarlingWorker : BackgroundService
     private Task? _oversizedPlanSweep;
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
-       every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
-       per-server; only consulted when _timescaleAvailable. */
+       every s_compressionCheckInterval, pinned to :30 past the minute by TimescaleSupport.NextCompressionCheckUtc
+       (#3575) so no steady-state sample lands on the :MM:00 instant the compression policies fire on. The
+       first sample is deliberately left unpinned — a restart is when an operator is reading the log and wants
+       the store's job health now — and the confirm-read inside ReadStuckCompressionJobsAsync covers it like
+       every other sample. Fleet-level (one shared store), so it is a single field, not per-server; only
+       consulted when _timescaleAvailable. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
@@ -2155,10 +2166,21 @@ public sealed class DarlingWorker : BackgroundService
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
                die (next_start = -infinity) or hang, halting the store's archival tier so uncompressed data grows
                without bound until the disk fills and collection stops for the WHOLE fleet (the field incident).
-               Timescale-only; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync. */
+               Timescale-only; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync.
+
+               The next due time is SNAPPED to the wall clock rather than taken from this fire (#3575). The
+               dead-job arm the check judges reads next_start = -infinity, which is also what the scheduler
+               writes for the few milliseconds at either edge of every healthy run before the worker is, or
+               after it stops being, visible as Running — and the policies run at :MM:00 on a fixed schedule,
+               so a check that re-anchored itself as "UtcNow + 1 h" on every fire crept a few seconds per hour
+               across those instants until, on a production store, it sampled one 53 ms into a 63 ms run and
+               paged. NextCompressionCheckUtc puts every steady-state sample at :30 past its minute instead,
+               half the grid step from every policy's start in both directions. The read itself now confirms
+               a -infinity trip with a second read five seconds later (ReadStuckCompressionJobsAsync), so the
+               phase is hardening on top of the fix, not the fix. */
             if (_timescaleAvailable && DateTime.UtcNow >= _nextCompressionCheckUtc)
             {
-                _nextCompressionCheckUtc = DateTime.UtcNow.Add(s_compressionCheckInterval);
+                _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
                 await EvaluateCompressionJobHealthAsync(stoppingToken);
             }
 
@@ -5138,12 +5160,22 @@ LIMIT 1";
 
     /// <summary>
     /// The #1581 compression-job self-heal check (fleet-level, hourly, Timescale-only): read every stuck
-    /// COMPRESSION-policy job (<see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/>) and hand them to the
-    /// self-alert evaluator's re-arm-once/escalate machine, wired to <see cref="TimescaleSupport.TryRearmJobAsync"/>
-    /// on the SAME open connection. One stuck job whose <c>next_start</c> went <c>-infinity</c> silently halts the
-    /// store's archival tier — the field incident — so this makes it visible AND self-heals it. Failure-isolated
-    /// at the worker level too (the connection open is OUTSIDE the evaluator's own isolation): a store hiccup logs
-    /// and skips this check, never aborting the sweep — mirroring the purge / disk-check isolation.
+    /// COMPRESSION-policy job (<see cref="TimescaleSupport.ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>)
+    /// and hand them to the self-alert evaluator's re-arm-once/escalate machine, wired to
+    /// <see cref="TimescaleSupport.TryRearmJobAsync"/> on the SAME open connection. One stuck job whose
+    /// <c>next_start</c> went <c>-infinity</c> silently halts the store's archival tier — the field incident — so
+    /// this makes it visible AND self-heals it. Failure-isolated at the worker level too (the connection open is
+    /// OUTSIDE the evaluator's own isolation): a store hiccup logs and skips this check, never aborting the sweep —
+    /// mirroring the purge / disk-check isolation.
+    ///
+    /// <para><b>The stuck-job read may hold this method for <see cref="TimescaleSupport.StuckCompressionConfirmDelay"/>
+    /// (#3575)</b>, and only on a pass where a job's <c>-infinity</c> arm tripped: the read re-executes its query
+    /// after that delay and reports the job only if the arm still trips, because TimescaleDB's view assembles
+    /// <c>next_start</c> and <c>job_status</c> from independent sources and reads the dead-job shape for a few
+    /// milliseconds at either edge of every healthy run. This method is awaited on the serial sweep loop, so
+    /// that five seconds is a once-an-hour worst case paid only when there was something to confirm; the
+    /// budgeting argument is on the constant. The evaluator downstream receives a list that has already been
+    /// confirmed and does not second-guess it.</para>
     /// </summary>
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {

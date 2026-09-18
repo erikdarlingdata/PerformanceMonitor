@@ -164,7 +164,11 @@ public sealed class TimescaleSupportTests
     public void IsCompressionJobStuck_NextStartNegativeInfinity_IsStuck()
     {
         /* The dominant failure mode: next_start = -infinity on a job that is NOT running — the scheduler
-           abandoned it and never re-fires it. */
+           abandoned it and never re-fires it. ONE read says so here, and one read is what the predicate
+           judges; since #3575 the reader (ReadStuckCompressionJobsAsync) asks twice five seconds apart before
+           it believes this arm, because the view assembles "not running" and "-infinity" from independent
+           sources and reads this exact shape for a few milliseconds at either edge of every healthy run.
+           The predicate itself stays single-shot — CompressionStuckConfirmReadTests pins the second read. */
         Assert.True(TimescaleSupport.IsCompressionJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
@@ -178,7 +182,13 @@ public sealed class TimescaleSupportTests
            -infinity WITH job_status = 'Running' — the engine only computes the real next start when the
            run finishes. An unconditioned -infinity arm flagged every healthy job caught mid-run (the
            field's transient stuck→self-healed alert noise, and the CI flake where the live test caught
-           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm: */
+           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm.
+
+           This guard was necessary and was not sufficient (#3575): 'Running' is pg_stat_activity, read
+           live, and -infinity is the bgw_job_stat row, read under the statement's snapshot, so the guard
+           is blind for the milliseconds between the scheduler committing -infinity and the worker
+           reporting itself active, and again between the worker leaving and its mark_end becoming
+           visible. That is the reader's problem to close (it re-reads), not this predicate's: */
         Assert.False(TimescaleSupport.IsCompressionJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-3),
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
@@ -2051,7 +2061,13 @@ LIMIT 1", connection))
            on one snapshot": next_start => now() makes the job immediately due, the scheduler picks it up, and
            from pickup to completion job_stats reads next_start = -infinity with status Running — the mid-run
            marker (measured live; the detector now defers that state to its elapsed-bound arm). A single
-           un-settled read raced the very run the re-arm triggered, which was this test's own flake. */
+           un-settled read raced the very run the re-arm triggered, which was this test's own flake.
+
+           Since #3575 the detector also re-reads five seconds later before it reports the -infinity arm, so
+           the run-instant EDGES (-infinity while the worker is not yet, or no longer, visible as Running —
+           the shape that paged a production store) clear inside one call rather than surfacing as a flagged
+           poll here. The wait stays: it is the assertion's contract, and a poll that lands on the edge now
+           costs five seconds of confirm rather than a flagged iteration. */
         await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
     }
 
