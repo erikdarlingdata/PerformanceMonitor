@@ -877,15 +877,22 @@ public sealed class McpQueryTools
                 query_plan_hash = r.QueryPlanHash
             });
 
-            return JsonSerializer.Serialize(new
+            /* The same disclosure block Darling's get_query_trend has carried since #2353 and the
+               duration-trend trio carries on both SKUs since #3541 A2 — with Lite's truth: one raw tier,
+               per-collection, the first point the store held as effective_start. Left as the one tool where
+               the SKUs' envelopes disagreed until a review of the trio's change pointed at it. */
+            var envelope = new Dictionary<string, object?>
             {
-                server = resolved.ServerName,
-                database_name,
-                query_hash,
-                hours_back,
-                data_points = rows.Count,
-                trend = result
-            }, McpHelpers.JsonOptions);
+                ["server"] = resolved.ServerName,
+                ["database_name"] = database_name,
+                ["query_hash"] = query_hash,
+                ["hours_back"] = hours_back,
+            };
+            WriteDisclosure(envelope, rows[0].CollectionTime, windowEnd.AddHours(-hours_back), windowEnd, PerCollection);
+            envelope["data_points"] = rows.Count;
+            envelope["trend"] = result;
+
+            return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {

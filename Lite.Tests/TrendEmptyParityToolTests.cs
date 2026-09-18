@@ -135,6 +135,16 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal(
             data.GetProperty("trend")[0].GetProperty("value").GetDouble(),
             data.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").GetDouble());
+
+        /* And get_query_trend over the same seeded query carries the block too — the last tool where the two
+           SKUs' envelopes disagreed (Darling's has had it since #2353). */
+        var single = JsonDocument.Parse(
+            await McpQueryTools.GetQueryTrend(service, _serverManager, "0xEMPTYTRENDHASH", "AppDb", ServerName, 4)).RootElement;
+        Assert.Equal("raw", single.GetProperty("source").GetString());
+        Assert.Equal("per-collection", single.GetProperty("bucket").GetString());
+        Assert.Equal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString());
+        Assert.True(single.GetProperty("truncated").GetBoolean(), "a series beginning 10 minutes ago in a 4-hour window starts past the slack");
+        Assert.Equal(1, single.GetProperty("data_points").GetInt32());
     }
 
     /// <summary>
