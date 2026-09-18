@@ -95,6 +95,11 @@ public sealed class ServerPageTabsTests
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",
             ["get_pg_plan_capture_readiness"] = "pg_plan_capture_readiness",
+            /* #3607: a READ over the config collector's table, not a collector of its own - the audit is
+               computed from the newest pg_server_config snapshot, so its not_collected gate names that
+               collector, which is what this map records. Two reads over one collector is the same shape
+               as get_pg_server_config / get_pg_server_config_changes above. */
+            ["get_pg_logging_audit"] = "pg_server_config",
             ["get_pg_blocking"] = "pg_blocking",
             ["get_pg_io_stats"] = "pg_io_stats",
             ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",

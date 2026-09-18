@@ -625,6 +625,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                    target can capture a plan at all, facet by facet with the remedy for each, which is the
                    read somebody needs the moment the plans one comes back empty. */
                 .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
+                /* get_pg_logging_audit (#3607) - the rest of the logging surface, in readiness's shape:
+                   log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
+                   log_connections / log_disconnections and log_min_duration_statement, each judged from
+                   the stored pg_server_config snapshot with what it unlocks, the recommended value and its
+                   cost, and the remedy in the hosting flavour's syntax. Registered beside the plan tools
+                   because it is the other half of one onboarding question - is this target telling us
+                   everything it could - and lists plan capture's own settings with a pointer to the
+                   readiness read rather than judging them twice. */
+                .WithGeminiCompatibleTools<DarlingMcpPgLoggingAuditTools>()
                 /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
                    PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
