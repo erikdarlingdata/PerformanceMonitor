@@ -1317,7 +1317,7 @@ public static class FactRemediation
             $"       apc_regressed_plan_id = JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId'), apc_last_good_plan_id = JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId'),{nl}" +
             $"       dtr.execute_action_initiated_by, dtr.last_refresh{nl}" +
             $"FROM sys.dm_db_tuning_recommendations AS dtr{nl}" +
-            $"WHERE JSON_VALUE(dtr.details, '$.planForceDetails.queryId') = '{t.QueryId}';{nl}" +
+            $"WHERE TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.queryId') AS bigint) = {t.QueryId};{nl}" +
             $"{nl}" +
             $"SELECT TOP (24) rs.plan_id, rs.runtime_stats_interval_id, rs.count_executions, rs.avg_cpu_time, rs.avg_duration, rs.max_cpu_time{nl}" +
             $"FROM sys.query_store_runtime_stats AS rs{nl}" +

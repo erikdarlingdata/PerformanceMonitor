@@ -390,7 +390,9 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("apc_state_reason = JSON_VALUE(dtr.state, '$.reason')", sql, StringComparison.Ordinal);
         Assert.Contains("apc_last_good_plan_id = JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId')", sql, StringComparison.Ordinal);
         Assert.Contains("FROM sys.dm_db_tuning_recommendations AS dtr", sql, StringComparison.Ordinal);
-        Assert.Contains("'$.planForceDetails.queryId') = '123'", sql, StringComparison.Ordinal);
+        /* The query id is compared as the bigint the collector shreds it to (PlanCorrectionCollector's
+           TRY_CAST precedent), not as a string literal — review catch on #3655. */
+        Assert.Contains("WHERE TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.queryId') AS bigint) = 123;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
