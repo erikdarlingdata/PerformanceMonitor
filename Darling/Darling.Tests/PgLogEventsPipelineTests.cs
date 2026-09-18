@@ -758,8 +758,11 @@ public sealed class PgLogEventsRungTests
 /// <summary>
 /// Gated (DARLING_TEST_PG) live round-trip: the pipeline's rows through the real table via the RDS
 /// transport's write, then read back through the real tool with every filter, the page contract observed at
-/// the boundary, and the self-hosted overlap deduped.
+/// the boundary, and the self-hosted overlap deduped. Serialized against every other live class because it
+/// writes the shared DARLING_TEST_PG store (its own server row and <c>pg_log_events</c> rows, deleted on the
+/// way out).
 /// </summary>
+[Collection("live-postgres")]
 public sealed class PgLogEventsLivePostgresTests
 {
     private const string ServerName = "darling-pg-log-events-e2e";
