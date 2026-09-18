@@ -202,8 +202,12 @@
                                 </ComboBox>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <!-- #3653 (#3593's class): the alert grades wait ACCUMULATED over a rolling ten-minute window against
+                                     fixed, fleet-calibrated bars shared with Lite and Darling (PoisonWaitEvaluator). The ms box was the
+                                     retired per-wait-average bar; it stays so saved settings round-trip, disabled and labelled so nobody
+                                     tunes a number nothing reads. -->
                                 <CheckBox x:Name="NotifyOnPoisonWaitsCheckBox"
-                                          Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;"
+                                          Content="Poison waits (THREADPOOL, etc.) &#x2014; accumulated wait over a 10-minute window; legacy avg-ms bar (no longer used):"
                                           VerticalAlignment="Center"
                                           Checked="NotifyOnPoisonWaitsCheckBox_Changed"
                                           Unchecked="NotifyOnPoisonWaitsCheckBox_Changed"/>
@@ -211,7 +215,9 @@
                                          Width="50"
                                          Margin="8,0,8,0"
                                          VerticalAlignment="Center"
-                                         TextAlignment="Center"/>
+                                         TextAlignment="Center"
+                                         IsEnabled="False"
+                                         ToolTip="Retired. The Poison Wait alert no longer judges an average ms per wait; it fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL). Kept so existing settings round-trip."/>
                                 <TextBlock Text="ms" VerticalAlignment="Center"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
