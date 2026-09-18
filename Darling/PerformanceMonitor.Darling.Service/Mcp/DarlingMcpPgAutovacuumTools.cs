@@ -29,8 +29,13 @@ public sealed class DarlingMcpPgAutovacuumTools
     /// count is routine on a large table and urgent on a small one, so the ratio is the only comparable
     /// figure — and whether the pile is growing separates autovacuum losing a race from autovacuum not
     /// running at all.
+    /// <para>The ratio handed in is the WORSE of the dead-tuple and insert-only ratios — the same GREATEST
+    /// the read ranks by. Classifying from the dead ratio alone let the #1-ranked table, an append-only
+    /// one far past its INSERT threshold, carry severity "ok" (#3534).</para>
+    /// <para>Growth is nullable because a one-sample window cannot measure it: null never escalates, and
+    /// never reads as "flat" either.</para>
     /// </summary>
-    internal static string Classify(bool autovacuumDisabled, double? thresholdRatio, bool deadTuplesGrowing)
+    internal static string Classify(bool autovacuumDisabled, double? thresholdRatio, bool? deadTuplesGrowing)
     {
         /* A configuration finding, and the one case where the count is beside the point: this table will
            never be vacuumed by autovacuum no matter how bad it gets, and it holds back the whole
@@ -50,7 +55,7 @@ public sealed class DarlingMcpPgAutovacuumTools
             /* Ten times past the line is not a busy table, it is a stuck one — most often autovacuum
                being cancelled repeatedly by conflicting locks, or starved of workers. */
             >= 10 => "critical_far_past_threshold",
-            >= 2 when deadTuplesGrowing => "warning_past_threshold_and_growing",
+            >= 2 when deadTuplesGrowing == true => "warning_past_threshold_and_growing",
             >= 2 => "warning_past_threshold",
             >= 1 => "info_at_threshold",
             _ => "ok",
@@ -113,19 +118,37 @@ public sealed class DarlingMcpPgAutovacuumTools
                 double? analyzeRatio = r.AnalyzeThreshold > 0
                     ? Math.Round((double)r.ModsSinceAnalyze / r.AnalyzeThreshold, 2)
                     : null;
-                var growing = r.DeadTuples > r.FirstDeadTuples;
+                /* The insert-side twin, mirroring the read's ORDER BY CASE: the -1 sentinel (a major
+                   without autovacuum_vacuum_insert_threshold, or an unreadable inserts figure) produces
+                   no ratio rather than a negative one. */
+                double? insertRatio = r.InsertVacuumThreshold > 0 && r.InsertsSinceVacuum >= 0
+                    ? Math.Round((double)r.InsertsSinceVacuum / r.InsertVacuumThreshold, 2)
+                    : null;
+                /* Severity comes from the axis the ranking already uses — GREATEST(dead, insert), NULLs
+                   ignored, exactly as the read orders. Classifying from the dead ratio alone let an
+                   append-only worst_table read "ok" (#3534). */
+                double? worstRatio = ratio is null ? insertRatio
+                    : insertRatio is null ? ratio
+                    : Math.Max(ratio.Value, insertRatio.Value);
+                /* One sample cannot measure growth: first == latest is the same reading, and a false
+                   there converts into "autovacuum blocked or not running" territory the window cannot
+                   support. Null, not false — and the change figure goes with it. */
+                bool? growing = r.FirstSeenAt == r.MeasuredAt ? null : r.DeadTuples > r.FirstDeadTuples;
 
                 return new
                 {
                     database_name = r.DatabaseName,
                     table_name = $"{r.SchemaName}.{r.TableName}",
-                    severity = Classify(r.AutovacuumDisabled, ratio, growing),
+                    severity = Classify(r.AutovacuumDisabled, worstRatio, growing),
                     dead_tuples = r.DeadTuples,
                     vacuum_threshold = r.VacuumThreshold >= 0 ? r.VacuumThreshold : (long?)null,
                     /* The headline number: 1.0 means autovacuum should be triggering right now. */
                     threshold_ratio = ratio,
                     dead_tuples_growing = growing,
-                    dead_tuple_change = r.DeadTuples - r.FirstDeadTuples,
+                    dead_tuple_change = growing is null ? null : (long?)(r.DeadTuples - r.FirstDeadTuples),
+                    /* The window the growth claim is measured over, so a caller can see how much history
+                       stands behind it — and that null growth means one sample, not missing data. */
+                    first_seen_at = r.FirstSeenAt,
                     live_tuples = r.LiveTuples,
                     /* The analyze half. Stale statistics produce bad row estimates and bad plans, which is
                        a different symptom from bloat and gets missed because both come from one process. */
@@ -136,6 +159,9 @@ public sealed class DarlingMcpPgAutovacuumTools
                        rule, and a table never vacuumed is never frozen either. */
                     inserts_since_vacuum = r.InsertsSinceVacuum >= 0 ? r.InsertsSinceVacuum : (long?)null,
                     insert_vacuum_threshold = r.InsertVacuumThreshold >= 0 ? r.InsertVacuumThreshold : (long?)null,
+                    /* threshold_ratio's insert-side sibling, so the figure severity ranks on is visible
+                       when the dead-tuple ratio is not the one that put the table here. */
+                    insert_threshold_ratio = insertRatio,
                     autovacuum_disabled = r.AutovacuumDisabled,
                     total_bytes = r.TotalBytes >= 0 ? r.TotalBytes : (long?)null,
                     total_gb = r.TotalBytes >= 0 ? Math.Round(r.TotalBytes / 1024.0 / 1024.0 / 1024.0, 2) : (double?)null,
@@ -158,9 +184,14 @@ public sealed class DarlingMcpPgAutovacuumTools
                 hours_back,
                 status = "tables_with_pending_maintenance",
                 table_count = tables.Count,
+                /* Page-scoped counts: each is computed over the rows the read's LIMIT let through, not
+                   the server. limit_reached is the discriminator that makes that caveat actionable — when
+                   it bit, the caller knows these are top-N figures and can raise the limit (the
+                   get_pg_database_stats pattern). */
                 autovacuum_disabled_count = tables.Count(t => t.autovacuum_disabled),
-                past_threshold_count = tables.Count(t => t.threshold_ratio >= 1),
-                growing_count = tables.Count(t => t.dead_tuples_growing),
+                past_threshold_count = tables.Count(t => t.threshold_ratio >= 1 || t.insert_threshold_ratio >= 1),
+                growing_count = tables.Count(t => t.dead_tuples_growing == true),
+                limit_reached = tables.Count >= limit,
                 worst_table = tables[0].table_name,
                 worst_severity = tables[0].severity,
                 tables,
