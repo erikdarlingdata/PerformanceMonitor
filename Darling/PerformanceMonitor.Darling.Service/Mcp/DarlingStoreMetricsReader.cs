@@ -27,10 +27,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// per-server daily ingest rate (whole-store daily growth divided by the enabled-server count), computed in
 /// <see cref="ComputeDailyGrowth"/> — pure, so it is unit-tested without a store.
 ///
-/// <para>Plus one read that is not a metric at all: <see cref="JobExecutionLoggingSql"/> asks whether
+/// <para>Plus two reads that are not metrics at all: <see cref="JobExecutionLoggingSql"/> asks whether
 /// <c>timescaledb_information.job_history</c> — the route the tool's description sends a maximum question
-/// to, since this series cannot answer one — is actually recording (#3175). It qualifies the redirect, so
-/// a caller who follows it can tell a census from an empty table.</para>
+/// to, since this series cannot answer one — is switched on (#3175), and <see cref="JobHistoryEvidenceSql"/>
+/// asks whether the connection doing the asking would SEE its rows and how many it does see (#3574). Together
+/// they qualify the redirect, so a caller who follows it can tell a census from an empty table — and can
+/// tell an empty table from a table the view is hiding from them.</para>
 /// </summary>
 internal static class DarlingStoreMetricsReader
 {
@@ -133,6 +135,121 @@ SELECT
     sourcefile
 FROM pg_settings
 WHERE name = $1";
+
+    /// <summary>
+    /// The evidence behind <see cref="JobExecutionLoggingReading.Recording"/>: what THIS connection actually
+    /// sees in <c>timescaledb_information.job_history</c>, and whether the view would show it anything at all
+    /// (#3574). The GUC read above answers <i>"is the instrument switched on"</i>; the reader's real question
+    /// is <i>"will I see its output"</i>, and between those two sits a role-membership filter nothing else on
+    /// this surface mentioned.
+    ///
+    /// <para><b>THE FALSE-QUIET ARM #3175 DID NOT KNOW ABOUT: recording on, rows present, reader filtered.</b>
+    /// <c>job_history</c> is a <c>security_barrier</c> view whose definition on TimescaleDB 2.28.1 ends with
+    /// <code>
+    /// WHERE (pg_catalog.pg_has_role(current_user,
+    ///            (SELECT pg_catalog.pg_get_userbyid(datdba)
+    ///               FROM pg_catalog.pg_database
+    ///              WHERE datname = current_database()),
+    ///            'MEMBER') IS TRUE
+    ///     OR pg_catalog.pg_has_role(current_user, owner, 'MEMBER') IS TRUE);
+    /// </code>
+    /// so a row is visible only to a member of the database owner's role or of the job's owner role
+    /// (<c>_timescaledb_catalog.bgw_job.owner</c> is <c>regrole NOT NULL DEFAULT current_role</c> — a job
+    /// belongs to whoever created it, which for every policy this product adds is the service's owner role).
+    /// The base table is not a back door: <c>pre_install/tables.sql</c> ends with
+    /// <c>REVOKE ALL ON _timescaledb_internal.bgw_job_stat_history FROM PUBLIC</c>, so the two filtered views
+    /// (<c>job_history</c>, <c>job_errors</c>) are the only way in. <b>The trap is that the two views a reader
+    /// checks FIRST are not filtered.</b> <c>timescaledb_information.jobs</c> has no WHERE clause at all and
+    /// <c>job_stats</c> has none either, so a role that can see all 110 jobs and every one of their
+    /// <c>total_runs</c> reasonably assumes it can see their history — and reads zero rows, forever, on a
+    /// store that is recording perfectly. Measured on a production store on 2.28.1: the GUC effective
+    /// <c>on</c> (sighup context, <c>pending_restart = false</c>), all 110 jobs owned by the service's owner
+    /// role, two independent reads as the least-privilege <c>admin</c> role counted <b>0</b> rows ever, and
+    /// the owner role's read of the same view returned every hourly run. That zero was declared "unknowable"
+    /// in a real postmortem before anyone read the view's definition. Recording was never broken and the GUC
+    /// never lied; the block just never said whose eyes the rows are visible to, and never proved rows exist.</para>
+    ///
+    /// <para><b>THIS READ IS ITSELF SUBJECT TO THE FILTER, and that is why it evaluates the predicate rather
+    /// than assuming it passes.</b> In managed mode the MCP host connects as the dedicated least-privilege
+    /// <c>mcp</c> role (<c>DarlingMcpHostService</c>; <c>DarlingManagedRoles</c> grants it SELECT and a few
+    /// narrow writes, never membership in the owner role) — so on a managed store THIS connection is exactly
+    /// the kind of reader the view shows nothing to, and a bare <c>count(*)</c> here would have reported
+    /// <c>rows_observed = 0</c> on every managed store and manufactured the very contradiction this issue is
+    /// about. The read therefore also returns <c>current_user</c> and evaluates the view's own two
+    /// <c>pg_has_role</c> tests for it: membership in the database owner (which sees everything) and, per
+    /// job, membership in that job's owner. From those the caller knows whether the count that follows is a
+    /// census, a partial census, or a zero the view produced by construction — and the note says which, in
+    /// so many words, naming the role. On a bring-your-own store whose connection string is the owner role
+    /// the count IS the census and the flag becomes self-proving; on a managed store the block says it
+    /// cannot see, and says who can, which is the sentence that would have ended the postmortem in a minute.</para>
+    ///
+    /// <para><b>The population half rides in the same statement, from the UNFILTERED view.</b> A zero is
+    /// readable only when the instrument would have caught the event AND the event had a chance to occur, so
+    /// beside the history count the read takes, from <c>job_stats</c>, how many jobs started a run inside the
+    /// same window and the newest start it knows of. TimescaleDB writes the history row at job START when
+    /// the GUC is on (<c>bgw_job_stat_history_mark_start</c> inserts it with finish, pid and outcome NULL and
+    /// the finish updates it; a failure is written regardless of the GUC), so a job that started inside the
+    /// window while logging was on has a row with <c>start_time</c> inside the window — no waiting on a
+    /// finish. <c>recording = on</c>, a reader the predicate admits, zero rows, and jobs that started in the
+    /// window is the contradiction, and the note calls it one. It does not manufacture certainty about the
+    /// cause: logging switched on AFTER the last of those starts is the benign shape (the v11 heal lands on a
+    /// service-owned server start, and nothing before that point was written to recover), and the note says
+    /// how to settle it — re-read after the next hourly run — rather than pronouncing.</para>
+    ///
+    /// <para><b>A FIXED 24-HOUR WINDOW, not the tool's <c>days_back</c>.</b> Three reasons, in order of
+    /// weight. The question this answers is CURRENT — is the instrument writing now — and a 30-to-400-day
+    /// forecasting window would let ten days of rows written after a heal hide a recording that stopped
+    /// yesterday. Every job this product schedules runs at least daily (CAGG refreshes and the compression
+    /// tick hourly, retention daily), so any 24-hour window on a live store contains starts, which is what
+    /// lets the <c>job_stats</c> count prove the population half instead of assuming it. And the view's
+    /// own <c>Job History Log Retention Policy</c> drops rows after one month by default, so a window past
+    /// that would count a table the retention job had already trimmed and call the trimming "no rows".
+    /// $1 is the window start.</para>
+    ///
+    /// <para><b>$1 IS BOUND AS <c>timestamptz</c> WITH <c>Kind = Utc</c>, WHICH IS THE INVERSE OF THIS
+    /// CODEBASE'S RULE, AND DELIBERATELY SO.</b> Every collector column in the store is naive UTC and the
+    /// discipline everywhere else is to strip Kind before binding, because a timestamptz parameter against a
+    /// naive column makes PostgreSQL convert the naive side at the session's TimeZone. These columns are the
+    /// other way round: <c>bgw_job_stat_history.execution_start</c> and <c>bgw_job_stat.last_start</c> are
+    /// declared <c>TIMESTAMPTZ</c> in TimescaleDB's own catalog, so here a NAIVE bind would be the bug — the
+    /// parameter, not the column, would be converted at the session zone and the window would skew by the
+    /// host's offset. The parameter type is stated explicitly rather than inferred so the intent survives a
+    /// caller passing a DateTime of the wrong Kind.</para>
+    ///
+    /// <para><c>'-infinity'</c> is TimescaleDB's never-ran sentinel in <c>last_run_started_at</c> (not NULL —
+    /// the <see cref="TimescaleSupport.CompressionActivitySql"/> lesson from #1760), so the newest start
+    /// NULLIFs it away; the window predicate needs no guard because <c>-infinity &gt;= $1</c> is simply false.
+    /// <c>IS TRUE</c> on each <c>pg_has_role</c> mirrors the view, whose second test can meet a NULL owner
+    /// (it LEFT JOINs the job catalog, so a history row whose job has since been deleted has none, and the
+    /// strict function yields NULL) — a NULL must read as "not a member" rather than poison a count. Here
+    /// the owner comes from the <c>jobs</c> view and cannot be NULL; the guard is kept so the two predicates
+    /// stay textually the view's own.</para>
+    /// </summary>
+    public const string JobHistoryEvidenceSql = @"
+SELECT
+    current_user::text AS reader_role,
+    pg_has_role(
+        current_user,
+        (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()),
+        'MEMBER') IS TRUE AS reader_is_database_owner_member,
+    (SELECT count(*) FROM timescaledb_information.jobs) AS job_count,
+    (SELECT count(*)
+       FROM timescaledb_information.jobs AS j
+      WHERE pg_has_role(current_user, j.owner, 'MEMBER') IS TRUE) AS owner_member_job_count,
+    (SELECT count(*)
+       FROM timescaledb_information.job_history AS h
+      WHERE h.start_time >= $1) AS rows_observed,
+    (SELECT max(h.start_time) FROM timescaledb_information.job_history AS h) AS newest_row_at,
+    (SELECT count(*)
+       FROM timescaledb_information.job_stats AS js
+      WHERE js.last_run_started_at >= $1) AS jobs_run_in_window,
+    (SELECT max(NULLIF(js.last_run_started_at, '-infinity'::timestamptz))
+       FROM timescaledb_information.job_stats AS js) AS newest_run_started_at";
+
+    /// <summary>The evidence window <see cref="JobHistoryEvidenceSql"/> counts over, in hours. Fixed, not
+    /// <c>days_back</c> — the paragraph on that constant says why. Published in the response beside the
+    /// count so the number never travels without its denominator.</summary>
+    public const int JobHistoryEvidenceWindowHours = 24;
 
     /// <summary>
     /// The four distinguishable states of the <c>job_history</c> precondition. Four rather than a bool
@@ -241,6 +358,222 @@ WHERE name = $1";
                and reporting that as Unreadable would put a measurement-shaped word on an act of the caller's
                own. Everything else becomes Unreadable, which the response says out loud. */
             return new JobExecutionLoggingReading(JobExecutionLoggingStatus.Unreadable, null, null, null);
+        }
+    }
+
+    /// <summary>
+    /// Whether <see cref="JobHistoryEvidenceSql"/> produced a reading (#3574). Three states, not a nullable
+    /// count, for the reason <see cref="JobExecutionLoggingStatus"/> has four: a count this read did not
+    /// obtain, a count there was nothing to obtain, and a count of zero are three different facts about an
+    /// empty <c>job_history</c>, and the whole defect class is one of them being read as another.
+    /// </summary>
+    public enum JobHistoryEvidenceStatus
+    {
+        /// <summary>The read did not complete. Every evidence field is null and the flag stays a GUC echo
+        /// — reported as such, never as "zero rows".</summary>
+        Unreadable,
+
+        /// <summary>Not attempted, because the GUC read said the view does not exist on this connection
+        /// (<see cref="JobExecutionLoggingStatus.NotRegistered"/>). A plain-PostgreSQL store has no
+        /// <c>job_history</c> to count, and a failed read of an absent view would report as Unreadable —
+        /// a fault-shaped word for a store that has no fault.</summary>
+        NotApplicable,
+
+        /// <summary>The read completed. The counts are what this connection saw, and
+        /// <see cref="JobHistoryEvidence.Visibility"/> says whether what it saw is what is there.</summary>
+        Observed,
+    }
+
+    /// <summary>
+    /// How much of <c>job_history</c> the view's ownership predicate lets THIS reader see (#3574) — derived
+    /// from the two <c>pg_has_role</c> facts the read evaluates, never assumed.
+    /// </summary>
+    public enum JobHistoryVisibility
+    {
+        /// <summary>Not established: the evidence read did not complete, or there are no jobs to be a
+        /// member of the owner of.</summary>
+        Unknown,
+
+        /// <summary>The reader is a member of neither the database owner nor any job's owner. The view
+        /// returns it NOTHING by construction, so a zero count here is the filter, not the table. This is
+        /// the managed-mode <c>mcp</c> role's reading on every store.</summary>
+        None,
+
+        /// <summary>The reader is a member of some jobs' owners but not all, and not of the database owner.
+        /// The count is a census of those jobs only.</summary>
+        Partial,
+
+        /// <summary>The reader is a member of the database owner, or of every job's owner. The count is a
+        /// census — the one state in which a zero says something about recording.</summary>
+        All,
+    }
+
+    /// <summary>
+    /// One reading of <see cref="JobHistoryEvidenceSql"/>: who read, what the view's predicate lets them
+    /// see, what they saw, and whether anything happened for them to see (#3574). One value, so a caller
+    /// cannot take the count and drop the role it was counted through — which is precisely the omission
+    /// this exists to close.
+    /// </summary>
+    /// <param name="Status">Whether the read completed; every other field is null unless
+    /// <see cref="JobHistoryEvidenceStatus.Observed"/>.</param>
+    /// <param name="ReaderRole"><c>current_user</c> on the connection that counted.</param>
+    /// <param name="ReaderIsDatabaseOwnerMember">The view's first <c>pg_has_role</c> test, evaluated for
+    /// this reader: membership in the database owner's role, which sees every row regardless of job owner.</param>
+    /// <param name="JobCount">Every job in <c>timescaledb_information.jobs</c> — the UNFILTERED view, so
+    /// this is what any role sees and the denominator the visibility fraction is stated against.</param>
+    /// <param name="OwnerMemberJobCount">The view's second test, evaluated per job: how many jobs' owner
+    /// roles this reader is a member of.</param>
+    /// <param name="RowsObserved">History rows with a start inside the window that the view showed this
+    /// reader. A census only when <see cref="Visibility"/> is <see cref="JobHistoryVisibility.All"/>.</param>
+    /// <param name="NewestRowAt">The newest history start the view showed this reader, over all time —
+    /// null when it showed none. UTC.</param>
+    /// <param name="JobsRunInWindow">Jobs whose <c>job_stats.last_run_started_at</c> falls inside the
+    /// window — the population half, from the unfiltered view, so it holds whatever the reader's
+    /// visibility.</param>
+    /// <param name="NewestRunStartedAt">The newest job start <c>job_stats</c> knows of, over all time —
+    /// null when no job has ever run. UTC.</param>
+    public sealed record JobHistoryEvidence(
+        JobHistoryEvidenceStatus Status,
+        string? ReaderRole,
+        bool? ReaderIsDatabaseOwnerMember,
+        long? JobCount,
+        long? OwnerMemberJobCount,
+        long? RowsObserved,
+        DateTime? NewestRowAt,
+        long? JobsRunInWindow,
+        DateTime? NewestRunStartedAt)
+    {
+        /// <summary>The reading for a connection on which the view does not exist — every field null,
+        /// status <see cref="JobHistoryEvidenceStatus.NotApplicable"/>.</summary>
+        public static JobHistoryEvidence NotApplicable { get; } =
+            new(JobHistoryEvidenceStatus.NotApplicable, null, null, null, null, null, null, null, null);
+
+        /// <summary>The reading for a read that did not complete — every field null, status
+        /// <see cref="JobHistoryEvidenceStatus.Unreadable"/>.</summary>
+        public static JobHistoryEvidence Unreadable { get; } =
+            new(JobHistoryEvidenceStatus.Unreadable, null, null, null, null, null, null, null, null);
+
+        /// <summary>
+        /// How many jobs' history the view lets this reader see: every job when the reader is a member of
+        /// the database owner (the view's first test short-circuits the second), otherwise the per-job
+        /// membership count. Null unless observed.
+        /// </summary>
+        public long? HistoryVisibleJobCount =>
+            Status != JobHistoryEvidenceStatus.Observed ? null
+            : ReaderIsDatabaseOwnerMember == true ? JobCount
+            : OwnerMemberJobCount;
+
+        /// <summary>
+        /// The reader's standing under the view's predicate, derived from the two membership facts and the
+        /// job count. <see cref="JobHistoryVisibility.Unknown"/> when the read did not complete or there are
+        /// no jobs — with nothing to be an owner of, "none" and "all" would both be vacuously true, and a
+        /// note built on either would be inventing a measurement.
+        /// </summary>
+        public JobHistoryVisibility Visibility
+        {
+            get
+            {
+                if (Status != JobHistoryEvidenceStatus.Observed || JobCount is not > 0)
+                {
+                    return JobHistoryVisibility.Unknown;
+                }
+
+                if (ReaderIsDatabaseOwnerMember == true)
+                {
+                    return JobHistoryVisibility.All;
+                }
+
+                return OwnerMemberJobCount switch
+                {
+                    null or 0 => JobHistoryVisibility.None,
+                    var n when n >= JobCount => JobHistoryVisibility.All,
+                    _ => JobHistoryVisibility.Partial,
+                };
+            }
+        }
+
+        /// <summary>
+        /// The new finding class (#3574): the GUC says recording, the view admits this reader to every job's
+        /// history, jobs started runs inside the window, and the reader saw NO rows for them. True only when
+        /// all four hold — a zero read through a filtered role contradicts nothing, a zero with no runs in
+        /// the window proves nothing, and a zero with the GUC off is the #3175 arm, not this one. The caller
+        /// supplies <paramref name="recording"/> because this record deliberately does not carry the GUC
+        /// reading; the two are read separately and fail separately.
+        /// </summary>
+        public bool ContradictsRecording(bool recording) =>
+            recording
+            && Status == JobHistoryEvidenceStatus.Observed
+            && Visibility == JobHistoryVisibility.All
+            && RowsObserved == 0
+            && JobsRunInWindow is > 0;
+    }
+
+    /// <summary>
+    /// Reads <see cref="JobHistoryEvidenceSql"/> over the window ending now and starting
+    /// <see cref="JobHistoryEvidenceWindowHours"/> ago. Failure-isolated to
+    /// <see cref="JobHistoryEvidence.Unreadable"/>, independently of the GUC read: the two are separate
+    /// statements on separate checkouts, so either can fail while the other answers, and a reading that
+    /// collapsed both into one status would report the GUC as unknown because a count timed out. Takes the
+    /// GUC reading only to skip the view a plain-PostgreSQL store does not have — the read is not attempted
+    /// for <see cref="JobExecutionLoggingStatus.NotRegistered"/>, and the response says NotApplicable rather
+    /// than dressing an absent view up as a failed read. No logger, for the reason
+    /// <see cref="GetJobExecutionLoggingAsync"/> gives.
+    /// </summary>
+    public static async Task<JobHistoryEvidence> GetJobHistoryEvidenceAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        if (logging.Status == JobExecutionLoggingStatus.NotRegistered)
+        {
+            return JobHistoryEvidence.NotApplicable;
+        }
+
+        try
+        {
+            await using var command = postgres.CreateCommand(JobHistoryEvidenceSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+
+            /* Kind = Utc and an EXPLICIT timestamptz, against timestamptz columns — the inverse of every
+               other bind on this surface, and the paragraph on JobHistoryEvidenceSql says why. Stated rather
+               than inferred so that a caller's DateTime of another Kind cannot quietly turn this into the
+               naive bind that would skew the window by the session zone. */
+            var windowStartUtc = DateTime.SpecifyKind(
+                DateTime.UtcNow.AddHours(-JobHistoryEvidenceWindowHours), DateTimeKind.Utc);
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+                Value = windowStartUtc,
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                /* A single-row SELECT of scalar subqueries always yields one row; no row is a shape this
+                   read does not understand, and Unreadable is the only honest word for it. */
+                return JobHistoryEvidence.Unreadable;
+            }
+
+            return new JobHistoryEvidence(
+                JobHistoryEvidenceStatus.Observed,
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetBoolean(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                reader.IsDBNull(5) ? null : DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
+                reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Same cancellation discipline as the GUC read: a caller's own stop is not a measurement. */
+            return JobHistoryEvidence.Unreadable;
         }
     }
 

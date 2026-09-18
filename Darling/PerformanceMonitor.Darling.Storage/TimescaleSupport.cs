@@ -2429,9 +2429,14 @@ WITH NO DATA";
     /// is not a fleet reading. <b>#3175/#3177 has since given the GUC its own marker, so existing stores
     /// heal; that does not widen this population, because the read predates the heal.</b> A later census
     /// could be broader, and would have to say so rather than inherit this one's scope. No SHIPPED read
-    /// touches <c>job_history</c> (every product surface uses <c>job_stats</c>,
-    /// deliberately — see <see cref="CompressionActivitySql"/>), so the gap is in what an investigation can
-    /// ask, not in what the product reports. Read at <c>2026-09-08 01:37Z</c>, so the
+    /// takes a DURATION from <c>job_history</c> (every product duration surface uses <c>job_stats</c>,
+    /// deliberately — see <see cref="CompressionActivitySql"/>); the one shipped read that touches the view
+    /// at all is <c>DarlingStoreMetricsReader.JobHistoryEvidenceSql</c> (#3574), a bounded row COUNT that
+    /// proves the instrument is writing and evaluates the view's ownership filter for its own connection —
+    /// because <c>job_history</c> shows rows only to members of the job's owner or the database owner, a
+    /// census like this one must be read as such a role, and a zero read as any other role is the filter
+    /// and not the table. So the gap is in what an investigation can ask, not in what the product reports.
+    /// Read at <c>2026-09-08 01:37Z</c>, so the
     /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
     /// does not have. Each side of the boundary, since a bound is only as good as what it excludes: <b>304
     /// runs</b> at or before it, median <b>1081.7 s</b>, maximum <b>13300.7 s</b>; <b>57 runs</b> after it,
