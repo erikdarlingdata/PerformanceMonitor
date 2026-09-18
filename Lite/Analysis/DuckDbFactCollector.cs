@@ -91,6 +91,10 @@ public partial class DuckDbFactCollector : IFactCollector
             await collect(context, facts);
         }
 
+        /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
+           it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
+           denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
+        await RunCollectorAsync(CollectObservedCoverageAsync);
         await RunCollectorAsync(CollectWaitStatsFactsAsync);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);

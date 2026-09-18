@@ -95,6 +95,13 @@ public static class FactCollectorHelpers
     ///   - LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_* (serializable/repeatable read signal)
     ///   - SCH_M, SCH_S (schema locks — DDL/index operations)
     /// Individual constituent wait times are preserved in metadata as "{type}_ms" keys.
+    ///
+    /// <para>The grouped Value is the SUM of the constituents' Values, not a fresh division (#3538 A2).
+    /// Every wait fact in a pass is a fraction of the same denominator — the observed collection time
+    /// stamped on the context, or the nominal window in a collector that does not stamp one — so the
+    /// sum is exactly the grouped fraction, and this helper stays correct whichever denominator the
+    /// collector chose without having to know which. Dividing here by the nominal window again would
+    /// have quietly re-introduced the coverage-blind rate for the LCK and CXPACKET families only.</para>
     /// </summary>
     public static void GroupGeneralLockWaits(List<Fact> facts, AnalysisContext context)
     {
@@ -105,7 +112,7 @@ public static class FactCollectorHelpers
         var totalWaitingTasks = generalLocks.Sum(f => f.Metadata.GetValueOrDefault("waiting_tasks_count"));
         var totalSignalMs = generalLocks.Sum(f => f.Metadata.GetValueOrDefault("signal_wait_time_ms"));
         var avgMsPerWait = totalWaitingTasks > 0 ? totalWaitTimeMs / totalWaitingTasks : 0;
-        var fractionOfPeriod = totalWaitTimeMs / context.PeriodDurationMs;
+        var fractionOfPeriod = generalLocks.Sum(f => f.Value);
 
         var metadata = new Dictionary<string, double>
         {
@@ -117,6 +124,7 @@ public static class FactCollectorHelpers
             ["period_duration_ms"] = context.PeriodDurationMs,
             ["lock_type_count"] = generalLocks.Count
         };
+        AddCoverageFraction(metadata, context);
 
         // Preserve individual constituent wait times for detailed analysis
         foreach (var lck in generalLocks)
@@ -150,7 +158,8 @@ public static class FactCollectorHelpers
         var totalWaitingTasks = cxWaits.Sum(f => f.Metadata.GetValueOrDefault("waiting_tasks_count"));
         var totalSignalMs = cxWaits.Sum(f => f.Metadata.GetValueOrDefault("signal_wait_time_ms"));
         var avgMsPerWait = totalWaitingTasks > 0 ? totalWaitTimeMs / totalWaitingTasks : 0;
-        var fractionOfPeriod = totalWaitTimeMs / context.PeriodDurationMs;
+        // Sum of the constituents' fractions — same denominator, see GroupGeneralLockWaits (#3538 A2).
+        var fractionOfPeriod = cxWaits.Sum(f => f.Value);
 
         var metadata = new Dictionary<string, double>
         {
@@ -161,6 +170,7 @@ public static class FactCollectorHelpers
             ["avg_ms_per_wait"] = avgMsPerWait,
             ["period_duration_ms"] = context.PeriodDurationMs
         };
+        AddCoverageFraction(metadata, context);
 
         // Preserve individual constituent wait times for detailed analysis
         foreach (var cx in cxWaits)
@@ -177,6 +187,22 @@ public static class FactCollectorHelpers
             ServerId = cxWaits[0].ServerId,
             Metadata = metadata
         });
+    }
+
+    /// <summary>
+    /// Stamps <c>coverage_fraction</c> — the observed share of the nominal window the fact's Value was
+    /// divided over — when the collector stamped one (#3538 A2). The wait facts carry it under this
+    /// name rather than as an <c>observed_duration_ms</c> because <c>FactAdvice.DominantLockMode</c>
+    /// reads every non-standard <c>*_ms</c> key on the grouped LCK fact as a lock MODE; a divisor named
+    /// in milliseconds would have been reported as "the largest single contributor". The divisor is
+    /// recoverable as <c>period_duration_ms × coverage_fraction</c>. Omitted, not zeroed, for a
+    /// collector that never stamped coverage (the frozen Dashboard twin), so its facts keep their
+    /// pre-#3538 shape exactly.
+    /// </summary>
+    public static void AddCoverageFraction(Dictionary<string, double> metadata, AnalysisContext context)
+    {
+        if (context.Coverage is { } coverage)
+            metadata["coverage_fraction"] = coverage.Fraction;
     }
 
     /// <summary>

@@ -101,20 +101,35 @@ public sealed class DarlingMcpTools
                     });
             }
 
+            /* #3538 A2: how much of the window the collector actually observed. Every rate in this pass
+               was divided by that time rather than by the nominal window, so the numbers are right at any
+               coverage — but a reader still needs to know the window had a hole in it, because "nothing
+               significant in the hour we saw" and "nothing significant in four hours" are different
+               claims. Below the partial bar the caveat is prose; the coverage block is always present. */
+            var coverage = analysisService.LastWindowCoverage;
+            var coverageCaveat = coverage is { IsPartial: true }
+                ? $"PARTIAL COVERAGE: {coverage.Describe()}. Rates and fractions below are per observed time, so they are not deflated by the gap — but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped."
+                : null;
+
             if (findings.Count == 0)
             {
                 /* A successful analysis that found nothing wrong: a true negative ("all clear"),
                    surfaced with the shared miss vocabulary so callers branch on it uniformly. Facts
                    WERE collected and scored this time — the window-collected-nothing case returned
-                   above as unavailable instead (#3524). */
+                   above as unavailable instead (#3524). With partial coverage the all-clear is scoped
+                   to the time that was seen (#3538 A2): the same status, because facts were scored and
+                   nothing fired, but prose that no longer claims the whole window. */
                 return McpHelpers.Status(
                     "empty",
-                    "No significant findings. All metrics are within normal ranges.",
+                    coverageCaveat is null
+                        ? "No significant findings. All metrics are within normal ranges."
+                        : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed — a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
                     new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
-                        persistence_note = persistenceNote
+                        persistence_note = persistenceNote,
+                        coverage = coverage?.ToPayload()
                     });
             }
 
@@ -133,6 +148,9 @@ public sealed class DarlingMcpTools
                 /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
                    one every caller already assumed. */
                 persistence_note = persistenceNote,
+                /* Null at full coverage (#3538 A2) — same rule. */
+                caveat = coverageCaveat,
+                coverage = coverage?.ToPayload(),
                 time_range = new
                 {
                     start = findings[0].TimeRangeStart?.ToString("o"),
@@ -218,7 +236,7 @@ public sealed class DarlingMcpTools
 
         try
         {
-            var facts = await analysisService.CollectAndScoreFactsAsync(
+            var (facts, coverage) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
 
             if (facts.Count == 0)
@@ -228,6 +246,22 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     "No facts collected. The collector may not have run yet, or no data exists in the requested time range.");
+            }
+
+            if (coverage is null || !coverage.IsObserved)
+            {
+                /* #3538 A2: facts exist but the window was never observed — the point-in-time config and
+                   state facts read from the latest row regardless of window, and every windowed rate is
+                   absent because there was no time to divide by. The tool's own description promises
+                   "wait stats as fraction-of-period, blocking rates"; none of those can be shown, so
+                   this is the unavailable envelope, with the count of what COULD be read so a caller
+                   after configuration alone knows audit_config still has it. */
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"The collector observed none of the requested window for {resolved.ServerName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
+                    $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
+                    "Check get_collection_health to see when collectors last succeeded and why they stopped.",
+                    new { coverage = coverage?.ToPayload() });
             }
 
             var filtered = facts.AsEnumerable();
@@ -265,6 +299,13 @@ public sealed class DarlingMcpTools
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
+                /* #3538 A2: null at full coverage; below the partial bar it says what share of the window
+                   the fractions and rates were divided over, because a 25%-of-observed-time wait on a
+                   quarter-collected window is a different claim from 25% of four hours. */
+                caveat = coverage.IsPartial
+                    ? $"PARTIAL COVERAGE: {coverage.Describe()}. Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole."
+                    : null,
+                coverage = coverage.ToPayload(),
                 facts = result
             }, McpHelpers.JsonOptions);
         }
@@ -304,13 +345,19 @@ public sealed class DarlingMcpTools
             var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
             var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
-            var (baselineFacts, comparisonFacts) = await analysisService.ComparePeriodsAsync(
+            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd);
 
-            var baselineByKey = baselineFacts.ToFactLookup();
-            var comparisonByKey = comparisonFacts.ToFactLookup();
+            /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
+               server, and it is reported through the coverage blocks and caveat below. Left in the
+               comparison it would count as a "stable" (or, on one side, a "new") entry in the summary
+               and pad fact rows with a key no advice speaks to. */
+            var baselineServerFacts = baselineFacts.Where(f => f.Source != WindowCoverage.FactSource).ToList();
+            var comparisonServerFacts = comparisonFacts.Where(f => f.Source != WindowCoverage.FactSource).ToList();
+            var baselineByKey = baselineServerFacts.ToFactLookup();
+            var comparisonByKey = comparisonServerFacts.ToFactLookup();
             var allKeys = baselineByKey.Keys.Union(comparisonByKey.Keys).ToHashSet();
 
             var comparisons = allKeys
@@ -355,6 +402,11 @@ public sealed class DarlingMcpTools
                         baseline_end = baselineEnd.ToString("o"),
                         comparison_start = comparisonStart.ToString("o"),
                         comparison_end = comparisonEnd.ToString("o"),
+                        /* #3538 A2: WHICH kind of nothing — a window the collector never observed, or one
+                           it observed and found idle — is the difference between "check collection" and
+                           "the server was quiet", and only the coverage can tell them apart. */
+                        baseline_coverage = baselineCoverage?.ToPayload(),
+                        comparison_coverage = comparisonCoverage?.ToPayload()
                     });
             }
 
@@ -365,29 +417,56 @@ public sealed class DarlingMcpTools
                 window simply was not collected is a worse answer than no answer. Data-bearing results keep
                 their own shape rather than the status envelope, so the warning rides in the payload.
             */
-            var caveat =
-                baselineFacts.Count == 0
+            /*
+                #3538 A2 extends the same warning to the case it never reached: a window that was only
+                PARTLY collected. Before the observed-time divisor, a comparison window with a three-hour
+                hole reported every rate at a quarter of its true value and this tool called that
+                "better" with no caveat at all — the empty-window arms above fire only when a side has NO
+                facts. The rates are now per observed time on both sides, so the deltas are honest; what
+                a reader still cannot know without being told is that one side speaks for an hour and the
+                other for four. Either side under the partial bar, or unobserved, earns its sentence
+                whether or not it produced facts — an idle hour the collector saw a quarter of is still a
+                quarter-seen window, and the empty-window sentence alone would send the reader to the
+                collection log without saying what they will find there. Both sides can earn one.
+            */
+            var emptyCaveat =
+                baselineServerFacts.Count == 0
                     ? "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against. Confirm collection covered the baseline window (get_collection_log) before reading new_issues as a regression."
-                    : comparisonFacts.Count == 0
+                    : comparisonServerFacts.Count == 0
                         ? "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against. Confirm collection is running (get_collection_log) before reading resolved_issues as an improvement."
                         : null;
+
+            var coverageCaveats = new List<string>(2);
+            if (baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved))
+                coverageCaveats.Add($"The BASELINE window was only partly collected: {baselineCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
+            if (comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved))
+                coverageCaveats.Add($"The COMPARISON window was only partly collected: {comparisonCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
+            if (coverageCaveats.Count > 0)
+                coverageCaveats.Add("A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.");
+
+            var caveat = emptyCaveat is null && coverageCaveats.Count == 0
+                ? null
+                : string.Join(" ", new[] { emptyCaveat }.Concat(coverageCaveats).Where(s => s is not null));
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                /* Null when both windows produced facts — the ordinary case, where nothing needs saying. */
+                /* Null when both windows produced facts at full coverage — the ordinary case, where
+                   nothing needs saying. */
                 caveat,
                 baseline = new
                 {
                     start = baselineStart.ToString("o"),
                     end = baselineEnd.ToString("o"),
-                    fact_count = baselineFacts.Count
+                    fact_count = baselineServerFacts.Count,
+                    coverage = baselineCoverage?.ToPayload()
                 },
                 comparison = new
                 {
                     start = comparisonStart.ToString("o"),
                     end = comparisonEnd.ToString("o"),
-                    fact_count = comparisonFacts.Count
+                    fact_count = comparisonServerFacts.Count,
+                    coverage = comparisonCoverage?.ToPayload()
                 },
                 summary = new
                 {
@@ -417,7 +496,10 @@ public sealed class DarlingMcpTools
 
         try
         {
-            var facts = await analysisService.CollectAndScoreFactsAsync(
+            /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
+               configuration facts, which are the latest row regardless of window, and a one-hour window
+               the collector missed changes nothing about what the server is configured to. */
+            var (facts, _) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, 1);
 
             var factsByKey = facts.ToFactLookup();

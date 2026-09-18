@@ -64,9 +64,161 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
 
         var pageioFact = facts.First(f => f.Key == "PAGEIOLATCH_SH");
 
-        /* 10,000,000 ms / 14,400,000 ms ≈ 0.694 */
+        /* 10,000,000 ms / 14,400,000 ms ≈ 0.694 — and since #3538 A2 the divisor is the OBSERVED
+           collection time, which for this fully collected series equals the window, so the figure the
+           scenario documents is unchanged. That equality is the regression pin: a coverage witness that
+           under-credited a full series (an off-by-one interval, a boundary excluded) would inflate every
+           scenario's fractions and land here first. */
         Assert.InRange(pageioFact.Value, 0.68, 0.71);
         Assert.Equal(TestDataSeeder.TestServerId, pageioFact.ServerId);
+
+        Assert.NotNull(context.Coverage);
+        Assert.InRange(context.Coverage!.Fraction, 0.999, 1.0);
+        Assert.False(context.Coverage.IsPartial);
+        Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.InRange(pageioFact.Metadata["coverage_fraction"], 0.999, 1.0);
+        Assert.Equal(TestDataSeeder.TestPeriodDurationMs, pageioFact.Metadata["period_duration_ms"]);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+       #3538 A2: rates and fractions divide by the time the collector actually observed.
+       The gap scenario is the memory-starved server at the SAME wait intensity with the
+       collector down for three of the window's four hours; the honest figures are the
+       memory-starved scenario's own, and the nominal division would have quartered them.
+       ═══════════════════════════════════════════════════════════════════ */
+
+    [Fact]
+    public async Task CollectFacts_CollectorGap_FractionsDivideByObservedTime_NotTheNominalWindow()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCollectorGapServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        var pageio = facts.First(f => f.Key == "PAGEIOLATCH_SH");
+
+        /* 2,500,000 ms over the ONE observed hour = 0.694 — the memory-starved figure. Divided by the
+           nominal four hours it would have read 0.174, under every PAGEIOLATCH bar. */
+        Assert.InRange(pageio.Value, 0.68, 0.71);
+        var nominalFraction = pageio.Metadata["wait_time_ms"] / context.PeriodDurationMs;
+        Assert.InRange(pageio.Value / nominalFraction, 3.9, 4.1);
+        Assert.InRange(pageio.Metadata["coverage_fraction"], 0.24, 0.26);
+
+        /* The divisor is recoverable from the metadata exactly as documented on the fact. */
+        var divisorMs = pageio.Metadata["period_duration_ms"] * pageio.Metadata["coverage_fraction"];
+        Assert.InRange(pageio.Metadata["wait_time_ms"] / divisorMs, pageio.Value - 0.001, pageio.Value + 0.001);
+
+        /* The grouped families sum their constituents' fractions, so they share the divisor too. */
+        var cx = facts.First(f => f.Key == "CXPACKET");
+        Assert.InRange(cx.Value, 0.10, 0.11); // 375,000 / 3,600,000
+        Assert.InRange(cx.Metadata["coverage_fraction"], 0.24, 0.26);
+
+        /* Blocking and deadlocks are per OBSERVED hour: 40 events and 8 deadlocks in the hour the
+           collector was up are 40/hr and 8/hr, not the 10/hr and 2/hr the nominal window claimed. */
+        var blocking = facts.First(f => f.Key == "BLOCKING_EVENTS");
+        Assert.InRange(blocking.Value, 39.5, 40.5);
+        Assert.InRange(blocking.Metadata["observed_hours"], 0.99, 1.01);
+        Assert.Equal(4.0, blocking.Metadata["period_hours"], precision: 6);
+
+        var deadlocks = facts.First(f => f.Key == "DEADLOCKS");
+        Assert.InRange(deadlocks.Value, 7.9, 8.1);
+        Assert.InRange(deadlocks.Metadata["observed_hours"], 0.99, 1.01);
+    }
+
+    [Fact]
+    public async Task CollectFacts_CollectorGap_EmitsTheCoverageFact_WithTheFractionAndTheLargestGap()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCollectorGapServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        /* The stamp on the context: one observed hour of four, largest hole the three-hour tail. */
+        var coverage = context.Coverage!;
+        Assert.True(coverage.IsObserved);
+        Assert.True(coverage.IsPartial);
+        Assert.InRange(coverage.Fraction, 0.24, 0.26);
+        Assert.InRange(coverage.ObservedMs, 3_599_000, 3_601_000);
+        Assert.InRange(coverage.LargestGapMs, 10_799_000, 10_801_000);
+        Assert.Equal(5, coverage.SampleCount); // the baseline reading plus four deltas
+
+        /* The context fact beside the facts it qualifies: Value = the fraction, scored nothing. */
+        var gap = Assert.Single(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.Equal(WindowCoverage.FactSource, gap.Source);
+        Assert.InRange(gap.Value, 0.24, 0.26);
+        Assert.InRange(gap.Metadata["largest_gap_ms"], 10_799_000, 10_801_000);
+        Assert.InRange(gap.Metadata["unobserved_ms"], 10_799_000, 10_801_000);
+        Assert.Equal(TestDataSeeder.TestPeriodDurationMs, gap.Metadata["nominal_ms"]);
+
+        new FactScorer().ScoreAll(facts);
+        Assert.Equal(0, gap.Severity);
+        Assert.Equal(0, gap.BaseSeverity);
+    }
+
+    [Fact]
+    public async Task CollectFacts_UnobservedWindow_EmitsNoRateFacts_AndStampsZeroCoverage()
+    {
+        /* The dead-collector shape that still has SOMETHING in the window: a single reading with no
+           predecessor. Its delta is unknowable (the calculator's first sighting), so is the time it
+           stands for, and a fraction computed against it would be a number about nothing. */
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.ClearTestDataAsync();
+        await seeder.SeedTestServerAsync();
+        await seeder.SeedWaitStatsInRangeAsync(
+            TestDataSeeder.TestPeriodStart.AddMinutes(30), TestDataSeeder.TestPeriodStart.AddMinutes(45),
+            new Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)>
+            {
+                ["PAGEIOLATCH_SH"] = (9_000_000, 1_000, 0)
+            }, samples: 1);
+        await seeder.SeedBlockingEventsAsync(40, avgWaitTimeMs: 20_000);
+        await seeder.SeedDeadlocksAsync(8);
+        await seeder.SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 57344);
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        var facts = await collector.CollectFactsAsync(context);
+
+        Assert.NotNull(context.Coverage);
+        Assert.False(context.Coverage!.IsObserved);
+        Assert.Equal(0, context.ObservedDurationMs);
+        Assert.Equal(1, context.Coverage.SampleCount);
+
+        /* The largest SINGLE unobserved stretch, not the whole window: the orphan splits it into a
+           30-minute lead-in and a 210-minute tail, and the tail is the figure — 12,600,000 ms. (The
+           whole window is unobserved, but in two stretches; only a window with no rows at all reports
+           the nominal length here.) */
+        Assert.InRange(context.Coverage.LargestGapMs, 12_599_000, 12_601_000);
+
+        /* No rate fact, no fabricated zero, no Infinity — and no gap fact either: "unobserved" is the
+           service's unavailable envelope, not a partial reading. */
+        Assert.DoesNotContain(facts, f => f.Source == "waits");
+        Assert.DoesNotContain(facts, f => f.Key is "BLOCKING_EVENTS" or "DEADLOCKS");
+        Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+        Assert.All(facts, f => Assert.False(double.IsInfinity(f.Value) || double.IsNaN(f.Value)));
+
+        /* The point-in-time facts still read: they are not measurements of the window. */
+        Assert.Contains(facts, f => f.Source == "config");
+    }
+
+    [Fact]
+    public async Task CollectFacts_EmptyWindow_StampsUnobservedCoverage()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.ClearTestDataAsync();
+        await seeder.SeedTestServerAsync();
+
+        var collector = new DuckDbFactCollector(_duckDb);
+        var context = TestDataSeeder.CreateTestContext();
+        await collector.CollectFactsAsync(context);
+
+        Assert.NotNull(context.Coverage);
+        Assert.False(context.Coverage!.IsObserved);
+        Assert.Equal(0, context.Coverage.SampleCount);
+        Assert.Equal(0, context.Coverage.Fraction);
     }
 
     [Fact]

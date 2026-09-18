@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -13,11 +14,155 @@ namespace PerformanceMonitorLite.Analysis;
 public partial class DuckDbFactCollector
 {
     /// <summary>
+    /// Step 0 of every pass (#3538 A2): stamps <see cref="AnalysisContext.Coverage"/> — how much of the
+    /// window the collector actually observed, measured from the wait-stats collection series — and,
+    /// when the window was only partly observed, emits the <see cref="WindowCoverage.FactKey"/> context
+    /// fact beside the facts it qualifies. Every rate and fraction fact below divides by this stamp.
+    /// Darling's <c>PgFactCollector.CollectObservedCoverageAsync</c> is the twin; the SQL is byte-identical
+    /// (shared dialect: <c>EXTRACT(EPOCH FROM …)</c>, <c>LAG</c>, <c>GREATEST</c>, <c>COALESCE</c>) and
+    /// <see cref="WindowCoverage"/> carries the measurement's argument, so it is not repeated here.
+    ///
+    /// <para>The parameters: <c>$1..$3</c> server and window as every windowed query binds them;
+    /// <c>$4</c> the window start minus the gap policy, so the first in-window row can find its
+    /// predecessor (the <c>GREATEST</c> then clips its interval to the window); <c>$5</c> the policy
+    /// itself, <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, bound rather than inlined so
+    /// this read and the calculator that produced the deltas cannot disagree about where "observed"
+    /// ends. <c>DISTINCT collection_time</c> because a collection writes one row per wait type and the
+    /// interval belongs to the collection. The lead-in and tail gaps are finished in C# from the edge
+    /// columns, because they are about the window's edges, which the row set cannot see.</para>
+    ///
+    /// <para>It lives in the collector rather than in <c>AnalysisService</c> so that every path that
+    /// collects facts — the scheduled pass, <c>get_analysis_facts</c>, both windows of
+    /// <c>compare_analysis</c>, and a test handing the collector a bare context — gets the stamp before
+    /// the first division. Like the wait read it precedes, it carries no catch: this is the canary
+    /// series, and a store that cannot answer it should fail the pass loudly rather than degrade into
+    /// "unobserved", which would report a dead collector for a store that merely faulted.</para>
+    /// </summary>
+    private async Task CollectObservedCoverageAsync(AnalysisContext context, List<Fact> facts)
+    {
+        var nominalMs = context.PeriodDurationMs;
+        if (nominalMs <= 0)
+        {
+            /* A zero-length or reversed window: no time to divide by and nothing the series could say. */
+            context.Coverage = WindowCoverage.Unobserved(nominalMs);
+            return;
+        }
+
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(context.CancellationToken);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+WITH samples AS (
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4
+    AND   collection_time <= $3
+),
+intervals AS (
+    SELECT collection_time,
+           LAG(collection_time) OVER (ORDER BY collection_time) AS previous_time
+    FROM samples
+)
+SELECT
+    COUNT(*) AS sample_count,
+    COALESCE(SUM(CASE
+        WHEN previous_time IS NULL THEN 0
+        WHEN EXTRACT(EPOCH FROM (collection_time - previous_time)) > $5 THEN 0
+        ELSE EXTRACT(EPOCH FROM (collection_time - GREATEST(previous_time, $2)))
+    END), 0) AS observed_seconds,
+    COALESCE(MAX(CASE
+        WHEN previous_time IS NOT NULL AND EXTRACT(EPOCH FROM (collection_time - previous_time)) > $5
+        THEN EXTRACT(EPOCH FROM (collection_time - GREATEST(previous_time, $2)))
+        ELSE 0
+    END), 0) AS largest_discarded_seconds,
+    COALESCE(SUM(CASE WHEN previous_time IS NULL THEN 1 ELSE 0 END), 0) AS orphan_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
+FROM intervals
+WHERE collection_time >= $2";
+
+        command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds) });
+        command.Parameters.Add(new DuckDBParameter { Value = CollectorDeltaCalculator.DefaultMaxGapSeconds });
+
+        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken))
+        {
+            context.Coverage = WindowCoverage.Unobserved(nominalMs);
+            return;
+        }
+
+        /* DuckDB hands SUM over integers back as a HUGEINT (BigInteger) — hence ToInt64, the
+           BigInteger-tolerant shared reader — and the epoch sums back as DOUBLE. */
+        var sampleCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        var observedSeconds = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+        var largestDiscardedSeconds = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
+        var orphanCount = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+        DateTime? firstSample = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+        DateTime? lastSample = reader.IsDBNull(5) ? null : reader.GetDateTime(5);
+
+        context.Coverage = BuildCoverage(
+            context, nominalMs, sampleCount, observedSeconds, largestDiscardedSeconds, orphanCount, firstSample, lastSample);
+
+        if (context.Coverage.IsPartial)
+            facts.Add(context.Coverage.ToGapFact(context.ServerId));
+    }
+
+    /// <summary>
+    /// Finishes the coverage stamp from the query's row: the lead-in gap (window start to a first row
+    /// that had no predecessor) and the tail gap (last row to window end — a collector that died
+    /// mid-window leaves nothing after itself to LAG from) are edge properties of the window and are
+    /// computed here; the in-series discarded stretch comes from the query. Largest gap is the longest
+    /// of the three. Darling's <c>PgFactCollector.BuildCoverage</c> verbatim.
+    /// </summary>
+    private static WindowCoverage BuildCoverage(
+        AnalysisContext context, double nominalMs, long sampleCount, double observedSeconds,
+        double largestDiscardedSeconds, long orphanCount, DateTime? firstSample, DateTime? lastSample)
+    {
+        if (sampleCount == 0 || firstSample is null || lastSample is null)
+            return WindowCoverage.Unobserved(nominalMs);
+
+        var leadInMs = orphanCount > 0 ? Math.Max(0, (firstSample.Value - context.TimeRangeStart).TotalMilliseconds) : 0;
+        var tailMs = Math.Max(0, (context.TimeRangeEnd - lastSample.Value).TotalMilliseconds);
+        var largestGapMs = Math.Max(largestDiscardedSeconds * 1000.0, Math.Max(leadInMs, tailMs));
+
+        return new WindowCoverage
+        {
+            NominalMs = nominalMs,
+            ObservedMs = Math.Min(nominalMs, Math.Max(0, observedSeconds * 1000.0)),
+            SampleCount = (int)Math.Min(int.MaxValue, sampleCount),
+            LargestGapMs = Math.Min(nominalMs, largestGapMs)
+        };
+    }
+
+    /// <summary>
     /// Collects wait stats facts — one Fact per significant wait type.
-    /// Value is wait_time_ms / period_duration_ms (fraction of examined period).
+    /// Value is wait_time_ms / the OBSERVED collection time in the window
+    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), i.e. the fraction of the time the collector
+    /// was actually up that this wait type was being waited on — not the fraction of the nominal window
+    /// (#3538 A2). The metadata keeps <c>period_duration_ms</c> (the nominal window) and adds
+    /// <c>coverage_fraction</c>, so the divisor is recoverable as their product.
+    ///
+    /// <para>Read the Value with its known scale-dependence in mind: <c>delta_wait_time_ms</c> sums the
+    /// wait time of every CONCURRENT task, so a fraction above 1.0 is legal (many tasks waiting at once)
+    /// and the same 25% means different things on 4 schedulers and on 64 — a handful of parallel
+    /// queries on the big box, most of the machine on the small one. The thresholds that score it do not
+    /// yet normalise for that; documented here rather than corrected, because the correction belongs
+    /// with the threshold re-derivation (#3538 A5), not with the denominator fix.</para>
+    ///
+    /// <para>An unobserved window (coverage 0) emits NO wait facts: there is no time to divide by, and
+    /// a fabricated fraction of 0 would read as a quiet server. The service turns that into the
+    /// "unavailable" envelope; this method's job is only to not lie.</para>
     /// </summary>
     private async Task CollectWaitStatsFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -51,8 +196,19 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 
             if (waitTimeMs <= 0) continue;
 
-            var fractionOfPeriod = waitTimeMs / context.PeriodDurationMs;
+            var fractionOfPeriod = waitTimeMs / context.ObservedDurationMs;
             var avgMsPerWait = waitingTasks > 0 ? (double)waitTimeMs / waitingTasks : 0;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["wait_time_ms"] = waitTimeMs,
+                ["waiting_tasks_count"] = waitingTasks,
+                ["signal_wait_time_ms"] = signalWaitTimeMs,
+                ["resource_wait_time_ms"] = waitTimeMs - signalWaitTimeMs,
+                ["avg_ms_per_wait"] = avgMsPerWait,
+                ["period_duration_ms"] = context.PeriodDurationMs
+            };
+            FactCollectorHelpers.AddCoverageFraction(metadata, context);
 
             facts.Add(new Fact
             {
@@ -60,15 +216,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
                 Key = waitType,
                 Value = fractionOfPeriod,
                 ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["wait_time_ms"] = waitTimeMs,
-                    ["waiting_tasks_count"] = waitingTasks,
-                    ["signal_wait_time_ms"] = signalWaitTimeMs,
-                    ["resource_wait_time_ms"] = waitTimeMs - signalWaitTimeMs,
-                    ["avg_ms_per_wait"] = avgMsPerWait,
-                    ["period_duration_ms"] = context.PeriodDurationMs
-                }
+                Metadata = metadata
             });
         }
     }
@@ -76,10 +224,16 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// <summary>
     /// Collects blocking facts from blocked_process_reports.
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
-    /// Value is events per hour for threshold comparison.
+    /// Value is events per OBSERVED hour — the hours the collector was actually up inside the window
+    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), not the nominal window (#3538 A2): forty
+    /// events in the one hour the collector saw of a four-hour window is a 40/hr storm, not a 10/hr
+    /// murmur. <c>period_hours</c> stays the nominal window; <c>observed_hours</c> is the divisor. An
+    /// unobserved window emits no fact.
     /// </summary>
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -113,7 +267,8 @@ AND   collection_time <= $3";
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
-        var eventsPerHour = periodHours > 0 ? eventCount / periodHours : 0;
+        var observedHours = context.ObservedDurationMs / 3_600_000.0;
+        var eventsPerHour = eventCount / observedHours;
 
         facts.Add(new Fact
         {
@@ -129,7 +284,8 @@ AND   collection_time <= $3";
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,
                 ["sleeping_blocker_count"] = sleepingBlockerCount,
-                ["period_hours"] = periodHours
+                ["period_hours"] = periodHours,
+                ["observed_hours"] = observedHours
             }
         });
     }
@@ -137,10 +293,14 @@ AND   collection_time <= $3";
     /// <summary>
     /// Collects deadlock facts from the deadlocks table.
     /// Produces a single DEADLOCKS fact with count and rate.
-    /// Value is deadlocks per hour for threshold comparison.
+    /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
+    /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
+    /// unobserved window emits no fact.
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -164,7 +324,8 @@ AND   collection_time <= $3";
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
-        var deadlocksPerHour = periodHours > 0 ? deadlockCount / periodHours : 0;
+        var observedHours = context.ObservedDurationMs / 3_600_000.0;
+        var deadlocksPerHour = deadlockCount / observedHours;
 
         facts.Add(new Fact
         {
@@ -176,7 +337,8 @@ AND   collection_time <= $3";
             {
                 ["deadlock_count"] = deadlockCount,
                 ["deadlocks_per_hour"] = deadlocksPerHour,
-                ["period_hours"] = periodHours
+                ["period_hours"] = periodHours,
+                ["observed_hours"] = observedHours
             }
         });
     }
