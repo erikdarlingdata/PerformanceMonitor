@@ -83,15 +83,21 @@ public sealed class McpPageContractTests
         (typeof(DarlingMcpPlanCorrectionTools), "get_plan_corrections", "Lite/Mcp/McpPlanCorrectionTools.cs", "get_plan_corrections"),
         (typeof(DarlingMcpSessionTools), "get_waiting_tasks", "Lite/Mcp/McpWaitTools.cs", "get_waiting_tasks"),
         (typeof(DarlingMcpDataTools), "get_wait_stats", "Lite/Mcp/McpWaitTools.cs", "get_wait_stats"),
+        /* #3541 A13: get_active_queries joined the dialect when its filters moved into the SQL — it now pages
+           the FILTERED population at limit + 1, publishes snapshots_returned / truncated / the page's bounds,
+           and its total_snapshots is the filtered population's COUNT(*) OVER () rather than rows.Count of an
+           unfiltered window read. */
+        (typeof(DarlingMcpSessionTools), "get_active_queries", "Lite/Mcp/McpSessionTools.cs", "get_active_queries"),
     ];
 
     /// <summary>
     /// The source span of every paged tool on both SKUs — the census walks these BODIES, not whole files,
     /// for the <c>total_* = .Count</c> and <c>&gt;= limit</c> shapes. Whole files would sweep in tools with a
-    /// different contract: <c>get_active_queries</c> publishes an UNBOUNDED window count beside <c>shown</c>
-    /// (a real total, and #3541 A13's filter semantics are its own item), and <c>get_mute_rules</c>'
-    /// <c>total_count</c> counts a whole set. Neither is a hidden cap, and a census that flagged them would be
-    /// asserting a rule the finding did not state.
+    /// different contract: <c>get_mute_rules</c>' <c>total_count</c> counts a whole set, which is not a hidden
+    /// cap, and a census that flagged it would be asserting a rule the finding did not state.
+    /// (<c>get_active_queries</c> used to be the other exclusion, for publishing an unbounded window count
+    /// beside its page; #3541 A13 made that count the filtered population's, computed in SQL, so it is a
+    /// member now.)
     /// </summary>
     private static IEnumerable<(string Label, string Body)> PagedToolBodies()
     {
@@ -118,6 +124,7 @@ public sealed class McpPageContractTests
         (nameof(DarlingPlanCorrectionReader.PlanCorrectionsSql), DarlingPlanCorrectionReader.PlanCorrectionsSql),
         (nameof(DarlingSessionReader.WaitingTasksSql), DarlingSessionReader.WaitingTasksSql),
         (nameof(DarlingDataReader.WaitStatsSql), DarlingDataReader.WaitStatsSql),
+        (nameof(DarlingSessionReader.ActiveQueriesSql), DarlingSessionReader.ActiveQueriesSql),
     ];
 
     /* ───────────────────────── the discriminators ───────────────────────── */
@@ -560,6 +567,158 @@ public sealed class McpPageContractTests
         Assert.Matches(WindowTotalColumn, "SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms");
         Assert.Matches(WindowTotalColumn, "SUM(user_ms + system_ms) OVER () AS window_total_cpu_ms");
         Assert.DoesNotMatch(WindowTotalColumn, "GREATEST(reads - LAG(reads) OVER series, 0) AS d_reads");
+    }
+
+    /* ───────────────────────── #3541 A13: a filter is part of the query ───────────────────────── */
+
+    /// <summary>
+    /// The tools whose filters ran in C# AFTER the read — over a page the SQL had already cut, or over a
+    /// whole-window read whose count was then published beside the filtered page. Each body, on both SKUs,
+    /// must now hand every filter to its reader and never <c>.Where(</c> the rows between the read and the
+    /// emit: a filter applied after the cut makes the page the filtered remainder of an unfiltered top-N,
+    /// which can be EMPTY while the window holds matches, and a count taken before the filter is a total of
+    /// a different population from the rows beside it.
+    /// </summary>
+    public static readonly (Type Tools, string ToolName, string LiteFile, string LiteToolName)[] FilterInQueryTools =
+    [
+        (typeof(DarlingMcpDataTools), "get_top_queries_by_cpu", "Lite/Mcp/McpQueryTools.cs", "get_top_queries_by_cpu"),
+        (typeof(DarlingMcpSessionTools), "get_active_queries", "Lite/Mcp/McpSessionTools.cs", "get_active_queries"),
+    ];
+
+    /// <summary>A LINQ filter over the rows a reader returned — the shape that puts the cut before the filter.</summary>
+    private static readonly Regex PostReadWhere = new(@"\.Where\(", RegexOptions.Compiled);
+
+    /// <summary>A parameter read as its absolute value — the shape that answers a negative window with a
+    /// positive one and says nothing.</summary>
+    private static readonly Regex AbsOfParameter = new(@"\bMath\.Abs\(\s*(hours_back|hoursBack|days_back|daysBack|limit|top)\b", RegexOptions.Compiled);
+
+    [Fact]
+    public void NoFilteredTool_FiltersItsRowsAfterTheRead_OnEitherSku()
+    {
+        foreach (var (type, darlingName, liteFile, liteName) in FilterInQueryTools)
+        {
+            foreach (var (label, body) in new[]
+            {
+                ($"Darling {darlingName}", ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), darlingName)),
+                ($"Lite {liteName}", ToolBody(ReadRepoFileLf(liteFile.Split('/')), liteName)),
+            })
+            {
+                var text = Strip(body);
+                var hit = PostReadWhere.Match(text);
+                Assert.False(hit.Success,
+                    $"{label}: `{hit.Value}` filters the rows in C# after the read — push the predicate into the SQL so the page is the top-N of the filtered population, and the count beside it counts that population");
+                /* And the filter's presence is STATED on the payload, so a stored result says what shaped it. */
+                Assert.True(
+                    text.Contains("filter_applied", StringComparison.Ordinal) || text.Contains("filters_applied", StringComparison.Ordinal),
+                    $"{label}: the payload never names the filter that shaped its population");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The reader statements behind them carry the predicates: the parallelism floor as a HAVING term on the
+    /// grouped population BEFORE the CPU ordering and the cap, and the session read's two filters as WHERE
+    /// terms with the population counted on the same statement above a parameterised LIMIT.
+    /// </summary>
+    [Fact]
+    public void TheFilteredReads_CarryTheirPredicates_BeforeTheOrderingAndTheCap()
+    {
+        foreach (var (name, sql) in new[]
+        {
+            (nameof(DarlingDataReader.TopQueriesSql), DarlingDataReader.TopQueriesSql),
+            (nameof(DarlingDataReader.TopQueriesByHostObjectSql), DarlingDataReader.TopQueriesByHostObjectSql),
+        })
+        {
+            var floor = sql.IndexOf("COALESCE(MAX(max_dop), 0) >= $6", StringComparison.Ordinal);
+            var order = sql.IndexOf("ORDER BY SUM(delta_worker_time) DESC", StringComparison.Ordinal);
+            Assert.True(floor >= 0, $"{name}: the parallelism floor is not in the statement");
+            Assert.True(order > floor, $"{name}: the parallelism floor sits after the ranking, so it filters a ranked page rather than ranking a filtered population");
+        }
+
+        var active = DarlingSessionReader.ActiveQueriesSql;
+        Assert.Contains("($5::text IS NULL OR w.database_name = $5)", active, StringComparison.Ordinal);
+        Assert.Contains("(NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)", active, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) OVER () AS population_count", active, StringComparison.Ordinal);
+        /* The head-blocker keep: a WAITFOR row stays when a row in the SAME capture names it. */
+        Assert.Contains("(w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)", active, StringComparison.Ordinal);
+        Assert.Contains("h.collection_time = w.collection_time", active, StringComparison.Ordinal);
+        Assert.True(active.IndexOf("COUNT(*) OVER ()", StringComparison.Ordinal) < active.IndexOf("LIMIT $4", StringComparison.Ordinal),
+            "the population count must be computed above the cap, or it counts the page");
+    }
+
+    /// <summary>
+    /// No tool on either SKU reads a parameter as its absolute value. Three did (<c>hours_back</c> on the
+    /// uncapped reads), and a caller who sent <c>-24</c> was answered about the last 24 hours with nothing to
+    /// say the sign had flipped. Every tool body on both SKUs is swept, comments stripped, because the fix's
+    /// own comments name the shape.
+    /// </summary>
+    [Fact]
+    public void NoTool_ReadsAParameterAsItsAbsoluteValue_OnEitherSku()
+    {
+        var examined = 0;
+        var offenders = new List<string>();
+        foreach (var (file, source) in AllMcpToolSources())
+        {
+            var marks = Regex.Matches(source, @"\[McpServerTool\(Name = ""([a-z_0-9]+)""");
+            for (var i = 0; i < marks.Count; i++)
+            {
+                var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                var body = Strip(source[marks[i].Index..end]);
+                examined++;
+                var hit = AbsOfParameter.Match(body);
+                if (hit.Success)
+                {
+                    offenders.Add($"{file} {marks[i].Groups[1].Value}: {hit.Value}");
+                }
+            }
+        }
+
+        Assert.True(examined >= 150, $"only {examined} tool bodies were examined across both SKUs; the marker has stopped matching");
+        Assert.True(offenders.Count == 0,
+            "these tools read a parameter as its absolute value — refuse the negative instead: " + string.Join("; ", offenders));
+    }
+
+    /// <summary>The three uncapped reads route their span through the shared refusal, on both SKUs.</summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "get_collection_log")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "get_current_waits_trend")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "get_blocking_stats")]
+    [InlineData("Lite/Mcp/McpHealthTools.cs", "get_collection_log")]
+    [InlineData("Lite/Mcp/McpHealthTools.cs", "get_current_waits_trend")]
+    [InlineData("Lite/Mcp/McpHealthTools.cs", "get_blocking_stats")]
+    public void TheUncappedReads_RefuseANonPositiveSpan_ThroughTheSharedValidator(string file, string toolName)
+    {
+        var body = Strip(ToolBody(ReadRepoFileLf(file.Split('/')), toolName));
+        Assert.Contains("McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("McpHelpers.ResolveAsOf(", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The A13 matchers, witnessed against the defect as it shipped and the fix as it landed.</summary>
+    [Fact]
+    public void TheA13Discriminators_FlagTheDefectShapes_AndPassTheFixedOnes()
+    {
+        /* The defect, verbatim from the shipped queries tool: the page is cut in SQL, then filtered. */
+        const string defectFilter = """
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var filtered = rows
+                .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
+                .ToList();
+            """;
+        Assert.Matches(PostReadWhere, defectFilter);
+        /* The fix: the floor is an argument to the read. */
+        const string fixedFilter = """
+            var minMaxDop = min_dop > 1 ? min_dop : parallel_only ? 2 : 0;
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop);
+            var result = rows.Select(r => new { max_dop = r.MaxDop });
+            """;
+        Assert.DoesNotMatch(PostReadWhere, fixedFilter);
+
+        /* The defect, verbatim from the three uncapped reads. */
+        Assert.Matches(AbsOfParameter, "            var start = end.AddHours(-Math.Abs(hours_back));");
+        Assert.Matches(AbsOfParameter, "            var hours = Math.Abs(hours_back);");
+        Assert.DoesNotMatch(AbsOfParameter, "            var start = end.AddHours(-hours_back);");
+        /* A genuine absolute value of a MEASUREMENT is not a parameter flip and must pass. */
+        Assert.DoesNotMatch(AbsOfParameter, "            var drift = Math.Abs(observed - expected);");
     }
 
     /// <summary>Every MCP tool source on both SKUs, LF-normalised, for the cross-SKU sweep. Through

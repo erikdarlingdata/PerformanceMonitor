@@ -178,6 +178,16 @@ public sealed class McpMissMessageParityPinTests
         "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
         "Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
         "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
+
+        /* #3541 A9 / A13. The purged-day refusal (get_daily_summary), the filtered-miss sentences
+           (get_top_queries_by_cpu under parallel_only / min_dop; get_active_queries under database_name /
+           blocking_only) and the negative-span refusal all live twice; each is a sentence whose whole job is
+           to say WHICH kind of nothing came back, and a SKU that reworded one alone would send its callers to
+           a different next step. The negative-span refusal is built by McpHelpers.ValidateUncappedWindow and
+           is shared by construction; what lives twice is the call, pinned by McpPageContractTests. */
+        "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+        ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
     };
 
     [Theory]

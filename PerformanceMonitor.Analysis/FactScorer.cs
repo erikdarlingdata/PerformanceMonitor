@@ -18,6 +18,31 @@ namespace PerformanceMonitor.Analysis;
 public class FactScorer
 {
     /// <summary>
+    /// The source registry: every <see cref="Fact.Source"/> value a collector on either SKU emits, in the
+    /// spelling the facts carry (#3541 A13).
+    ///
+    /// <para><b>Why a registry exists at all.</b> Sources were only ever string literals — in the collectors
+    /// that stamp them, in the switch below that scores them, and in the four the <c>get_analysis_facts</c>
+    /// description happened to mention ("waits, blocking, config, memory") out of the fifteen that exist. A
+    /// caller filtering on any of the other eleven got <c>[]</c>, which reads as "no facts of that kind" for
+    /// a value that could never have matched. The MCP tools now publish THIS list as the accepted set and
+    /// refuse anything outside it; the analysis-side tests pin it against every <c>Source = "..."</c> literal
+    /// in the three collector assemblies AND against the switch arms below, so a new source that lands in a
+    /// collector without landing here fails a test rather than becoming the sixteenth silent value.</para>
+    ///
+    /// <para>Sorted, and kept sorted, because the list is published verbatim in a refusal message and a
+    /// description on both SKUs. <c>coverage</c> and <c>sessions</c> are emitted but not scored (they carry
+    /// context, base severity 0); they are still filterable, so they are still members. <c>perfmon</c> is
+    /// named in the amplifier context set below but no collector emits it, so it is NOT a member — a filter
+    /// on it would always be empty, which is the outcome this registry exists to refuse.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> KnownSources = new[]
+    {
+        "anomaly", "bad_actor", "blocking", "config", "coverage", "cpu", "database_config", "disk", "io",
+        "jobs", "memory", "queries", "sessions", "tempdb", "waits",
+    };
+
+    /// <summary>
     /// Scores all facts: Layer 1 (base severity), then Layer 2 (amplifiers).
     /// </summary>
     public void ScoreAll(List<Fact> facts)

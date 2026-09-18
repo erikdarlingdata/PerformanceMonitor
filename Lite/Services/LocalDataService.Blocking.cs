@@ -286,6 +286,189 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     }
 
     /// <summary>
+    /// The get_active_queries MCP read (#3541 A13): the newest <paramref name="cap"/> snapshot rows over the
+    /// window that pass the caller's filters, plus the FILTERED population's size from the same statement.
+    /// A sibling of <see cref="GetLatestQuerySnapshotsAsync"/> rather than a change to it: that read is the
+    /// grids' whole-window snapshot (unfiltered, unbounded — the Active Queries grid wants every row and
+    /// filters in the UI), and the two questions are different enough that one signature serving both would
+    /// carry a page cap the grid must remember to disable.
+    ///
+    /// <para><b>Every filter is part of the query.</b> The tool used to read the whole window, filter
+    /// <c>database_name</c> and <c>blocking_only</c> in C#, take <c>limit</c>, and publish the PRE-filter row
+    /// count as <c>total_snapshots</c> beside the page — a total of a different population from the rows, and a
+    /// page that could be empty while the window held matches. Here the filters are predicates, the population
+    /// count is <c>COUNT(*) OVER ()</c> on the filtered rows above the cap (Darling's #3613 idiom), and the cap
+    /// is the caller's, fetched at <c>limit + 1</c> so truncation is observed rather than inferred.</para>
+    ///
+    /// <para><b>Head blockers are never stripped.</b> The WAITFOR trim exists to drop idle monitoring shells,
+    /// but the classic head blocker IS a session sitting in <c>WAITFOR</c> with an open transaction, and it was
+    /// dropped while its victims' <c>blocking_session_id</c> pointed at a session no longer on the page. A row
+    /// is kept whatever its text when a row in the SAME capture names it as its blocker — same capture, not
+    /// same window, because session ids are reused and the old C# arm matched across the whole window. The two
+    /// flags tell a victim's story when its blocker is absent: <c>blocker_in_capture</c> false is the idle
+    /// open-transaction blocker sys.dm_exec_requests never lists; <c>blocker_in_population</c> false is a
+    /// blocker the caller's own database filter excluded.</para>
+    ///
+    /// <para>The predicates are composed as SQL text from two booleans (a database name is still bound), the
+    /// <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a type for a bare <c>$N IS NULL</c>
+    /// parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do it.</para>
+    /// </summary>
+    public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var dbClause = BuildDbInClause(
+            string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
+        var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
+
+        command.CommandText = @"
+WITH window_rows AS (
+    SELECT
+        session_id,
+        database_name,
+        elapsed_time_formatted,
+        query_text,
+        status,
+        blocking_session_id,
+        wait_type,
+        wait_time_ms,
+        wait_resource,
+        cpu_time_ms,
+        total_elapsed_time_ms,
+        reads,
+        writes,
+        logical_reads,
+        granted_query_memory_gb,
+        transaction_isolation_level,
+        dop,
+        parallel_worker_count,
+        collection_time,
+        login_name,
+        host_name,
+        program_name,
+        open_transaction_count,
+        percent_complete,
+        query_hash
+    FROM v_query_snapshots
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+),
+heads AS (
+    /* (capture, session) pairs some victim in the SAME capture points at. */
+    SELECT DISTINCT collection_time, blocking_session_id AS session_id
+    FROM window_rows
+    WHERE blocking_session_id > 0
+),
+population AS (
+    SELECT
+        w.*,
+        (h.session_id IS NOT NULL) AS is_head_blocker,
+        EXISTS (
+            SELECT 1
+            FROM window_rows b
+            WHERE b.collection_time = w.collection_time
+            AND   b.session_id = w.blocking_session_id
+        ) AS blocker_in_capture
+    FROM window_rows w
+    LEFT JOIN heads h
+      ON  h.collection_time = w.collection_time
+      AND h.session_id = w.session_id
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + @"
+)
+SELECT
+    p.session_id,
+    p.database_name,
+    p.elapsed_time_formatted,
+    p.query_text,
+    p.status,
+    p.blocking_session_id,
+    p.wait_type,
+    p.wait_time_ms,
+    p.wait_resource,
+    p.cpu_time_ms,
+    p.total_elapsed_time_ms,
+    p.reads,
+    p.writes,
+    p.logical_reads,
+    p.granted_query_memory_gb,
+    p.transaction_isolation_level,
+    p.dop,
+    p.parallel_worker_count,
+    p.collection_time,
+    p.login_name,
+    p.host_name,
+    p.program_name,
+    p.open_transaction_count,
+    p.percent_complete,
+    p.query_hash,
+    p.is_head_blocker,
+    p.blocker_in_capture,
+    EXISTS (
+        SELECT 1
+        FROM population q
+        WHERE q.collection_time = p.collection_time
+        AND   q.session_id = p.blocking_session_id
+    ) AS blocker_in_population,
+    COUNT(*) OVER () AS population_count
+FROM population p
+ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
+LIMIT $4";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = cap });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        var items = new List<QuerySnapshotRow>();
+        long populationCount = 0;
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new QuerySnapshotRow
+            {
+                SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+                LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : ToDouble(reader.GetValue(14)),
+                TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
+                Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
+                ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
+                CollectionTime = reader.IsDBNull(18) ? DateTime.MinValue : reader.GetDateTime(18),
+                LoginName = reader.IsDBNull(19) ? "" : reader.GetString(19),
+                HostName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                ProgramName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                OpenTransactionCount = reader.IsDBNull(22) ? 0 : reader.GetInt32(22),
+                PercentComplete = reader.IsDBNull(23) ? 0m : Convert.ToDecimal(reader.GetValue(23)),
+                QueryHash = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                IsHeadBlocker = !reader.IsDBNull(25) && reader.GetBoolean(25),
+                BlockerInCapture = !reader.IsDBNull(26) && reader.GetBoolean(26),
+                BlockerInPopulation = !reader.IsDBNull(27) && reader.GetBoolean(27),
+            });
+            populationCount = Convert.ToInt64(reader.GetValue(28));
+        }
+
+        return (items, populationCount);
+    }
+
+    /// <summary>
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
     /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
     /// </summary>
@@ -1153,6 +1336,19 @@ public class QuerySnapshotRow
     public int OpenTransactionCount { get; set; }
     public decimal PercentComplete { get; set; }
     public string QueryHash { get; set; } = "";
+
+    /// <summary>Some row in the SAME capture names this session as its blocker (#3541 A13) — the reason a
+    /// WAITFOR row can be on the MCP page. Set by <see cref="LocalDataService.GetActiveQueriesPageAsync"/> only.</summary>
+    public bool IsHeadBlocker { get; set; }
+
+    /// <summary>For a victim: its blocker had a row in the same capture at all. False is the idle
+    /// open-transaction head blocker sys.dm_exec_requests never lists. MCP read only.</summary>
+    public bool BlockerInCapture { get; set; }
+
+    /// <summary>For a victim: its blocker also passes the caller's filters, so it is in the population the
+    /// page is drawn from (it may still be past the page — the tool checks that). MCP read only.</summary>
+    public bool BlockerInPopulation { get; set; }
+
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
     public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);

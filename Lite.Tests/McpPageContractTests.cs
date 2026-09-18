@@ -316,6 +316,180 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         AssertPage(whole, "waits", "wait_types_returned", returned: 3, truncated: false);
     }
 
+    /* ───────────────────────── #3541 A13: a filter is part of the query ───────────────────────── */
+
+    /// <summary>
+    /// <c>parallel_only</c> / <c>min_dop</c> used to be a <c>.Where</c> over the top-N page the SQL had already
+    /// cut, so a box whose hottest N plans were serial answered an EMPTY page while the window held a parallel
+    /// plan just past the cut. The fixture is that shape — three serial groups hotter than one parallel group,
+    /// read at <c>top = 2</c>. The old code returned nothing; the fixed read returns the parallel group, and the
+    /// unfiltered read at the same cap still returns the two hottest serial ones. Darling's twin proves the
+    /// same pair against live Postgres.
+    /// </summary>
+    [Fact]
+    public async Task GetTopQueriesByCpu_ParallelFilter_RanksTheFilteredPopulation_NotTheFilteredPage()
+    {
+        var now = WholeSecondsNow().AddMinutes(-2);
+        await SeedQueryStatAsync(now, "0xSERIAL1", cpuUs: 900_000L, maxDop: 1);
+        await SeedQueryStatAsync(now, "0xSERIAL2", cpuUs: 800_000L, maxDop: 1);
+        await SeedQueryStatAsync(now, "0xSERIAL3", cpuUs: 700_000L, maxDop: 1);
+        await SeedQueryStatAsync(now, "0xPARALLEL", cpuUs: 100_000L, maxDop: 8);
+
+        var unfiltered = Parse(await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, ServerName, 1, 2));
+        Assert.Equal(new[] { "0xSERIAL1", "0xSERIAL2" }, Hashes(unfiltered));
+        Assert.Equal(JsonValueKind.Null, unfiltered.GetProperty("filter_applied").ValueKind);
+
+        var parallel = Parse(await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, ServerName, 1, 2, parallel_only: true));
+        Assert.Equal(new[] { "0xPARALLEL" }, Hashes(parallel));
+        Assert.Contains("max_dop >= 2", parallel.GetProperty("filter_applied").GetString(), StringComparison.Ordinal);
+
+        /* min_dop above the seeded DOP: an empty FILTERED page is the window's answer, not a collection miss. */
+        var tooHigh = Parse(await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, ServerName, 1, 2, min_dop: 16));
+        Assert.Equal("empty", tooHigh.GetProperty("status").GetString());
+        Assert.Contains("max_dop >= 16", tooHigh.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One capture holding the three blocker situations the tool now names: a victim whose blocker is a
+    /// WAITFOR shell in the same capture (the classic head blocker — kept and flagged, where the old trim
+    /// dropped it while the victim pointed at it), a victim whose blocker was never captured (an idle open
+    /// transaction), and a victim in one database whose blocker is in another. A stale WAITFOR row under the
+    /// same session id in an EARLIER capture must not be resurrected: the match is same capture, not same
+    /// window. The count beside the page is the FILTERED population's, and truncation is observed on it.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_FiltersInTheQuery_KeepsHeadBlockers_AndNamesAbsentOnes()
+    {
+        var t = WholeSecondsNow().AddMinutes(-2);
+        await SeedSnapshotAsync(t, 55, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 60, cpuMs: 500);
+        await SeedSnapshotAsync(t, 60, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+        await SeedSnapshotAsync(t, 56, "Db", "DELETE FROM Votes", blockingSessionId: 61, cpuMs: 400);
+        await SeedSnapshotAsync(t, 57, "OtherDb", "SELECT * FROM Sales", blockingSessionId: 62, cpuMs: 300);
+        await SeedSnapshotAsync(t, 62, "Db", "UPDATE Users SET Reputation = 0", blockingSessionId: 0, cpuMs: 900);
+        await SeedSnapshotAsync(t, 70, "Db", "SELECT COUNT(*) FROM Comments", blockingSessionId: 0, cpuMs: 200);
+        await SeedSnapshotAsync(t.AddMinutes(-2), 60, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+
+        var all = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
+        var rows = all.GetProperty("queries").EnumerateArray().ToArray();
+        Assert.Equal(6, rows.Length);
+        Assert.Equal(6, all.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(6, all.GetProperty("snapshots_returned").GetInt32());
+        Assert.False(all.GetProperty("truncated").GetBoolean());
+        Assert.Equal("collection_time_desc", all.GetProperty("order").GetString());
+        Assert.Equal(Stamp(t), all.GetProperty("newest_returned_collection_time").GetString());
+
+        var head = Row(rows, 60);
+        Assert.True(head.GetProperty("is_head_blocker").GetBoolean());
+        Assert.StartsWith("WAITFOR", head.GetProperty("query_text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Null, Row(rows, 55).GetProperty("blocker_not_shown").ValueKind);
+        Assert.Equal("not_captured", Row(rows, 56).GetProperty("blocker_not_shown").GetString());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 57).GetProperty("blocker_not_shown").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Row(rows, 70).GetProperty("is_head_blocker").ValueKind);
+
+        /* database_name, in the query: the population is OtherDb's one victim; its blocker is in Db, so filtered. */
+        var other = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "OtherDb"));
+        Assert.Equal(1, other.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal("filtered", Assert.Single(other.GetProperty("queries").EnumerateArray()).GetProperty("blocker_not_shown").GetString());
+
+        /* blocking_only, in the query: victims 55/56/57 + heads 60/62 = 5; 70 is out. */
+        var blocking = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, blocking_only: true));
+        Assert.Equal(5, blocking.GetProperty("total_snapshots").GetInt64());
+        Assert.DoesNotContain(blocking.GetProperty("queries").EnumerateArray(), r => r.GetProperty("session_id").GetInt32() == 70);
+
+        /* Truncation on the FILTERED population, as a pair; the WAITFOR head (1 ms CPU) falls past a 4-row
+           page and its victim says so. */
+        var cut = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, blocking_only: true, limit: 4));
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(4, cut.GetProperty("snapshots_returned").GetInt32());
+        Assert.Equal(5, cut.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal("past_page", Row(cut.GetProperty("queries").EnumerateArray().ToArray(), 55).GetProperty("blocker_not_shown").GetString());
+        var whole = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, blocking_only: true, limit: 5));
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+
+        /* A filtered miss names the filter rather than calling the window empty. */
+        var miss = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "NoSuchDb"));
+        Assert.Equal("empty", miss.GetProperty("status").GetString());
+        Assert.Contains("database_name 'NoSuchDb'", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* A13's third item: the uncapped reads refuse a negative span rather than flipping its sign. */
+        Assert.StartsWith("Invalid hours_back value '-24'", await McpHealthTools.GetCollectionLog(_dataService, _serverManager, ServerName, -24), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid hours_back value '0'", await McpHealthTools.GetCurrentWaitsTrend(_dataService, _serverManager, ServerName, 0), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid hours_back value '-1'", await McpHealthTools.GetBlockingStats(_dataService, _serverManager, ServerName, -1), StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── #3541 A9: retention ghosts ───────────────────────── */
+
+    /// <summary>
+    /// Lite's one horizon is the archive retention (three months, every table together), so a day older than
+    /// that which the spine still holds is a shell whatever its run count: <c>purged</c>, <c>NoData</c>, never
+    /// Healthy. A day inside the horizon with signal rows but no run record is <c>no_run_record</c> and keeps its band. Today's run
+    /// is <c>collected</c> and Healthy beside them. The single-day read of a purged day refuses a verdict, and
+    /// <c>summary_date</c> is exact ISO-8601.
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_StopsPaintingPurgedDaysGreen_AndPublishesTheHorizon()
+    {
+        var today = DateTime.UtcNow.Date;
+        var horizon = LocalDataService.DailySummaryRetentionHorizon(DateTime.UtcNow);
+        var ghostDay = horizon.AddDays(-10);
+        var uncollectedDay = today.AddDays(-3);
+
+        await SeedRunAsync(DateTime.UtcNow.AddMinutes(-2));
+        await SeedRunAsync(ghostDay.AddHours(12));
+        /* Signal rows and no run record: the spine holds the day from wait_stats alone. */
+        await SeedWaitStatAsync(uncollectedDay.AddHours(12), "CXPACKET", 4000);
+
+        var daysBack = (int)(today - ghostDay).TotalDays + 1;
+        var range = Parse(await McpHealthTools.GetDailySummaryRange(_dataService, _serverManager, ServerName, daysBack));
+        Assert.Equal(horizon.ToString("yyyy-MM-dd"), range.GetProperty("retention_horizon").GetString());
+        Assert.Equal(3, range.GetProperty("day_count").GetInt32());
+        Assert.Equal(1, range.GetProperty("days_before_horizon").GetInt32());
+        Assert.Equal(1, range.GetProperty("purged_day_count").GetInt32());
+        Assert.Equal(1, range.GetProperty("collected_day_count").GetInt32());
+
+        var days = range.GetProperty("days").EnumerateArray().ToArray();
+        var ghost = Assert.Single(days, d => d.GetProperty("summary_date").GetString() == ghostDay.ToString("yyyy-MM-dd"));
+        Assert.Equal(1, ghost.GetProperty("collection_runs").GetInt64());
+        Assert.Equal("purged", ghost.GetProperty("data_state").GetString());
+        Assert.Equal("NoData", ghost.GetProperty("health_band").GetString());
+        Assert.Equal("No Data", ghost.GetProperty("overall_health").GetString());
+        Assert.StartsWith("PURGED", ghost.GetProperty("data_note").GetString(), StringComparison.Ordinal);
+
+        /* Inside retention with signal rows and no run record: a disclosure, not a withheld verdict — the day
+           keeps its band (Healthy here; PerformanceCalendarDataTests pins an alert-only day as Warning). */
+        var uncollected = Assert.Single(days, d => d.GetProperty("summary_date").GetString() == uncollectedDay.ToString("yyyy-MM-dd"));
+        Assert.Equal("no_run_record", uncollected.GetProperty("data_state").GetString());
+        Assert.Equal("Healthy", uncollected.GetProperty("health_band").GetString());
+        Assert.StartsWith("NO RUN RECORD", uncollected.GetProperty("data_note").GetString(), StringComparison.Ordinal);
+        Assert.Equal(0, uncollected.GetProperty("collection_runs").GetInt64());
+        Assert.Equal("CXPACKET", uncollected.GetProperty("top_wait_type").GetString());
+
+        var live = Assert.Single(days, d => d.GetProperty("summary_date").GetString() == today.ToString("yyyy-MM-dd"));
+        Assert.Equal("collected", live.GetProperty("data_state").GetString());
+        Assert.Equal("Healthy", live.GetProperty("overall_health").GetString());
+        Assert.Equal(JsonValueKind.Null, live.GetProperty("data_note").ValueKind);
+
+        var single = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, ghostDay.ToString("yyyy-MM-dd")));
+        Assert.Equal("unavailable", single.GetProperty("status").GetString());
+        Assert.Equal("purged", single.GetProperty("hints").GetProperty("data_state").GetString());
+        Assert.Equal(horizon.ToString("yyyy-MM-dd"), single.GetProperty("hints").GetProperty("retention_horizon").GetString());
+
+        var todayRow = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName));
+        Assert.Equal("collected", todayRow.GetProperty("data_state").GetString());
+        Assert.Equal(horizon.ToString("yyyy-MM-dd"), todayRow.GetProperty("retention_horizon").GetString());
+
+        Assert.StartsWith("Invalid summary_date value '01/02/2026'", await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026"), StringComparison.Ordinal);
+    }
+
+    /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock.</summary>
+    [Fact]
+    public void TheLiteHorizon_IsTheArchiveRetention_InMonths()
+    {
+        var now = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(now.AddMonths(-RetentionService.ArchiveRetentionMonths).Date, LocalDataService.DailySummaryRetentionHorizon(now));
+        Assert.Equal(3, RetentionService.ArchiveRetentionMonths);
+    }
+
     /* ───────────────────────── the contract, as a census ───────────────────────── */
 
     /// <summary>
@@ -334,6 +508,8 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         (typeof(McpPlanCorrectionTools), "get_plan_corrections"),
         (typeof(McpWaitTools), "get_waiting_tasks"),
         (typeof(McpWaitTools), "get_wait_stats"),
+        /* #3541 A13: joined the dialect when its filters moved into the SQL — see the A13 tests above. */
+        (typeof(McpSessionTools), "get_active_queries"),
     ];
 
     [Fact]
@@ -480,4 +656,35 @@ INSERT INTO wait_stats
      delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
 VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 10, $6, 100)",
         _nextId--, Naive(at), _serverId, ServerName, waitType, deltaMs);
+
+    /* #3541 A13 / A9 fixtures. */
+
+    private Task SeedQueryStatAsync(DateTime at, string queryHash, long cpuUs, int maxDop) => ExecAsync(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+     query_text, last_execution_time, creation_time, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+     min_dop, max_dop)
+VALUES ($1, $2, $3, $4, 'Db', $5, '0xPLANHASH', $6, '0xPLANH', $7, $2, $2, 10, $8, $8, 100, 1, $9)",
+        _nextId--, Naive(at), _serverId, ServerName, queryHash, "0xSQLH" + queryHash, "SELECT " + queryHash, cpuUs, maxDop);
+
+    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs) => ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id,
+     wait_type, cpu_time_ms, total_elapsed_time_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        _nextId--, Naive(at), _serverId, ServerName, sessionId, database, text,
+        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, blockingSessionId > 0 ? "LCK_M_X" : null, cpuMs, cpuMs * 2);
+
+    private Task SeedRunAsync(DateTime at) => ExecAsync(@"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time,
+     duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, $3, 'wait_stats', $4, 100, 'SUCCESS', NULL, 10, 80, 20)",
+        _nextId--, _serverId, ServerName, Naive(at));
+
+    private static string[] Hashes(JsonElement root) =>
+        root.GetProperty("queries").EnumerateArray().Select(q => q.GetProperty("query_hash").GetString()!).ToArray();
+
+    private static JsonElement Row(JsonElement[] rows, int sessionId) =>
+        Assert.Single(rows, r => r.GetProperty("session_id").GetInt32() == sessionId);
 }

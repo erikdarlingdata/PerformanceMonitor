@@ -116,7 +116,10 @@ public sealed class FindingsRetentionHorizonPinTests
     {
         var archive = ReadRepoSource("Lite", "Services", "RetentionService.cs");
 
-        Assert.Contains("int retentionMonths = 3", archive, StringComparison.Ordinal);
+        /* #3541 A9 promoted the literal to a named constant so the daily-summary reader publishes the SAME
+           horizon the cleanup enforces; the knob is still months, still 3, still RetentionService's own. */
+        Assert.Contains("public const int ArchiveRetentionMonths = 3;", archive, StringComparison.Ordinal);
+        Assert.Contains("int retentionMonths = ArchiveRetentionMonths", archive, StringComparison.Ordinal);
         Assert.False(
             archive.Contains("AnalysisRetentionDefaults", StringComparison.Ordinal),
             "RetentionService took on the findings horizon — the parquet archive window is a separate retention");

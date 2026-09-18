@@ -47,7 +47,20 @@ internal static class DarlingSessionReader
         long TotalElapsedTimeMs, string? ElapsedTimeFormatted, long LogicalReads, long Reads, long Writes,
         string? WaitType, long WaitTimeMs, int BlockingSessionId, int Dop, int ParallelWorkerCount,
         double GrantedQueryMemoryGb, string? TransactionIsolationLevel, int OpenTransactionCount,
-        string? LoginName, string? HostName, string? ProgramName, string? QueryText);
+        string? LoginName, string? HostName, string? ProgramName, string? QueryText)
+    {
+        /// <summary>Some row in the SAME capture names this session as its blocker (#3541 A13) — the reason a
+        /// WAITFOR row can be on the page.</summary>
+        public bool IsHeadBlocker { get; init; }
+
+        /// <summary>For a victim: its blocker had a row in the same capture at all. False is the idle
+        /// open-transaction head blocker sys.dm_exec_requests never lists.</summary>
+        public bool BlockerInCapture { get; init; }
+
+        /// <summary>For a victim: its blocker also passes the caller's filters, so it is in the population the
+        /// page is drawn from (it may still be past the page — the tool checks that).</summary>
+        public bool BlockerInPopulation { get; init; }
+    }
 
     /// <summary>One waiting-task snapshot row.</summary>
     public sealed record WaitingTaskRow(
@@ -110,48 +123,146 @@ internal static class DarlingSessionReader
     /// <summary>
     /// The captured query snapshots over the window — the viewer's <c>LatestQuerySnapshotsSql</c> projected
     /// to the columns Lite's get_active_queries surfaces, from the base <c>query_snapshots</c> table (the
-    /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision. WAITFOR
-    /// shells are trimmed. $1 server_id, $2/$3 window (naive UTC).
+    /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (NULL = all), $6 blocking_only.
+    ///
+    /// <para><b>Every filter is part of the query (#3541 A13).</b> This read used to return the whole window
+    /// unfiltered and unbounded; the tool then applied <c>database_name</c> and <c>blocking_only</c> in C#,
+    /// took <c>limit</c>, and published the pre-filter row count as <c>total_snapshots</c> beside the page —
+    /// so the "total" was of a different population from the rows, and a page could be empty while the
+    /// window held matches. Now the filters are predicates on the same statement, the population count is
+    /// <c>COUNT(*) OVER ()</c> on the FILTERED rows above the parameterised <c>LIMIT</c> (the #3613 idiom), and
+    /// the cap is the caller's, fetched at <c>limit + 1</c> so truncation is observed rather than inferred.</para>
+    ///
+    /// <para><b>Head blockers are never stripped (#3541 A13).</b> The WAITFOR trim exists to drop the idle
+    /// shells a monitoring session leaves in dm_exec_requests, but the classic head blocker IS a session
+    /// sitting in <c>WAITFOR</c> with an open transaction — and this read dropped it while its victims'
+    /// <c>blocking_session_id</c> pointed at the session that was no longer on the page. A row is kept
+    /// whatever its text when some row in the SAME capture names it as its blocker. Same capture, not same
+    /// window: session ids are reused, so "any row in the window points at this session id" would resurrect
+    /// unrelated sessions from other snapshots, which is what the old C# arm did.</para>
+    ///
+    /// <para><b>The two blocker-presence flags.</b> <c>blocker_in_capture</c>: the victim's blocker had a row
+    /// in the same capture at all — FALSE is the other classic head blocker, a session idle in an open
+    /// transaction, which sys.dm_exec_requests never lists and so was never captured; the tool says so on the
+    /// row rather than leaving a dangling id. <c>blocker_in_population</c>: the blocker also passes the
+    /// caller's own filters (a head blocker in another database under a <c>database_name</c> filter does
+    /// not) — the caller asked for that database, so the row is honoured and the victim says its blocker was
+    /// filtered. A blocker that passes both but falls past the page is detected by the tool, which has the
+    /// page.</para>
     /// </summary>
     public const string ActiveQueriesSql = """
+        WITH window_rows AS (
+            SELECT
+                collection_time,
+                session_id,
+                database_name,
+                status,
+                cpu_time_ms,
+                total_elapsed_time_ms,
+                elapsed_time_formatted,
+                logical_reads,
+                reads,
+                writes,
+                wait_type,
+                wait_time_ms,
+                blocking_session_id,
+                dop,
+                parallel_worker_count,
+                CAST(granted_query_memory_gb AS double precision) AS granted_query_memory_gb,
+                transaction_isolation_level,
+                open_transaction_count,
+                login_name,
+                host_name,
+                program_name,
+                query_text
+            FROM query_snapshots
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        ),
+        heads AS (
+            /* (capture, session) pairs some victim in the SAME capture points at. */
+            SELECT DISTINCT collection_time, blocking_session_id AS session_id
+            FROM window_rows
+            WHERE blocking_session_id > 0
+        ),
+        population AS (
+            SELECT
+                w.*,
+                (h.session_id IS NOT NULL) AS is_head_blocker,
+                EXISTS (
+                    SELECT 1
+                    FROM window_rows b
+                    WHERE b.collection_time = w.collection_time
+                    AND   b.session_id = w.blocking_session_id
+                ) AS blocker_in_capture
+            FROM window_rows AS w
+            LEFT JOIN heads AS h
+              ON  h.collection_time = w.collection_time
+              AND h.session_id = w.session_id
+            WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)
+            AND   ($5::text IS NULL OR w.database_name = $5)
+            AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
+        )
         SELECT
-            collection_time,
-            session_id,
-            database_name,
-            status,
-            cpu_time_ms,
-            total_elapsed_time_ms,
-            elapsed_time_formatted,
-            logical_reads,
-            reads,
-            writes,
-            wait_type,
-            wait_time_ms,
-            blocking_session_id,
-            dop,
-            parallel_worker_count,
-            CAST(granted_query_memory_gb AS double precision),
-            transaction_isolation_level,
-            open_transaction_count,
-            login_name,
-            host_name,
-            program_name,
-            query_text
-        FROM query_snapshots
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        AND   query_text NOT LIKE 'WAITFOR%'
-        ORDER BY collection_time DESC, cpu_time_ms DESC
+            p.collection_time,
+            p.session_id,
+            p.database_name,
+            p.status,
+            p.cpu_time_ms,
+            p.total_elapsed_time_ms,
+            p.elapsed_time_formatted,
+            p.logical_reads,
+            p.reads,
+            p.writes,
+            p.wait_type,
+            p.wait_time_ms,
+            p.blocking_session_id,
+            p.dop,
+            p.parallel_worker_count,
+            p.granted_query_memory_gb,
+            p.transaction_isolation_level,
+            p.open_transaction_count,
+            p.login_name,
+            p.host_name,
+            p.program_name,
+            p.query_text,
+            p.is_head_blocker,
+            p.blocker_in_capture,
+            EXISTS (
+                SELECT 1
+                FROM population q
+                WHERE q.collection_time = p.collection_time
+                AND   q.session_id = p.blocking_session_id
+            ) AS blocker_in_population,
+            COUNT(*) OVER () AS population_count
+        FROM population AS p
+        ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
+        LIMIT $4
         """;
 
-    public static async Task<List<ActiveQueryRow>> GetActiveQueriesAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    /// <summary>The filtered page plus the filtered population's size, from one statement.</summary>
+    public sealed record ActiveQueriesPage(List<ActiveQueryRow> Rows, long PopulationCount);
+
+    /// <summary>
+    /// The newest <paramref name="cap"/> snapshots over the window that pass the filters, with the filtered
+    /// population's count (#3541 A13). Callers detecting truncation pass <c>limit + 1</c> and read the extra
+    /// row as the signal. <paramref name="databaseName"/> null = every database; <paramref name="blockingOnly"/>
+    /// keeps victims and the head blockers of victims in the same capture.
+    /// </summary>
+    public static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        string? databaseName = null, bool blockingOnly = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<ActiveQueryRow>();
+        long populationCount = 0;
         await using var command = postgres.CreateCommand(ActiveQueriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, cap);
+        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -177,10 +288,16 @@ internal static class DarlingSessionReader
                 reader.IsDBNull(18) ? null : reader.GetString(18),
                 reader.IsDBNull(19) ? null : reader.GetString(19),
                 reader.IsDBNull(20) ? null : reader.GetString(20),
-                reader.IsDBNull(21) ? null : reader.GetString(21)));
+                reader.IsDBNull(21) ? null : reader.GetString(21))
+            {
+                IsHeadBlocker = !reader.IsDBNull(22) && reader.GetBoolean(22),
+                BlockerInCapture = !reader.IsDBNull(23) && reader.GetBoolean(23),
+                BlockerInPopulation = !reader.IsDBNull(24) && reader.GetBoolean(24),
+            });
+            populationCount = reader.GetInt64(25);
         }
 
-        return rows;
+        return new ActiveQueriesPage(rows, populationCount);
     }
 
     /* ─────────────────────────── waiting tasks (base table over the window) ─────────────────────────── */

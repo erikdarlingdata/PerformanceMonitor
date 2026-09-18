@@ -18,6 +18,19 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public class RetentionService
 {
+    /// <summary>
+    /// How long an archived Parquet file is kept, in months — Lite's ONE retention horizon (#3541 A9).
+    ///
+    /// <para>Lite does not purge per collector: hot rows leave DuckDB for Parquet after the archive service's
+    /// hot-data week, the <c>v_*</c> views union live and archive so every read sees both, and this is the
+    /// age at which an archive file is deleted. Because every table — the signal tables, the collection log
+    /// and the alert log alike — shares it, a day older than this is gone from every source at once, which is
+    /// why the daily summary's retention horizon on Lite is this single number rather than the shortest of
+    /// several. Named so the horizon the daily-summary reader publishes and the horizon the cleanup enforces
+    /// are the same constant, not two literals that happen to agree.</para>
+    /// </summary>
+    public const int ArchiveRetentionMonths = 3;
+
     private readonly string _archivePath;
     private readonly ILogger<RetentionService>? _logger;
 
@@ -35,7 +48,7 @@ public class RetentionService
     ///   - Consolidated daily: "20260221_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
     /// </summary>
-    public void CleanupOldArchives(int retentionMonths = 3)
+    public void CleanupOldArchives(int retentionMonths = ArchiveRetentionMonths)
     {
         if (!Directory.Exists(_archivePath))
         {

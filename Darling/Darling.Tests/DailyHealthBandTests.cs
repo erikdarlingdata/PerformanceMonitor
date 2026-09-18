@@ -589,3 +589,103 @@ public class DailyHealthBandTests
             DailyHealthBandCalculator.Classify(Signals(deadlocks: 1, window: window)));
     }
 }
+
+
+/// <summary>
+/// #3541 A9: the one decision both SKUs' daily-summary readers make about a returned day — is it a
+/// measurement, or the shape retention left behind — pinned identically here and in the twin project.
+///
+/// <para>The defect: the daily aggregate's spine is a UNION over nine sources aging out at different
+/// horizons, each COALESCEd to zero, so a day between the shortest horizon (the signals' 30 days) and the
+/// longest (the alert log's 90) kept its spine row while every signal the band reads was gone — and zeros
+/// band Healthy. The state is decided from two inputs, the day and the horizon; the run count only decides
+/// between the two INSIDE-retention states. The horizon test comes first, because <c>runs &gt; 0</c> alone was
+/// half the fix and called the whole second month collected.</para>
+/// </summary>
+public class DailySummaryRetentionTests
+{
+    private static readonly DateTime Horizon = new(2026, 8, 19);
+
+    [Theory]
+    [InlineData("2026-08-18", 1_440, 0, DailySummaryDataState.Purged)]      /* the day before: a surviving run record does not rescue it */
+    [InlineData("2026-08-18", 0, 0, DailySummaryDataState.Purged)]          /* nor does the absence of one change the verdict */
+    [InlineData("2026-07-01", 5, 0, DailySummaryDataState.Purged)]
+    [InlineData("2026-08-18", 1_440, 7, DailySummaryDataState.PastHorizon)] /* signal rows still there: the purge has not reached it */
+    [InlineData("2026-08-18", 0, 1, DailySummaryDataState.PastHorizon)]     /* even one source present withholds "purged" */
+    [InlineData("2026-08-19", 1, 0, DailySummaryDataState.Collected)]       /* the horizon day itself is held */
+    [InlineData("2026-09-01", 1_440, 7, DailySummaryDataState.Collected)]
+    [InlineData("2026-09-01", 1_440, 0, DailySummaryDataState.Collected)]   /* inside retention a quiet day needs no signal rows to be collected */
+    [InlineData("2026-09-01", 0, 3, DailySummaryDataState.NoRunRecord)]     /* inside retention, signals but no run recorded — a disclosure, the band stands */
+    public void TheState_IsDecidedByTheHorizonAndPresenceFirst_ThenByTheRunCount(string day, long runs, int present, DailySummaryDataState expected)
+    {
+        var date = DateTime.ParseExact(day, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(expected, DailySummaryRetention.StateFor(date, runs, present, Horizon));
+        /* A time-of-day on either side changes nothing: the decision is on DATES. */
+        Assert.Equal(expected, DailySummaryRetention.StateFor(date.AddHours(23), runs, present, Horizon.AddHours(5)));
+    }
+
+    /// <summary>The horizon is the cutoff instant's DATE — see <see cref="DailySummaryRetention.HorizonFor"/>
+    /// for why that is exact on the TimescaleDB path and at most a partial day generous on the DELETE path.</summary>
+    [Fact]
+    public void TheHorizon_IsTheCutoffsDate()
+    {
+        var now = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 8, 19), DailySummaryRetention.HorizonFor(now, 30));
+        Assert.Equal(new DateTime(2026, 9, 17), DailySummaryRetention.HorizonFor(now, 1));
+        Assert.Equal(DateTimeKind.Utc, DailySummaryRetention.HorizonFor(now, 30).Kind);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DailySummaryRetention.HorizonFor(now, 0));
+    }
+
+    [Fact]
+    public void TheVocabulary_IsOneWordPerState_AndTheNoteSaysWhatTheZerosAre()
+    {
+        Assert.Equal("collected", DailySummaryRetention.Label(DailySummaryDataState.Collected));
+        Assert.Equal("purged", DailySummaryRetention.Label(DailySummaryDataState.Purged));
+        Assert.Equal("past_horizon", DailySummaryRetention.Label(DailySummaryDataState.PastHorizon));
+        Assert.Equal("no_run_record", DailySummaryRetention.Label(DailySummaryDataState.NoRunRecord));
+
+        Assert.Null(DailySummaryRetention.Note(DailySummaryDataState.Collected, Horizon));
+        var purged = DailySummaryRetention.Note(DailySummaryDataState.Purged, Horizon)!;
+        Assert.StartsWith("PURGED", purged, StringComparison.Ordinal);
+        Assert.Contains("2026-08-19", purged, StringComparison.Ordinal);
+        Assert.Contains("absences, not measurements", purged, StringComparison.Ordinal);
+        var past = DailySummaryRetention.Note(DailySummaryDataState.PastHorizon, Horizon, 3)!;
+        Assert.StartsWith("PAST HORIZON", past, StringComparison.Ordinal);
+        Assert.Contains("3 of 7 signal sources", past, StringComparison.Ordinal);
+        Assert.Equal(7, DailySummaryRetention.SignalSourceCount);
+        var noRun = DailySummaryRetention.Note(DailySummaryDataState.NoRunRecord, Horizon)!;
+        Assert.StartsWith("NO RUN RECORD", noRun, StringComparison.Ordinal);
+        Assert.Contains("the band stands", noRun, StringComparison.Ordinal);
+    }
+
+    /// <summary>The band's own contract, end to end: a signals projection with <c>HasData</c> folded from a
+    /// past-horizon state is No Data even under a Critical count — the calendar's grey, never green or red.
+    /// The two inside-retention states keep the band, because inside retention a zero is a measurement.</summary>
+    [Fact]
+    public void APastHorizonDay_BandsNoData_WhateverItsCounts_AndAnInsideRetentionDayKeepsItsBand()
+    {
+        foreach (var state in new[] { DailySummaryDataState.Collected, DailySummaryDataState.NoRunRecord })
+        {
+            var signals = new DailyHealthSignals
+            {
+                HasData = state is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                Deadlocks = 480,
+                CollectionRuns = 1_440,
+                Window = TimeSpan.FromDays(1),
+            };
+            Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(signals));
+        }
+
+        foreach (var state in new[] { DailySummaryDataState.Purged, DailySummaryDataState.PastHorizon })
+        {
+            var signals = new DailyHealthSignals
+            {
+                HasData = state is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                Deadlocks = 480,
+                CollectionRuns = 1_440,
+                Window = TimeSpan.FromDays(1),
+            };
+            Assert.Equal(DailyHealthBand.NoData, DailyHealthBandCalculator.Classify(signals));
+        }
+    }
+}

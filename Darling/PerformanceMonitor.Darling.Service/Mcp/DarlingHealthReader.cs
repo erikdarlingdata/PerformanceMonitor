@@ -12,8 +12,8 @@ using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
-
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -215,9 +215,31 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         /// trailing <c>collection_runs</c> column.</summary>
         public long CollectionRuns { get; init; }
 
+        /// <summary>
+        /// Whether this row's counts are a measurement or the shape retention left behind (#3541 A9) — see
+        /// <see cref="DailySummaryDataState"/>. Stamped by the range reader from the day, the run count and the
+        /// store's retention horizon; the default is Collected so a row constructed without a reader (the
+        /// tests' hand-built rows, the fleet sweep's) bands as it always did.
+        /// </summary>
+        public DailySummaryDataState DataState { get; init; } = DailySummaryDataState.Collected;
+
+        /// <summary>The horizon <see cref="DataState"/> was judged against, carried so the single-day tool can
+        /// publish it beside a purged verdict; <c>null</c> on a row nobody judged.</summary>
+        public DateTime? RetentionHorizon { get; init; }
+
+        /// <summary>How many of the seven per-signal sources hold at least one row for the day (#3541 A9) —
+        /// the aggregate's trailing <c>signal_sources_present</c> column, the fact that tells a purged shell
+        /// from a day the purge has not reached.</summary>
+        public int SignalSourcesPresent { get; init; }
+
         public DailyHealthSignals ToSignals() => new()
         {
-            HasData = HasData,
+            /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still
+               holds for it — the COALESCEd zeros it carries may be absences, and measured-zero-Healthy was the
+               lie. HasData alone said "a spine row exists", which the collection log's longer horizon made
+               true for a whole second month of purged signals. Inside retention (Collected, NoRunRecord) a
+               zero IS a measurement and the band stands. */
+            HasData = HasData && DataState is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
             Deadlocks = DeadlockCount,
             CollectionErrors = CollectionErrors,
             CollectionRuns = CollectionRuns,
@@ -250,14 +272,97 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// </summary>
     public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
+    /// <summary>The range read's rows plus the horizon they were judged against (#3541 A9).</summary>
+    /// <param name="Rows">One row per day the spine holds, oldest first, each stamped with its <see cref="DailySummaryReadRow.DataState"/>.</param>
+    /// <param name="RetentionHorizon">The oldest UTC day every signal source still holds — <see cref="DailySummaryRetention.HorizonFor"/>.</param>
+    /// <param name="ShortestRetentionDays">The retention (days) the horizon was computed from: the shortest effective horizon among the sources.</param>
+    public sealed record DailySummaryRangeReadResult(List<DailySummaryReadRow> Rows, DateTime RetentionHorizon, int ShortestRetentionDays);
+
+    /// <summary>
+    /// The collectors whose tables the daily aggregate reads as SIGNALS, by their schedule names — the
+    /// sources whose retention decides the horizon (#3541 A9). The collection log and the alert log are the
+    /// other two spine members; they are constants on <see cref="DarlingRetention"/> and are folded in by
+    /// <see cref="ShortestSignalRetentionDays"/>. <c>query_stats</c> is included even though old windows route
+    /// its CTE to a rollup with its own longer retention: the horizon is a floor over EVERY signal, and the
+    /// rollup keeps only the query count, not the band's inputs.
+    /// </summary>
+    internal static readonly string[] DailySummarySignalCollectors =
+    {
+        "wait_stats", "query_stats", "deadlocks", "blocked_process_report", "dmv_blocking_snapshot",
+        "cpu_utilization", "memory_pressure_events",
+    };
+
+    /// <summary>
+    /// The FLEET-WIDE retention overrides (<c>server_id</c> NULL) for the signal collectors — the same rows
+    /// <c>StoreConfigProvider.ResolveFleetRetentionDays</c> layers over <c>CollectorScheduleDefaults</c> for
+    /// the purge itself, so the horizon this reader publishes is the horizon the purge actually enforces
+    /// rather than the shipped default. A per-server override cannot apply to a shared-table purge, which is
+    /// why only fleet rows are read. $1 the collector names.
+    /// </summary>
+    public const string FleetRetentionOverridesSql = """
+        SELECT collector_name, retention_days
+        FROM config_collector_schedules
+        WHERE server_id IS NULL
+        AND   retention_days IS NOT NULL
+        AND   collector_name = ANY($1)
+        """;
+
+    /// <summary>
+    /// The shortest effective retention among the daily aggregate's sources, in days — the number the
+    /// horizon is measured back from. Pure: <paramref name="fleetOverrideDays"/> is the collector →
+    /// retention_days map the store holds (empty on an untouched store).
+    ///
+    /// <para>The signal collectors resolve through <see cref="StoreConfigProvider.ResolveFleetRetentionDays"/>
+    /// so an operator-shortened or -lengthened retention moves the horizon with it, with the same floor the
+    /// purge applies to the two baseline-serving raw tables (<see cref="BaselineMath.BaselineWindowDays"/> for
+    /// <c>cpu_utilization</c>). The collection log and the alert log are folded in at their constants; on a
+    /// default store they are the LONGER horizons (60 and 90 days), which is exactly why a spine row can
+    /// outlive its signals and why the shortest one is the horizon.</para>
+    /// </summary>
+    internal static int ShortestSignalRetentionDays(IReadOnlyList<ScheduleOverride> fleetOverrides)
+    {
+        var shortest = Math.Min(DarlingRetention.CollectionLogRetentionDays, DarlingRetention.AlertHistoryRetentionDays);
+        foreach (var collector in DailySummarySignalCollectors)
+        {
+            var days = StoreConfigProvider.ResolveFleetRetentionDays(collector, fleetOverrides);
+            if (DarlingRetention.BaselineServingRawCollectors.Contains(collector))
+            {
+                days = Math.Max(days, BaselineMath.BaselineWindowDays);
+            }
+
+            shortest = Math.Min(shortest, days);
+        }
+
+        return Math.Max(1, shortest);
+    }
+
+    private static async Task<IReadOnlyList<ScheduleOverride>> ReadFleetRetentionOverridesAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var overrides = new List<ScheduleOverride>();
+        await using var command = postgres.CreateCommand(FleetRetentionOverridesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = DailySummarySignalCollectors });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            overrides.Add(new ScheduleOverride(null, reader.GetString(0), null, reader.GetInt32(1), true, null));
+        }
+
+        return overrides;
+    }
+
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
     ///
     /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
     /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
     /// report different query counts for the same day and there would be no way to tell which was right.</para>
+    ///
+    /// <para>#3541 A9: returns the rows AND the retention horizon they were judged against — see
+    /// <see cref="DailySummaryRangeReadResult"/> and the horizon note in the body.</para>
     /// </summary>
-    public static async Task<List<DailySummaryReadRow>> GetDailySummaryRangeAsync(
+    public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
         DateTime? referenceUtc = null, CancellationToken cancellationToken = default)
     {
@@ -279,6 +384,16 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
            old pair and the rest on the new one. */
         var rateTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
 
+        /* #3541 A9: the retention horizon, from the store's effective retention and the READER's wall clock.
+           The clock is deliberately NOT the caller's anchor — a purge is a wall-clock event and a backdated
+           as_of cannot un-purge a table; anchoring the horizon to as_of would let "as_of 25 days ago,
+           days_back 30" paint the purged stretch green again, which is the defect. The anchor still governs
+           the WINDOW (fromDate/toDate above) and the still-forming day's clamp (ReferenceUtc below); the
+           horizon is a property of the store. DailySummaryRetention.HorizonFor documents the date arithmetic. */
+        var fleetOverrides = await ReadFleetRetentionOverridesAsync(postgres, cancellationToken);
+        var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
+        var horizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
+
         var results = new List<DailySummaryReadRow>();
         await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -289,14 +404,17 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            results.Add(ReadDailySummaryRow(reader) with
+            var row = ReadDailySummaryRow(reader);
+            results.Add(row with
             {
                 RateTiers = rateTiers,
                 ReferenceUtc = referenceUtc ?? DateTime.UtcNow,
+                DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, horizon),
+                RetentionHorizon = horizon,
             });
         }
 
-        return results;
+        return new DailySummaryRangeReadResult(results, horizon, shortestRetentionDays);
     }
 
     /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120), or the
@@ -363,10 +481,16 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null, CancellationToken cancellationToken = default)
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
-        var rows = await GetDailySummaryRangeAsync(postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken);
-        return rows.Count > 0
-            ? rows[0]
-            : new DailySummaryReadRow(targetDate, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: false);
+        var range = await GetDailySummaryRangeAsync(postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken);
+        return range.Rows.Count > 0
+            ? range.Rows[0]
+            : new DailySummaryReadRow(targetDate, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: false)
+            {
+                /* A day the spine does not hold at all is not "collected" either: before the horizon it is
+                   purged like any other, inside it simply without a run record — so the single-day tool can say which. */
+                DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, range.RetentionHorizon),
+                RetentionHorizon = range.RetentionHorizon,
+            };
     }
 
     private static DailySummaryReadRow ReadDailySummaryRow(DbDataReader reader) => new(
@@ -387,5 +511,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         /* #3539 A2: the trailing collection_runs column, appended after peak_block_wait_ms so the eleven
            positional reads above stay where they were. */
         CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+        /* #3541 A9: the signal-presence count, after collection_runs. */
+        SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
     };
 }

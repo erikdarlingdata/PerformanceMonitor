@@ -63,27 +63,42 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation.")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; No Data, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
     public static async Task<string> GetDailySummary(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Summary date (yyyy-MM-dd), interpreted as a UTC day. Default is today.")] string? summary_date = null)
+        [Description("Summary date, ISO-8601 yyyy-MM-dd ONLY (e.g. 2026-07-09), interpreted as a UTC day; any other spelling is refused rather than guessed at. Default is today.")] string? summary_date = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        DateTime? date = null;
-        if (!string.IsNullOrEmpty(summary_date))
-        {
-            if (!DateTime.TryParse(summary_date, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed))
-                return $"Invalid date format '{summary_date}'. Use yyyy-MM-dd format (e.g., 2026-07-09).";
-            date = parsed;
-        }
+        /* #3541 A9: exact ISO-8601, refused otherwise — McpHelpers.ParseSummaryDate says why the general
+           parse this replaced was the wrong tool; Darling's twin makes the same call. */
+        var dateError = McpHelpers.ParseSummaryDate(summary_date, out var date);
+        if (dateError != null) return dateError;
 
         try
         {
             var row = await dataService.GetDailySummaryAsync(resolved.ServerId, date);
+
+            /* #3541 A9: a day before the retention horizon is "unavailable" in the miss vocabulary's own
+               sense — it existed and is not retrievable now — told apart from a never-collected day because
+               the two send a caller to different places. Darling's twin says the same words. */
+            if (row is { DataState: DailySummaryDataState.Purged })
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.ServerName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+                    new
+                    {
+                        summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
+                        overall_health = row.OverallHealth,
+                        data_state = DailySummaryRetention.Label(row.DataState),
+                        retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
+                        collection_runs = row.CollectionRuns,
+                        alert_count = row.AlertCount,
+                    });
+
             if (row == null || !row.HasData)
             {
                 var missDate = row?.SummaryDate ?? date ?? DateTime.UtcNow.Date;
@@ -99,6 +114,11 @@ public sealed class McpHealthTools
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 overall_health = row.OverallHealth,
                 health_band = row.HealthBand.ToString(),
+                /* #3541 A9: collected, past_horizon or no_run_record here (purged returned above); the note
+                   says what the zeros are on a non-collected day, null on a collected one. */
+                data_state = DailySummaryRetention.Label(row.DataState),
+                data_note = row.RetentionHorizon is { } horizon ? DailySummaryRetention.Note(row.DataState, horizon, row.SignalSourcesPresent) : null,
+                retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
                 total_wait_time_sec = row.TotalWaitTimeSec,
                 top_wait_type = row.TopWaitType,
                 unique_queries = row.UniqueQueries,
@@ -134,7 +154,7 @@ public sealed class McpHealthTools
     /// branch on a parameter it may not have sent. They share the ONE aggregate underneath, which is what
     /// stops them ever disagreeing about a day.</para>
     /// </summary>
-    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION.")]
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION — INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do — the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy — a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record — it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict.")]
     public static async Task<string> GetDailySummaryRange(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -200,14 +220,24 @@ public sealed class McpHealthTools
                    otherwise tell which days they were given from the days they got. */
                 from_date = fromDate.ToString("yyyy-MM-dd"),
                 to_date = lastDay.ToString("yyyy-MM-dd"),
-                /* Days WITH data, not days in the span. The two differ exactly where collection has a hole,
-                   and that difference is the most useful thing on this payload. */
+                /* Days the spine holds, not days in the span. The two differ exactly where collection has a
+                   hole, and that difference is the most useful thing on this payload — read it together with
+                   days_before_horizon, because a held day before the horizon is a shell, not a collected day. */
                 day_count = rows.Count,
+                /* #3541 A9: the store's horizon (reader clock, Lite's one archive retention — see the reader)
+                   and how many returned days fall before it. Every row carries the same horizon, so the
+                   first row's is the range's. */
+                retention_horizon = rows[0].RetentionHorizon?.ToString("yyyy-MM-dd"),
+                days_before_horizon = rows.Count(row => row.DataState is DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                purged_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Purged),
+                collected_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Collected),
                 days = rows.Select(row => new
                 {
                     summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                     overall_health = row.OverallHealth,
                     health_band = row.HealthBand.ToString(),
+                    data_state = DailySummaryRetention.Label(row.DataState),
+                    data_note = row.RetentionHorizon is { } rowHorizon ? DailySummaryRetention.Note(row.DataState, rowHorizon, row.SignalSourcesPresent) : null,
                     total_wait_time_sec = row.TotalWaitTimeSec,
                     top_wait_type = row.TopWaitType,
                     unique_queries = row.UniqueQueries,
@@ -574,7 +604,7 @@ public sealed class McpHealthTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 200. Applied AFTER the two filters, so it caps the matching rows rather than the window.")] int limit = 200,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         /*
@@ -600,17 +630,18 @@ public sealed class McpHealthTools
         var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
         if (invalidFloor != null) return invalidFloor;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, with Darling's twin's words. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
-            var hours = Math.Abs(hours_back);
+            var hours = hours_back;
 
             /* Over-fetch by one so truncation is observed, not inferred -- see Darling's twin. The filters go
                INTO the read for the same reason they do there: the over-fetch is then of the FILTERED set, so
@@ -739,24 +770,25 @@ public sealed class McpHealthTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, with Darling's twin's words. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
-            var hours = Math.Abs(hours_back);
+            var hours = hours_back;
             var filter = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
 
             var waits = await dataService.GetWaitingTaskTrendAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
@@ -814,23 +846,24 @@ public sealed class McpHealthTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, with Darling's twin's words. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
-            var hours = Math.Abs(hours_back);
+            var hours = hours_back;
             var blocking = await dataService.GetBlockingDurationStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
             var deadlocks = await dataService.GetDeadlockSeverityStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
 
