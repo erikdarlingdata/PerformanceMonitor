@@ -124,6 +124,7 @@ VALUES
             "Set DARLING_TEST_PG to a Postgres connection string to run the live #3648 DOP-provenance test.");
 
         var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
 
         await using (var connection = new NpgsqlConnection(connectionString))
         {
@@ -219,11 +220,12 @@ VALUES
                 Assert.Equal(newest, DateTime.Parse(top.GetProperty("max_dop_any_plan_last_seen").GetString()!, null,
                     System.Globalization.DateTimeStyles.RoundtripKind));
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var connection = await OpenWithSearchPathAsync(connectionString!, ct);
-            await DeleteTestRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
         }
     }
 }

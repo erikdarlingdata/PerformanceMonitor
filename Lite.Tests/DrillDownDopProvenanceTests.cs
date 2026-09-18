@@ -46,9 +46,13 @@ public sealed class DrillDownDopProvenanceTests : IClassFixture<SharedDuckDbFixt
     private const string OldParallelPlan = "0x3648PLANPARALLEL";
     private const string NewSerialPlan = "0x3648PLANSERIAL";
 
-    private static readonly DateTime WindowEnd = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
-        DateTimeKind.Unspecified);
+    /* One UtcNow read, truncated to the second: two reads can land on different ticks, leaving a sub-
+       microsecond residue that DuckDB's microsecond timestamps drop on the way back out — and the
+       last-seen assertions below compare a round-tripped timestamp for equality. */
+    private static readonly DateTime WindowEnd = TruncateToSeconds(DateTime.UtcNow);
+
+    private static DateTime TruncateToSeconds(DateTime t) =>
+        DateTime.SpecifyKind(new DateTime(t.Ticks - (t.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
 

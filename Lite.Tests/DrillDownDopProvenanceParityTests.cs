@@ -13,34 +13,25 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Cross-SKU text guard for #3648: the <c>top_cpu_queries</c> and <c>bad_actor_query</c> drill-down SQL must
-/// be BYTE-IDENTICAL between Lite's inline <c>cmd.CommandText</c> and Darling's named constants, and both
-/// must carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>.
+/// Lite's half of the cross-SKU text guard for #3648. The exact counterpart of
+/// <c>Darling.Tests.DrillDownDopProvenanceParityTests</c>, built to the shape
+/// <c>QueryHighDopStaleMaxDopParityTests</c> established: Darling's twin does the cross-STORE comparison
+/// (its <c>build.yml</c> filter covers every Lite <c>.cs</c> file, so it runs on an edit to either analysis
+/// tree); this file owns Lite's own census — that the <c>top_cpu_queries</c> and <c>bad_actor_query</c> reads
+/// carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and that an
+/// unknown DOP is projected as null rather than 0 — and meta-pins Darling's guard, so weakening the byte-
+/// identity comparison over there fails here, under the <c>lite</c> filter that reaches Darling's test tree.
 ///
-/// <para><b>Why identical text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop
-/// cross-check and closed without a record that Lite had a twin; #2999 is what that cost. The two
-/// drill-down reads here were already character-for-character the same before #3648 (the port kept Lite's
-/// text), and the provenance columns are engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>,
-/// <c>FILTER</c>-free <c>CASE</c> aggregates, explicit <c>NULLS LAST</c>), so the strongest guard available
-/// is equality: a future edit to one SKU's read fails here until the other is brought along. Lite's SQL is
-/// inline, Darling's is a constant, and no test project references both assemblies, so both sides are read
-/// from the checked-out tree through <see cref="ParitySource"/>, as the other parity pairs do.</para>
+/// <para><b>Why not read Darling's SQL from here.</b> The <c>lite</c> filter does not reach
+/// <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and <c>CrossAppGuardCiGateTests</c> fails any Lite
+/// guard whose source read PR CI cannot run (#2839): a guard that compares the two apps cannot live behind a
+/// filter that fires for only one of them. Darling's constants are public, so its suite compares them against
+/// Lite's inline text without parsing its own file.</para>
 /// </summary>
 public sealed class DrillDownDopProvenanceParityTests
 {
     private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
-    private const string DarlingFile = "Darling/PerformanceMonitor.Darling.Analysis/PgDrillDownCollector.Queries.cs";
-
-    [Theory]
-    [InlineData("CollectTopCpuQueries", "TopCpuQueriesSql")]
-    [InlineData("CollectBadActorDetail", "BadActorDetailSql")]
-    public void TheDrillDownSql_IsByteIdenticalAcrossSkus(string liteMethod, string darlingConst)
-    {
-        var lite = LiteInlineSql(liteMethod);
-        var darling = DarlingConstSql(darlingConst);
-
-        Assert.Equal(darling, lite);
-    }
+    private const string DarlingGuard = "Darling/Darling.Tests/DrillDownDopProvenanceParityTests.cs";
 
     [Theory]
     [InlineData("CollectTopCpuQueries")]
@@ -69,19 +60,30 @@ public sealed class DrillDownDopProvenanceParityTests
     }
 
     [Fact]
-    public void NeitherSku_CoercesAnUnknownDopToZero()
+    public void Lite_DoesNotCoerceAnUnknownDopToZero()
     {
         /* The DMV never reports 0 — a serial plan is 1 — so `IsDBNull ? 0` on a DOP ordinal was "no reading"
-           rendered as a degree of parallelism. Both readers must project null. Scoped to the two files'
-           max_dop reads: the other drill-downs' zero-coercions (counts, sums) are legitimately 0-when-absent. */
-        foreach (var file in new[] { LiteFile, DarlingFile })
-        {
-            var source = ParitySource.ReadFile(file);
-            Assert.DoesNotMatch(new Regex(@"max_dop\s*=\s*reader\.IsDBNull\(\d+\)\s*\?\s*0\b"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(4\) \? \(int\?\)null"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(10\) \? \(int\?\)null"), source);
-            Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
-        }
+           rendered as a degree of parallelism. Scoped to this file's max_dop reads: the other drill-downs'
+           zero-coercions (counts, sums) are legitimately 0-when-absent. */
+        var source = ParitySource.ReadFile(LiteFile);
+        Assert.DoesNotMatch(new Regex(@"max_dop\s*=\s*reader\.IsDBNull\(\d+\)\s*\?\s*0\b"), source);
+        Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(4\) \? \(int\?\)null"), source);
+        Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(10\) \? \(int\?\)null"), source);
+        Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DarlingsTwinGuard_StillComparesBothReadsByteForByte_SoNeitherSideCanFallBehind()
+    {
+        /* Meta-pin: Darling's guard must keep BOTH reads in its byte-identity theory and keep reading Lite's
+           inline text. Dropping a row, or narrowing the comparison to a Contains, is how one SKU's read would
+           start drifting under a green board. */
+        var guard = ParitySource.ReadFile(DarlingGuard);
+        Assert.Contains("public void TheDrillDownSql_IsByteIdenticalAcrossSkus(", guard, StringComparison.Ordinal);
+        Assert.Contains("{ \"CollectTopCpuQueries\", PgDrillDownCollector.TopCpuQueriesSql }", guard, StringComparison.Ordinal);
+        Assert.Contains("{ \"CollectBadActorDetail\", PgDrillDownCollector.BadActorDetailSql }", guard, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(Lf(darlingSql), Lf(LiteInlineSql(liteMethod)));", guard, StringComparison.Ordinal);
+        Assert.Contains("RepoFile.ReadRepoFile(\"Lite\", \"Analysis\", \"DrillDownCollector.Queries.cs\")", guard, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -96,18 +98,6 @@ public sealed class DrillDownDopProvenanceParityTests
         Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
         const string Marker = "cmd.CommandText = @\"";
         var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
-    }
-
-    /// <summary>Darling's named constant: <c>public const string {name} = @"..."</c>, same literal rules.</summary>
-    private static string DarlingConstSql(string constName)
-    {
-        var source = ParitySource.ReadFile(DarlingFile);
-        var marker = $"public const string {constName} = @\"";
-        var start = source.IndexOf(marker, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{constName} not found in {DarlingFile}");
-        var literalStart = start + marker.Length;
         var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
         return source[literalStart..literalEnd];
     }
