@@ -376,17 +376,18 @@ public sealed class SerialLoopStoreSizeSourceTests
         Assert.True(
             literal.Count == 0,
             $"{literal.Count} ObjectKind comparison(s) in DarlingMcpStoreMetricsTools.cs compare against "
-            + "something other than StoreSelfMetrics.StoreObjectKind. The kind is one const with six "
+            + "something other than a StoreSelfMetrics.*ObjectKind const. Every kind is one const with several "
             + "consumers because a reader filtering on a kind the writer stopped writing returns zero "
             + $"rows rather than erroring: {string.Join(", ", literal)}");
     }
 
     /// <summary>
     /// Every <c>.ObjectKind ==</c> / <c>!=</c> comparison in <paramref name="source"/>: how many there are,
-    /// and the ones whose right-hand side is not
-    /// <see cref="StoreSelfMetrics.StoreObjectKind"/>. Read over STRIPPED source, where a literal
-    /// right-hand side survives as blanks — so the next code token after the operator is not the const,
-    /// and the site is reported.
+    /// and the ones whose right-hand side is not one of the <c>StoreSelfMetrics.*ObjectKind</c> constants
+    /// (<see cref="StoreSelfMetrics.StoreObjectKind"/> and, since #3582, its siblings for every other kind
+    /// the sweep writes — the invariant is "no retyped literal", not "only the store kind"). Read over
+    /// STRIPPED source, where a literal right-hand side survives as blanks — so the next code token after
+    /// the operator is not a const of that shape, and the site is reported.
     /// </summary>
     private static (int Compared, List<string> NotTheConst) ObjectKindComparisons(string source)
     {
@@ -400,7 +401,7 @@ public sealed class SerialLoopStoreSizeSourceTests
             compared++;
             var rest = code[(m.Index + m.Length)..];
 
-            if (!rest.TrimStart().StartsWith("StoreSelfMetrics.StoreObjectKind", StringComparison.Ordinal))
+            if (!Regex.IsMatch(rest.TrimStart(), @"^StoreSelfMetrics\.[A-Za-z]+ObjectKind\b", RegexOptions.CultureInvariant))
             {
                 var line = code.Take(m.Index).Count(c => c == '\n') + 1;
                 offenders.Add($"line {line}");
@@ -484,6 +485,10 @@ public sealed class SerialLoopStoreSizeSourceTests
     [Theory]
     [InlineData("if (r.ObjectKind == StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
     [InlineData("if (p.ObjectKind != StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
+    /* #3582: the sibling kind consts pass; a StoreSelfMetrics member that is NOT a kind const does not. */
+    [InlineData("if (r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind) { }\n", 1, 0)]
+    [InlineData("if (r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind) { }\n", 1, 0)]
+    [InlineData("if (r.ObjectKind == StoreSelfMetrics.OtherObjectName) { }\n", 1, 1)]
     [InlineData("if (r.ObjectKind == \"store\") { }\n", 1, 1)]
     [InlineData("if (r.ObjectKind != \"store\") { }\n", 1, 1)]
     [InlineData("/* r.ObjectKind == \"store\" is what this used to do. */\n", 0, 0)]

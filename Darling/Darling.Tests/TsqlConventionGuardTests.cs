@@ -1439,6 +1439,11 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",
+        /* #3582: two expression-bodied formatters of the same shape as the Figure/Count/Tally lines above.
+           Stamp strands the "o" round-trip format and "(unknown instant)"; Window strands the "0.##" format.
+           Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
         "Darling/PerformanceMonitor.Darling.Service/Targets/PostgresTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
