@@ -146,9 +146,14 @@ ORDER BY bucket";
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                /* Ordinal 4 (total_reads) is the LOGICAL-reads aggregate — TotalReads and TotalLogicalReads
+                   are deliberate aliases of it, same as the query-stats slicer. Physical reads ride
+                   separately at ordinal 6; this reader shipped without that mapping, so the physical
+                   column was computed and then dropped on the floor (#3530). */
                 TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
             });
         }

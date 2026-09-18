@@ -48,7 +48,7 @@ public sealed class McpMemoryTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory. Useful for identifying memory growth patterns or pressure periods.")]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, and plan cache. total_granted_mb in this payload is always null — granted memory is a separate series; use get_memory_grants for it. Useful for identifying memory growth patterns or pressure periods.")]
     public static async Task<string> GetMemoryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -98,13 +98,18 @@ public sealed class McpMemoryTools
                 target_server_memory_mb = p.TargetServerMemoryMb,
                 buffer_pool_mb = p.BufferPoolMb,
                 plan_cache_mb = p.PlanCacheMb,
-                total_granted_mb = p.TotalGrantedMb
+                /* GetMemoryTrendAsync is a memory_stats-only read and never assigns TotalGrantedMb — the
+                   grant overlay is a separate series (get_memory_grants). null, not the model's default 0:
+                   a literal zero read as "granted was 0 all window" and steered callers away from memory
+                   grants at exactly the wrong moment (#3529). */
+                total_granted_mb = (double?)null
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                granted_note = "total_granted_mb is not sourced by this tool — the memory_stats series carries no grant data. Use get_memory_grants for the granted-memory series.",
                 trend = result
             }, McpHelpers.JsonOptions);
         }

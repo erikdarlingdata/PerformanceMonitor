@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory. Useful for identifying memory growth patterns or pressure periods.")]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, and plan cache. total_granted_mb in this payload is always null — granted memory is a separate series; use get_memory_grants for it. Useful for identifying memory growth patterns or pressure periods.")]
     public static async Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -94,16 +94,18 @@ public sealed class DarlingMcpTrendTools
                 target_server_memory_mb = p.TargetServerMemoryMb,
                 buffer_pool_mb = p.BufferPoolMb,
                 plan_cache_mb = p.PlanCacheMb,
-                /* Lite carries total_granted_mb on its MemoryTrendPoint but GetMemoryTrendAsync (a
-                   memory_stats-only read) leaves it unset — the grant overlay is a separate chart series.
-                   Reproduced here as the same 0 placeholder for field-for-field parity with Lite's tool. */
-                total_granted_mb = 0.0
+                /* The memory_stats source carries no grant data — the grant overlay is a separate series
+                   (get_memory_grants). null, not the 0 placeholder this used to ship: a literal zero read
+                   as "granted was 0 all window" and steered callers away from memory grants at exactly the
+                   wrong moment (#3529). Field-for-field parity with Lite's tool, which nulls it the same way. */
+                total_granted_mb = (double?)null
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                granted_note = "total_granted_mb is not sourced by this tool — the memory_stats series carries no grant data. Use get_memory_grants for the granted-memory series.",
                 trend = result
             }, McpHelpers.JsonOptions);
         }
