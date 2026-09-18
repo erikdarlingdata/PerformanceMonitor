@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -41,6 +42,21 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// collapsing both into one "unavailable" — a quiet window answers "empty" and tells the caller to widen
 /// it, while a server the collector has never sampled answers "unavailable" and says so outright. A
 /// response-shape change here must land in Lite's Mcp*Tools too, and vice versa.
+/// </para>
+///
+/// <para>
+/// <b>The four reads over ROLLED tables route by retention tier and say what they served (#2353, #3541
+/// A2).</b> <c>query_stats</c>, <c>procedure_stats</c> and <c>query_store_stats</c> have their raw rows
+/// dropped at <see cref="TimescaleSupport.RawRetentionSpan"/> on a TimescaleDB store while the tools accept
+/// <c>hours_back</c> up to seven days, so get_query_trend, get_query_duration_trend and
+/// get_procedure_duration_trend read the hourly rollup for a window raw cannot hold and
+/// get_query_store_duration_trend reads the corrected rollup for the region it has materialized (#2736) —
+/// and every one of them publishes <c>source</c>, <c>effective_start</c>, <c>effective_hours_back</c>,
+/// <c>truncated</c> and <c>bucket</c>, on the data path and on the empty one. "Quiet, widen hours_back" is
+/// said only where widening can help: a window whose head the store no longer holds says that instead,
+/// because the rows were dropped, not absent, and a wider window cannot recover them. Lite's twins publish
+/// the same fields with Lite's truth (raw, unbounded within its retention), so the contract is one shape
+/// across SKUs even where the depth differs.
 /// </para>
 /// </summary>
 [McpServerToolType]
@@ -343,7 +359,17 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = windowEnd;
-            var history = await DarlingTrendReader.GetQueryHistoryAsync(postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now);
+
+            /* #3541 A2: the store's measured shape rides along so the tier decision degrades to what exists
+               and to what has materialized (see DarlingTrendReader.ResolveTier) — the age-only #2353 rule
+               answered 42P01 on a plain-PostgreSQL store for any window past four days, and read an empty
+               rollup while raw still held the rows on a never-backfilled one. Cached per data source and
+               shared with the composer, so this is not a probe per call. */
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var history = await DarlingTrendReader.GetQueryHistoryAsync(
+                postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now,
+                hourlyAvailable: rollups.QueryGrainHourly,
+                coverage: coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
             var rows = history.Points;
             if (rows.Count == 0)
             {
@@ -428,31 +454,43 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = windowEnd;
-            var points = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            if (points.Count == 0)
+            var startUtc = now.AddHours(-hours_back);
+
+            /*
+                #3541 A2: route by the tier that can actually serve the window. This read went to raw
+                query_stats only, whose rows a TimescaleDB store drops at four days, while hours_back
+                accepts 168 — so a 7-day request came back as 4 days under a label saying 7, and when
+                nothing survived the empty branch called the window "genuinely quiet" and advised widening
+                it, which cannot help with rows that were dropped. Same ladder as get_query_trend
+                (DarlingTrendReader.ResolveTier), measured against the WALL CLOCK because retention drops
+                by age, never by where a point sits inside the requested window.
+            */
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, DateTime.UtcNow, rollups, coverage);
+            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route);
+
+            if (result.Points.Count == 0)
             {
-                /* Same two states again. The probe reads the BASE query_stats table because this trend
-                   does — v_query_stats is the payload-resolving view on a V38+ store, and probing a
-                   different relation from the one the read walks is how an existence probe ends up
-                   reporting the wrong branch. */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats");
                 if (gated != null)
                 {
                     return gated;
                 }
 
-                return await DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId)
-                    ? McpHelpers.Status(
-                        "empty",
-                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
-                    : McpHelpers.Status(
-                        "unavailable",
-                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
+                /* The raw probe reads the BASE query_stats table because the raw trend does — v_query_stats
+                   is the payload-resolving view on a V38+ store, and probing a different relation from the
+                   one the read walks is how an existence probe ends up reporting the wrong branch. On the
+                   hourly route the rollup is probed too, because a server whose raw rows have all aged out
+                   is not a server nothing was ever stored for. */
+                return await EmptyRoutedTrendAsync(
+                    DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId),
+                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, DateTime.UtcNow, route, "query",
+                    "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now));
         }
         catch (Exception ex)
         {
@@ -476,10 +514,14 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = windowEnd;
-            var points = await DarlingTrendReader.GetProcedureDurationTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var startUtc = now.AddHours(-hours_back);
 
-            if (points.Count == 0)
+            /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair. */
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, DateTime.UtcNow, rollups, coverage);
+            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route);
+
+            if (result.Points.Count == 0)
             {
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats");
                 if (gated != null)
@@ -487,13 +529,13 @@ public sealed class DarlingMcpTrendTools
                     return gated;
                 }
 
-                return await EmptyTrendAsync(
+                return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId),
-                    resolved.ServerName, hours_back, "stored-procedure",
+                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, DateTime.UtcNow, route, "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now));
         }
         catch (Exception ex)
         {
@@ -525,11 +567,15 @@ public sealed class DarlingMcpTrendTools
                 window width on a large store — so the materialized window portion is served from
                 query_store_stats_corrected_hourly and only the unmaterialized tail is ranked raw. The
                 payload discloses the routing (grain and boundary) rather than presenting the two regions
-                as one estimator.
+                as one estimator. The same route is what keeps this sibling honest about DEPTH (#3541 A2):
+                raw query_store_stats is dropped at four days only once its rollups cover it (the #1680
+                arming gate), so wherever raw is short the rollup is the tier holding the history, and a
+                raw-only route means raw is complete.
             */
             var route = await QueryStoreTrendRouting.ResolveAsync(postgres);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
                 postgres, resolved.ServerId, startUtc, now, route);
+            var disclosure = DescribeQueryStoreRoute(route, points, startUtc, now);
 
             if (points.Count == 0)
             {
@@ -552,23 +598,137 @@ public sealed class DarlingMcpTrendTools
                 */
                 if (route.UseRollup && route.RollupFloorUtc is DateTime floor && now < floor)
                 {
-                    return McpHelpers.Status(
+                    return EmptyStatus(
                         "empty",
-                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.");
+                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.",
+                        disclosure);
                 }
 
-                return await EmptyTrendAsync(
-                    DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId),
-                    resolved.ServerName, hours_back, "Query Store",
-                    "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
+                var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId);
+                if (!everSampled)
+                {
+                    return EmptyStatus(
+                        "unavailable",
+                        NeverSampledMessage(resolved.ServerName, "Query Store",
+                            "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server."),
+                        disclosure);
+                }
+
+                /*
+                    Sampled, nothing in the window — but a window whose HEAD sits below the rollup's floor is
+                    only quiet in the part the rollup has reached. The unserved head is named so "widen" is
+                    read for what it can do (find the most recent samples) and not for what it cannot (reach
+                    history nothing has materialized).
+                */
+                if (route.UseRollup && route.RollupFloorUtc is DateTime head && head > startUtc)
+                {
+                    return EmptyStatus(
+                        "empty",
+                        $"No Query Store samples were recorded for {resolved.ServerName} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
+                        disclosure);
+                }
+
+                return EmptyStatus("empty", QuietWindowMessage(resolved.ServerName, hours_back, "Query Store"), disclosure);
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points, DescribeQueryStoreRoute(route, startUtc));
+            return SerializeTrend(resolved.ServerName, hours_back, points, disclosure);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_query_store_duration_trend", ex);
         }
+    }
+
+    /// <summary>
+    /// What a tiered trend says about itself beside its points (#2353's vocabulary, applied to the trio by
+    /// #3541 A2): which tier served (<c>source</c>), where the served series actually begins
+    /// (<c>effective_start</c>, <c>effective_hours_back</c>), whether that head sits later than asked
+    /// (<c>truncated</c>), the grain of a point (<c>bucket</c>), and the prose a degraded tier owes the reader
+    /// (<c>aggregate_note</c>, null on raw). <c>Routing</c> is the Query Store sibling's #2736 seam detail and
+    /// is emitted only when the rollup route was taken — the other two have no seam to describe.
+    /// </summary>
+    private sealed record TrendDisclosure(
+        string Source, DateTime EffectiveStartUtc, DateTime WindowEndUtc, bool Truncated, string Bucket,
+        string? AggregateNote, Dictionary<string, object>? Routing = null)
+    {
+        /// <summary>The disclosure keys in the order they are written, so the data envelope and the empty
+        /// envelope carry the same block in the same shape.</summary>
+        public void WriteTo(Dictionary<string, object?> envelope)
+        {
+            envelope["source"] = Source;
+            /* Written in the store's own frame (naive UTC, Kind=Unspecified) so it prints exactly like the
+               points' `time` beside it. The requested start arrives Kind=Utc from ValidateWindow and would
+               otherwise carry a trailing Z the points do not, which reads as two frames in one payload. */
+            envelope["effective_start"] = DateTime.SpecifyKind(EffectiveStartUtc, DateTimeKind.Unspecified).ToString("o");
+            envelope["effective_hours_back"] = Math.Round((WindowEndUtc - EffectiveStartUtc).TotalHours, 1);
+            envelope["truncated"] = Truncated;
+            envelope["bucket"] = Bucket;
+            envelope["aggregate_note"] = AggregateNote;
+            if (Routing is not null)
+            {
+                envelope["routing"] = Routing;
+            }
+        }
+    }
+
+    /// <summary>The prose the hourly tier owes a reader of the query-stats and procedure-stats trends.</summary>
+    private static string HourlyAggregateNote(DarlingTrendReader.DurationTrendRoute route) =>
+        $"Served from the hourly rollup ({route.HourlyView}) because the requested window reaches past the raw tier's "
+        + $"{TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention. Each point is one hour's summed work divided by "
+        + "3,600 seconds, so an hour the collector covered only partly reads LOW, never high; the rollup trails the "
+        + "clock by up to two hours (the current hour is never materialized and the previous one lands on the next refresh).";
+
+    /// <summary>The routed trio's disclosure, from the route and what the read returned.</summary>
+    private static TrendDisclosure DescribeRoute(DarlingTrendReader.DurationTrendResult result, DateTime windowEndUtc) =>
+        new(
+            result.Route.Source,
+            result.EffectiveStartUtc,
+            windowEndUtc,
+            result.Truncated,
+            result.Route.Tier == RetentionTier.Raw ? "per-collection" : "1 hour",
+            result.Route.Tier == RetentionTier.Raw ? null : HourlyAggregateNote(result.Route));
+
+    /// <summary>
+    /// The routed trio's disclosure for an EMPTY answer: the tier is described from its floor rather than from
+    /// a first point it does not have. Where the tier's oldest instant is measured and sits above the requested
+    /// start, that instant is what the read could reach — <c>effective_start</c> says so and <c>truncated</c>
+    /// follows <see cref="DarlingTrendReader.TruncationSlack"/>, exactly as it would had a point been there.
+    /// Unmeasured, the requested start stands (#2353's rule: an empty result narrows nothing it cannot describe).
+    /// A floor beyond the window's END is clamped to the end: the tier held none of the window, and
+    /// <c>effective_hours_back</c> reads 0 rather than a negative span.
+    /// </summary>
+    private static TrendDisclosure DescribeEmptyRoute(DarlingTrendReader.DurationTrendRoute route, DateTime startUtc, DateTime windowEndUtc)
+    {
+        var reach = route.Tier == RetentionTier.Raw ? route.Coverage.RawOldestUtc : route.Coverage.HourlyFloorUtc;
+        var (effectiveStart, truncated) = DescribeEmptyCoverage(reach, startUtc, windowEndUtc);
+
+        return new TrendDisclosure(
+            route.Source, effectiveStart, windowEndUtc, truncated,
+            route.Tier == RetentionTier.Raw ? "per-collection" : "1 hour",
+            route.Tier == RetentionTier.Raw ? null : HourlyAggregateNote(route));
+    }
+
+    /// <summary>
+    /// Coverage for an EMPTY answer, from the tier's measured floor rather than from a first point it does not
+    /// have. Three shapes: a floor at or before the start (or unmeasured) reached the whole window, so the
+    /// requested start stands and nothing is truncated (#2353's rule — an empty result narrows nothing it
+    /// cannot describe); a floor inside the window is where the tier could first have answered, and
+    /// <see cref="DarlingTrendReader.DescribeCoverage"/> judges it by the shared slack exactly as it would a
+    /// first point; a floor BEYOND the window's end means the tier held none of the window, so the served
+    /// span is honestly zero (<c>effective_start</c> clamped to the end) and the answer is truncated outright
+    /// — the slack is for a head that arrived late, not for a window that never arrived at all.
+    /// </summary>
+    private static (DateTime EffectiveStartUtc, bool Truncated) DescribeEmptyCoverage(
+        DateTime? tierFloorUtc, DateTime startUtc, DateTime windowEndUtc)
+    {
+        if (tierFloorUtc is not DateTime floor || floor <= startUtc)
+        {
+            return (startUtc, false);
+        }
+
+        return floor > windowEndUtc
+            ? (windowEndUtc, true)
+            : DarlingTrendReader.DescribeCoverage(floor, startUtc);
     }
 
     /// <summary>
@@ -578,86 +738,190 @@ public sealed class DarlingMcpTrendTools
     /// shipped truncated to an integer, which on a quiet server turns 0.4 executions a second into a
     /// reported ZERO - an idle server, when the truth was a slow one. It is kept so a consumer reading it
     /// does not break; read <c>executions_per_second</c>.</para>
+    /// <para><c>value</c> and <c>elapsed_ms_per_second</c> are the same quantity too (#3541): a bare
+    /// <c>value</c> named no unit, and a reasoning agent charted it as whatever it guessed. The named field is
+    /// the one to read; <c>value</c> stays for the consumer already reading it, on the precedent above.</para>
+    /// <para>The disclosure block sits between the request echo and the points on every sibling, and the
+    /// empty envelope (<see cref="EmptyStatus"/>) carries the same block — the same six keys in the same
+    /// order whichever branch answered, which is what lets a caller read <c>source</c> without first checking
+    /// whether it got data.</para>
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points,
-        object? source = null)
+        TrendDisclosure disclosure)
     {
-        var trend = points.Select(p => new
+        var envelope = new Dictionary<string, object?>
+        {
+            ["server"] = serverName,
+            ["hours_back"] = hours_back,
+        };
+        disclosure.WriteTo(envelope);
+        envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),
             value = p.Value,
+            elapsed_ms_per_second = p.Value,
             execution_count = p.ExecutionCount,
             executions_per_second = p.ExecutionsPerSecond,
         });
 
-        /* `source` is additive and only the Query Store sibling sends one (#2736) — the shared trend field
-           set stays identical across the three siblings, which is this helper's whole job. */
-        return source is null
-            ? JsonSerializer.Serialize(new { server = serverName, hours_back, trend }, McpHelpers.JsonOptions)
-            : JsonSerializer.Serialize(new { server = serverName, hours_back, source, trend }, McpHelpers.JsonOptions);
+        return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
     /// <summary>
-    /// The routing disclosure get_query_store_duration_trend attaches when the corrected rollup served part
-    /// of the window (#2736) — which relation served which region, at which grain, and (when the requested
-    /// window reaches below the rollup's materialized floor) what was NOT served and why. A degraded or
-    /// partial answer must label itself; the raw-only route attaches nothing because it is the original
-    /// single-estimator read.
+    /// <see cref="McpHelpers.Status"/> with the trend's disclosure block beside <c>status</c> and
+    /// <c>message</c>: an empty answer still says which tier it read and how far that tier reached, because
+    /// "nothing here" means different things from a four-day raw tier and a ninety-day rollup.
     /// </summary>
-    private static Dictionary<string, object>? DescribeQueryStoreRoute(
-        QueryStoreTrendRouting.QueryStoreTrendRoute route, DateTime windowStartUtc)
+    private static string EmptyStatus(string status, string message, TrendDisclosure disclosure)
     {
+        var envelope = new Dictionary<string, object?>
+        {
+            ["status"] = status,
+            ["message"] = message,
+        };
+        disclosure.WriteTo(envelope);
+        return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// The routing disclosure get_query_store_duration_trend attaches (#2736): which relation served which
+    /// region, at which grain, and (when the requested window reaches below the rollup's materialized floor)
+    /// what was NOT served and why. A degraded or partial answer must label itself. Since #3541 A2 the block
+    /// speaks the shared vocabulary — <c>source</c> is the tier word (<c>rollup+raw</c> or <c>raw</c>),
+    /// <c>aggregate_note</c> the grain prose, and the seam's instants live under <c>routing</c> — so the three
+    /// siblings' envelopes carry the same keys with the same types. The raw-only route attaches no
+    /// <c>routing</c> block because it is the original single-estimator read.
+    /// </summary>
+    private static TrendDisclosure DescribeQueryStoreRoute(
+        QueryStoreTrendRouting.QueryStoreTrendRoute route, List<DarlingTrendReader.QueryDurationTrendPoint> points,
+        DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        /* Coverage from the first point; for an EMPTY rollup-routed answer whose head sits below the floor,
+           from the floor — the instant the tier could first have answered, the same rule DescribeEmptyRoute
+           applies to the other two siblings. */
+        var (effectiveStart, truncated) = points.Count > 0
+            ? DarlingTrendReader.DescribeCoverage(points[0].CollectionTime, windowStartUtc)
+            : DescribeEmptyCoverage(route.UseRollup ? route.RollupFloorUtc : null, windowStartUtc, windowEndUtc);
+
         if (!route.UseRollup)
         {
-            return null;
+            return new TrendDisclosure("raw", effectiveStart, windowEndUtc, truncated, "per-interval", null);
         }
 
-        var source = new Dictionary<string, object>
+        var routing = new Dictionary<string, object>
         {
-            ["tier"] = "rollup+raw",
             ["rollup"] = TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
             ["raw_from"] = route.RawStartUtc.ToString("o"),
-            ["note"] =
-                "Points before raw_from are 1-hour buckets from the corrected Query Store rollup (#1849): " +
-                "bucketed on the COLLECTION hour, deduped at interval grain, with an interval whose " +
-                "snapshots straddle an hour boundary contributing to both adjacent buckets. Points at or " +
-                "after raw_from are raw Query Store intervals deduped to their final snapshot and placed " +
-                "at interval_start_time_utc.",
         };
 
         if (route.RollupFloorUtc is DateTime floor && floor > windowStartUtc)
         {
-            source["unserved_before"] = floor.ToString("o");
-            source["unserved_note"] =
+            routing["unserved_before"] = floor.ToString("o");
+            routing["unserved_note"] =
                 "The rollup has not materialized history before unserved_before, and this read no longer " +
                 "falls back to ranking the raw slab for it (that rank is the #2736 timeout) — points " +
                 "before that instant are missing, not zero. Run --backfill-rollups to materialize deeper " +
                 "history.";
         }
 
-        return source;
+        return new TrendDisclosure(
+            "rollup+raw", effectiveStart, windowEndUtc, truncated,
+            "1 hour before routing.raw_from, per-interval from it",
+            "Points before routing.raw_from are 1-hour buckets from the corrected Query Store rollup (#1849): " +
+            "bucketed on the COLLECTION hour, deduped at interval grain, with an interval whose " +
+            "snapshots straddle an hour boundary contributing to both adjacent buckets. Points at or " +
+            "after routing.raw_from are raw Query Store intervals deduped to their final snapshot and placed " +
+            "at interval_start_time_utc.",
+            routing);
     }
 
+    /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
+    private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
+        $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.";
+
+    private static string NeverSampledMessage(string serverName, string what, string checkThis) =>
+        $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}";
+
     /// <summary>
-    /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), phrased to match
-    /// the one get_query_duration_trend already ships (#2485) so the three reads tell one story.
-    /// <para>Zero points is two facts wanting opposite responses. A server that HAS been sampled and was
-    /// quiet in this window wants the window widened; a server that has never been sampled wants somebody
-    /// to go look at why. Both are literally "no trend data", and the probe — one LIMIT 1 against the same
-    /// table the trend reads, run only on this path — is what separates them.</para>
+    /// The empty answer for the two ROUTED Performance-Trends siblings (#2484, #2485, #3541 A2), in three
+    /// states rather than the two the pre-routing version knew.
+    /// <para>Zero points is still two facts wanting opposite responses — sampled-and-quiet wants the window
+    /// widened, never-sampled wants somebody to look at collection — and the probe (one LIMIT 1 against the
+    /// relation the trend reads, run only on this path; on the hourly route the rollup too, see
+    /// <see cref="DarlingTrendReader.HasAnySampleOnRouteAsync"/>) still separates them. The third state is
+    /// the one this fix exists for: sampled, nothing in the window, and the tier that was read does NOT
+    /// reach the window's start. That is neither quiet nor broken; the rows are DROPPED (raw past its
+    /// retention) or NOT MATERIALIZED (a rollup whose floor sits above the start), and "widen hours_back"
+    /// is exactly the wrong advice, because a wider window reaches further into what the tier does not
+    /// hold. The message names the tier, its measured reach, and the remedy that can work.</para>
+    /// <para>"Quiet, widen" is kept word for word with Lite's twin for the state where it is true: the tier
+    /// reaches the whole window (a plain-PostgreSQL store, where nothing drops raw; a rollup whose floor
+    /// covers the start; a measured raw oldest at or before the start).</para>
     /// </summary>
-    private static async Task<string> EmptyTrendAsync(
-        Task<bool> probe, string serverName, int hours_back, string what, string checkThis)
+    private static async Task<string> EmptyRoutedTrendAsync(
+        Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
+        DateTime startUtc, DateTime windowEndUtc, DateTime nowUtc, DarlingTrendReader.DurationTrendRoute route,
+        string what, string checkThis)
     {
-        var everSampled = await probe;
-        return everSampled
-            ? McpHelpers.Status(
+        var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc);
+
+        if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId))
+        {
+            return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure);
+        }
+
+        if (route.Tier == RetentionTier.Hourly)
+        {
+            var floor = route.Coverage.HourlyFloorUtc;
+            var reach = floor is DateTime f
+                ? (f <= startUtc
+                    ? $"The rollup has materialized history from {f:o}, which covers the whole window, so nothing was recorded for this server in it in the tier searched — a quiet stretch, or a refresh gap inside the rollup (check get_collection_health)."
+                    : $"The rollup has materialized history only from {f:o}; the part of the window before that is UNSERVED rather than quiet, and the raw rows for it were dropped by retention. Run --backfill-rollups to materialize deeper history.")
+                : "The rollup has materialized NOTHING yet, so this is a coverage gap rather than a quiet server: the raw rows for this span were dropped by retention and only --backfill-rollups can materialize them.";
+
+            return EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
-            : McpHelpers.Status(
-                "unavailable",
-                $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}");
+                $"No {what} samples in the hourly rollup ({route.HourlyView}) for {serverName} over the last {hours_back} hour(s), from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
+                disclosure);
+        }
+
+        /*
+            Raw route. Honest "quiet" needs raw to reach the window's start. Raw's oldest row is MEASURED
+            (the coverage probe reads min(collection_time) on every rolled table, rollups or not), so where it
+            sits at or before the start the window is fully served and quiet is the truth. Where it is later,
+            the head is unserved for one of two reasons the reader must not confuse: the window predates the
+            store's own history (a young store, any engine — nothing was dropped, nothing ever existed), or
+            retention dropped it (a TimescaleDB store, window past the raw horizon, and the rollup that
+            would serve it absent or shallower — the only way a past-horizon window routes to raw). Unmeasured
+            (an empty table), the horizon decides, and only where retention applies at all.
+        */
+        var pastRawHorizon = route.RawRetentionApplies && startUtc < nowUtc - TimescaleSupport.RawRetentionSpan;
+        var rawReaches = route.RawReaches(startUtc) ?? !pastRawHorizon;
+        if (rawReaches)
+        {
+            return EmptyStatus("empty", QuietWindowMessage(serverName, hours_back, what), disclosure);
+        }
+
+        if (!pastRawHorizon && route.Coverage.RawOldestUtc is DateTime storeOldest)
+        {
+            return EmptyStatus(
+                "empty",
+                $"No {what} samples were recorded for {serverName} between {storeOldest:o} — the oldest {route.RawTable} row this store holds for any server — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
+                disclosure);
+        }
+
+        var oldest = route.Coverage.RawOldestUtc is DateTime o
+            ? $"The raw tier's oldest row for any server is {o:o}"
+            : $"The raw tier keeps about {TimescaleSupport.RawRetentionSpan.TotalDays:0} days";
+        var why = route.HourlyAvailable
+            ? $"the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds"
+            : $"the hourly rollup ({route.HourlyView}) that would serve deeper history is not present on this store";
+
+        return EmptyStatus(
+            "empty",
+            $"No {what} samples were recorded for {serverName} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because {why}. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
+            disclosure);
     }
 
     /// <summary>

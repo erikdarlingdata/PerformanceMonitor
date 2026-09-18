@@ -598,6 +598,7 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            var startUtc = windowEnd.AddHours(-hours_back);
             var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (points.Count == 0)
@@ -612,17 +613,19 @@ public sealed class McpQueryTools
                 }
 
                 return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
-                    ? McpHelpers.Status(
+                    ? EmptyStatus(
                         "empty",
-                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
-                    : McpHelpers.Status(
+                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                        startUtc, windowEnd, PerCollection)
+                    : EmptyStatus(
                         "unavailable",
-                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
+                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
+                        startUtc, windowEnd, PerCollection);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerCollection);
         }
         catch (Exception ex)
         {
@@ -646,6 +649,7 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            var startUtc = windowEnd.AddHours(-hours_back);
             var points = await dataService.GetProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
@@ -657,11 +661,12 @@ public sealed class McpQueryTools
 
                 return await EmptyTrendAsync(
                     dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
+                    startUtc, windowEnd, PerCollection,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerCollection);
         }
         catch (Exception ex)
         {
@@ -685,6 +690,7 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            var startUtc = windowEnd.AddHours(-hours_back);
             var points = await dataService.GetQueryStoreDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
@@ -701,16 +707,58 @@ public sealed class McpQueryTools
 
                 return await EmptyTrendAsync(
                     dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
+                    startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerInterval);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_query_store_duration_trend", ex);
         }
+    }
+
+    /// <summary>The grain word for a per-collection series (the plan-cache trends).</summary>
+    private const string PerCollection = "per-collection";
+
+    /// <summary>The grain word for the Query Store series, whose points sit at runtime-interval starts.</summary>
+    private const string PerInterval = "per-interval";
+
+    /// <summary>
+    /// How far past the requested start the first served point may sit before the answer calls itself
+    /// <c>truncated</c>. Twin of Darling's <c>DarlingTrendReader.TruncationSlack</c> (#2353, #3541 A2) and
+    /// must stay equal to it: the two SKUs' payloads are one contract, and a window that one SKU calls
+    /// truncated and the other does not is a divergence about the same data. Ninety minutes: a raw series
+    /// legitimately opens a collection cadence or two late; anything past that means the store did not hold
+    /// the window's head (Lite's per-collector <c>retention_days</c> purge, or a server added mid-window).
+    /// </summary>
+    internal static readonly TimeSpan TruncationSlack = TimeSpan.FromMinutes(90);
+
+    /// <summary>
+    /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order
+    /// on both SKUs and on both branches. Lite has ONE tier — DuckDB keeps raw rows for the collector's whole
+    /// <c>retention_days</c>, nothing rolls them up — so <c>source</c> is always <c>raw</c> and
+    /// <c>aggregate_note</c> is always null here; what varies is <c>effective_start</c>, the first point the
+    /// store actually held for the window, and <c>truncated</c>, true when that head sits more than
+    /// <see cref="TruncationSlack"/> after what was asked for. Darling's twin publishes the same keys with
+    /// Darling's truth (<c>raw</c>, <c>hourly</c> or <c>rollup+raw</c>), so a client reads one shape across
+    /// SKUs even though the depth behind it differs. Emitted as an ordered dictionary rather than an
+    /// anonymous type so the data envelope and the empty envelope are built by the same code.
+    /// </summary>
+    private static void WriteDisclosure(
+        Dictionary<string, object?> envelope, DateTime? firstPointUtc, DateTime startUtc, DateTime windowEndUtc, string bucket)
+    {
+        var effectiveStart = firstPointUtc ?? startUtc;
+        envelope["source"] = "raw";
+        /* The store's own frame (naive UTC, Kind=Unspecified), so it prints exactly like the points' `time`
+           beside it — the requested start arrives Kind=Utc and would otherwise carry a trailing Z. */
+        envelope["effective_start"] = DateTime.SpecifyKind(effectiveStart, DateTimeKind.Unspecified).ToString("o");
+        envelope["effective_hours_back"] = Math.Round((windowEndUtc - effectiveStart).TotalHours, 1);
+        envelope["truncated"] = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
+        envelope["bucket"] = bucket;
+        envelope["aggregate_note"] = null;
     }
 
     /// <summary>
@@ -720,38 +768,70 @@ public sealed class McpQueryTools
     /// shipped truncated to an integer, which on a quiet server turns 0.4 executions a second into a
     /// reported ZERO - an idle server, when the truth was a slow one. It is kept so a consumer reading it
     /// does not break; read <c>executions_per_second</c>.</para>
+    /// <para><c>value</c> and <c>elapsed_ms_per_second</c> are the same quantity too (#3541): a bare
+    /// <c>value</c> named no unit, and a reasoning agent charted it as whatever it guessed. The named field is
+    /// the one to read; <c>value</c> stays for the consumer already reading it, on the precedent above.</para>
     /// </summary>
-    private static string SerializeTrend(string serverName, int hours_back, List<QueryTrendPoint> points) =>
-        JsonSerializer.Serialize(new
+    private static string SerializeTrend(
+        string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, string bucket)
+    {
+        var envelope = new Dictionary<string, object?>
         {
-            server = serverName,
-            hours_back,
-            trend = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                execution_count = p.ExecutionCount,
-                executions_per_second = p.ExecutionsPerSecond,
-            }),
-        }, McpHelpers.JsonOptions);
+            ["server"] = serverName,
+            ["hours_back"] = hours_back,
+        };
+        WriteDisclosure(envelope, points.Count > 0 ? points[0].CollectionTime : null, startUtc, windowEndUtc, bucket);
+        envelope["trend"] = points.Select(p => new
+        {
+            time = p.CollectionTime.ToString("o"),
+            value = p.Value,
+            elapsed_ms_per_second = p.Value,
+            execution_count = p.ExecutionCount,
+            executions_per_second = p.ExecutionsPerSecond,
+        });
+
+        return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// <see cref="McpHelpers.Status"/> with the disclosure block beside <c>status</c> and <c>message</c>, so
+    /// an empty Performance-Trends answer carries the same six keys the data envelope does (#3541 A2) — a
+    /// caller reads <c>source</c> without first checking whether it got data.
+    /// </summary>
+    private static string EmptyStatus(string status, string message, DateTime startUtc, DateTime windowEndUtc, string bucket)
+    {
+        var envelope = new Dictionary<string, object?>
+        {
+            ["status"] = status,
+            ["message"] = message,
+        };
+        WriteDisclosure(envelope, null, startUtc, windowEndUtc, bucket);
+        return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
+    }
 
     /// <summary>
     /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), word for word with
-    /// Darling's <c>DarlingMcpTrendTools.EmptyTrendAsync</c> and phrased like the get_query_duration_trend
-    /// answer that already ships -- a user moving between the SKUs, or between the three trends, must not be
-    /// told a different story about the same state.
+    /// Darling's <c>DarlingMcpTrendTools.QuietWindowMessage</c> / <c>NeverSampledMessage</c> and phrased like
+    /// the get_query_duration_trend answer that already ships -- a user moving between the SKUs, or between
+    /// the three trends, must not be told a different story about the same state. Lite has no third state:
+    /// nothing here drops a window's head behind a tier boundary, so "quiet, widen hours_back" is always
+    /// true of a sampled server with nothing in the window (Darling's routed twins add the dropped-or-
+    /// unmaterialized state, which only a tiered store can be in).
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
-        Task<bool> probe, string serverName, int hours_back, string what, string checkThis)
+        Task<bool> probe, string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, string bucket,
+        string what, string checkThis)
     {
         var everSampled = await probe;
         return everSampled
-            ? McpHelpers.Status(
+            ? EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
-            : McpHelpers.Status(
+                $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                startUtc, windowEndUtc, bucket)
+            : EmptyStatus(
                 "unavailable",
-                $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}");
+                $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}",
+                startUtc, windowEndUtc, bucket);
     }
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time.")]

@@ -30,10 +30,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// get_perfmon_trend / get_file_io_trend / get_query_trend / get_query_duration_trend), the store-faithful
 /// shape Darling's collector-mirror schema serves — the same rule the merged <see cref="DarlingDataReader"/>
 /// follows (Lite's get_query_duration_trend has no Dashboard twin; the other four names + params match the
-/// Dashboard, the shape follows Lite where the SKUs diverge). Every SQL string is byte-identical to the
-/// viewer's proven Postgres read for that chart (the viewer already ported Lite's DuckDB SQL), so Darling
-/// serves one consistent product. Each SQL string is a public const so Darling.Tests can pin the dialect +
-/// columns without a live Postgres.
+/// Dashboard, the shape follows Lite where the SKUs diverge). Every RAW-tier SQL string is byte-identical to
+/// the viewer's proven Postgres read for that chart (the viewer already ported Lite's DuckDB SQL), so Darling
+/// serves one consistent product; the hourly-tier twins the retention-routed reads fall to (#2353, #3541 A2)
+/// have no viewer counterpart yet and are documented beside their raw originals. Each SQL string is a public
+/// const so Darling.Tests can pin the dialect + columns without a live Postgres.
 /// </para>
 /// </summary>
 internal static class DarlingTrendReader
@@ -402,10 +403,154 @@ internal static class DarlingTrendReader
         ORDER BY collection_time
         """;
 
-    /// <summary>Runs <see cref="QueryDurationTrendSql"/>.</summary>
-    public static Task<List<QueryDurationTrendPoint>> GetQueryDurationTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadDurationTrendAsync(QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+    /// <summary>
+    /// The seconds in one hourly-rollup bucket, as the SQL literal the hourly-tier duration trends divide by.
+    /// A string because a constant interpolated string admits only string constants; pinned equal to
+    /// <see cref="TimescaleSupport.HourlyBucket"/> by DarlingMcpTrendToolsTests so the two cannot drift.
+    /// </summary>
+    public const string HourlyBucketSecondsSql = "3600.0";
+
+    /// <summary>
+    /// The hourly-tier twin of <see cref="QueryDurationTrendSql"/> (#3541 A2): the same two per-second rates,
+    /// read from the <c>query_stats_hourly</c> continuous aggregate for windows whose oldest point the raw
+    /// tier no longer holds. The rollup carries <c>elapsed_time_sum</c> and <c>execution_count_sum</c> per
+    /// (server, database, query_hash, sql_handle, hour); summing those across the identity columns per bucket
+    /// is exactly what the raw read's <c>GROUP BY collection_time</c> does one grain finer, so the two tiers
+    /// answer the same question at different resolution. <c>bucket</c> is projected as <c>collection_time</c>
+    /// so the point shape does not change underneath a caller that got a raw answer last time.
+    ///
+    /// <para><b>The denominator is the bucket width, not a LAG.</b> The raw read has to recompute its interval
+    /// from the gap to the previous collection because a per-sweep row carries no shared interval (the
+    /// measurement lane's A11a); an hour bucket's width is KNOWN, so this read divides by
+    /// <see cref="HourlyBucketSecondsSql"/> and every bucket has a real denominator — the LAG idiom's first
+    /// point, whose interval is NULL and whose rate is therefore a fabricated 0, does not exist here. The
+    /// trade is stated in the payload rather than hidden: an hour the collector covered only partly (a
+    /// service restart mid-hour, a gap past the delta policy) reads LOW, never high, because its summed work is
+    /// still spread over the full 3,600 seconds.</para>
+    ///
+    /// <para>Materialized-only, like every rollup here (#1759): the current hour is never materialized
+    /// (<see cref="TimescaleSupport.HourlyRefreshScheduleInterval"/> is the end_offset) and the previous one
+    /// lands on the next refresh, so this series trails the clock by up to two hours. $1 server_id, $2/$3
+    /// window (naive UTC).</para>
+    /// </summary>
+    public const string QueryDurationTrendHourlySql = $"""
+        SELECT
+            bucket AS collection_time,
+            SUM(elapsed_time_sum) / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
+            CAST(SUM(execution_count_sum) AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
+        FROM {TimescaleSupport.QueryStatsHourlyView}
+        WHERE server_id = $1
+        AND   bucket >= $2
+        AND   bucket <= $3
+        GROUP BY bucket
+        ORDER BY bucket
+        """;
+
+    /// <summary>
+    /// The hourly-tier twin of <see cref="ProcedureDurationTrendSql"/> (#3541 A2), over
+    /// <c>procedure_stats_hourly</c>. Same shape and same bucket-width denominator as
+    /// <see cref="QueryDurationTrendHourlySql"/>; see there for why. $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string ProcedureDurationTrendHourlySql = $"""
+        SELECT
+            bucket AS collection_time,
+            SUM(elapsed_time_sum) / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
+            CAST(SUM(execution_count_sum) AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
+        FROM {TimescaleSupport.ProcedureStatsHourlyView}
+        WHERE server_id = $1
+        AND   bucket >= $2
+        AND   bucket <= $3
+        GROUP BY bucket
+        ORDER BY bucket
+        """;
+
+    /// <summary>
+    /// Which tier one unkeyed duration trend read serves from, and the evidence the choice rests on (#3541 A2)
+    /// — the get_query_trend routing (<see cref="QueryHistoryResult"/>, #2353) generalized to the reads that
+    /// have no query key.
+    ///
+    /// <para><see cref="RawTable"/> and <see cref="HourlyView"/> are the pair this trend reads at each tier;
+    /// <see cref="Relation"/> is the one <see cref="Tier"/> picked, so a payload or an empty message can say
+    /// WHAT WAS READ rather than what was asked for. <see cref="HourlyAvailable"/> and <see cref="Coverage"/>
+    /// are kept on the route so the empty branch can say why the tier it read holds nothing — a rollup that
+    /// has materialized nothing and a rollup whose floor sits above the window's start are different facts
+    /// with different remedies, and both differ from a quiet server.</para>
+    ///
+    /// <para><see cref="RawRetentionApplies"/> is false on a store with no rollups at all — plain PostgreSQL,
+    /// or a failed availability probe — where no retention policy ever drops raw, so raw holds the complete
+    /// answer and "quiet, widen the window" is honest there (#1665). On a TimescaleDB store it is true, and
+    /// the empty branch has to consider that the rows were DROPPED, not absent.</para>
+    /// </summary>
+    public sealed record DurationTrendRoute(
+        RetentionTier Tier, string RawTable, string HourlyView, bool HourlyAvailable, TierCoverage Coverage,
+        bool RawRetentionApplies)
+    {
+        /// <summary>The payload's <c>source</c> word: <c>raw</c> or <c>hourly</c>, get_query_trend's vocabulary.</summary>
+        public string Source => Tier == RetentionTier.Raw ? "raw" : "hourly";
+
+        /// <summary>The relation the read actually walks.</summary>
+        public string Relation => Tier == RetentionTier.Raw ? RawTable : HourlyView;
+
+        /// <summary>
+        /// Whether the raw table is measured to hold rows at or before <paramref name="windowStartUtc"/>. Null
+        /// when raw's oldest row was not measured (no rollups, probe failed, or the table is empty) — the
+        /// caller falls back to the retention span, which is the proxy #1759 warns is wrong in the dangerous
+        /// direction on a held-purge store, so it is used only where nothing was measured.
+        /// </summary>
+        public bool? RawReaches(DateTime windowStartUtc) =>
+            Coverage.RawOldestUtc is DateTime oldest ? oldest <= windowStartUtc : null;
+    }
+
+    /// <summary>
+    /// One routed duration-trend answer: the points, the route that produced them, and what the points
+    /// actually cover — the <see cref="QueryHistoryResult"/> shape for the unkeyed trends, so all four tiered
+    /// reads describe themselves with the same three words (<c>source</c>, <c>effective_start</c>,
+    /// <c>truncated</c>).
+    /// </summary>
+    public sealed record DurationTrendResult(
+        List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated);
+
+    /// <summary>
+    /// Resolves the route for the query-stats duration trend: raw <c>query_stats</c> or
+    /// <c>query_stats_hourly</c>, by <see cref="ResolveTier"/>. <paramref name="nowUtc"/> is the WALL CLOCK,
+    /// never the window's end — see <see cref="ShouldUseRawTier"/>.
+    /// </summary>
+    public static DurationTrendRoute ResolveQueryDurationTrendRoute(
+        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+        => ResolveDurationTrendRoute(
+            "query_stats", TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
+            rollups.QueryGrainHourly, startUtc, nowUtc, rollups, coverage);
+
+    /// <summary>The procedure-stats twin of <see cref="ResolveQueryDurationTrendRoute"/>.</summary>
+    public static DurationTrendRoute ResolveProcedureDurationTrendRoute(
+        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+        => ResolveDurationTrendRoute(
+            "procedure_stats", TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
+            rollups.ProcedureGrainHourly, startUtc, nowUtc, rollups, coverage);
+
+    private static DurationTrendRoute ResolveDurationTrendRoute(
+        string rawTable, string hourlyView, string dailyView, bool hourlyAvailable,
+        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        var tierCoverage = coverage.For(hourlyView, dailyView);
+        return new DurationTrendRoute(
+            ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
+            rawTable, hourlyView, hourlyAvailable, tierCoverage,
+            RawRetentionApplies: rollups != RollupAvailability.None);
+    }
+
+    /// <summary>
+    /// Runs the query-stats duration trend down <paramref name="route"/> (#3541 A2): the raw read for a
+    /// window raw can serve, the hourly twin otherwise. Coverage is described by <see cref="DescribeCoverage"/>
+    /// so the payload can say what it served.
+    /// </summary>
+    public static Task<DurationTrendResult> GetQueryDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        CancellationToken cancellationToken = default)
+        => ReadRoutedDurationTrendAsync(
+            QueryDurationTrendSql, QueryDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
 
     /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
 
@@ -539,10 +684,30 @@ internal static class DarlingTrendReader
     public static readonly string QueryStoreDurationTrendRollupSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false);
 
-    /// <summary>Runs <see cref="ProcedureDurationTrendSql"/>.</summary>
-    public static Task<List<QueryDurationTrendPoint>> GetProcedureDurationTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadDurationTrendAsync(ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+    /// <summary>Runs the procedure-stats duration trend down <paramref name="route"/> (#3541 A2) — the
+    /// procedure twin of <see cref="GetQueryDurationTrendAsync"/>.</summary>
+    public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        CancellationToken cancellationToken = default)
+        => ReadRoutedDurationTrendAsync(
+            ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
+
+    /// <summary>
+    /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
+    /// describe what came back. One method so the query and procedure trends cannot drift in how they
+    /// route, read, or describe coverage.
+    /// </summary>
+    private static async Task<DurationTrendResult> ReadRoutedDurationTrendAsync(
+        string rawSql, string hourlySql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        DurationTrendRoute route, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+
+        var points = await ReadDurationTrendAsync(
+            route.Tier == RetentionTier.Raw ? rawSql : hourlySql, postgres, serverId, startUtc, endUtc, cancellationToken);
+        var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
+        return new DurationTrendResult(points, route, effectiveStart, truncated);
+    }
 
     /// <summary>
     /// Runs <see cref="QueryStoreDurationTrendSql"/> — the raw-only route, kept for callers that have not
@@ -671,6 +836,75 @@ internal static class DarlingTrendReader
         startUtc >= nowUtc - TimescaleSupport.RawRetentionSpan + RawTierMargin;
 
     /// <summary>
+    /// The one tier decision every tiered trend read in this file makes (#3541 A2): get_query_trend's age rule
+    /// (<see cref="ShouldUseRawTier"/>), degraded to what the store HAS and to what it has MATERIALIZED, in
+    /// that order — the same three-rung ladder <see cref="RetentionTierRouter"/> runs for the viewer's tabs,
+    /// built from the same Storage primitives, with this file's raw margin at the bottom rung instead of the
+    /// router's one-day one (that margin is #2353's deliberate trade of resolution for purge-independence, and
+    /// widening it to a day would push every 3-to-4-day window onto the hourly tier for nothing).
+    ///
+    /// <para><b>Availability (#1664).</b> A plain-PostgreSQL store has no continuous aggregates, and a
+    /// relation named in a statement is resolved at PARSE time — so an age-only rule sent a 168-hour window on
+    /// such a store to a view that does not exist and the tool answered 42P01. Raw is the right answer there
+    /// anyway: without the extension nothing ever drops raw, so it holds the complete window.</para>
+    ///
+    /// <para><b>Coverage (#1759).</b> A rollup created <c>WITH NO DATA</c> serves only what a refresh or a
+    /// backfill has materialized, and its refresh reaches back one <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>
+    /// from creation — so on a store that pre-existed its rollups and was never backfilled the hourly tier is
+    /// SHALLOWER than raw, whose purge the arming gate holds paused until the rollup covers it. Routing such a
+    /// window to the rollup by age alone returned EMPTY while raw held every row. The rule is comparative and
+    /// only ever moves DOWN on a positive measurement: raw wins only when it is measured to reach further back
+    /// than the rollup's floor (<see cref="TierCoverage.ReachesFurtherBack"/>); unmeasured coverage (nulls) is
+    /// inert and the age + availability answer stands. Hourly is never abandoned merely because the window
+    /// starts below its floor — on a healthy store raw keeps four days against the rollup's ninety, and
+    /// dropping to raw there would return LESS. The part of the window the rollup has not reached is the
+    /// payload's job to disclose (<c>effective_start</c>, <c>truncated</c>), not routing's job to hide.</para>
+    ///
+    /// <para>Pure, for the same reason <see cref="ShouldUseRawTier"/> is: the tiering decision is the whole of
+    /// the fix, and DarlingQueryTrendTieringTests walks its table without a store. The daily tier is not on
+    /// this ladder because <see cref="PerformanceMonitor.Common.McpHelpers.MaxHoursBack"/> (seven days)
+    /// sits far inside <see cref="TimescaleSupport.HourlyRetentionSpan"/>; a window the hourly tier cannot
+    /// reach by AGE cannot be asked for.</para>
+    /// </summary>
+    public static RetentionTier ResolveTier(DateTime startUtc, DateTime nowUtc, bool hourlyAvailable, TierCoverage coverage)
+    {
+        if (ShouldUseRawTier(startUtc, nowUtc) || !hourlyAvailable)
+        {
+            return RetentionTier.Raw;
+        }
+
+        if (TierCoverage.Covers(coverage.HourlyFloorUtc, startUtc))
+        {
+            return RetentionTier.Hourly;
+        }
+
+        return TierCoverage.ReachesFurtherBack(coverage.RawOldestUtc, coverage.HourlyFloorUtc)
+            ? RetentionTier.Raw
+            : RetentionTier.Hourly;
+    }
+
+    /// <summary>
+    /// How far past the requested start the first served point may sit before the answer calls itself
+    /// <c>truncated</c>. Ninety minutes: an hourly bucket can begin up to an hour after a window start that
+    /// falls mid-hour (<c>bucket &gt;= $start</c> excludes the bucket the start falls inside), and a raw series
+    /// legitimately opens a collection cadence or two late; anything past that means the tier did not hold the
+    /// window's head. Extracted from #2353's inline literal so the four tiered reads share one boundary.
+    /// </summary>
+    public static readonly TimeSpan TruncationSlack = TimeSpan.FromMinutes(90);
+
+    /// <summary>
+    /// What a series actually covers, which is what the caller gets told (#2353): the first served point, or
+    /// the requested start when nothing came back — an empty result says nothing about coverage, so the
+    /// requested start stands rather than being narrowed to a window nobody can describe. <c>Truncated</c> is
+    /// true only on a NON-empty series whose head sits more than <see cref="TruncationSlack"/> after the
+    /// requested start; an empty series reports its coverage through the empty branch's message instead.
+    /// </summary>
+    public static (DateTime EffectiveStartUtc, bool Truncated) DescribeCoverage(DateTime? firstPointUtc, DateTime startUtc)
+        => firstPointUtc is DateTime first
+            ? (first, first > startUtc + TruncationSlack)
+            : (startUtc, false);
+
+    /// <summary>
     /// Reads a query's history from the tier that can actually serve the window (#2353).
     ///
     /// <para><b>The bug this replaces.</b> This read went to the raw <c>query_stats</c> table only, and the raw
@@ -689,25 +923,28 @@ internal static class DarlingTrendReader
     /// It is deliberately NOT defaulted to <paramref name="endUtc"/>: a caller asking for a historical window
     /// would then have its start measured against its own end, which makes a two-hour window from ten days ago
     /// look recent and routes it to a tier that dropped those rows six days earlier.</para>
+    ///
+    /// <para><paramref name="hourlyAvailable"/> and <paramref name="coverage"/> are the store's measured shape
+    /// (#3541 A2 — see <see cref="ResolveTier"/>); the defaults reproduce the age-only #2353 decision for a
+    /// caller that has not probed, which is what every pre-existing test of this read exercises.</para>
     /// </summary>
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
-        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
+        DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, CancellationToken cancellationToken = default)
     {
-        var useRaw = ShouldUseRawTier(startUtc, nowUtc ?? DateTime.UtcNow);
+        var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
 
-        var items = useRaw
+        var items = tier == RetentionTier.Raw
             ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
             : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
 
-        /* What was actually covered, which is what the caller gets told. An empty result says nothing about
-           coverage, so the requested start stands rather than being narrowed to a window we cannot describe. */
-        var effectiveStart = items.Count > 0 ? items[0].CollectionTime : startUtc;
+        var (effectiveStart, truncated) = DescribeCoverage(items.Count > 0 ? items[0].CollectionTime : null, startUtc);
 
         return new QueryHistoryResult(
             items,
-            useRaw ? "raw" : "hourly",
+            tier == RetentionTier.Raw ? "raw" : "hourly",
             effectiveStart,
-            Truncated: items.Count > 0 && effectiveStart > startUtc.AddMinutes(90));
+            truncated);
     }
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
@@ -833,7 +1070,34 @@ internal static class DarlingTrendReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
         => HasAnySampleAsync(postgres, HasAnyQueryStoreStatSql, serverId, cancellationToken);
 
-    /// <summary>All five probes share one shape: a scalar that is null when no row qualifies.</summary>
+    /// <summary>
+    /// Whether this server has EVER been sampled as far as a ROUTED duration trend can tell (#3541 A2): the
+    /// raw probe, OR a row in the hourly rollup the route can reach. The raw probes above are the right
+    /// question for a raw-tier read, and the wrong one on a rolled table: a server disabled a week ago has no
+    /// raw rows left (retention dropped them) while its hourly rollup still holds weeks of history, and the
+    /// raw probe alone would answer "nothing has EVER been stored" — a false statement, not an incomplete one.
+    /// Probed only when the route says the rollup exists, because the view is parse-time-resolved; the view
+    /// name comes from <see cref="DurationTrendRoute.HourlyView"/>, which only ever carries a
+    /// <see cref="TimescaleSupport"/> view constant.
+    /// </summary>
+    public static async Task<bool> HasAnySampleOnRouteAsync(
+        NpgsqlDataSource postgres, Task<bool> rawProbe, DurationTrendRoute route, int serverId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(rawProbe);
+        ArgumentNullException.ThrowIfNull(route);
+
+        if (await rawProbe)
+        {
+            return true;
+        }
+
+        return route.HourlyAvailable
+            && await HasAnySampleAsync(
+                postgres, $"SELECT 1 FROM {route.HourlyView} WHERE server_id = $1 LIMIT 1", serverId, cancellationToken);
+    }
+
+    /// <summary>All the probes share one shape: a scalar that is null when no row qualifies.</summary>
     private static async Task<bool> HasAnySampleAsync(
         NpgsqlDataSource postgres, string sql, int serverId, CancellationToken cancellationToken)
     {

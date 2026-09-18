@@ -45,6 +45,12 @@ public sealed class QueryStoreTrendRoutingLiveTests
 
     private const string ServerName = "qs-trend-routing-e2e";
 
+    /// <summary>The second server (#3541 A2): sampled only in the unmaterialized tail. Distinctive fake id
+    /// for the same reason as <see cref="TestServerId"/>.</summary>
+    private const int TailOnlyServerId = -927361;
+
+    private const string TailOnlyServerName = "qs-trend-routing-tail-only";
+
     [Fact]
     public async Task DurationTrend_ServesTheRollupBelowTheBoundary_AndRanksOnlyTheTail()
     {
@@ -90,6 +96,14 @@ public sealed class QueryStoreTrendRoutingLiveTests
               deliberately does NOT materialize. Served by the raw arm, deduped, at its interval start. ── */
         await SeedSnapshotsAsync(connection, intervalId: 3103, queryId: 63, intervalStart: hour12,
             avgDurationUs: 300, [(hour12.AddMinutes(5), 3L), (hour12.AddMinutes(20), 9L)], ct);
+
+        /* ── a SECOND server with one interval in the tail only (#3541 A2): sampled, so a window over the
+              rollup region that finds nothing for it is a QUIET stretch — and when that window's head sits
+              below the rollup's floor, the empty answer has to say which part is quiet and which part is
+              unserved rather than advising a wider window for both. ── */
+        await DarlingMcpTestData.RegisterServerAsync(connection, TailOnlyServerId, TailOnlyServerName, ct);
+        await SeedSnapshotsAsync(connection, intervalId: 3104, queryId: 64, intervalStart: hour12,
+            avgDurationUs: 500, [(hour12.AddMinutes(10), 4L)], ct, serverId: TailOnlyServerId, serverName: TailOnlyServerName);
 
         await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
 
@@ -149,18 +163,29 @@ public sealed class QueryStoreTrendRoutingLiveTests
 
         Assert.Equal(3, payload.GetProperty("trend").GetArrayLength());
 
-        var source = payload.GetProperty("source");
-        Assert.Equal("rollup+raw", source.GetProperty("tier").GetString());
-        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, source.GetProperty("rollup").GetString());
-        Assert.StartsWith("2026-03-04T12:00:00", source.GetProperty("raw_from").GetString()!, StringComparison.Ordinal);
+        /* #3541 A2: the disclosure speaks the vocabulary get_query_trend and the two plan-cache siblings
+           share — `source` is the tier WORD, and the #2736 seam detail lives under `routing`. Same
+           assertions as before the move, on the moved keys. */
+        Assert.Equal("rollup+raw", payload.GetProperty("source").GetString());
+        var routing = payload.GetProperty("routing");
+        Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, routing.GetProperty("rollup").GetString());
+        Assert.StartsWith("2026-03-04T12:00:00", routing.GetProperty("raw_from").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("routing.raw_from", payload.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("1 hour before routing.raw_from", payload.GetProperty("bucket").GetString()!, StringComparison.Ordinal);
 
         /* The window starts at 07:00, below the rollup's 10:00 floor — a degraded answer must label
-           itself: points before the floor are missing, not zero, and the remedy is named. */
-        Assert.StartsWith("2026-03-04T10:00:00", source.GetProperty("unserved_before").GetString()!, StringComparison.Ordinal);
-        Assert.Contains("--backfill-rollups", source.GetProperty("unserved_note").GetString()!, StringComparison.Ordinal);
+           itself: points before the floor are missing, not zero, and the remedy is named. The shared
+           coverage words say the same thing in the shared shape: the series begins at 10:00, three hours
+           after what was asked for, so it is truncated. */
+        Assert.StartsWith("2026-03-04T10:00:00", routing.GetProperty("unserved_before").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("--backfill-rollups", routing.GetProperty("unserved_note").GetString()!, StringComparison.Ordinal);
+        Assert.StartsWith("2026-03-04T10:00:00", payload.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(3.0, payload.GetProperty("effective_hours_back").GetDouble());
+        Assert.True(payload.GetProperty("truncated").GetBoolean());
 
         /* ── a window ENTIRELY below the floor is a coverage gap, not a quiet server: the empty answer
-              names the mechanism and the remedy instead of advising a wider window. ── */
+              names the mechanism and the remedy instead of advising a wider window — and carries the same
+              disclosure block the data envelope does, with the served span honestly zero. ── */
         var belowFloor = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(
             postgres, ServerName, hours_back: 1, as_of: "2026-03-04T09:30:00Z")).RootElement;
 
@@ -169,6 +194,38 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Contains("--backfill-rollups", message, StringComparison.Ordinal);
         Assert.Contains("2026-03-04T10:00:00", message, StringComparison.Ordinal);
         Assert.DoesNotContain("widen", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("rollup+raw", belowFloor.GetProperty("source").GetString());
+        Assert.StartsWith("2026-03-04T09:30:00", belowFloor.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(0.0, belowFloor.GetProperty("effective_hours_back").GetDouble());
+        Assert.True(belowFloor.GetProperty("truncated").GetBoolean());
+
+        /* ── #3541 A2: the tail-only server over a window whose head is below the floor and whose covered
+              part holds nothing for it. Sampled, so not "unavailable"; nothing in [10:00, 11:00), so
+              "empty" — but the message must split the window: quiet from the floor on, UNSERVED before it,
+              and "widen" only for what widening can do. ── */
+        var partialHead = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(
+            postgres, TailOnlyServerName, hours_back: 2, as_of: "2026-03-04T11:00:00Z")).RootElement;
+
+        Assert.Equal("empty", partialHead.GetProperty("status").GetString());
+        var partialMessage = partialHead.GetProperty("message").GetString()!;
+        Assert.Contains("2026-03-04T10:00:00", partialMessage, StringComparison.Ordinal);
+        Assert.Contains("unserved rather than quiet", partialMessage, StringComparison.Ordinal);
+        Assert.Contains("--backfill-rollups", partialMessage, StringComparison.Ordinal);
+        Assert.Contains("cannot reach the unserved head", partialMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("EVER", partialMessage, StringComparison.Ordinal);
+
+        /* And the same server over its tail alone: one raw-arm point at 12:00, exactly where the window
+           starts, so nothing is truncated and the served span is the whole hour. */
+        var tailOnly = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(
+            postgres, TailOnlyServerName, hours_back: 1, as_of: "2026-03-04T13:00:00Z")).RootElement;
+
+        Assert.Equal(1, tailOnly.GetProperty("trend").GetArrayLength());
+        Assert.Equal("rollup+raw", tailOnly.GetProperty("source").GetString());
+        Assert.StartsWith("2026-03-04T12:00:00", tailOnly.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        Assert.False(tailOnly.GetProperty("truncated").GetBoolean());
+        Assert.Equal(
+            tailOnly.GetProperty("trend")[0].GetProperty("value").GetDouble(),
+            tailOnly.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").GetDouble());
     }
 
     /// <summary>
@@ -178,7 +235,8 @@ public sealed class QueryStoreTrendRoutingLiveTests
     /// </summary>
     private static async Task SeedSnapshotsAsync(
         NpgsqlConnection connection, long intervalId, long queryId, DateTime intervalStart,
-        long avgDurationUs, (DateTime When, long Count)[] snapshots, CancellationToken ct)
+        long avgDurationUs, (DateTime When, long Count)[] snapshots, CancellationToken ct,
+        int serverId = TestServerId, string serverName = ServerName)
     {
         const string sql = @"
 INSERT INTO collect.query_store_stats
@@ -195,8 +253,8 @@ VALUES
             await using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue(when);
             command.Parameters.AddWithValue(intervalId);
-            command.Parameters.AddWithValue(TestServerId);
-            command.Parameters.AddWithValue(ServerName);
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(serverName);
             command.Parameters.AddWithValue(queryId);
             command.Parameters.AddWithValue(intervalStart);
             command.Parameters.AddWithValue(count);
