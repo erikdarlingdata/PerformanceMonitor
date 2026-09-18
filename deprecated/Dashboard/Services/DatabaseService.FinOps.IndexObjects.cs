@@ -783,6 +783,15 @@ namespace PerformanceMonitorDashboard.Models
         public string TableName { get; set; } = "";
         public string IndexName { get; set; } = "";
         public string IndexTypeDesc { get; set; } = "";
+
+        /// <summary>
+        /// <c>schema.table</c> for the Locking &amp; Contention grid's Table column (#3576, mirrored from Lite).
+        /// The bare <see cref="TableName"/> is ambiguous when two schemas hold a table of the same name; the
+        /// grid binds and filters on this one string instead. Falls back to the bare name when the schema is
+        /// empty.
+        /// </summary>
+        public string FullName => string.IsNullOrEmpty(SchemaName) ? TableName : $"{SchemaName}.{TableName}";
+
         public decimal ReservedMb { get; set; }
         public long TotalRows { get; set; }
         public long RowLockCount { get; set; }

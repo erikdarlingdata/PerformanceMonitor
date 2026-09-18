@@ -577,6 +577,18 @@ public sealed class IndexLockingRow
     public string TableName { get; set; } = "";
     public string IndexName { get; set; } = "";
     public string IndexTypeDesc { get; set; } = "";
+
+    /// <summary>
+    /// <c>schema.table</c> for the Locking &amp; Contention grid's Table column (#3576). The grid used to bind
+    /// the bare <see cref="TableName"/>, which is ambiguous the moment two schemas hold a table of the same
+    /// name — routine on Azure SQL DB, where per-tenant or per-environment schemas are the usual pattern — so
+    /// two different <c>Orders</c> tables read as one. One computed string (rather than a converter or a second
+    /// column) so the column sorts, filters, and CSV-exports on the qualified name as a unit. Falls back to the
+    /// bare name when the schema is empty, the same shape as <c>ProcedureStatsRow.FullName</c>. Mirrors Lite's
+    /// <c>IndexLockingRow.FullName</c> exactly.
+    /// </summary>
+    public string FullName => string.IsNullOrEmpty(SchemaName) ? TableName : $"{SchemaName}.{TableName}";
+
     public decimal ReservedMb { get; set; }
     public long TotalRows { get; set; }
     public long RowLockCount { get; set; }

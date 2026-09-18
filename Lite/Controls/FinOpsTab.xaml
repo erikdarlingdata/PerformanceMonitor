@@ -1079,9 +1079,13 @@
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TableName}" Width="170">
+                            <!-- #3576: schema.table, not the bare table name — the same table name in two schemas
+                                 (the norm on Azure SQL DB) read as one object here. The filter Tag names the SAME
+                                 property as the binding: the popup filter resolves Tag by reflection and a Tag
+                                 that names a property the row does not expose filters nothing, silently. -->
+                            <DataGridTextColumn Binding="{Binding FullName}" Width="220">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FullName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding IndexName}" Width="180">

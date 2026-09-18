@@ -1097,9 +1097,11 @@
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TableName}" Width="170">
+                            <!-- #3576: schema.table, not the bare table name; the filter Tag must name the same property as
+                                 the binding (Tag resolves by reflection, and an unknown property filters nothing, silently). -->
+                            <DataGridTextColumn Binding="{Binding FullName}" Width="220">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FullName" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding IndexName}" Width="180">
