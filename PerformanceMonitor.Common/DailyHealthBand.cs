@@ -204,6 +204,28 @@ namespace PerformanceMonitor.Common
             return DailyHealthBand.Healthy;
         }
 
+        /// <summary>
+        /// The window a CALENDAR-DAY cell bands its counts over: a finished day is its full 24 hours, but
+        /// the still-forming day is only the portion that has elapsed — otherwise an active storm dilutes
+        /// against hours that have not happened yet (60 deadlocks in the last hour ÷ 24h reads 2.5/hr and
+        /// Healthy while the true in-progress rate is 60/hr; the pre-#3525 any-deadlock trigger could not
+        /// under-read this way, so the clamp is part of the rate change, per its review). The reference
+        /// clock is the CALLER's: an anchored (as_of) read hands its window end so a backdated read clamps
+        /// against its own "now", and the live calendars hand the wall clock. An elapsed portion under an
+        /// hour lands in <see cref="ServerHealthClassifier.DeadlockSeverity"/>'s unrateable-window arm
+        /// (Warning-not-rate), which is exactly right for a day cell minutes old; a reference before the
+        /// day starts (a future cell) returns zero for the same reason.
+        /// </summary>
+        public static TimeSpan CalendarDayWindow(DateTime summaryDate, DateTime referenceUtc)
+        {
+            var dayStart = summaryDate.Date;
+            if (referenceUtc >= dayStart.AddDays(1))
+                return TimeSpan.FromDays(1);
+
+            var elapsed = referenceUtc - dayStart;
+            return elapsed > TimeSpan.Zero ? elapsed : TimeSpan.Zero;
+        }
+
         /// <summary>A short human label for the band ("No Data" / "Healthy" / "Warning" / "Critical").</summary>
         public static string Label(DailyHealthBand band) => band switch
         {

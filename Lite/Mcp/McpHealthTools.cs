@@ -142,7 +142,8 @@ public sealed class McpHealthTools
             var fromDate = lastDay.AddDays(-(days_back - 1));
             var toDate = lastDay.AddDays(1);
 
-            var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate);
+            /* The anchor is also the clock the still-forming day's window clamps against (#3525 review). */
+            var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate, asOfUtc: windowEnd);
 
             if (rows.Count == 0)
             {

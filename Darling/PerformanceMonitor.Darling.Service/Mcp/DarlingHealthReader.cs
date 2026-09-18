@@ -178,6 +178,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         /// defaults holds anyway.</summary>
         public DeadlockRateThresholds RateTiers { get; init; } = DeadlockRateThresholds.Default;
 
+        /// <summary>The clock the still-forming day's window clamps against (#3525 review): anchored
+        /// reads hand their resolved window end so a backdated as_of clamps against its own "now";
+        /// unanchored reads (the explicit-date tool, the viewer path) band against the wall clock.</summary>
+        public DateTime ReferenceUtc { get; init; } = DateTime.UtcNow;
+
         public DailyHealthSignals ToSignals() => new()
         {
             HasData = HasData,
@@ -188,10 +193,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
-            /* #3525: a calendar day is the 24-hour window these counts were aggregated over — the
-               denominator the deadlock rate bands on. The fleet sweep does NOT read this projection: it
-               sums this row type's raw counts into signals windowed to its own span. */
-            Window = TimeSpan.FromDays(1),
+            /* #3525: a finished calendar day bands over its full 24 hours; the still-forming day clamps
+               to its elapsed portion against ReferenceUtc, or an active storm dilutes against hours that
+               have not happened yet (review finding on #3525). The fleet sweep does NOT read this
+               projection: it sums this row type's raw counts into signals windowed to its own span. */
+            Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc),
         };
 
         public DailyHealthBand HealthBand =>
@@ -216,7 +222,8 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// report different query counts for the same day and there would be no way to tell which was right.</para>
     /// </summary>
     public static async Task<List<DailySummaryReadRow>> GetDailySummaryRangeAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
+        DateTime? referenceUtc = null, CancellationToken cancellationToken = default)
     {
         /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
            (and never drops raw, so raw is complete there). #1759: and on what they have MATERIALIZED, which is
@@ -246,7 +253,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            results.Add(ReadDailySummaryRow(reader) with { RateTiers = rateTiers });
+            results.Add(ReadDailySummaryRow(reader) with
+            {
+                RateTiers = rateTiers,
+                ReferenceUtc = referenceUtc ?? DateTime.UtcNow,
+            });
         }
 
         return results;
@@ -315,7 +326,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null, CancellationToken cancellationToken = default)
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
-        var rows = await GetDailySummaryRangeAsync(postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken);
+        var rows = await GetDailySummaryRangeAsync(postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken);
         return rows.Count > 0
             ? rows[0]
             : new DailySummaryReadRow(targetDate, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: false);

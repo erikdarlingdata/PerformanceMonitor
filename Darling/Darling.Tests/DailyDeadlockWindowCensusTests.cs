@@ -75,13 +75,15 @@ public sealed class DailyDeadlockWindowCensusTests
     }
 
     /// <summary>
-    /// The three CALENDAR-DAY projections declare the day's own 24-hour window — stated against the
-    /// source because the census above can only see that A window was assigned, and a calendar day whose
-    /// denominator drifted from 24h would band the same count differently across the three surfaces that
-    /// answer the same question.
+    /// The three CALENDAR-DAY projections declare the day's window through the ONE clamp helper — stated
+    /// against the source because the census above can only see that A window was assigned, and a calendar
+    /// day whose denominator drifted would band the same count differently across the three surfaces that
+    /// answer the same question. The helper (not a bare 24h constant) is the pin because the still-forming
+    /// day must clamp to its elapsed portion (#3525 review: an active storm banded over unelapsed hours
+    /// reads Healthy mid-crisis), and a projection that hand-rolls FromDays(1) reintroduces that dilution.
     /// </summary>
     [Fact]
-    public void EveryCalendarDayProjection_DeclaresTheTwentyFourHourWindow()
+    public void EveryCalendarDayProjection_BandsThroughTheDayWindowClamp()
     {
         var surfaces = new (string What, string Text)[]
         {
@@ -96,7 +98,10 @@ public sealed class DailyDeadlockWindowCensusTests
         foreach (var (what, text) in surfaces)
         {
             Assert.False(string.IsNullOrWhiteSpace(text), $"{what}: read nothing, so this pin would assert nothing");
-            Assert.Contains("Window = TimeSpan.FromDays(1)", text, StringComparison.Ordinal);
+            Assert.Contains(
+                "Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc)",
+                text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Window = TimeSpan.FromDays(1)", text, StringComparison.Ordinal);
         }
     }
 
@@ -112,6 +117,7 @@ public sealed class DailyDeadlockWindowCensusTests
 
         Assert.Contains("Window = spanEndUtc - spanStartUtc", sweep, StringComparison.Ordinal);
         Assert.DoesNotContain("Window = TimeSpan.FromDays(1)", sweep, StringComparison.Ordinal);
+        Assert.DoesNotContain("CalendarDayWindow", sweep, StringComparison.Ordinal);
     }
 
     /* ─────────────────────── helpers (the rung census's own, re-keyed) ─────────────────────── */

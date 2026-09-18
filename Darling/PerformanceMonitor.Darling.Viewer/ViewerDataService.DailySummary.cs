@@ -126,6 +126,10 @@ public sealed partial class ViewerDataService
 public class DailySummaryRow
 {
     public DateTime SummaryDate { get; set; }
+
+    /// <summary>The clock the still-forming day's window clamps against (#3525 review). The viewer's
+    /// calendar reads are always live, so the wall-clock default is the correct reference.</summary>
+    public DateTime ReferenceUtc { get; set; } = DateTime.UtcNow;
     public decimal TotalWaitTimeSec { get; set; }
     public string TopWaitType { get; set; } = "";
     public long UniqueQueries { get; set; }
@@ -169,8 +173,9 @@ public class DailySummaryRow
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,
-        /* #3525: a calendar day is the 24-hour window these counts were aggregated over — the denominator
-           the deadlock rate bands on. */
-        Window = TimeSpan.FromDays(1),
+        /* #3525: a finished calendar day bands over its full 24 hours; the still-forming day clamps to
+           its elapsed portion so an active storm is not diluted by hours that have not happened yet
+           (review finding on #3525). The viewer's reads are live, so the wall clock is the reference. */
+        Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc),
     };
 }
