@@ -51,6 +51,15 @@ public class DarlingMcpPgIoToolsTests
             ReadBytes: 0, WriteBytes: 0, ExtendBytes: 0, ByteCountersTracked: false),
     };
 
+    /// <summary>
+    /// The page the projection takes since #3541 A7: the rows plus the WINDOW's totals. Built here as the rows'
+    /// own sums, which is the "page is the whole window" case every assertion in this file was written
+    /// against; the shares-of-a-larger-window arithmetic is <see cref="DarlingMcpPgPercentDenominatorTests"/>'
+    /// subject.
+    /// </summary>
+    private static DarlingPgIoReader.PgIoPage Page(List<DarlingPgIoReader.PgIoRow> rows) =>
+        new(rows, rows.Sum(r => r.Reads), rows.Sum(r => r.ReadTimeMs));
+
     private static JsonElement Parse(string json)
     {
         using var doc = JsonDocument.Parse(json);
@@ -66,7 +75,7 @@ public class DarlingMcpPgIoToolsTests
     [Fact]
     public void TimingUntracked_NullsEveryTimeField_AndKeepsTheCounts()
     {
-        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: false), timingSetting: false));
+        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: false)), 20, timingSetting: false));
 
         Assert.False(root.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("total_read_time_ms").ValueKind);
@@ -98,12 +107,12 @@ public class DarlingMcpPgIoToolsTests
     [Fact]
     public void TheBusiestBasis_IsReadsWhenUntracked_AndReadTimeWhenTracked()
     {
-        var untracked = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: false), timingSetting: false));
+        var untracked = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: false)), 20, timingSetting: false));
         Assert.Equal("client backend/relation/normal", untracked.GetProperty("busiest_by_read_time").GetString());
         Assert.Contains("read count", untracked.GetProperty("busiest_basis").GetString(), StringComparison.Ordinal);
         Assert.Contains("does not measure I/O time", untracked.GetProperty("busiest_basis").GetString(), StringComparison.Ordinal);
 
-        var tracked = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: true), timingSetting: true));
+        var tracked = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: true)), 20, timingSetting: true));
         Assert.Equal("client backend/relation/normal", tracked.GetProperty("busiest_by_read_time").GetString());
         Assert.Contains("read time", tracked.GetProperty("busiest_basis").GetString(), StringComparison.Ordinal);
     }
@@ -116,7 +125,7 @@ public class DarlingMcpPgIoToolsTests
     [Fact]
     public void TimingTracked_KeepsTheMeasuredFigures()
     {
-        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: true), timingSetting: true));
+        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: true)), 20, timingSetting: true));
 
         Assert.True(root.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Equal(3_200.0, root.GetProperty("total_read_time_ms").GetDouble());
@@ -138,11 +147,11 @@ public class DarlingMcpPgIoToolsTests
     [Fact]
     public void AnUncollectedSetting_IsInferredFromTheData_AndSaysSo()
     {
-        var quiet = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: false), timingSetting: null));
+        var quiet = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: false)), 20, timingSetting: null));
         Assert.False(quiet.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Contains("inferred from the data", quiet.GetProperty("io_timing_source").GetString(), StringComparison.Ordinal);
 
-        var timed = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: true), timingSetting: null));
+        var timed = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: true)), 20, timingSetting: null));
         Assert.True(timed.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Contains("inferred from the data", timed.GetProperty("io_timing_source").GetString(), StringComparison.Ordinal);
     }
@@ -155,12 +164,12 @@ public class DarlingMcpPgIoToolsTests
     public void TheCollectedSetting_OverridesTheObservation()
     {
         /* Setting says on, window happens to be all zeros: tracked, with honest zeros, not nulls. */
-        var on = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: false), timingSetting: true));
+        var on = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: false)), 20, timingSetting: true));
         Assert.True(on.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Equal(0.0, on.GetProperty("combinations")[0].GetProperty("read_time_ms").GetDouble());
 
         /* Setting says off, stale non-zero times in the window: untracked wins and the times are null. */
-        var off = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Rows(timed: true), timingSetting: false));
+        var off = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(Rows(timed: true)), 20, timingSetting: false));
         Assert.False(off.GetProperty("io_timing_tracked").GetBoolean());
         Assert.Equal(JsonValueKind.Null, off.GetProperty("combinations")[0].GetProperty("read_time_ms").ValueKind);
     }
@@ -177,7 +186,7 @@ public class DarlingMcpPgIoToolsTests
             .Select(r => r with { Writes = 0, WriteTimeMs = 0, WriteCountersTracked = false })
             .ToList();
 
-        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, aurora, timingSetting: true));
+        var root = Parse(DarlingMcpPgIoTools.BuildIoJson("srv", 24, Page(aurora), 20, timingSetting: true));
 
         Assert.True(root.GetProperty("io_timing_tracked").GetBoolean());
         Assert.False(root.GetProperty("write_counters_tracked_anywhere").GetBoolean());

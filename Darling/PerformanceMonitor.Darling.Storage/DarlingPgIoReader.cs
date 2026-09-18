@@ -45,6 +45,18 @@ public static class DarlingPgIoReader
         bool ByteCountersTracked);
 
     /// <summary>
+    /// One page of I/O combinations plus the two denominators their shares are taken over (#3541 A7).
+    /// <para><c>WindowTotalReads</c> and <c>WindowTotalReadTimeMs</c> are the reads and read time of EVERY
+    /// (backend_type, object, context) combination that moved in the window, not of the rows on the page.
+    /// Off the same statement as the rows, as window aggregates over the grouped result before <c>LIMIT</c>,
+    /// so they cannot drift from them. On the page rather than on <see cref="PgIoRow"/>: facts about the
+    /// window, and a per-row copy would widen the Viewer's projection and invite a reader to sum them.</para>
+    /// <para><c>WindowTotalReadTimeMs</c> is a sum of stored zeros when <c>track_io_timing</c> is off; the tool
+    /// already nulls every time figure under that setting, and the total goes with them.</para>
+    /// </summary>
+    public sealed record PgIoPage(List<PgIoRow> Rows, long WindowTotalReads, double WindowTotalReadTimeMs);
+
+    /// <summary>
     /// Positive-difference-per-interval, summed over the window — the same rule the statement read uses,
     /// for the same reason: these are cumulative counters, so a plain last-minus-first goes negative
     /// whenever <c>pg_stat_reset_shared('io')</c> runs or the server restarts.
@@ -59,7 +71,14 @@ public static class DarlingPgIoReader
     /// <para>This comment previously claimed NULL survived the arithmetic. It does not, and the claim was
     /// worse than useless: it would have licensed someone to drop the tracked flag believing the NULLs were
     /// carrying the information. The flag is not belt-and-braces — it is the only discriminator.</para>
-    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// <para><b><c>window_total_reads</c> / <c>window_total_read_time_ms</c> are the whole window's figures, on
+    /// every row</b> (#3541 A7). <c>SUM(SUM(d_reads)) OVER ()</c> is a window aggregate over the GROUPED result,
+    /// evaluated after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>, so it sums every
+    /// combination that moved rather than the ones the cap admitted. The tool used to divide each row by the
+    /// sum of the rows it had fetched, so a three-row page summed to 100% of "total" reads by construction.
+    /// One pass over a result the query has already grouped; no second statement. Appended LAST so the
+    /// positional reader's existing ordinals stand.</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row cap.</para>
     /// </summary>
     public const string PgIoSql = """
         WITH differenced AS (
@@ -116,7 +135,10 @@ public static class DarlingPgIoReader
             coalesce(SUM(d_read_bytes), 0)                 AS read_bytes,
             coalesce(SUM(d_write_bytes), 0)                AS write_bytes,
             coalesce(SUM(d_extend_bytes), 0)               AS extend_bytes,
-            bool_or(byte_counters_tracked)                 AS byte_counters_tracked
+            bool_or(byte_counters_tracked)                 AS byte_counters_tracked,
+            /* #3541 A7: the WINDOW's totals, not the page's - see the remarks. Same on every row. */
+            CAST(SUM(coalesce(SUM(d_reads), 0)) OVER () AS bigint) AS window_total_reads,
+            SUM(coalesce(SUM(d_read_time_ms), 0)) OVER ()          AS window_total_read_time_ms
         FROM differenced
         GROUP BY backend_type, object_type, context
         /* Anything that moved, ordered by the work that actually costs time. A combination with no
@@ -130,11 +152,23 @@ public static class DarlingPgIoReader
         LIMIT $4
         """;
 
+    /// <summary>The rows alone — the WPF Viewer's grid, which has no column for the window totals.</summary>
     public static async Task<List<PgIoRow>> GetPgIoAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgIoPageAsync(postgres, serverId, startUtc, endUtc, limit, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read: <paramref name="limit"/> rows, busiest first, and the whole window's reads and read
+    /// time beside them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
+    /// </summary>
+    public static async Task<PgIoPage> GetPgIoPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgIoRow>();
+        long windowTotalReads = 0;
+        double windowTotalReadTimeMs = 0;
         await using var command = postgres.CreateCommand(PgIoSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -149,6 +183,9 @@ public static class DarlingPgIoReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+            windowTotalReads = reader.IsDBNull(19) ? 0 : reader.GetInt64(19);
+            windowTotalReadTimeMs = reader.IsDBNull(20) ? 0 : reader.GetDouble(20);
             rows.Add(new PgIoRow(
                 reader.IsDBNull(0) ? null : reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
@@ -171,7 +208,7 @@ public static class DarlingPgIoReader
                 !reader.IsDBNull(18) && reader.GetBoolean(18)));
         }
 
-        return rows;
+        return new PgIoPage(rows, windowTotalReads, windowTotalReadTimeMs);
     }
 
     /// <summary>

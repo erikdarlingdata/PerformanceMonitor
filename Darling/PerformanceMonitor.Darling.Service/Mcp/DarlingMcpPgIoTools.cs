@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -34,12 +33,12 @@ public sealed class DarlingMcpPgIoTools
     /// </summary>
     internal static string ContextMeaning(string? context) => DarlingPgIoReader.ContextMeaning(context);
 
-    [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby.")]
+    [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby. THE PAGE IS BOUNDED BY limit: combination_count is how many combinations you got, truncated says the window held more, and the rows are the busiest so the ones past the cap did less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads' denominator is total_reads and pct_of_total_read_time's is total_read_time_ms, each the WHOLE window's figure across every combination that moved, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_reads / returned_read_time_ms (what the page adds up to) and the totals is the I/O the cap left out; returned_pct_of_total_reads and returned_pct_of_total_read_time are those ratios stated once.")]
     public static async Task<string> GetPgIoStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum (backend_type, object, context) combinations to return, busiest first. Default 20.")] int limit = 20,
+        [Description("Maximum (backend_type, object, context) combinations to return, busiest first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -53,10 +52,13 @@ public sealed class DarlingMcpPgIoTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgIoReader.GetPgIoAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit);
+            /* #3541 A7: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal - and the window's reads and read time ride on the same statement, so the shares
+               below have denominators the cap cannot shrink. */
+            var page = await DarlingPgIoReader.GetPgIoPageAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
 
-            if (rows.Count == 0)
+            if (page.Rows.Count == 0)
             {
                 /* Ask the engine BEFORE offering the idle-server reading (#2532). "No combination recorded
                    activity" is a statement about a PostgreSQL instance; said about a SQL Server target it
@@ -87,7 +89,7 @@ public sealed class DarlingMcpPgIoTools
             var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
                 postgres, resolved.ServerId, windowEnd);
 
-            return BuildIoJson(resolved.ServerName, hours_back, rows, timingSetting);
+            return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting);
         }
         catch (Exception ex)
         {
@@ -102,18 +104,35 @@ public sealed class DarlingMcpPgIoTools
     /// <para><c>timingSetting</c> is the target's own <c>track_io_timing</c> from <c>pg_server_config</c>,
     /// or null when the configuration has not been collected — in which case whether any non-zero time
     /// appears in the window is the only evidence available and is used, stated as inference.</para>
+    ///
+    /// <para><b>The denominators are the window's, not the page's</b> (#3541 A7). <paramref name="page"/>
+    /// carries <c>WindowTotalReads</c> and <c>WindowTotalReadTimeMs</c> from the same statement as its rows, and
+    /// <c>pct_of_total_reads</c> / <c>pct_of_total_read_time</c> divide by THOSE. The previous shape divided by
+    /// the sums of the rows fetched, so at <c>limit = 3</c> the three shares summed to 100% and read as "these
+    /// three combinations are all the I/O". The page's own sums still travel as <c>returned_reads</c> /
+    /// <c>returned_read_time_ms</c>, and the ratios of page to window are stated once each.</para>
+    ///
+    /// <para><paramref name="page"/> holds up to <c>limit + 1</c> rows; the extra one is the truncation signal
+    /// and is cut before the projection. The timing inference below runs over the CUT rows: the sentinel is
+    /// not on the page, so it must not decide anything the page reports.</para>
     /// </summary>
     internal static string BuildIoJson(
         string serverName,
         int hoursBack,
-        IReadOnlyList<DarlingPgIoReader.PgIoRow> rows,
+        DarlingPgIoReader.PgIoPage page,
+        int limit,
         bool? timingSetting)
     {
+        var truncated = page.Rows.Count > limit;
+        var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
+
         var timingObserved = rows.Any(r => r.ReadTimeMs > 0 || r.WriteTimeMs > 0);
         var timingTracked = timingSetting ?? timingObserved;
 
-        var totalReads = rows.Sum(r => r.Reads);
-        var totalReadTime = rows.Sum(r => r.ReadTimeMs);
+        var totalReads = page.WindowTotalReads;
+        var totalReadTime = page.WindowTotalReadTimeMs;
+        var returnedReads = rows.Sum(r => r.Reads);
+        var returnedReadTime = rows.Sum(r => r.ReadTimeMs);
 
         var combinations = rows.Select(r =>
         {
@@ -137,6 +156,7 @@ public sealed class DarlingMcpPgIoTools
                    anything: a server-wide ratio averages bulkread's deliberate misses together with
                    normal-context misses and understates both. */
                 hit_pct = accesses > 0 ? Math.Round((double)r.Hits / accesses * 100, 1) : (double?)null,
+                /* Of the WINDOW's totals, never of the page's — see the remarks. */
                 pct_of_total_reads = totalReads > 0 ? Math.Round((double)r.Reads / totalReads * 100, 1) : 0,
                 pct_of_total_read_time = timingTracked
                     ? (totalReadTime > 0 ? Math.Round(r.ReadTimeMs / totalReadTime * 100, 1) : 0)
@@ -184,9 +204,25 @@ public sealed class DarlingMcpPgIoTools
             server = serverName,
             hours_back = hoursBack,
             status = "io_activity",
+            /* #3541 A3 dialect: the page described as a page. combination_count keeps its name — the web
+               I/O tile reads it by key — and it IS a page count, which the description says; truncated
+               beside it says whether the window held more. No time bounds: each row is one combination
+               differenced across the whole window, so there is no page reach to report, only a cap. */
             combination_count = combinations.Count,
+            truncated,
+            order = "read_time_ms_desc_then_reads_desc",
+            /* The WINDOW's reads and read time, across every combination that moved — the denominators of
+               every pct_of_total_reads / pct_of_total_read_time above. NOT the sums of the rows; those are
+               returned_reads / returned_read_time_ms. The read-time total is null under untracked timing
+               for the same reason every other time figure is: it is a sum of stored zeros, not a measurement. */
             total_reads = totalReads,
             total_read_time_ms = timingTracked ? Math.Round(totalReadTime, 1) : (double?)null,
+            returned_reads = returnedReads,
+            returned_read_time_ms = timingTracked ? Math.Round(returnedReadTime, 1) : (double?)null,
+            returned_pct_of_total_reads = totalReads > 0 ? Math.Round((double)returnedReads / totalReads * 100, 1) : 0,
+            returned_pct_of_total_read_time = timingTracked
+                ? (totalReadTime > 0 ? Math.Round(returnedReadTime / totalReadTime * 100, 1) : 0)
+                : (double?)null,
             /* The key survives untracked timing for the web tile's sake; busiest_basis beside it says
                what the ranking actually used. The reader orders by read time and then by read count, so
                over a store of zero times the count IS the ordering rather than a tiebreak. */
@@ -209,12 +245,17 @@ public sealed class DarlingMcpPgIoTools
             bytes_source = bytesMeasured
                 ? "measured"
                 : (bytesEstimated ? "estimated_from_block_size" : "unavailable"),
-            note = anyWritesTracked
+            note = (anyWritesTracked
                 ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
                 + "produce a negative figure."
                 : "All counters are windowed differences. This server tracks NO write counters — the "
                 + "signature of Amazon Aurora, where backends do not write data files and the storage "
-                + "layer does. Absent writes here mean unmeasured, not zero.",
+                + "layer does. Absent writes here mean unmeasured, not zero.")
+                + " total_reads and total_read_time_ms are the WHOLE window's figures across every "
+                + "combination that moved, computed in the same statement as the rows; each row's "
+                + "pct_of_total_reads and pct_of_total_read_time divide by them, so the shares on a page do "
+                + "not sum to 100 unless the page is the whole window (truncated = false). returned_reads "
+                + "and returned_read_time_ms are what the rows returned add up to.",
             timing_note = timingTracked
                 ? "read_time_ms, avg_read_ms, write_time_ms and extend_time_ms are measured I/O times: "
                   + "this server has track_io_timing on."

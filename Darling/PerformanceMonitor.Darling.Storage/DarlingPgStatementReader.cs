@@ -53,6 +53,29 @@ public static class DarlingPgStatementReader
         string? QueryText = null);
 
     /// <summary>
+    /// One page of the top-queries read, plus the denominator its shares are taken over.
+    /// <para><c>WindowTotalExecTimeMs</c> is the execution time of EVERY query shape that ran in the window,
+    /// not of the rows on the page (#3541 A7). It comes off the same statement as the rows — a window
+    /// aggregate over the grouped result, evaluated before <c>LIMIT</c> cuts it — so it cannot drift from
+    /// them and costs no second read. It lives on the page rather than on <see cref="PgStatementRow"/>
+    /// because it is a fact about the window, not about a statement, and a per-row copy would either
+    /// widen every consumer's projection or invite a reader to sum it.</para>
+    /// <para>Zero when the window holds no rows: the <c>HAVING</c> admits only shapes that ran, so a
+    /// zero total and an empty page are the same fact stated twice.</para>
+    /// </summary>
+    public sealed record PgTopQueriesPage(List<PgStatementRow> Rows, long WindowTotalExecTimeMs);
+
+    /// <summary>
+    /// The row cap the unpaged read binds — the <c>50</c> this query carried as a literal <c>LIMIT</c> from the
+    /// day it was written. The WPF Viewer's top-queries grid is the remaining caller of that read and keeps
+    /// reading exactly what it always read; the MCP tool binds the caller's own <c>limit</c> through
+    /// <see cref="GetPgTopQueriesPageAsync"/> instead, because a tool that advertised a limit up to 1,000 and
+    /// silently served 50 was the hidden-cap shape #3541 A3 named (this read was not in A3's list; A7 found it
+    /// because the page-scoped share was computed over those 50).
+    /// </summary>
+    public const int PgTopQueriesGridRowCap = 50;
+
+    /// <summary>
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
     /// counters directly would multiply each query's whole history by the number of snapshots in the
     /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
@@ -76,7 +99,16 @@ public static class DarlingPgStatementReader
     /// (queryid, database_id), which is the grain a "top queries" answer wants.</para>
     /// <para><c>max_exec_peakmem_bytes</c> and <c>max_exec_time_ms</c> stay MAX — they are high-water
     /// marks, not counters, and differencing a high-water mark would be meaningless.</para>
-    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// <para><b><c>window_total_exec_time_ms</c> is the whole window's figure, on every row</b> (#3541 A7).
+    /// <c>SUM(SUM(delta_total_exec_time_ms)) OVER ()</c> is a window aggregate over the GROUPED result: PostgreSQL
+    /// evaluates window functions after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>,
+    /// so the value is the sum across every shape the window holds, not across the rows the cap lets
+    /// through. The tool used to divide each row by the sum of the rows it had fetched, which made a
+    /// three-row page sum to 100% of "total" time by construction; this column is the honest denominator,
+    /// and it is one extra pass over a result the query has already grouped and is about to sort — no
+    /// second statement, no way to drift from the rows. Identical on every row, read once off the first.</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row cap — a PARAMETER, bound to the caller's limit by
+    /// the page read and to <see cref="PgTopQueriesGridRowCap"/> by the unpaged one.</para>
     /// </summary>
     public const string PgTopQueriesSql = """
         WITH differenced AS (
@@ -142,7 +174,10 @@ public static class DarlingPgStatementReader
                because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text
                per group by construction, so MAX picks it without widening the GROUP BY. LEFT JOIN, so a
                queryid whose text has not been captured yet still ranks; it simply reads as null. */
-            MAX(t.query_text) AS query_text
+            MAX(t.query_text) AS query_text,
+            /* #3541 A7: the WINDOW's total, not the page's - see the remarks. Window aggregate over the
+               grouped rows, so it is evaluated before LIMIT and is the same on every row. */
+            CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms
         FROM differenced
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
@@ -150,14 +185,29 @@ public static class DarlingPgStatementReader
         GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         ORDER BY SUM(delta_total_exec_time_ms) DESC
-        LIMIT 50
+        LIMIT $4
         """;
 
+    /// <summary>
+    /// The unpaged read the WPF Viewer's grid calls: the same statement at the cap it always carried. Kept
+    /// with its signature so the Viewer keeps compiling and keeps reading exactly what it read; the window
+    /// total the statement now also returns is dropped here because the grid has no column for it.
+    /// </summary>
     public static async Task<List<PgStatementRow>> GetPgTopQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgTopQueriesPageAsync(postgres, serverId, startUtc, endUtc, PgTopQueriesGridRowCap, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read: <paramref name="limit"/> rows, heaviest first, and the whole window's execution time
+    /// beside them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
+    /// </summary>
+    public static async Task<PgTopQueriesPage> GetPgTopQueriesPageAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgStatementRow>();
+        long windowTotalExecTimeMs = 0;
         await using var command = postgres.CreateCommand(PgTopQueriesSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -168,9 +218,13 @@ public static class DarlingPgStatementReader
            stores; found by the round-2 review. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Same value on every row by construction (OVER () with no partition); reading it on each is
+               cheaper than a branch and the last write wins with the same number. */
+            windowTotalExecTimeMs = reader.IsDBNull(15) ? 0 : reader.GetInt64(15);
             rows.Add(new PgStatementRow(
                 reader.GetInt64(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -191,6 +245,6 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(14) ? null : reader.GetString(14)));
         }
 
-        return rows;
+        return new PgTopQueriesPage(rows, windowTotalExecTimeMs);
     }
 }
