@@ -127,7 +127,9 @@ public sealed class ViewerCalendarRetentionPortTests
         var single = source[source.IndexOf("public async Task<DailySummaryRow?> GetDailySummaryAsync(", StringComparison.Ordinal)..];
         single = single[..single.IndexOf("private static DailySummaryRow ReadDailySummaryRow(", StringComparison.Ordinal)];
         Assert.Contains("DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, horizon)", single, StringComparison.Ordinal);
-        Assert.Contains("await ReadRetentionHorizonAsync(cancellationToken)", single, StringComparison.Ordinal);
+        /* Against the horizon the range read already computed — one fleet-override read per lookup, not two. */
+        Assert.Contains("var (rows, horizon) = await ReadDailySummaryRangeAsync(", single, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadRetentionHorizonAsync(", single, StringComparison.Ordinal);
     }
 
     /// <summary>
