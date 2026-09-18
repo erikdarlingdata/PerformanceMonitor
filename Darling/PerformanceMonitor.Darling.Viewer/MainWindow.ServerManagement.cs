@@ -477,11 +477,14 @@ public partial class MainWindow
     /// <summary>
     /// "Silence This Server" — writes a whole-server mute rule (see
     /// <see cref="ViewerDataService.BuildServerSilenceRule"/>) the running Darling service honors on its next
-    /// config reload: every future alert for this server is flagged muted (channels skipped for email/Teams/Slack)
-    /// and so never toasts. The Darling shortcut over the multi-step Manage Mute Rules dialog, mirroring Lite's
-    /// one-click "Silence This Server". Idempotent: an existing active silence is reported, not duplicated. Keyed
-    /// on the server's DISPLAY name (what the alert engine's mute context + the alert rows carry). A read-only
-    /// seat / schema-skew / failure degrades to the friendly status message like the other server-row writes.
+    /// config reload: every future alert for this server is flagged muted (channels skipped for email/Teams/Slack).
+    /// The tray does not wait for that: the rule joins <see cref="_viewerMuteRules"/> on success, so this viewer's
+    /// toast filter honors it from the next poll (#3570 — before, "never toasts" held only once the service had
+    /// reloaded and stamped the next row muted). The Darling shortcut over the multi-step Manage Mute Rules
+    /// dialog, mirroring Lite's one-click "Silence This Server". Idempotent: an existing active silence is
+    /// reported, not duplicated. Keyed on the server's DISPLAY name (what the alert engine's mute context + the
+    /// alert rows carry). A read-only seat / schema-skew / failure degrades to the friendly status message like
+    /// the other server-row writes.
     /// </summary>
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
     {
@@ -500,10 +503,15 @@ public partial class MainWindow
                 return;
             }
 
-            await _dataService.InsertMuteRuleAsync(ViewerDataService.BuildServerSilenceRule(server.DisplayName));
-            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. */
+            var silence = ViewerDataService.BuildServerSilenceRule(server.DisplayName);
+            await _dataService.InsertMuteRuleAsync(silence);
+            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
+               hand the rule to the toast filter now (persist-then-cache), for the same reason. */
             server.SetSilenced(true);
-            StatusText.Text = $"Silenced all alerts for '{server.DisplayName}'. Right-click → Unsilence to restore.";
+            _viewerMuteRules.Add(silence);
+            StatusText.Text =
+                $"Silenced all alerts for '{server.DisplayName}' — tray toasts stop now; the service applies it within "
+                + $"{ViewerDataService.ServiceReloadTickSeconds} s. Right-click → Unsilence to restore.";
         }
         catch (ViewerReadOnlyException ex)
         {
@@ -550,8 +558,11 @@ public partial class MainWindow
                 await _dataService.DeleteMuteRuleAsync(rule.Id);
             }
 
-            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. */
+            /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
+               drop the silences from the toast filter's set too, so an un-silenced server can toast on the
+               next poll rather than after the next re-read. */
             server.SetSilenced(false);
+            _viewerMuteRules.RemoveAll(r => silences.Any(s => s.Id == r.Id));
             StatusText.Text = $"Unsilenced '{server.DisplayName}'.";
         }
         catch (ViewerReadOnlyException ex)
@@ -572,9 +583,16 @@ public partial class MainWindow
     /// <summary>
     /// Refreshes every server's whole-server-silence indicator (#2031) from the store's mute rules — the
     /// sidebar muted-bell and the context menu's Silence/Unsilence exclusivity both read the resulting
-    /// <see cref="DarlingServer.IsSilenced"/> flag. Rides the alert poll (the same cadence as the badge), over
-    /// the WHOLE fleet like the badge does, so a silence created from another seat (or over MCP) surfaces here
-    /// within a poll tick. Never throws — a broken read must not disturb the refresh loop.
+    /// <see cref="DarlingServer.IsSilenced"/> flag — and, from the SAME read, replaces
+    /// <see cref="_viewerMuteRules"/>, the rule set the tray-toast filter judges polled rows against (#3570).
+    /// One store read serves both because they want the same thing: the rules in force right now, as the store
+    /// has them. Rides the alert poll (the same cadence as the badge), over the WHOLE fleet like the badge does,
+    /// so a rule created from another seat (or over MCP) reaches both the bell and the tray within a poll tick.
+    ///
+    /// <para>Never throws — a broken read must not disturb the refresh loop — and on a failed read the rule set
+    /// is LEFT AS IT WAS rather than emptied: the previous read's rules, plus whatever this viewer wrote since,
+    /// stay in force for the tray until a read succeeds. Emptying it would let one store blip un-mute every
+    /// snoozed toast on this seat, which is the #3354 defect one process over.</para>
     /// </summary>
     private async Task UpdateServerSilencedAsync()
     {
@@ -585,8 +603,30 @@ public partial class MainWindow
 
         try
         {
+            var readStartedUtc = DateTime.UtcNow;
             var rules = await _dataService.GetMuteRulesAsync();
             var active = rules.Where(r => r.Enabled && !r.IsExpired).ToList();
+
+            /* Replace, not merge: the store is the authority. A rule this viewer added locally before this read
+               began is in the store too (persist-then-cache), so it comes back in `rules`; a rule deleted from
+               another seat is absent from `rules` and drops out here, which is the un-mute direction working.
+
+               The one exception is a rule this viewer wrote WHILE the read was in flight. The click handlers
+               run on this same UI thread, so a Snooze can land between the await above and this line; that
+               rule is not in `rules` (the SELECT began before the INSERT) and a plain replace would drop it
+               until the next poll — a one-tick hole in the very guarantee #3570 adds. Every local writer
+               stamps CreatedAtUtc at the click, so "written during this read" is exactly "created at or after
+               the read began", and only THOSE are carried over. A stale rule from a previous read can never
+               pass that test, so a remote delete still lands on this poll. */
+            foreach (var local in _viewerMuteRules)
+            {
+                if (local.CreatedAtUtc >= readStartedUtc && !active.Any(a => a.Id == local.Id))
+                {
+                    active.Add(local);
+                }
+            }
+
+            _viewerMuteRules = active;
 
             foreach (var server in _fleet.All)
             {

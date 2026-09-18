@@ -83,6 +83,34 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
 
+    /// <summary>
+    /// This row as the <see cref="AlertMuteContext"/> a <see cref="MuteRule"/> is judged against — the SAME
+    /// server name and metric name the row carries (so a rule keyed on them matches this row by construction,
+    /// whatever spelling the producing family used for <c>server_name</c>), plus the Database / Wait Type /
+    /// Job Name / Query dimensions parsed out of the stored <see cref="DetailText"/> by
+    /// <see cref="AlertMuteContext.PopulateFromDetailText"/>.
+    ///
+    /// <para>The ONE definition of "what does this alert row look like to a mute rule" on the viewer side
+    /// (#3570). Both viewer consumers go through it: the Alert History tab's "Mute This Alert" pre-fill, which
+    /// builds the rule an operator authors FROM a row, and the tray-toast filter in
+    /// <see cref="AlertToastCoordinator"/>, which decides whether a rule already in force covers a row. Two
+    /// hand-built contexts could drift — one parsing the detail text and one not — and then a rule authored
+    /// from a row would suppress the service's channels but not the very toast it was authored from.</para>
+    ///
+    /// <para>The metric name is passed to the detail-text parse so a custom alert (<c>"Custom:&lt;id&gt;"</c>)
+    /// skips it (#3309): its detail text is a user-authored name, not DMV label/value lines, and must not be
+    /// able to forge a label line.</para>
+    /// </summary>
+    public AlertMuteContext ToMuteContext()
+    {
+        var context = new AlertMuteContext
+        {
+            ServerName = ServerName,
+            MetricName = MetricName,
+        };
+        context.PopulateFromDetailText(DetailText, MetricName);
+        return context;
+    }
 }
 
 public sealed partial class ViewerDataService

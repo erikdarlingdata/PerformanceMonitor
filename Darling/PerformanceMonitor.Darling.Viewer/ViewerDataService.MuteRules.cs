@@ -97,6 +97,41 @@ WHERE id = $1";
         /* MetricName/DatabasePattern/QueryTextPattern/WaitTypePattern/JobNamePattern stay null → matches all. */
     };
 
+    /// <summary>The <see cref="MuteRule.Reason"/> prefix a tray-toast Snooze stamps ("Snoozed from tray (4h)"), so
+    /// the Manage Mute Rules list says where the rule came from. Lite's balloon writes "Snoozed from popup (…)".</summary>
+    public const string TraySnoozeReasonPrefix = "Snoozed from tray";
+
+    /// <summary>
+    /// Builds the temporary rule a tray toast's Snooze writes (#3570): scoped to the toasted alert's server +
+    /// metric exactly as the alert row spells them, expiring <paramref name="duration"/> after
+    /// <paramref name="nowUtc"/>, every pattern field left null. Lite's <c>SnoozeBalloon</c> semantics, as a
+    /// pure function so the shape can be pinned without WPF.
+    ///
+    /// <para><paramref name="serverName"/> is the toasted <see cref="ViewerAlertRow.ServerName"/> — the row's own
+    /// <c>server_name</c> — and that is what makes the rule match. Alert rows on this store spell a server two
+    /// ways (the self-alert family and the shared engine each write the name they evaluate with), and a rule
+    /// keyed on the row's spelling matches that row's producer by construction, because the producer's mute
+    /// context and its history row carry the same string. It is also the spelling
+    /// <see cref="ViewerAlertRow.ToMuteContext"/> feeds the viewer's own toast filter, so the rule stops the
+    /// tray on the next poll too. An empty name (a row with none) becomes null = every server, which is the
+    /// only honest scope for a row that did not say.</para>
+    /// </summary>
+    public static MuteRule BuildTraySnoozeRule(string? serverName, string metricName, TimeSpan duration, DateTime nowUtc) => new()
+    {
+        ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
+        MetricName = metricName,
+        Enabled = true,
+        CreatedAtUtc = nowUtc,
+        ExpiresAtUtc = nowUtc + duration,
+        Reason = $"{TraySnoozeReasonPrefix} ({FormatSnoozeDuration(duration)})",
+        /* DatabasePattern/QueryTextPattern/WaitTypePattern/JobNamePattern stay null — a snooze is "this
+           alert on this server", not a narrower shape. */
+    };
+
+    /// <summary>"4h" / "1h" / "15m" — the snooze duration as the buttons label it (Lite's FormatDuration).</summary>
+    public static string FormatSnoozeDuration(TimeSpan d) =>
+        d.TotalHours >= 1 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalMinutes}m";
+
     /// <summary>
     /// True when <paramref name="rule"/> is a WHOLE-SERVER silence for <paramref name="serverName"/> — scoped to
     /// that server (case-insensitive) with no narrowing pattern on any other field. This is the shape

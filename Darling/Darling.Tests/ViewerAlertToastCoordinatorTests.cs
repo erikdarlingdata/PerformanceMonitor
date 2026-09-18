@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -223,5 +224,160 @@ public sealed class ViewerAlertToastCoordinatorTests
         var toasts = coordinator.SelectToasts(new[] { Row(T0, 1, "High CPU") }, T0.AddMinutes(21), Cooldown);
 
         Assert.Single(toasts);
+    }
+
+    /* ---------------- #3570: the viewer honors mute rules for its own channel ---------------- */
+
+    /// <summary>
+    /// The report, as a pin. The service re-fires "Agent Not Running" with <c>muted = false</c> — because it has
+    /// not reloaded its cache yet, or its reload failed, or the beacon never reached it — and the viewer holds
+    /// the rule the operator's Snooze just wrote. The toast must not appear: the tray is the viewer's channel and
+    /// the viewer's rule set decides. Before #3570 only <c>row.Muted</c> was consulted and this toasted.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_RowCoveredByAViewerRule_IsNotToasted_EvenWhenTheServiceLeftItUnmuted()
+    {
+        var coordinator = new AlertToastCoordinator(Retention);
+        var refire = Row(T0.AddMinutes(5), 1, "Agent Not Running", muted: false);
+        var snooze = ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromHours(4), T0);
+
+        var toasts = coordinator.SelectToasts(new[] { refire }, T0.AddMinutes(5), Cooldown, new[] { snooze });
+
+        Assert.Empty(toasts);
+    }
+
+    /// <summary>Null and empty rule sets are the pre-#3570 behavior exactly: the service's flag alone decides.</summary>
+    [Fact]
+    public void SelectToasts_NoViewerRules_LeavesAnUnmutedRowToasting()
+    {
+        var row = Row(T0, 1, "Agent Not Running");
+
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, muteRules: null));
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, Array.Empty<MuteRule>()));
+    }
+
+    /// <summary>
+    /// The viewer-side judgement is <see cref="MuteRule.MatchesAt"/> on the coordinator's injected clock: a rule
+    /// whose expiry has passed suppresses nothing, judged at the SAME instant the rest of the decision is.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_ExpiredViewerRule_DoesNotSuppress()
+    {
+        var coordinator = new AlertToastCoordinator(Retention);
+        var snooze = ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromMinutes(15), T0);
+
+        /* Judged one second after the 15 m snooze lapsed. */
+        var toasts = coordinator.SelectToasts(
+            new[] { Row(T0.AddMinutes(16), 1, "Agent Not Running") }, T0.AddMinutes(15).AddSeconds(1), Cooldown, new[] { snooze });
+
+        Assert.Single(toasts);
+    }
+
+    [Fact]
+    public void SelectToasts_DisabledViewerRule_DoesNotSuppress()
+    {
+        var coordinator = new AlertToastCoordinator(Retention);
+        var rule = ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromHours(4), T0);
+        rule.Enabled = false;
+
+        var toasts = coordinator.SelectToasts(new[] { Row(T0, 1, "Agent Not Running") }, T0, Cooldown, new[] { rule });
+
+        Assert.Single(toasts);
+    }
+
+    /// <summary>
+    /// Scope is the shared matcher's: server name case-insensitive, metric exact (by name), a rule for another
+    /// server or another metric leaves this row alone. Pinned here so the tray can never be broader OR narrower
+    /// than the channels the service mutes with the same rule.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_ViewerRuleScope_IsTheSharedMatchersScope()
+    {
+        var row = Row(T0, 1, "Agent Not Running");
+
+        var otherServer = ViewerDataService.BuildTraySnoozeRule("Server2", "Agent Not Running", TimeSpan.FromHours(4), T0);
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { otherServer }));
+
+        var otherMetric = ViewerDataService.BuildTraySnoozeRule("Server1", "Failed Agent Job", TimeSpan.FromHours(4), T0);
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { otherMetric }));
+
+        var differentCase = ViewerDataService.BuildTraySnoozeRule("SERVER1", "agent not running", TimeSpan.FromHours(4), T0);
+        Assert.Empty(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { differentCase }));
+
+        /* A whole-server silence (no metric) covers every metric on that server — the sidebar's one-click rule. */
+        var silence = ViewerDataService.BuildServerSilenceRule("Server1");
+        Assert.Empty(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { silence }));
+    }
+
+    /// <summary>
+    /// A pattern-scoped rule is judged over the dimensions <see cref="ViewerAlertRow.ToMuteContext"/> parses out
+    /// of the row's detail text — the same pre-fill the "Mute This Alert" dialog reads — so a database-scoped
+    /// mute the operator authored FROM a row covers that row's toast, and only rows about that database.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_PatternScopedViewerRule_IsJudgedOverTheRowsDetailText()
+    {
+        var rule = new MuteRule { MetricName = "Blocking Detected", DatabasePattern = "Sales" };
+
+        var salesRow = Row(T0, 1, "Blocking Detected", detail: "Blocking detected\n  Database: SalesDb\n  Wait Type: LCK_M_S");
+        Assert.Empty(new AlertToastCoordinator(Retention).SelectToasts(new[] { salesRow }, T0, Cooldown, new[] { rule }));
+
+        var otherDbRow = Row(T0, 1, "Blocking Detected", detail: "Blocking detected\n  Database: Payroll");
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { otherDbRow }, T0, Cooldown, new[] { rule }));
+
+        /* No detail text at all: the pattern dimension is unknown, the rule cannot claim it, the row toasts. */
+        var bareRow = Row(T0, 1, "Blocking Detected");
+        Assert.Single(new AlertToastCoordinator(Retention).SelectToasts(new[] { bareRow }, T0, Cooldown, new[] { rule }));
+    }
+
+    /// <summary>
+    /// A row the viewer's rule suppressed is marked seen exactly like a service-muted one, so when the snooze
+    /// lapses the rows it covered do not replay as a storm — only rows that arrive AFTER expiry can toast.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_ViewerSuppressedRow_IsMarkedSeen_SoRuleExpiryDoesNotReplayIt()
+    {
+        var coordinator = new AlertToastCoordinator(Retention);
+        var snooze = ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromMinutes(15), T0);
+        var covered = Row(T0.AddMinutes(5), 1, "Agent Not Running");
+
+        Assert.Empty(coordinator.SelectToasts(new[] { covered }, T0.AddMinutes(5), Cooldown, new[] { snooze }));
+
+        /* The snooze has lapsed and the same row is re-read (the poll window overlaps): still nothing. */
+        Assert.Empty(coordinator.SelectToasts(new[] { covered }, T0.AddMinutes(16), Cooldown, new[] { snooze }));
+
+        /* A NEW row after expiry toasts — the condition is live again and the operator asked for 15 m, not forever. */
+        Assert.Single(coordinator.SelectToasts(new[] { Row(T0.AddMinutes(17), 1, "Agent Not Running") }, T0.AddMinutes(17), Cooldown, new[] { snooze }));
+    }
+
+    /// <summary>
+    /// The viewer's rule set and the service's flag are ORed: either alone suppresses, and a rule covering row A
+    /// says nothing about row B on another server in the same poll.
+    /// </summary>
+    [Fact]
+    public void SelectToasts_ViewerRulesAndServiceFlag_AreIndependentPerRow()
+    {
+        var coordinator = new AlertToastCoordinator(Retention);
+        var snooze = ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromHours(4), T0);
+
+        var coveredByRule = Row(T0, 1, "Agent Not Running");
+        var mutedByService = Row(T0, 2, "High CPU", muted: true);
+        var neither = Row(T0, 3, "Agent Not Running");
+
+        var toasts = coordinator.SelectToasts(new[] { coveredByRule, mutedByService, neither }, T0, Cooldown, new[] { snooze });
+
+        var only = Assert.Single(toasts);
+        Assert.Equal(3, only.ServerId);
+    }
+
+    /// <summary>A null entry in the rule list is skipped rather than thrown on — the filter runs inside the refresh loop.</summary>
+    [Fact]
+    public void IsMutedByViewerRules_SkipsNullEntries()
+    {
+        var row = Row(T0, 1, "Agent Not Running");
+        var rules = new MuteRule[] { null!, ViewerDataService.BuildTraySnoozeRule("Server1", "Agent Not Running", TimeSpan.FromHours(1), T0) };
+
+        Assert.True(AlertToastCoordinator.IsMutedByViewerRules(row, rules, T0));
+        Assert.False(AlertToastCoordinator.IsMutedByViewerRules(row, new MuteRule[] { null! }, T0));
     }
 }
