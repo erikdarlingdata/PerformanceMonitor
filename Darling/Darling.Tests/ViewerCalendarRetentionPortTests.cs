@@ -125,7 +125,9 @@ public sealed class ViewerCalendarRetentionPortTests
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.DailySummary.cs");
         var single = source[source.IndexOf("public async Task<DailySummaryRow?> GetDailySummaryAsync(", StringComparison.Ordinal)..];
-        single = single[..single.IndexOf("private static DailySummaryRow ReadDailySummaryRow(", StringComparison.Ordinal)];
+        /* The method body only: the horizon helper's own declaration follows it in the file and must not be
+           mistaken for a second call. */
+        single = single[..single.IndexOf("internal async Task<DateTime> ReadRetentionHorizonAsync(", StringComparison.Ordinal)];
         Assert.Contains("DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, horizon)", single, StringComparison.Ordinal);
         /* Against the horizon the range read already computed — one fleet-override read per lookup, not two. */
         Assert.Contains("var (rows, horizon) = await ReadDailySummaryRangeAsync(", single, StringComparison.Ordinal);
