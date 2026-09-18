@@ -70,7 +70,9 @@ public sealed class PgLogEventsPipelineTests
         + P + "[1200] LOG:  database system is ready to accept connections\n"
         + P + "[4104] WARNING:  there is already a transaction in progress\n"
         + P + "[4105] ERROR:  canceling statement due to user request\n"
-        + P + "[4105] STATEMENT:  SELECT pg_sleep(30)\n";
+        + P + "[4105] STATEMENT:  SELECT pg_sleep(30)\n"
+        + P + "[4106] ERROR:  invalid input syntax for type integer: \"secret-order-ref-9931\"\n"
+        + P + "[4106] STATEMENT:  SELECT * FROM orders WHERE id = 'secret-order-ref-9931'\n";
 
     /// <summary>The managed parameter-group prefix, no fractional seconds, <c>%r</c> and <c>%u@%d</c> before the pid.</summary>
     private const string ManagedLog =
@@ -95,8 +97,8 @@ public sealed class PgLogEventsPipelineTests
     {
         var entries = PgLogEntryAssembler.Assemble(SelfHostedLog);
 
-        /* 15 primary lines in the fixture; DETAIL / CONTEXT / STATEMENT / tab lines are folded, not counted. */
-        Assert.Equal(15, entries.Count);
+        /* 16 primary lines in the fixture; DETAIL / CONTEXT / STATEMENT / tab lines are folded, not counted. */
+        Assert.Equal(16, entries.Count);
 
         var lockWait = entries.Single(e => e.Message.StartsWith("process 4102 still waiting", StringComparison.Ordinal));
         Assert.Equal("LOG", lockWait.Severity);
@@ -168,7 +170,7 @@ public sealed class PgLogEventsPipelineTests
            same method: GMT, UCT, +00, +00:00. */
         foreach (var zone in new[] { "GMT", "UCT", "+00", "+00:00" })
         {
-            Assert.Equal(15, PgLogEntryAssembler.Assemble(SelfHostedLog.Replace(" UTC ", $" {zone} ", StringComparison.Ordinal)).Count);
+            Assert.Equal(16, PgLogEntryAssembler.Assemble(SelfHostedLog.Replace(" UTC ", $" {zone} ", StringComparison.Ordinal)).Count);
         }
     }
 
@@ -181,15 +183,16 @@ public sealed class PgLogEventsPipelineTests
         var byFamily = events.GroupBy(e => e.Family).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
 
         /* Four connection lines (received, authenticated, authorized, disconnection), two lock-wait lines
-           (still waiting, acquired), four errors (duplicate key, FATAL auth, WARNING, cancel), one spill,
-           one autovacuum, two checkpoints. "database system is ready" is claimed by nobody and is dropped. */
+           (still waiting, acquired), five errors (duplicate key, FATAL auth, WARNING, cancel, bad input),
+           one spill, one autovacuum, two checkpoints. "database system is ready" is claimed by nobody and
+           is dropped. */
         Assert.Equal(4, byFamily[PgLogFamilies.Connection]);
         Assert.Equal(2, byFamily[PgLogFamilies.LockWait]);
-        Assert.Equal(4, byFamily[PgLogFamilies.Error]);
+        Assert.Equal(5, byFamily[PgLogFamilies.Error]);
         Assert.Equal(1, byFamily[PgLogFamilies.TempFile]);
         Assert.Equal(1, byFamily[PgLogFamilies.Autovacuum]);
         Assert.Equal(2, byFamily[PgLogFamilies.Checkpoint]);
-        Assert.Equal(14, events.Count);
+        Assert.Equal(15, events.Count);
         Assert.DoesNotContain(events, e => e.Message.Contains("ready to accept", StringComparison.Ordinal));
         Assert.All(events, e => Assert.True(PgLogFamilies.IsKnown(e.Family), e.Family));
     }
@@ -285,7 +288,7 @@ public sealed class PgLogEventsPipelineTests
         var spill = events.Single(e => e.Family == PgLogFamilies.TempFile);
         /* The stand-in lifted the database from the statement's context; the generic arm would have left it null. */
         Assert.Equal("from-sibling", spill.DatabaseName);
-        Assert.Equal(14, events.Count);
+        Assert.Equal(15, events.Count);
     }
 
     private sealed class StandInTempFileParser : IPgLogFamilyParser
@@ -315,6 +318,8 @@ public sealed class PgLogEventsPipelineTests
 
         foreach (var e in events)
         {
+            Assert.DoesNotContain("secret-order-ref", e.Message + e.Detail + e.StatementFingerprint, StringComparison.Ordinal);
+            Assert.DoesNotContain("host all all", e.Message + e.Detail, StringComparison.Ordinal);
             Assert.DoesNotContain("someone@example.com", e.Message + e.Detail + e.StatementFingerprint, StringComparison.Ordinal);
             Assert.DoesNotContain("O'Brien", e.Message + e.Detail, StringComparison.Ordinal);
             Assert.DoesNotContain("shipped", e.Message + e.Detail, StringComparison.Ordinal);
@@ -359,7 +364,39 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(
             "process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms",
             PgLogTextRedactor.RedactMessage("process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms"));
-        Assert.Equal("invalid input syntax for type integer: '?'", PgLogTextRedactor.RedactMessage("invalid input syntax for type integer: 'abc'"));
+        /* PostgreSQL quotes the offending VALUE with DOUBLE quotes in this class of message — review caught
+           the first draft asserting a single-quoted variant the server never writes. The value shapes go
+           whole (greedy to the closing quote, so JSON with quotes of its own is not left standing), the
+           identifier shapes stay, an unknown lead is over-redacted rather than trusted. */
+        Assert.Equal("invalid input syntax for type integer: \"?\"", PgLogTextRedactor.RedactMessage("invalid input syntax for type integer: \"abc123\""));
+        Assert.Equal("invalid input syntax for type uuid: \"?\"", PgLogTextRedactor.RedactMessage("invalid input syntax for type uuid: \"not-a-uuid\""));
+        Assert.Equal("malformed array literal: \"?\"", PgLogTextRedactor.RedactMessage("malformed array literal: \"{\"a\"}\""));
+        Assert.Equal("date/time field value out of range: \"?\"", PgLogTextRedactor.RedactMessage("date/time field value out of range: \"2026-13-40\""));
+        Assert.Equal("invalid input value for enum mood: \"?\"", PgLogTextRedactor.RedactMessage("invalid input value for enum mood: \"happ\""));
+        Assert.Equal("syntax error at or near \"?\"", PgLogTextRedactor.RedactMessage("syntax error at or near \"DELTE\""));
+        Assert.Equal("unterminated quoted string at or near \"?\"", PgLogTextRedactor.RedactMessage("unterminated quoted string at or near \"'abc\""));
+        Assert.Equal("invalid value for parameter \"work_mem\": \"?\"", PgLogTextRedactor.RedactMessage("invalid value for parameter \"work_mem\": \"lots\""));
+        Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactMessage("Failing row contains (1, someone@example.com, Acme (USA) Inc., null)."));
+        Assert.Equal("something odd \"?\" mid-sentence", PgLogTextRedactor.RedactMessage("something odd \"value\" mid-sentence"));
+        Assert.Equal("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"?\"", PgLogTextRedactor.RedactMessage("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"host all all 0.0.0.0/0 scram-sha-256\""));
+
+        /* Identifiers, by the noun before them: the diagnostic value of the message is the name. */
+        foreach (var kept in new[]
+        {
+            "duplicate key value violates unique constraint \"customers_email_key\"",
+            "password authentication failed for user \"intruder\"",
+            "role \"intruder\" does not exist",
+            "database \"app_db\" does not exist",
+            "null value in column \"email\" of relation \"customers\" violates not-null constraint",
+            "connection authenticated: identity=\"app_rw\" method=scram-sha-256 (/etc/postgresql/pg_hba.conf:117)",
+            "temporary file: path \"base/pgsql_tmp/pgsql_tmp4102.0\", size 4294967296",
+            "automatic vacuum of table \"app_db.public.orders\": index scans: 1",
+            "while updating tuple (0,7) in relation \"orders\"",
+            "unrecognized configuration parameter \"foo\"",
+        })
+        {
+            Assert.Equal(kept, PgLogTextRedactor.RedactMessage(kept));
+        }
 
         /* Same shape, different values, one fingerprint; and the fingerprint is over the REDACTED text, so
            the raw literal is not even hashed. */
@@ -425,7 +462,7 @@ public sealed class PgLogEventsPipelineTests
 
         using var body = new FakeReader(new object?[][] { new object?[] { SelfHostedLog } });
         var rows = await definition.ReadAsync(body, context, CancellationToken.None);
-        Assert.Equal(14, rows.Count);
+        Assert.Equal(15, rows.Count);
 
         using var marker = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker } });
         await Assert.ThrowsAsync<PgLoggingCollectorOffException>(async () => await definition.ReadAsync(marker, context, CancellationToken.None));
@@ -797,28 +834,29 @@ public sealed class PgLogEventsLivePostgresTests
             var stamp = DateTime.UtcNow.AddMinutes(-3).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
             var body = LogFixture(stamp);
             var events = PgLogEventClassifier.Default.Classify(body);
-            Assert.Equal(14, events.Count);
+            Assert.Equal(15, events.Count);
 
             await WriteAsync(postgres, events, ct);
             await WriteAsync(postgres, events, ct);
 
             var everything = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, null, 100);
-            JsonAssert.Contains("\"events_returned\": 14", everything);
-            JsonAssert.Contains("\"total_events\": 14", everything);
+            JsonAssert.Contains("\"events_returned\": 15", everything);
+            JsonAssert.Contains("\"total_events\": 15", everything);
             JsonAssert.Contains("\"truncated\": false", everything);
             JsonAssert.Contains("\"times_seen\": 2", everything);
             Assert.DoesNotContain("someone@example.com", everything, StringComparison.Ordinal);
             Assert.DoesNotContain("O'Brien", everything, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-order-ref", everything, StringComparison.Ordinal);
 
             /* The boundary pair: limit = N-1 truncated, limit = N not; total_events is the window either way. */
-            var cut = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, null, 13);
-            JsonAssert.Contains("\"events_returned\": 13", cut);
+            var cut = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, null, 14);
+            JsonAssert.Contains("\"events_returned\": 14", cut);
             JsonAssert.Contains("\"truncated\": true", cut);
-            JsonAssert.Contains("\"total_events\": 14", cut);
+            JsonAssert.Contains("\"total_events\": 15", cut);
 
             var errors = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, "WARNING", 100);
-            JsonAssert.Contains("\"events_returned\": 4", errors);
-            JsonAssert.Contains("\"total_events\": 4", errors);
+            JsonAssert.Contains("\"events_returned\": 5", errors);
+            JsonAssert.Contains("\"total_events\": 5", errors);
             Assert.DoesNotContain("\"family\": \"connection\"", errors, StringComparison.Ordinal);
 
             var locks = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "lock_wait", null, 100);

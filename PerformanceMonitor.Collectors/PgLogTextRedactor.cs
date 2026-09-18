@@ -46,10 +46,19 @@ namespace PerformanceMonitor.Collectors;
 /// where a column name follows the same shape.</description></item>
 /// </list>
 ///
-/// <para><b>Identifiers stay.</b> PostgreSQL double-quotes identifiers in its prose — <c>relation
-/// "orders"</c>, <c>user "app_rw"</c> — and those are not values; a redaction that took them would leave
-/// <c>permission denied for relation "?"</c>, which names nothing and helps nobody. The single-quote
-/// pattern does not touch them.</para>
+/// <para><b>Double quotes are NOT a safe signal, and review caught the first draft treating them as one.</b>
+/// PostgreSQL double-quotes identifiers in its prose — <c>relation "orders"</c>, <c>user "app_rw"</c> —
+/// and those are not values; a redaction that took them would leave <c>permission denied for relation
+/// "?"</c>, which names nothing. But it double-quotes the offending VALUE too, in a whole class of routine
+/// errors: <c>invalid input syntax for type integer: "abc"</c>, <c>malformed array literal: "{bad"</c>,
+/// <c>date/time field value out of range: "2026-13-40"</c>, <c>invalid input value for enum mood: "x"</c>,
+/// <c>syntax error at or near "…"</c> — client input verbatim, at WARNING-or-worse, needing no setting on
+/// the target. So the rule is an ALLOWLIST in the safe direction: a double-quoted run is kept only when
+/// the word before it is one PostgreSQL uses for a named object (<see cref="s_identifierNoun"/>), and
+/// every other double-quoted run — including the <c>: "…"</c> and <c>at or near "…"</c> value shapes,
+/// which are taken greedily to the closing quote because a JSON value carries quotes of its own — becomes
+/// <c>"?"</c>. An unknown shape is over-redacted, never leaked. The one unquoted value shape beside the
+/// key tuple, <c>Failing row contains (…)</c>, goes whole for the same reason.</para>
 /// </summary>
 public static class PgLogTextRedactor
 {
@@ -86,7 +95,36 @@ public static class PgLogTextRedactor
         @"(?<key>\bKey \(.*?\))=\((?!\?\)).*\)(?=[^)]*$)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
-    /// <summary>Prose: quoted literals and key-tuple values out, bare numbers kept. Null in, null out.</summary>
+    /* `: "value"` and `at or near "fragment"` — PostgreSQL's two ways of quoting the thing the client sent.
+       Greedy to the LAST quote in the text, because the value can carry quotes of its own (`malformed array
+       literal: "{"a"}"`) and a first-quote match would leave its middle standing; both shapes end the
+       message, so the last quote is the value's close. */
+    private static readonly Regex s_quotedValueShape = new(
+        @"(?<=:\s|\bat or near\s)"".*""(?=[^""]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /* `Failing row contains (1, abc, 2026-01-01).` — the NOT NULL / CHECK violation DETAIL, the row's
+       values unquoted whatever their type. Greedy to the last `)` for the key tuple's reason. */
+    private static readonly Regex s_failingRow = new(
+        @"\bFailing row contains \(.*\)(?=[^)]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /* Every remaining double-quoted run, with what precedes it captured so the allowlist can be asked. */
+    private static readonly Regex s_doubleQuoted = new(
+        @"(?<lead>(?:[A-Za-z_]+=|\b[A-Za-z_]+\s|^|\S))(?<quoted>""[^""]*"")",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* The words PostgreSQL puts before a double-quoted IDENTIFIER. A run preceded by one of these is a
+       name and stays; a run preceded by anything else is treated as a value. Enumerated rather than
+       inferred, and wrong in the safe direction: a noun missing from this list over-redacts one name, a
+       value shape missing from a blocklist would leak. `identity=` / `method=` / `application_name=` are
+       the connection-authenticated line's own key=value spellings; `path` is the temp-file line's, which
+       #3602 reads. */
+    private static readonly Regex s_identifierNoun = new(
+        @"(?:^|\b)(?:relation|table|column|constraint|index|sequence|view|function|procedure|routine|type|schema|database|role|user|extension|parameter|tablespace|trigger|rule|policy|language|domain|collation|operator|aggregate|publication|subscription|server|wrapper|mapping|file|directory|path|option|setting|slot|partition|attribute|object|library|module|record|conversion|dictionary|template|configuration|statistics|method|namespace|catalog|cursor|portal|savepoint|prepared statement|access method|event trigger|foreign table|materialized view|composite type|enum type|range type|base type|text search configuration|text search dictionary|text search parser|text search template|application_name=|identity=|method=)\s?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    /// <summary>Prose: quoted values out (single-quoted, double-quoted after a value shape or an unknown lead, key tuples, failing rows), identifiers and bare numbers kept. Null in, null out.</summary>
     public static string? RedactMessage(string? text)
     {
         if (string.IsNullOrEmpty(text))
@@ -96,7 +134,14 @@ public static class PgLogTextRedactor
 
         var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(text, "'?'");
         scrubbed = s_exclusionTupleValues.Replace(scrubbed, "${key}=(?) conflicts with existing key ${key2}=(?)");
-        return s_keyTupleValue.Replace(scrubbed, "${key}=(?)");
+        scrubbed = s_keyTupleValue.Replace(scrubbed, "${key}=(?)");
+        scrubbed = s_failingRow.Replace(scrubbed, "Failing row contains (?)");
+        scrubbed = s_quotedValueShape.Replace(scrubbed, "\"?\"");
+
+        return s_doubleQuoted.Replace(scrubbed, m =>
+            s_identifierNoun.IsMatch(m.Groups["lead"].Value)
+                ? m.Value
+                : m.Groups["lead"].Value + "\"?\"");
     }
 
     /// <summary>SQL: quoted literals AND bare numbers out, identifier-glued digits kept. Null in, null out.</summary>
