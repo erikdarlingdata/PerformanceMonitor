@@ -602,14 +602,37 @@ public sealed class ThemeColorOverrideTests
             .ToDictionary(t => t.key, t => t.color, StringComparer.Ordinal);
         Assert.All(overrides.Values, sentinel => Assert.DoesNotContain(sentinel, stockColors.Values));
 
-        var (dictionary, warnings) = OnStaThread(() =>
+        /* Everything that touches the parsed dictionary happens on the STA thread that built it. The
+           brushes it holds are unfrozen SolidColorBrushes — DispatcherObjects owned by that thread — and
+           reading .Color from the test runner's thread throws "the calling thread cannot access this
+           object" (which is exactly what the first CI run of this test did). Only plain Color structs
+           come back out. */
+        var (parsed, brushColors, colorEntries, warnings) = OnStaThread(() =>
         {
             var captured = new List<string>();
             var previous = ThemeManager.LogWarning;
             ThemeManager.LogWarning = captured.Add;
             try
             {
-                return (ThemeManager.TryParseRegenerated("test", xaml, overrides), captured);
+                var dictionary = ThemeManager.TryParseRegenerated("test", xaml, overrides);
+                if (dictionary is null)
+                {
+                    return (false, new Dictionary<string, Color>(StringComparer.Ordinal), new Dictionary<string, Color>(StringComparer.Ordinal), captured);
+                }
+
+                var brushes = new Dictionary<string, Color>(StringComparer.Ordinal);
+                foreach (var brushKeyText in dependencies.Keys)
+                {
+                    brushes[brushKeyText] = Assert.IsType<SolidColorBrush>(dictionary[ResourceKey(brushKeyText)]).Color;
+                }
+
+                var colors = new Dictionary<string, Color>(StringComparer.Ordinal);
+                foreach (var key in overrides.Keys)
+                {
+                    colors[key] = Assert.IsType<Color>(dictionary[key]);
+                }
+
+                return (true, brushes, colors, captured);
             }
             finally
             {
@@ -618,17 +641,17 @@ public sealed class ThemeColorOverrideTests
         });
 
         Assert.Empty(warnings);
-        Assert.NotNull(dictionary);
+        Assert.True(parsed, "The regenerated theme did not parse.");
 
         var checkedBrushes = 0;
         foreach (var (brushKeyText, colorKey) in dependencies)
         {
-            var brush = Assert.IsType<SolidColorBrush>(dictionary![ResourceKey(brushKeyText)]);
+            var actual = brushColors[brushKeyText];
             var expected = overrides.TryGetValue(colorKey, out var sentinel) ? sentinel : stockColors[colorKey];
 
-            Assert.True(expected == brush.Color,
+            Assert.True(expected == actual,
                 $"{brushKeyText} is derived from {colorKey} and should be {ThemeColorOverrides.ToHex(expected)} after regeneration, " +
-                $"but is {ThemeColorOverrides.ToHex(brush.Color)}.");
+                $"but is {ThemeColorOverrides.ToHex(actual)}.");
             checkedBrushes++;
         }
 
@@ -644,7 +667,7 @@ public sealed class ThemeColorOverrideTests
         /* And the Color entries themselves, for the app XAML that reads a Color directly. */
         foreach (var (key, sentinel) in overrides)
         {
-            Assert.Equal(sentinel, Assert.IsType<Color>(dictionary![key]));
+            Assert.Equal(sentinel, colorEntries[key]);
         }
     }
 
