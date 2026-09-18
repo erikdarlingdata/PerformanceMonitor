@@ -279,11 +279,15 @@ public static class ComparisonBanding
                 : BandByLadder(key, baseline, comparison, coverageCaveat));
         }
 
-        /* Changed rows first, the larger relative move first within each group, then the key — a
-           scale-free order. The old payload ordered by |severity_delta|, which put a saturated ladder's
+        /* Worse rows first, then better, then stable; the larger relative move first within each
+           group, then the key — a scale-free order in which a regression always outranks an
+           improvement. Direction before magnitude matters for the family rollup below: a family whose
+           BLOCKING_EVENTS fell 60% while its LCK_M_S rose 30% has a real regression in it, and ordering by
+           magnitude alone would have made the improvement its worst member and dropped the family from
+           families_worse. The old payload ordered by |severity_delta|, which put a saturated ladder's
            doubling last and a trace's formula slope first. */
         rows = rows
-            .OrderBy(r => r.Status == StatusStable ? 1 : 0)
+            .OrderBy(r => StatusRank(r.Status))
             .ThenByDescending(r => r.RelativeMove ?? 0)
             .ThenBy(r => r.Key, StringComparer.Ordinal)
             .ToList();
@@ -292,7 +296,7 @@ public static class ComparisonBanding
             .GroupBy(r => r.Family, StringComparer.Ordinal)
             .Select(g =>
             {
-                var members = g.ToList(); // already in verdict order, so First() is the worst member
+                var members = g.ToList(); // in verdict order (worse > better > stable, then move), so First() is the worst member
                 var worst = members[0];
                 return new ComparisonFamily(
                     g.Key,
@@ -304,7 +308,7 @@ public static class ComparisonBanding
                     members.Count(m => m.Status == StatusStable),
                     coverageCaveat);
             })
-            .OrderBy(f => f.Status == StatusStable ? 1 : 0)
+            .OrderBy(f => StatusRank(f.Status))
             .ThenByDescending(f => rows.First(r => r.Key == f.WorstKey).RelativeMove ?? 0)
             .ThenBy(f => f.Family, StringComparer.Ordinal)
             .ToList();
@@ -412,6 +416,14 @@ public static class ComparisonBanding
             CoverageCaveat = coverageCaveat
         };
     }
+
+    /// <summary>The verdict order: a regression outranks an improvement outranks no change.</summary>
+    private static int StatusRank(string status) => status switch
+    {
+        StatusWorse => 0,
+        StatusBetter => 1,
+        _ => 2
+    };
 
     /// <summary>|b − a| over the larger magnitude; 0 when both are 0.</summary>
     private static double RelativeMove(double a, double b)

@@ -269,6 +269,42 @@ public sealed class ComparisonBandingTests
     }
 
     /// <summary>
+    /// A family with members moving in BOTH directions: BLOCKING_EVENTS falls 60% (better, the larger
+    /// move) while LCK_M_S rises to a scored level (worse, the smaller move). The regression is the
+    /// family's worst member and the family counts in families_worse — direction outranks magnitude, so
+    /// a large improvement in a sibling symptom cannot hide a real degradation in the same cause. The
+    /// review's catch on the first head; ordered rows read worse, then better, then stable.
+    /// </summary>
+    [Fact]
+    public void AMixedDirectionFamily_IsWorse_WhenAnyMemberIs_WhateverTheLargerMoveDid()
+    {
+        var (baseline, comparison) = Scored(
+            [Blocking(50), Wait("LCK_M_S", 0.02), Wait("CXPACKET", 0.10)],
+            [Blocking(20), Wait("LCK_M_S", 0.03), Wait("CXPACKET", 0.10)]);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+
+        var blocking = result.Rows.Single(r => r.Key == "BLOCKING_EVENTS");
+        var lck = result.Rows.Single(r => r.Key == "LCK_M_S");
+        Assert.Equal(ComparisonBanding.StatusBetter, blocking.Status);
+        Assert.Equal(0.6, blocking.RelativeMove!.Value, precision: 6);
+        Assert.Equal(ComparisonBanding.StatusWorse, lck.Status);
+        Assert.InRange(lck.RelativeMove!.Value, 0.33, 0.34);
+
+        var family = Assert.Single(result.Families, f => f.Family == "lock_contention");
+        Assert.Equal(ComparisonBanding.StatusWorse, family.Status);
+        Assert.Equal("LCK_M_S", family.WorstKey);
+        Assert.Equal(new[] { "LCK_M_S", "BLOCKING_EVENTS" }, family.Members);
+        Assert.Equal(1, family.Worse);
+        Assert.Equal(1, family.Better);
+        Assert.Equal(1, result.FamiliesWorse);
+        Assert.Equal(0, result.FamiliesBetter);
+
+        Assert.Equal(new[] { "LCK_M_S", "BLOCKING_EVENTS", "CXPACKET" }, result.Rows.Select(r => r.Key));
+        Assert.Equal("lock_contention", result.Families[0].Family);
+    }
+
+    /// <summary>
     /// The family map mirrors the collector's wait grouping and the reconciler's symptom families: every
     /// regular key the reconciler folds an anomaly into shares a family with its siblings; a raw CX* or
     /// general lock mode lands where the collector would have grouped it; a key with no family is its own.
@@ -417,6 +453,12 @@ public sealed class ComparisonBandingTests
     };
 
     private static Fact Cpu(double avgPercent) => new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = avgPercent };
+
+    private static Fact Blocking(double eventsPerHour) => new()
+    {
+        Source = "blocking", Key = "BLOCKING_EVENTS", Value = eventsPerHour,
+        Metadata = new Dictionary<string, double> { ["event_count"] = eventsPerHour * 4, ["period_hours"] = 4, ["observed_hours"] = 4 }
+    };
 
     private static Fact Io(double avgReadMs) => new() { Source = "io", Key = "IO_READ_LATENCY_MS", Value = avgReadMs };
 
