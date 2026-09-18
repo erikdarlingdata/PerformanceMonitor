@@ -40,6 +40,16 @@ public static class DarlingPgWaitReader
         double AvgWaitTimeMs);
 
     /// <summary>
+    /// One page of wait events plus the denominator their shares are taken over (#3541 A7).
+    /// <para><c>WindowTotalWaitTimeMs</c> is the wait time of EVERY event in the window, not of the rows on the
+    /// page. Off the same statement as the rows, as a window aggregate over the grouped result before
+    /// <c>LIMIT</c>, so it cannot drift from them. On the page rather than on <see cref="PgWaitRow"/>: it is
+    /// a fact about the window, and a per-row copy would invite a reader to sum it. Zero when the page is
+    /// empty, which is the same fact twice.</para>
+    /// </summary>
+    public sealed record PgWaitStatsPage(List<PgWaitRow> Rows, double WindowTotalWaitTimeMs);
+
+    /// <summary>
     /// Aggregated over the window from the delta columns, not the raw cumulative counters — summing
     /// cumulative values across snapshots would multiply the whole history by the snapshot count.
     /// <para>Unnamed events are surfaced rather than filtered: <c>wait_type</c> and <c>wait_event</c>
@@ -51,6 +61,12 @@ public static class DarlingPgWaitReader
     /// caller-supplied limit and then applied it with <c>Take(limit)</c> — so a caller asking for more than 50
     /// silently got 50, and every request below that fetched rows only to discard them. Same shape as every
     /// other read in this store.</para>
+    /// <para><b><c>window_total_wait_time_ms</c> is the whole window's wait time, on every row</b> (#3541 A7).
+    /// <c>SUM(SUM(delta_wait_time_us)) OVER ()</c> is a window aggregate over the GROUPED result, evaluated
+    /// after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>, so it sums every event
+    /// that accrued time rather than the events the cap admitted. The tool used to divide each row by the sum
+    /// of the rows it had fetched, so a three-row page summed to 100% of "total" wait by construction. One
+    /// pass over a result the query has already grouped; no second statement.</para>
     /// </summary>
     public const string PgWaitStatsSql = """
         SELECT
@@ -62,7 +78,9 @@ public static class DarlingPgWaitReader
                 WHEN SUM(delta_waits) > 0
                 THEN (SUM(delta_wait_time_us) / 1000.0) / SUM(delta_waits)
                 ELSE 0
-            END AS avg_wait_time_ms
+            END AS avg_wait_time_ms,
+            /* #3541 A7: the WINDOW's total, not the page's - see the remarks. Same on every row. */
+            SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -75,11 +93,22 @@ public static class DarlingPgWaitReader
         LIMIT $4
         """;
 
+    /// <summary>The rows alone — the WPF Viewer's grid, which has no column for the window total.</summary>
     public static async Task<List<PgWaitRow>> GetPgWaitStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgWaitStatsPageAsync(postgres, serverId, startUtc, endUtc, limit, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read: <paramref name="limit"/> rows, heaviest first, and the whole window's wait time beside
+    /// them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
+    /// </summary>
+    public static async Task<PgWaitStatsPage> GetPgWaitStatsPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgWaitRow>();
+        double windowTotalWaitTimeMs = 0;
         await using var command = postgres.CreateCommand(PgWaitStatsSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -94,6 +123,8 @@ public static class DarlingPgWaitReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+            windowTotalWaitTimeMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5));
             rows.Add(new PgWaitRow(
                 reader.GetString(0),
                 reader.GetString(1),
@@ -102,6 +133,6 @@ public static class DarlingPgWaitReader
                 reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4))));
         }
 
-        return rows;
+        return new PgWaitStatsPage(rows, windowTotalWaitTimeMs);
     }
 }

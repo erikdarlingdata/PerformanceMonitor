@@ -108,8 +108,12 @@ public sealed class PgInt64IdentityWireShapeTests
     private static JsonElement TopQueries(IEnumerable<long> queryIds, out JsonDocument document)
     {
         var rows = queryIds.Select(StatementRow).ToList();
+        /* #3541 A7: the projection takes a PAGE - rows plus the window's total - rather than bare rows. The
+           total here is the rows' own sum, which is the "page is the whole window" case; the share arithmetic
+           is DarlingMcpPgPercentDenominatorTests' subject, not this file's. */
+        var page = new DarlingPgStatementReader.PgTopQueriesPage(rows, rows.Sum(r => r.TotalExecTimeMs));
         document = JsonDocument.Parse(
-            DarlingMcpPgStatementTools.BuildTopQueriesJson("pg-target-01", 24, rows, 20));
+            DarlingMcpPgStatementTools.BuildTopQueriesJson("pg-target-01", 24, page, 20));
         return document.RootElement.GetProperty("queries");
     }
 

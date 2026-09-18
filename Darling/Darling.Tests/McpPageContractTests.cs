@@ -9,8 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -50,6 +52,16 @@ namespace Darling.Tests;
 /// written for the purpose, because a census whose matcher has quietly stopped matching reports a clean bill
 /// of health. <c>Lite.Tests/McpPageContractTests</c> executes the Lite tools against a real DuckDB;
 /// <see cref="McpPageContractLivePostgresTests"/> executes the Darling ones against live Postgres.</para>
+///
+/// <para><b>#3541 A7 extends the dialect to PERCENTS.</b> Five PostgreSQL tools divided every row by the sum
+/// of the rows they had fetched and published the result as <c>pct_of_total_*</c>, so a three-row page summed
+/// to 100% of "total" by construction. The rule added here: a share's denominator is the WINDOW's figure,
+/// computed on the same statement as the rows (<c>SUM(...) OVER ()</c> over the grouped result, before
+/// <c>LIMIT</c>), published as <c>total_*</c>; the page's own sum travels as <c>returned_*</c>; and every
+/// description names which denominator its shares use. <c>*_of_returned</c> remains the ONE other spelling,
+/// for a share that genuinely is of the page and says so (<c>get_pg_database_stats</c>' cache ratio). The
+/// arithmetic through each projection is <see cref="DarlingMcpPgPercentDenominatorTests"/>' subject; this
+/// file holds the census.</para>
 /// </summary>
 public sealed class McpPageContractTests
 {
@@ -279,6 +291,291 @@ public sealed class McpPageContractTests
             keys.Order().ToArray());
     }
 
+    /* ───────────────────────── #3541 A7: percents name their denominator ───────────────────────── */
+
+    /// <summary>
+    /// The five tools whose shares were of the page, with the three keys each must now publish: the per-row
+    /// share, the WINDOW total it divides by, and the page's own sum under a name that says so. Darling-only —
+    /// Lite has no PostgreSQL tools — so there is no twin-parity arm; the cross-SKU sweep below is the
+    /// negative census over every paged tool body on BOTH SKUs instead.
+    /// </summary>
+    public static readonly (Type Tools, string ToolName, string ShareKey, string TotalKey, string ReturnedKey)[] PercentTools =
+    [
+        (typeof(DarlingMcpPgStatementTools), "get_pg_top_queries", "pct_of_total_time", "total_exec_time_ms", "returned_exec_time_ms"),
+        (typeof(DarlingMcpPgWaitTools), "get_pg_wait_stats", "pct_of_total_wait", "total_wait_time_ms", "returned_wait_time_ms"),
+        (typeof(DarlingMcpPgWaitSamplingTools), "get_pg_wait_sampling", "pct_of_samples", "total_samples", "returned_samples"),
+        (typeof(DarlingMcpPgKernelStatsTools), "get_pg_kernel_stats", "pct_of_total_cpu", "total_cpu_ms", "returned_cpu_ms"),
+        (typeof(DarlingMcpPgIoTools), "get_pg_io_stats", "pct_of_total_reads", "total_reads", "returned_reads"),
+    ];
+
+    /// <summary>The reader consts behind them: each must carry its window total on the SAME statement as the
+    /// rows and bind its cap as a parameter.</summary>
+    private static readonly (string Name, string Sql)[] PercentReads =
+    [
+        (nameof(DarlingPgStatementReader.PgTopQueriesSql), DarlingPgStatementReader.PgTopQueriesSql),
+        (nameof(DarlingPgWaitReader.PgWaitStatsSql), DarlingPgWaitReader.PgWaitStatsSql),
+        (nameof(DarlingPgWaitSamplingReader.PgWaitSamplingSql), DarlingPgWaitSamplingReader.PgWaitSamplingSql),
+        (nameof(DarlingPgKernelStatsReader.PgKernelStatsSql), DarlingPgKernelStatsReader.PgKernelStatsSql),
+        (nameof(DarlingPgIoReader.PgIoSql), DarlingPgIoReader.PgIoSql),
+    ];
+
+    /// <summary>A local that is the sum of a fetched collection — the page sum the defect divided by.</summary>
+    private static readonly Regex PageSumLocal = new(@"\bvar\s+(\w+)\s*=\s*\w+\s*\.Sum\(", RegexOptions.Compiled);
+
+    /// <summary>A share key whose divisor is the named local. <c>[^,;]</c> keeps the match inside one
+    /// initializer entry: the first comma in every share expression here is the one inside
+    /// <c>Math.Round(x, 1)</c>, and the division precedes it.</summary>
+    private static Regex ShareOverLocal(string local) =>
+        new($@"\b\w*pct\w*\s*=[^,;]*?/\s*{Regex.Escape(local)}\b", RegexOptions.Compiled);
+
+    /// <summary>A <c>total_*</c> key assigned from the named local, rounded or bare.</summary>
+    private static Regex TotalFromLocal(string local) =>
+        new($@"\btotal_\w+\s*=\s*(?:Math\.Round\(\s*)?{Regex.Escape(local)}\b", RegexOptions.Compiled);
+
+    /// <summary>The window total on the reader's statement: an <c>OVER ()</c> aggregate aliased <c>window_total_*</c>.</summary>
+    private static readonly Regex WindowTotalColumn = new(@"\)\s+OVER \(\)(?:\s*/\s*1000\.0)?(?:\s+AS\s+bigint\))?\s+AS\s+window_total_\w+", RegexOptions.Compiled);
+
+    /// <summary>The page-record read the fixed tools go through: the tool fetches <c>limit + 1</c> and observes.</summary>
+    private static readonly Regex PageTruncationObserved = new(@"var truncated = page\.Rows\.Count > limit;", RegexOptions.Compiled);
+
+    [Fact]
+    public void EveryPercentTool_NamesItsDenominator_AndItsPageBound_InItsDescription()
+    {
+        foreach (var (type, name, shareKey, totalKey, returnedKey) in PercentTools)
+        {
+            var method = ToolMethod(type, name);
+            var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+            Assert.Contains("truncated", description, StringComparison.Ordinal);
+            Assert.Contains("limit", description, StringComparison.Ordinal);
+            /* The sentence that makes the numbers readable: which denominator, and that it is not the page. */
+            Assert.Contains("SHARES ARE OF THE WINDOW, NOT OF THE PAGE", description, StringComparison.Ordinal);
+            Assert.Contains(shareKey, description, StringComparison.Ordinal);
+            Assert.Contains(totalKey, description, StringComparison.Ordinal);
+            Assert.Contains(returnedKey, description, StringComparison.Ordinal);
+            Assert.Contains("does not sum to 100%", description, StringComparison.Ordinal);
+
+            var limit = method.GetParameters().Single(p => p.Name == "limit");
+            var limitDescription = limit.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            Assert.Contains("truncated", limitDescription, StringComparison.Ordinal);
+            Assert.Contains("whole window", limitDescription, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The denominator is on the SAME statement as the rows — a window aggregate over the grouped result,
+    /// which PostgreSQL evaluates before <c>LIMIT</c> — so it cannot drift from them and costs no second read.
+    /// And the cap is a parameter: <c>get_pg_top_queries</c> carried <c>LIMIT 50</c> as a literal under a limit
+    /// the tool accepts up to 1,000, which is the A3 shape and the reason its share had TWO wrong denominators.
+    /// </summary>
+    [Fact]
+    public void EveryPercentRead_CarriesItsWindowTotalOnTheSameStatement_AndBindsItsCap()
+    {
+        foreach (var (name, sql) in PercentReads)
+        {
+            Assert.True(WindowTotalColumn.IsMatch(sql),
+                $"{name} has no `... OVER () AS window_total_*` column, so the tool has nothing but the page to divide by");
+            Assert.False(LiteralLimit.IsMatch(sql), $"{name} caps with a literal: {LiteralLimit.Match(sql).Value}");
+            Assert.True(ParameterLimit.IsMatch(sql.TrimEnd()), $"{name} does not end in a parameterised LIMIT");
+            /* Before the cap, so it is the window's and not the page's: the OVER () sits above the LIMIT. */
+            Assert.True(sql.IndexOf("OVER ()", StringComparison.Ordinal) < sql.LastIndexOf("LIMIT", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// The kernel read's ordering was <c>ORDER BY 3 + 4 DESC</c> — meant as two ordinals, read by PostgreSQL as
+    /// the constant 7 and dropped, so the "ranked by CPU" page was the alphabetically-first series. Found when
+    /// A7's three-row page came back 60 / 10 / 30 against live PostgreSQL 18. Pinned by SHAPE: the sort key
+    /// names the two differenced columns, and no integer-expression ordinal survives in any of these reads.
+    /// </summary>
+    [Fact]
+    public void TheKernelRead_RanksByCpu_NotByAConstant()
+    {
+        var sql = DarlingPgKernelStatsReader.PgKernelStatsSql;
+        Assert.Contains("ORDER BY user_ms + system_ms DESC", sql, StringComparison.Ordinal);
+
+        foreach (var (name, read) in PercentReads)
+        {
+            Assert.False(Regex.IsMatch(read, @"ORDER BY\s+\d+\s*[-+*/]\s*\d+"),
+                $"{name} orders by an arithmetic expression on ordinals, which PostgreSQL folds to a constant and ignores");
+        }
+    }
+
+    /// <summary>
+    /// The sampling read cannot name its <c>sample_count</c> alias inside a window function of the same
+    /// level, so the differencing CASE is written twice — once as the row figure, once inside the
+    /// <c>SUM(...) OVER ()</c>. Two copies of one expression drift; this holds them identical modulo
+    /// whitespace, so the window total is provably the sum of the very figure the rows report.
+    /// </summary>
+    [Fact]
+    public void TheSamplingRead_SumsTheSameCaseItReportsPerRow()
+    {
+        var cases = Regex.Matches(DarlingPgWaitSamplingReader.PgWaitSamplingSql, @"CASE WHEN n\.sample_count.*?\bEND\b", RegexOptions.Singleline)
+            .Select(m => Regex.Replace(m.Value, @"\s+", " "))
+            .ToArray();
+
+        Assert.Equal(2, cases.Length);
+        Assert.Equal(cases[0], cases[1]);
+        Assert.Contains("coalesce(o.sample_count, 0)", cases[0], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The positive half over the five tool bodies: the share divides by the page record's window total, the
+    /// page's own sum reaches only a <c>returned_*</c> key, truncation is observed off the <c>limit + 1</c> fetch.
+    /// </summary>
+    [Fact]
+    public void EveryPercentTool_DividesByTheWindowTotal_AndPublishesThePageSumAsReturned()
+    {
+        foreach (var (type, name, shareKey, totalKey, returnedKey) in PercentTools)
+        {
+            var body = Strip(ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), name));
+
+            Assert.Contains("page.WindowTotal", body, StringComparison.Ordinal);
+            Assert.True(PageTruncationObserved.IsMatch(body), $"{name}: truncation is not observed off the page record");
+            Assert.Contains("limit + 1", body, StringComparison.Ordinal);
+            Assert.Contains($"{returnedKey} =", body, StringComparison.Ordinal);
+            Assert.Contains($"{totalKey} =", body, StringComparison.Ordinal);
+            Assert.Contains($"{shareKey} =", body, StringComparison.Ordinal);
+
+            foreach (Match local in PageSumLocal.Matches(body))
+            {
+                var sum = local.Groups[1].Value;
+                Assert.False(ShareOverLocal(sum).IsMatch(body),
+                    $"{name}: a share divides by `{sum}`, which is a sum of the rows fetched — divide by the page's window total");
+                Assert.False(TotalFromLocal(sum).IsMatch(body),
+                    $"{name}: a total_* key is `{sum}`, a sum of the rows fetched — publish it as returned_* and the window's as total_*");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The negative half, over EVERY tool body on both SKUs that takes a <c>limit</c> or <c>top</c>: no share
+    /// anywhere divides by a sum of the rows fetched, and no <c>total_*</c> key is one. Scoped to paged tools
+    /// because an unpaged read's sum over all its rows IS a total (<c>get_session_summary</c>,
+    /// <c>get_plan_cache_stats</c>) and a census that flagged those would be asserting a rule the finding did
+    /// not state.
+    ///
+    /// <para><b>One stated allowance.</b> <c>get_pg_database_stats</c> publishes <c>total_temp_files</c> /
+    /// <c>total_temp_bytes</c> / <c>total_deadlocks</c> summed over its top-N page — beside <c>limit_reached</c>,
+    /// a note that says the totals cover only the databases returned, a <c>database_count</c> the web tile
+    /// labels "Databases returned", and a share it already spells <c>_of_returned</c>. Honest by disclosure
+    /// rather than by name; moving it to the window idiom means relabelling the web tile's figures, which
+    /// sits outside the lane that added this census. Named here so it fails loudly the day the allowance is
+    /// no longer needed, rather than being carried silently.</para>
+    /// </summary>
+    [Fact]
+    public void NoPagedTool_DividesByOrPublishesAPageSumAsATotal_OnEitherSku()
+    {
+        var allowedPageSummedTotals = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "get_pg_database_stats:total_temp_files",
+            "get_pg_database_stats:total_temp_bytes",
+            "get_pg_database_stats:total_deadlocks",
+        };
+        var allowancesUsed = new HashSet<string>(StringComparer.Ordinal);
+        var examined = 0;
+
+        foreach (var (file, source) in AllMcpToolSources())
+        {
+            var marks = Regex.Matches(source, @"\[McpServerTool\(Name = ""([a-z_0-9]+)""");
+            for (var i = 0; i < marks.Count; i++)
+            {
+                var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                var body = source[marks[i].Index..end];
+                if (!Regex.IsMatch(body, @"\bint\s+(limit|top)\b"))
+                {
+                    continue;
+                }
+
+                examined++;
+                var toolName = marks[i].Groups[1].Value;
+                var text = Strip(body);
+
+                foreach (Match local in PageSumLocal.Matches(text))
+                {
+                    var sum = local.Groups[1].Value;
+                    var share = ShareOverLocal(sum).Match(text);
+                    Assert.False(share.Success,
+                        $"{file} {toolName}: `{share.Value}` divides by a sum of the rows fetched — a page share under a share-of-total name");
+
+                    var total = TotalFromLocal(sum).Match(text);
+                    if (total.Success)
+                    {
+                        var key = toolName + ":" + Regex.Match(total.Value, @"\btotal_\w+").Value;
+                        Assert.True(allowedPageSummedTotals.Contains(key),
+                            $"{file} {toolName}: `{total.Value}` publishes a sum of the rows fetched under a total's name — publish the window's total, or name it returned_*");
+                        allowancesUsed.Add(key);
+                    }
+                }
+            }
+        }
+
+        /* Population controls: a sweep that parsed nothing passes for free, and an allowance nobody needs
+           is a widened exemption waiting for a defect to hide under. 82 bodies at the time of writing. */
+        Assert.True(examined >= 60, $"only {examined} paged tool bodies were examined across both SKUs; the marker or the signature pattern has stopped matching");
+        Assert.True(allowedPageSummedTotals.SetEquals(allowancesUsed),
+            "stated allowances no longer match what the sweep finds — remove the ones that are no longer needed: "
+            + string.Join(", ", allowedPageSummedTotals.Except(allowancesUsed)));
+    }
+
+    /// <summary>The A7 matchers, witnessed against the defect as it shipped and the fix as it landed.</summary>
+    [Fact]
+    public void TheA7Discriminators_FlagTheDefectShapes_AndPassTheFixedOnes()
+    {
+        /* The defect, verbatim from the shipped statement tool. */
+        const string defect = """
+            var totalTimeMs = rows.Sum(r => r.TotalExecTimeMs);
+            var result = rows.Take(limit).Select(r => new
+            {
+                pct_of_total_time = totalTimeMs > 0 ? Math.Round((double)r.TotalExecTimeMs / totalTimeMs * 100, 1) : 0,
+            });
+            return JsonSerializer.Serialize(new { total_exec_time_ms = totalTimeMs, });
+            """;
+        var local = Assert.Single(PageSumLocal.Matches(defect)).Groups[1].Value;
+        Assert.Equal("totalTimeMs", local);
+        Assert.Matches(ShareOverLocal(local), defect);
+        Assert.Matches(TotalFromLocal(local), defect);
+        /* The rounded form the wait tool used. */
+        Assert.Matches(TotalFromLocal("totalWaitMs"), "total_wait_time_ms = Math.Round(totalWaitMs, 1),");
+        /* A multi-line share, the sampling tool's shape. */
+        Assert.Matches(ShareOverLocal("totalSamples"), "pct_of_samples = totalSamples > 0\n    ? Math.Round((double)r.SampleCount / totalSamples * 100, 1)\n    : 0,");
+
+        /* The fix: the page sum feeds only returned_*, the share divides by the window total. */
+        const string fixedShape = """
+            var truncated = page.Rows.Count > limit;
+            var windowTotalMs = page.WindowTotalExecTimeMs;
+            var returnedMs = rows.Sum(r => r.TotalExecTimeMs);
+            pct_of_total_time = windowTotalMs > 0 ? Math.Round((double)r.TotalExecTimeMs / windowTotalMs * 100, 1) : 0,
+            total_exec_time_ms = windowTotalMs,
+            returned_exec_time_ms = returnedMs,
+            returned_pct_of_total = windowTotalMs > 0 ? Math.Round((double)returnedMs / windowTotalMs * 100, 1) : 0,
+            """;
+        var fixedLocal = Assert.Single(PageSumLocal.Matches(fixedShape)).Groups[1].Value;
+        Assert.Equal("returnedMs", fixedLocal);
+        Assert.DoesNotMatch(ShareOverLocal(fixedLocal), fixedShape);
+        Assert.DoesNotMatch(TotalFromLocal(fixedLocal), fixedShape);
+        Assert.Matches(PageTruncationObserved, fixedShape);
+
+        Assert.Matches(WindowTotalColumn, "CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms");
+        Assert.Matches(WindowTotalColumn, "SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms");
+        Assert.Matches(WindowTotalColumn, "SUM(user_ms + system_ms) OVER () AS window_total_cpu_ms");
+        Assert.DoesNotMatch(WindowTotalColumn, "GREATEST(reads - LAG(reads) OVER series, 0) AS d_reads");
+    }
+
+    /// <summary>Every MCP tool source on both SKUs, LF-normalised, for the cross-SKU sweep. Through
+    /// <see cref="RepoFile"/> so a worktree checkout resolves the same root every other pin uses.</summary>
+    private static IEnumerable<(string File, string Source)> AllMcpToolSources()
+    {
+        foreach (var directory in new[] { "Darling/PerformanceMonitor.Darling.Service/Mcp", "Lite/Mcp" })
+        {
+            var root = RepoFile.PathTo(directory);
+            foreach (var file in System.IO.Directory.EnumerateFiles(root, "*.cs").Order(StringComparer.Ordinal))
+            {
+                yield return (System.IO.Path.GetFileName(file), System.IO.File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal));
+            }
+        }
+    }
+
     /* ───────────────────────── plumbing ───────────────────────── */
 
     private static MethodInfo ToolMethod(Type type, string toolName) => type
@@ -334,6 +631,8 @@ public sealed class McpPageContractLivePostgresTests
     [
         "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "config_alert_log",
         "long_query_completions", "plan_correction", "waiting_tasks", "wait_stats",
+        /* #3541 A7: the five PostgreSQL percent tools' tables. */
+        "pg_statement_stats", "pg_wait_stats", "pg_wait_sampling", "pg_kernel_stats", "pg_io_stats",
     ];
 
     [Fact]
@@ -481,6 +780,176 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", CollectionIdGenerator.Next(), now, ServerId, 
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #3541 A7 against live PostgreSQL: the SQL that produces each window total is the thing the in-process
+    /// tests cannot see, so it is executed here through the real tool methods. Three series per table at
+    /// 600 / 300 / 100 — the whole window is 1,000 — read at <c>limit = 1</c>: the one row's share must be
+    /// <b>60</b>, the published total must be the seeded window's 1,000, and <c>truncated</c> must be true;
+    /// at <c>limit = 3</c> the shares must be 60 / 30 / 10, the page sum must equal the total, and
+    /// <c>truncated</c> must be false. The pair is what separates the fix from the defect: a page that IS the
+    /// window sums to 100 under either arithmetic.
+    ///
+    /// <para>The cumulative tables (<c>pg_wait_sampling</c>, <c>pg_kernel_stats</c>, <c>pg_io_stats</c>) and the
+    /// block/WAL side of <c>pg_statement_stats</c> are seeded with TWO snapshots, because their reads difference
+    /// newest against oldest and a single sample has no interval. The kernel series are seeded so the HOTTEST
+    /// query has the HIGHEST <c>query_id</c>: under the read's old <c>ORDER BY 3 + 4</c> — a constant, not two
+    /// ordinals — the page came back in <c>query_id</c> order and a <c>limit = 1</c> page held the coolest
+    /// query; the assertion that the 60% row leads is what pins the ranking.</para>
+    /// </summary>
+    [Fact]
+    public async Task PercentTools_ShareTheWindowNotThePage_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live percent-denominator test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t1 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            var t0 = t1.AddMinutes(-10);
+            long[] series = [600, 300, 100];
+            /* Spread over the int8 range and NOT in share order: the hottest series has the middle id, the
+               coolest the smallest, so any read that falls back to id order shows it. */
+            long[] queryIds = [42L, 7_000_000_000_000_000_001L, -4_185_925_123_159_566_327L];
+
+            for (var i = 0; i < 3; i++)
+            {
+                /* Statements: the rate columns are stored deltas, so only the second snapshot carries them. */
+                foreach (var (t, delta) in new[] { (t0, 0L), (t1, series[i]) })
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
+     calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, storage_blks_read, orcache_blks_hit,
+     temp_blks_read, temp_blks_written, wal_bytes, max_exec_peakmem_bytes, delta_calls, delta_total_exec_time_ms, delta_rows)
+VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 3, 2, 0, 0, 1000, 2097152, $6, $7, $8)",
+                        CollectionIdGenerator.Next(), t, ServerId, ServerName, queryIds[i], delta > 0 ? 10L : 0L, delta, delta > 0 ? 100L : 0L);
+                }
+
+                /* Aurora waits: stored deltas, one snapshot is enough. Microseconds in the store. */
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_wait_stats (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event, waits, wait_time_us, delta_waits, delta_wait_time_us)
+VALUES ($1, $2, $3, $4, $5, $6, 'IO', $7, 100, 9999999, 10, $8)",
+                    CollectionIdGenerator.Next(), t1, ServerId, ServerName, i + 1, (long)(i + 100), "DataFileRead" + i, series[i] * 1000);
+
+                /* Sampled waits: cumulative, oldest 100 -> newest 100 + share. */
+                foreach (var (t, count) in new[] { (t0, 100L), (t1, 100L + series[i]) })
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count)
+VALUES ($1, $2, $3, $4, 'IO', 'DataFileRead', $5, $6, 10, 1)",
+                        CollectionIdGenerator.Next(), t, ServerId, ServerName, queryIds[i], count);
+                }
+
+                /* Kernel: cumulative user + system, oldest (100, 0) -> newest (100 + half the share, half the
+                   share). Halves, because every seeded share is even and the arithmetic stays exact in a double. */
+                foreach (var (t, user, system) in new[] { (t0, 100.0, 0.0), (t1, 100.0 + series[i] / 2.0, series[i] / 2.0) })
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_kernel_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, exec_user_time_ms, exec_system_time_ms, plan_cpu_time_ms, exec_read_bytes, exec_write_bytes, minor_faults, major_faults, stats_since)
+VALUES ($1, $2, $3, $4, 'app', $5, $6, $7, 0, 8192, 0, 0, 0, $8)",
+                        CollectionIdGenerator.Next(), t, ServerId, ServerName, queryIds[i], user, system, t0.AddDays(-1));
+                }
+
+                /* I/O: cumulative reads and read time, three contexts of one backend type. */
+                var context = i == 0 ? "normal" : i == 1 ? "vacuum" : "bulkread";
+                foreach (var (t, reads, readTime) in new[] { (t0, 1000L, 100.0), (t1, 1000L + series[i], 100.0 + series[i] / 10.0) })
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, reads, read_time_ms, writes, write_time_ms, writebacks, writeback_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, fsyncs, fsync_time_ms, stats_reset, read_bytes, write_bytes, extend_bytes)
+VALUES ($1, $2, $3, $4, 'client backend', 'relation', $5, $6, $7, 5, 1, 0, 0, 1, 0, 8192, 100, 0, 0, 0, 0, NULL, NULL, NULL, NULL)",
+                        CollectionIdGenerator.Next(), t, ServerId, ServerName, context, reads, readTime);
+                }
+            }
+
+            /* One assertion set, five tools. The hot row's id is asserted on the three per-query reads so a
+               read that still ranks by id rather than by weight fails on the ROW, not only on the share. */
+            var hot = queryIds[0].ToString(CultureInfo.InvariantCulture);
+
+            AssertPercentPair(
+                await DarlingMcpPgStatementTools.GetPgTopQueries(postgres, ServerName, 4, 1),
+                await DarlingMcpPgStatementTools.GetPgTopQueries(postgres, ServerName, 4, 3),
+                "queries_returned", "total_exec_time_ms", "returned_exec_time_ms", "returned_pct_of_total", "queries", "pct_of_total_time", hot);
+
+            AssertPercentPair(
+                await DarlingMcpPgWaitTools.GetPgWaitStats(postgres, ServerName, 4, 1),
+                await DarlingMcpPgWaitTools.GetPgWaitStats(postgres, ServerName, 4, 3),
+                "wait_events_returned", "total_wait_time_ms", "returned_wait_time_ms", "returned_pct_of_total", "waits", "pct_of_total_wait", hotQueryId: null);
+
+            AssertPercentPair(
+                await DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(postgres, ServerName, 4, 1),
+                await DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(postgres, ServerName, 4, 3),
+                "waits_returned", "total_samples", "returned_samples", "returned_pct_of_total", "waits", "pct_of_samples", hot);
+
+            AssertPercentPair(
+                await DarlingMcpPgKernelStatsTools.GetPgKernelStats(postgres, ServerName, 4, 1),
+                await DarlingMcpPgKernelStatsTools.GetPgKernelStats(postgres, ServerName, 4, 3),
+                "queries_returned", "total_cpu_ms", "returned_cpu_ms", "returned_pct_of_total", "queries", "pct_of_total_cpu", hot);
+
+            AssertPercentPair(
+                await DarlingMcpPgIoTools.GetPgIoStats(postgres, ServerName, 4, 1),
+                await DarlingMcpPgIoTools.GetPgIoStats(postgres, ServerName, 4, 3),
+                "combination_count", "total_reads", "returned_reads", "returned_pct_of_total_reads", "combinations", "pct_of_total_reads", hotQueryId: null);
+
+            /* The second I/O denominator: read time, inferred as tracked because non-zero times are seeded
+               and no configuration row says otherwise. 100 ms across the window, 60 on the one-row page. */
+            var ioCut = JsonDocument.Parse(await DarlingMcpPgIoTools.GetPgIoStats(postgres, ServerName, 4, 1)).RootElement;
+            Assert.True(ioCut.GetProperty("io_timing_tracked").GetBoolean());
+            Assert.Equal(100.0, ioCut.GetProperty("total_read_time_ms").GetDouble());
+            Assert.Equal(60.0, ioCut.GetProperty("returned_read_time_ms").GetDouble());
+            Assert.Equal(60.0, ioCut.GetProperty("combinations")[0].GetProperty("pct_of_total_read_time").GetDouble());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The cut page and the whole page over one seeded window. Cut: one row, share 60, total 1,000, page sum
+    /// 600, truncated. Whole: three rows at 60 / 30 / 10, page sum equal to the total, not truncated. And on
+    /// the per-query reads, the cut page's row IS the hottest series by id.
+    /// </summary>
+    private static void AssertPercentPair(
+        string cutJson, string wholeJson,
+        string returnedCountKey, string totalKey, string returnedKey, string ratioKey, string rowsKey, string shareKey,
+        string? hotQueryId)
+    {
+        var cut = JsonDocument.Parse(cutJson).RootElement;
+        Assert.False(cut.TryGetProperty("status", out _), "expected a data-bearing payload, got a status envelope: " + cutJson);
+        Assert.Equal(1, cut.GetProperty(returnedCountKey).GetInt32());
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(1000.0, cut.GetProperty(totalKey).GetDouble());
+        Assert.Equal(600.0, cut.GetProperty(returnedKey).GetDouble());
+        Assert.Equal(60.0, cut.GetProperty(ratioKey).GetDouble());
+        var cutRow = Assert.Single(cut.GetProperty(rowsKey).EnumerateArray());
+        Assert.Equal(60.0, cutRow.GetProperty(shareKey).GetDouble());
+        if (hotQueryId is not null)
+        {
+            Assert.Equal(hotQueryId, cutRow.GetProperty("queryid").GetString());
+        }
+
+        var whole = JsonDocument.Parse(wholeJson).RootElement;
+        Assert.Equal(3, whole.GetProperty(returnedCountKey).GetInt32());
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+        Assert.Equal(1000.0, whole.GetProperty(totalKey).GetDouble());
+        Assert.Equal(1000.0, whole.GetProperty(returnedKey).GetDouble());
+        Assert.Equal(100.0, whole.GetProperty(ratioKey).GetDouble());
+        Assert.Equal(new[] { 60.0, 30.0, 10.0 },
+            whole.GetProperty(rowsKey).EnumerateArray().Select(r => r.GetProperty(shareKey).GetDouble()).ToArray());
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)

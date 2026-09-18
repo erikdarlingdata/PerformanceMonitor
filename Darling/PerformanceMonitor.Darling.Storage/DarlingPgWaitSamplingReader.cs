@@ -52,12 +52,30 @@ public static class DarlingPgWaitSamplingReader
         bool CounterReset,
         DateTime CaptureTime);
 
+    /// <summary>
+    /// One page of sampled waits plus the denominator their shares are taken over (#3541 A7).
+    /// <para><c>WindowTotalSamples</c> is the differenced sample count of EVERY (event type, event, query) series
+    /// in the window, not of the rows on the page. Off the same statement as the rows, as a window aggregate
+    /// over the joined result before <c>LIMIT</c>, so it cannot drift from them. On the page rather than on
+    /// <see cref="PgWaitSamplingRow"/>: a fact about the window, not a series, and a per-row copy would invite
+    /// a reader to sum it.</para>
+    /// </summary>
+    public sealed record PgWaitSamplingPage(List<PgWaitSamplingRow> Rows, long WindowTotalSamples);
+
     /* Newest and oldest per key in one pass each, then differenced. Two DISTINCT ON scans rather than a
        window function because the key is compound and the hypertable is ordered by time - the same idiom
        every other reader here uses.
 
        The key does NOT include database_name: the profile is cluster-wide and the table carries no such
-       column, deliberately (#2599 is about not inventing that attribution). */
+       column, deliberately (#2599 is about not inventing that attribution).
+
+       #3541 A7: window_total_samples is the WHOLE window's differenced sample count, on every row. A window
+       aggregate over the joined result - PostgreSQL evaluates it before ORDER BY / LIMIT - so it sums every
+       series the window holds rather than the rows the cap admits. The tool used to divide each row by the
+       sum of the rows it had fetched, so a three-row page summed to 100% of the samples by construction.
+       The CASE is repeated inside the SUM rather than referenced by alias because a window function cannot
+       name a select-list alias of the same level; the two expressions are pinned identical by test. Appended
+       LAST so the ordinal ORDER BY 4 still names sample_count. */
     public const string PgWaitSamplingSql = """
         WITH newest AS (
             SELECT DISTINCT ON (event_type, event, query_id)
@@ -88,7 +106,11 @@ public static class DarlingPgWaitSamplingReader
             n.profile_period_ms,
             n.backend_count,
             (n.sample_count < o.sample_count) AS counter_reset,
-            n.collection_time
+            n.collection_time,
+            SUM(CASE WHEN n.sample_count < o.sample_count
+                     THEN n.sample_count
+                     ELSE n.sample_count - coalesce(o.sample_count, 0)
+                END) OVER () AS window_total_samples
         FROM newest AS n
         LEFT JOIN oldest AS o
           ON  o.event_type IS NOT DISTINCT FROM n.event_type
@@ -98,13 +120,24 @@ public static class DarlingPgWaitSamplingReader
         LIMIT $4
         """;
 
+    /// <summary>The rows alone — the WPF Viewer's grid, which has no column for the window total.</summary>
     public static async Task<List<PgWaitSamplingRow>> GetPgWaitSamplingAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgWaitSamplingPageAsync(postgres, serverId, startUtc, endUtc, limit, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read: <paramref name="limit"/> rows, most-sampled first, and the whole window's sample count
+    /// beside them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
+    /// </summary>
+    public static async Task<PgWaitSamplingPage> GetPgWaitSamplingPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var rows = new List<PgWaitSamplingRow>();
+        long windowTotalSamples = 0;
         await using var command = postgres.CreateCommand(PgWaitSamplingSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -120,6 +153,8 @@ public static class DarlingPgWaitSamplingReader
         {
             var samples = reader.IsDBNull(3) ? 0 : reader.GetInt64(3);
             var periodMs = reader.IsDBNull(4) ? 10 : reader.GetInt32(4);
+            /* SUM over bigint widens to numeric in PostgreSQL; identical on every row, last write wins. */
+            windowTotalSamples = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8));
 
             rows.Add(new PgWaitSamplingRow(
                 EventType: reader.IsDBNull(0) ? null : reader.GetString(0),
@@ -134,6 +169,6 @@ public static class DarlingPgWaitSamplingReader
                     : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
         }
 
-        return rows;
+        return new PgWaitSamplingPage(rows, windowTotalSamples);
     }
 }
