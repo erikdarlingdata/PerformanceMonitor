@@ -137,7 +137,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Equal(DailySummaryRetention.SignalSourceCount, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
         Assert.DoesNotContain("CASE WHEN cl.d IS NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CASE WHEN al.d IS NULL", sql, StringComparison.Ordinal);
-        Assert.True(sql.TrimEnd().EndsWith("ORDER BY s.d", StringComparison.Ordinal));
+        Assert.EndsWith("ORDER BY s.d", sql.TrimEnd(), StringComparison.Ordinal);
 
         /* And Lite's copy carries the same arm, in the same position, read at the same ordinal. */
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.DailySummary.cs");
