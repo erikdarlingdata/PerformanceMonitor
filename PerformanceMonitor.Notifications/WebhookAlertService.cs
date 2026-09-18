@@ -917,8 +917,10 @@ public class WebhookAlertService
     /// no structured context at all, and the alerts with heavy per-incident details carry prose that is
     /// short or suppressed as redundant (<see cref="AlertDetailText.ProseForDelivery"/>), so the yielding
     /// branch never costs a real payload both halves at once. Since #3612 the details are themselves
-    /// bounded, and they reserve one block for the prose when there is one, so the prose's budget is
-    /// at least one by construction rather than by <c>Math.Max</c>.</para>
+    /// bounded, and they reserve one block for the prose when there is one, so every caller hands in a
+    /// budget of at least one — and the packer floors it at one locally as well, so the invariant the
+    /// repack loop depends on (it terminates by reaching its final block) does not live only in three
+    /// call sites' subtraction (review note on #3618).</para>
     ///
     /// <para><b>Degrading is stated, never silent.</b> A prose the budget cannot hold keeps as many whole
     /// lines as fit and ends with one omission line naming HOW MANY lines were dropped and quoting the
@@ -949,8 +951,12 @@ public class WebhookAlertService
             return;
         }
 
+        /* The floor is local on purpose: PackProseLines' repack loop terminates by reaching its final
+           block, which a budget of zero would never present, and a budget below one cannot render any
+           section anyway. Every caller already hands in at least one; this keeps that true if one of
+           them is edited. */
         var lines = SplitProseIntoSectionSafeLines(prose, capacity);
-        var texts = PackProseLines(lines, capacity, blockBudget);
+        var texts = PackProseLines(lines, capacity, Math.Max(1, blockBudget));
 
         for (var i = 0; i < texts.Count; i++)
         {
