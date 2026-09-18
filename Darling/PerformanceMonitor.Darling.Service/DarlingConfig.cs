@@ -617,6 +617,7 @@ public sealed class AlertsConfig
        integer, one meaning on every lookback -- the engine scales it to the window at comparison time. */
     public int FileGrowthRiseMb { get; set; } = 10240;
     public int FileGrowthVolumePercent { get; set; } = 60;
+    /* The window the rise RATE is averaged over (#3539 A8c) -- it does not rescale the threshold. */
     public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
