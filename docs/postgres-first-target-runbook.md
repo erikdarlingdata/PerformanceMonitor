@@ -77,6 +77,18 @@ so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
 26 collectors are unaffected.
 
+`pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
+collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
+window every five minutes and accumulates what it saw, so a stock target has a wait profile from its first
+cycle rather than an empty chart. That arm needs **nothing beyond the `pg_monitor` grant in step 1** —
+`pg_stat_activity`'s wait columns for other users' backends come from `pg_read_all_stats`, which
+`pg_monitor` carries, and `pg_stat_clear_snapshot()` and `pg_sleep()` are callable by any role. It is a
+floor, not parity: a wait shorter than a second is seen with probability roughly its length over a second,
+and nothing between windows is seen. Every read of that table (`get_pg_wait_sampling`, the Viewer's panel)
+says which arm fed it as `instrument` — `extension_sampled` or `service_sampled` — and the three-tier
+selection (Aurora native › extension › service sampler) is made once when the service connects, so after
+installing the extension let the service reconnect to move up a tier.
+
 ### Self-hosted: the log-reader grants (plan capture, deadlocks)
 
 `pg_deadlocks` and `pg_plan_capture` read the server log with `pg_read_file()`, and that is the one read
@@ -354,7 +366,7 @@ All 27, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_server_config` | 60 min | 60 min | 2 h for the *changes* read (a change needs two snapshots) |
 | `pg_plan_capture_readiness` | 60 min | 60 min | 60 min (facets are levels) |
 | `pg_plan_capture` | 60 min | **60 min** | the first plan `auto_explain` logs past its threshold |
-| `pg_wait_sampling` | 60 min | 60 min | 2 h (counters) |
+| `pg_wait_sampling` | 5 min | 5 min | 10 min (counters; on the service-sampler arm the second cycle also fills the first window) |
 | `pg_kernel_stats` | 60 min | 60 min | 2 h (counters) |
 | `pg_predicate_stats` | 60 min | 60 min | 2 h (counters) |
 | `pg_buffer_usage` | 60 min | 60 min | 60 min (residency is a level) |
@@ -363,10 +375,12 @@ All 27, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_column_stats` | 24 h | **24 h** | 24 h (levels; "it moved" needs two) |
 | `pg_extension_availability` | 24 h | **24 h** | 24 h (levels) |
 
-The four extension-backed hourly ones (`pg_wait_sampling`, `pg_kernel_stats`, `pg_predicate_stats`,
-`pg_plan_capture`) are hourly for the fleet's sake rather than the data's: on a managed target they can
-only ever record a non-fatal skip, and a five-minute cadence would be ~900 skip rows per target per day
-saying the same thing. Their counters lose nothing at the longer interval — with one exception the
+The three extension-backed hourly ones (`pg_kernel_stats`, `pg_predicate_stats`, `pg_plan_capture`) are
+hourly for the fleet's sake rather than the data's: on a managed target they can only ever record a
+non-fatal skip, and a five-minute cadence would be hundreds of skip rows per target per day saying the
+same thing. `pg_wait_sampling` left that group in #3604: it is gated off Aurora (which cannot load the
+module) and takes the service-sampler arm everywhere else, so it records that skip nowhere, and its
+five-minute cadence is the sampler arm's duty cycle (30 s of every 300). Their counters lose nothing at the longer interval — with one exception the
 schedule's own remarks spell out: `pg_plan_capture`'s self-hosted route is a fixed 4 MB log tail with
 no resume marker, so a server logging faster than that window covers silently loses plans between reads,
 and a self-hosted operator lowers the cadence per server rather than relying on the default.
@@ -662,7 +676,8 @@ re-probes the target — which is how a promoted reader stops being gated as a s
 | The connect line says SQL Server, or the error mentions `SqlException` / a TDS handshake against 5432 | the target lost its `engine` on the way through the registry. Requires store schema **v70+**: `SELECT name, engine, port FROM config.config_monitored_servers;` — if `engine` is not a column, this build predates the fix and no darling.json edit will help |
 | Autovacuum health reports everything fine on a cluster you know is behind | you are reading a **reader**. It reports all zeros, not an error. Measured: writer 13,654,458 dead tuples, reader 0, same cluster and tables |
 | Added a target to darling.json and nothing happened | the store was already seeded; use `add_servers` (step 2) |
-| `pg_wait_stats` empty, everything else fine | not Aurora. Core PostgreSQL has no cumulative wait counters at all, and the gap message says so — `pg_wait_sampling` answers the same question from its extension |
+| `pg_wait_stats` empty, everything else fine | not Aurora. Core PostgreSQL has no cumulative wait counters at all, and the gap message says so — `pg_wait_sampling` answers the same question from its extension, or from the service sampler when the extension is absent |
+| `get_pg_wait_sampling` says `instrument: service_sampled` | expected on a stock target without `pg_wait_sampling` — the floor tier (#3604). Every share is of one-second polls in a 30-second window per five-minute cycle; install the extension and let the service reconnect to reach `extension_sampled` |
 | `get_pg_top_queries` empty on self-hosted | `pg_stat_statements` not installed (step 1's optional half) — since #2625 the collector reads the vanilla view anywhere the extension exists |
 | Only some databases in `pg_autovacuum_stats` | by design: `datallowconn` and non-template only, minus `rdsadmin` on a managed instance (it rejects every customer principal) and your `excludedDatabases` |
 | Store stopped compressing after adding targets | background workers (step 4). Silent — check the postmaster log for "out of background workers" |

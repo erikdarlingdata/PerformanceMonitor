@@ -59,6 +59,61 @@ namespace PerformanceMonitor.Collectors;
 /// mean one thing. Grouping by <c>(event_type, event, queryid)</c> is the shape a read actually wants, and
 /// <c>backend_count</c> preserves the one thing the pid dimension was carrying: how many backends were
 /// waiting this way.</para>
+///
+/// <para><b>6. Two arms, one table, one instrument per target (#3604).</b> A stock target WITHOUT the
+/// extension used to get nothing from this collector but an hourly <c>EXTENSION_MISSING</c> skip — and
+/// nothing from <see cref="PgWaitStatsCollector"/> either, which is Aurora-only. For the SQL Server DBA whose
+/// whole performance worldview is <c>dm_os_wait_stats</c>, the flagship diagnostic dimension was simply
+/// absent on exactly the targets most likely to be their first, and an empty wait chart reads as "the
+/// product is broken". So this definition now has a SECOND arm: when
+/// <see cref="CollectorTargetInfo.HasPgWaitSamplingExtension"/> is false it polls <c>pg_stat_activity</c>
+/// itself — <see cref="SamplerSnapshotsPerCycle"/> one-second snapshots per cycle, run as ONE multi-statement
+/// command so the whole window is one collection and one <c>collection_log</c> row — and accumulates the
+/// tallies across cycles in its own per-server state (<see cref="TallyStateKey"/>) so the rows it writes are
+/// CUMULATIVE like the extension's and the existing read differences them unchanged. Which arm ran is
+/// recorded beside the tally (<see cref="InstrumentStateKey"/>, a <see cref="PgWaitInstrument"/> token) so
+/// every read can disclose the grain it is serving. It is the same shape as <c>cpu_utilization</c>'s
+/// Azure-vs-ring-buffer fork and <c>pg_statement_stats</c>' Aurora-vs-vanilla one: a target-aware definition,
+/// not a second collector, because the catalog's one-collector-one-table rule is what the schema generator,
+/// retention and the table census all rest on.</para>
+///
+/// <para><b>Why the sampler is a FLOOR and says so.</b> The extension samples in-engine every 10 ms and misses
+/// nothing a backend did for longer than that. This arm samples from outside every second for
+/// <see cref="SamplerSnapshotsPerCycle"/> seconds of every five-minute cycle — a 10% duty cycle. A wait shorter
+/// than a second is seen with probability roughly its length over a second; nothing between samples, or
+/// between windows, is seen at all. Shares of the profile are trustworthy for anything that is a steady
+/// fraction of the server's time, which is the question a wait chart answers first; rare short events are
+/// under-counted and a burst that fits between two windows is missed. The window is 30 s and not the whole
+/// cycle for a reason outside this file: <c>SweepPressureClassifier</c> sums every collector's single-run
+/// cost against a 60,000 ms body budget and calls the body <c>BODY_OVERRUN</c> past it, so a four-minute
+/// sampling run would make every stock target read as saturated. Thirty seconds at one Hz is the densest
+/// honest floor that leaves that surface truthful, and it is still thirty times the resolution
+/// <c>pg_blocking</c> and <c>pg_lock_stats</c> — the two existing PostgreSQL samplers — get from one snapshot a
+/// minute. The period is one second rather than five because each doubling of the period halves the odds of
+/// seeing a wait shorter than it, while the cost — a shared-memory read of <c>pg_stat_activity</c>, well under
+/// a millisecond at hundreds of backends, from a connection the pool holds open regardless — does not move.</para>
+///
+/// <para><b>Why the sampler reads are separate statements.</b> <c>pg_stat_activity</c> is snapshotted once per
+/// transaction on first access and the same rows are returned for the rest of it; a single statement that
+/// slept and re-read in a loop would return thirty copies of one instant. Each snapshot is therefore its own
+/// statement, preceded by <c>pg_stat_clear_snapshot()</c> — its documented purpose — and a <c>pg_sleep</c>,
+/// and the three are repeated in the command text so <see cref="ReadAsync"/> walks result sets rather than
+/// rows. Under <c>pg_monitor</c> (the grant every PostgreSQL collector here already needs) all three are
+/// callable and every backend's wait columns are visible; the arm adds no privilege.</para>
+///
+/// <para><b>What the sampler excludes.</b> Its own backend (<c>pg_backend_pid()</c>), every other connection
+/// this service holds open (by <c>application_name</c> — the two names the connector presents), and the same
+/// three wait TYPES the extension arm excludes, spliced from the same set so the two arms cannot disagree
+/// about what counts as a wait. A running backend (<c>state = 'active'</c>, no wait) is <c>CPU</c>/
+/// <c>Running</c>, as on the extension arm; an idle one is <c>Client</c>/<c>ClientRead</c> and drops out by
+/// type. <c>query_id</c> is PostgreSQL 14+, and on 13 the column is not selected rather than errored on.</para>
+///
+/// <para><b>Aurora is gated OFF</b> — <see cref="AppliesTo"/> is <c>!IsAurora</c> now, where it used to be
+/// <c>true</c>. Aurora cannot preload <c>pg_wait_sampling</c>, so the hourly <c>EXTENSION_MISSING</c> it recorded
+/// there was a permanent gap wearing a fixable precondition's clothes; and the sampler arm running beside
+/// <c>pg_wait_stats</c> would be two answers to one question on the one engine that has the real one.
+/// <c>CollectorEngineCapability.CoveredInsteadBy</c> now points an Aurora caller of <c>get_pg_wait_sampling</c>
+/// at <c>get_pg_wait_stats</c>, the mirror of the pointer that already ran the other way.</para>
 /// </summary>
 public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<PgWaitSamplingCollector.Row>
 {
@@ -113,6 +168,78 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     private static readonly string IgnoredTypeList =
         string.Join(", ", PgWaitStatsCollector.IgnoredWaitTypes.OrderBy(t => t, StringComparer.Ordinal).Select(t => $"'{t}'"));
 
+    /// <summary>The state key under which the arm that ran records its <see cref="PgWaitInstrument"/> token
+    /// (#3604), per server, every cycle — what the reads disclose as <c>instrument</c>.</summary>
+    public const string InstrumentStateKey = "instrument";
+
+    /// <summary>The state key holding the sampler arm's cumulative tally between cycles (#3604): one line per
+    /// (event_type, event, query_id), tab-separated, count last. Text because <c>collector_state</c> is text;
+    /// lines rather than JSON so the parser is a split and a bad line is one lost key rather than a lost
+    /// tally. Capped at <see cref="SamplerTallyCap"/> keys.</summary>
+    public const string TallyStateKey = "sampler_tally";
+
+    /// <summary>One-second snapshots per cycle on the sampler arm — the window is this many seconds. See the
+    /// type header for why thirty and not the whole cycle.</summary>
+    public const int SamplerSnapshotsPerCycle = 30;
+
+    /// <summary>The sampler's period, stored in every row it writes as <c>profile_period_ms</c> so the read's
+    /// samples-times-period estimate is right for this arm too.</summary>
+    public const int SamplerPeriodMs = 1000;
+
+    /// <summary>Most keys the tally keeps — the same 500 the extension arm's <c>LIMIT</c> ships. Past it the
+    /// least-sampled keys are dropped; a dropped key seen again starts over, which the read shows as that
+    /// one series resetting rather than as anything wrong with the others.</summary>
+    public const int SamplerTallyCap = 500;
+
+    /// <summary>The <c>application_name</c> this service's monitoring connections present, excluded from the
+    /// sampler so the tool does not count its own collectors as the server's workload. Pinned equal to the
+    /// connector's literal by test; this assembly cannot reference the service project.</summary>
+    public const string ServiceApplicationName = "PerformanceMonitorDarling";
+
+    /// <summary>The remediation connections' <c>application_name</c>, excluded for the same reason.</summary>
+    public const string ServiceRemediationApplicationName = "PerformanceMonitorDarling-Remediation";
+
+    /// <summary>
+    /// One <c>pg_stat_activity</c> snapshot, as the sampler arm reads it: four columns, one row per backend
+    /// that is waiting on something the profile counts or is on CPU. Public so a test can run it alone.
+    /// <para><c>query_id</c> exists from PostgreSQL 14; on 13 (or an unknown version reading as 0 — which the
+    /// gates treat as "newest", so it selects the column) the caller passes <paramref name="hasQueryId"/>
+    /// false and the column is a constant 0, the same "belongs to no statement" value the extension arm
+    /// stores for a background process.</para>
+    /// </summary>
+    public static string SamplerSnapshotSql(bool hasQueryId) => @"
+SELECT
+    coalesce(a.wait_event_type, 'CPU')::text AS event_type,
+    coalesce(a.wait_event, 'Running')::text  AS event,
+    " + (hasQueryId ? "coalesce(a.query_id, 0)::bigint" : "0::bigint") + @"                AS query_id,
+    a.pid::int                               AS pid
+FROM pg_stat_activity AS a
+WHERE a.pid <> pg_backend_pid()
+  AND coalesce(a.application_name, '') NOT IN ('" + ServiceApplicationName + "', '" + ServiceRemediationApplicationName + @"')
+  AND (a.wait_event_type IS NOT NULL OR a.state = 'active')
+  AND coalesce(a.wait_event_type, 'CPU') NOT IN (" + IgnoredTypeList + ")";
+
+    /// <summary>
+    /// The sampler arm's whole cycle as ONE command: snapshot, then (sleep one period, clear the backend
+    /// snapshot cache, snapshot) repeated <see cref="SamplerSnapshotsPerCycle"/> − 1 times. Statements in a
+    /// batch execute in order, so the sleep-clear-read sequence is guaranteed without relying on evaluation
+    /// order inside a statement. Public so a test can count its statements against the constant.
+    /// </summary>
+    public static string SamplerBatchSql(bool hasQueryId)
+    {
+        var snapshot = SamplerSnapshotSql(hasQueryId);
+        var sb = new System.Text.StringBuilder();
+        sb.Append(snapshot).Append(';');
+        for (var i = 1; i < SamplerSnapshotsPerCycle; i++)
+        {
+            sb.Append("\nSELECT pg_sleep(").Append(SamplerPeriodMs / 1000.0).Append(");")
+              .Append("\nSELECT pg_stat_clear_snapshot();")
+              .Append(snapshot).Append(';');
+        }
+
+        return sb.ToString();
+    }
+
     private static string QueryText => @"
 SELECT
     /* A NULL wait event means the backend was NOT waiting - it was on CPU. That is PostgreSQL's own
@@ -150,8 +277,14 @@ LIMIT 500";
     ///
     /// <para>No version gate. The extension supports PostgreSQL 13+ and the query uses nothing
     /// version-conditional, so a gate here would only be a second thing to keep in step with reality.</para>
+    ///
+    /// <para><b>Since #3604: every PostgreSQL target that is NOT Aurora.</b> Aurora cannot preload the module,
+    /// so the skip above was permanent there rather than a resting state, and the sampler arm this definition
+    /// grew must not run beside <c>pg_wait_stats</c> on the one engine that has real counters. The
+    /// engine-capability sweep fixes <c>IsAurora</c> per kind, so this reads as a permanent gap on the
+    /// <c>aurora-postgres</c> kind with a pointer to the instrument that does answer there.</para>
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAurora;
 
     /// <summary>
     /// Cluster-wide. The profile covers every backend on the instance and carries no database column, so
@@ -164,13 +297,51 @@ LIMIT 500";
     /// Preloaded, and the restart is the reason an operator sees nothing here for so long. This is
     /// the one dependency <c>PgExtensionAvailabilityCollector</c>'s roster deliberately omits, so a
     /// consumer reading that roster as the dependency set misses exactly this collector.
+    ///
+    /// <para><b>Still declared after #3604, with a narrower meaning.</b> The EXTENSION arm cannot run without
+    /// it; the sampler arm is what runs instead when the connect probe finds it absent, so a missing module is
+    /// no longer a skip — it is the coarser tier. The declaration stays because it is what the README's
+    /// permissions paragraph is pinned to (the operator still needs to know what to install to reach the
+    /// finer tier), and because a module DROPPED mid-connection on the extension arm still fails with
+    /// <c>42P01</c>, which this declaration is what classifies as <c>EXTENSION_MISSING</c> rather than a
+    /// permissions fault until the next connect re-decides the arm.</para>
     /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
         new PgExtensionDependency("pg_wait_sampling", PgExtensionInstallKind.SharedPreloadLibraries),
     };
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// The arm (#3604): the extension's profile when the connect probe found <c>pg_wait_sampling</c> created in
+    /// this database, the service sampler's batch when it did not. Decided off <see cref="CollectorContext.Target"/>
+    /// rather than probed here so the choice is the connect-time one every other tier fact is.
+    /// </summary>
+    public override CollectorQuery BuildQuery(CollectorContext context) =>
+        context.Target.HasPgWaitSamplingExtension
+            ? new CollectorQuery(QueryText)
+            : new CollectorQuery(SamplerBatchSql(HasQueryIdColumn(context.Target)));
+
+    /// <summary>
+    /// The sampler batch holds <see cref="SamplerSnapshotsPerCycle"/> − 1 seconds of deliberate sleep and its
+    /// results are buffered by the server until the batch ends, so the client sees nothing for the whole
+    /// window. The default 60 s would fit today's 30 s window but leave a cluster under load — where a snapshot
+    /// itself can take longer — with no headroom; 120 s bounds the arm at four times its window. Applies to
+    /// the extension arm too, where a longer ceiling on a 500-row read costs nothing.
+    /// </summary>
+    public override int? CommandTimeoutSecondsOverride => 120;
+
+    /// <summary>
+    /// Both arms record which instrument ran (<see cref="InstrumentStateKey"/>); the sampler arm also carries
+    /// its cumulative tally between cycles (<see cref="TallyStateKey"/>). Declared so the host loads them
+    /// before the cycle and persists them after — the #1962 mechanism for state a MAX() over the table cannot
+    /// recover, which a tally the table only holds as its LAST written value is.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { InstrumentStateKey, TallyStateKey };
+
+    /// <summary><c>pg_stat_activity.query_id</c> arrived in PostgreSQL 14. 0 is "unknown", which every gate
+    /// here reads as newest.</summary>
+    private static bool HasQueryIdColumn(CollectorTargetInfo target) =>
+        target.PostgresMajorVersion == 0 || target.PostgresMajorVersion >= 14;
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -186,6 +357,15 @@ LIMIT 500";
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
+        if (!context.Target.HasPgWaitSamplingExtension)
+        {
+            return await ReadSamplerAsync(reader, context, cancellationToken);
+        }
+
+        /* The arm that ran, recorded every cycle rather than once: a target that gains or loses the extension
+           changes arm at its next connect, and the reads must follow on the next cycle, not the next restart. */
+        context.PendingState[InstrumentStateKey] = PgWaitInstrument.ExtensionSampled;
+
         var rows = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))
@@ -202,6 +382,129 @@ LIMIT 500";
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The sampler arm's read (#3604): walks the batch's result sets, tallies every four-column snapshot row
+    /// by (event_type, event, query_id), folds the window into the tally carried in from the previous cycle,
+    /// and emits the CUMULATIVE tally as rows in the extension arm's shape. Internal and reader-shaped so a
+    /// test can drive it with a fixture batch and no server.
+    ///
+    /// <para><b>Result sets, not rows, are the unit.</b> A <c>pg_sleep</c> or <c>pg_stat_clear_snapshot()</c>
+    /// result set is one column wide and is drained; a snapshot is four. Counting snapshots by shape rather
+    /// than by position means a batch that a future edit reorders still tallies only what it should.</para>
+    ///
+    /// <para><b>backend_count is the WINDOW's distinct pids</b>, not a cumulative one: pids recycle, so a
+    /// distinct count across cycles would grow without meaning. The extension arm's figure is cumulative
+    /// because the module's is; the column means "how many backends were doing this" on both, over the
+    /// span each instrument can honestly speak for.</para>
+    /// </summary>
+    internal static async ValueTask<List<Row>> ReadSamplerAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var window = new Dictionary<(string Type, string Event, long QueryId), (long Samples, HashSet<int> Pids)>();
+
+        do
+        {
+            if (reader.FieldCount == 4)
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var key = (
+                        reader.IsDBNull(0) ? "CPU" : reader.GetString(0),
+                        reader.IsDBNull(1) ? "Running" : reader.GetString(1),
+                        reader.IsDBNull(2) ? 0L : reader.GetInt64(2));
+                    var pid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+
+                    if (!window.TryGetValue(key, out var seen))
+                    {
+                        seen = (0, new HashSet<int>());
+                    }
+
+                    seen.Pids.Add(pid);
+                    window[key] = (seen.Samples + 1, seen.Pids);
+                }
+            }
+            else
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                }
+            }
+        }
+        while (await reader.NextResultAsync(cancellationToken));
+
+        var tally = ParseTally(context.State.TryGetValue(TallyStateKey, out var carried) ? carried : null);
+        foreach (var (key, seen) in window)
+        {
+            tally[key] = tally.TryGetValue(key, out var prior) ? prior + seen.Samples : seen.Samples;
+        }
+
+        /* Cap by dropping the least-sampled: the extension arm ships its top 500 by count, and a tally that
+           grew with every distinct query_id ever seen waiting would make the state row unbounded. */
+        if (tally.Count > SamplerTallyCap)
+        {
+            foreach (var victim in tally.OrderBy(kv => kv.Value).ThenBy(kv => kv.Key.Type, StringComparer.Ordinal)
+                         .ThenBy(kv => kv.Key.Event, StringComparer.Ordinal).ThenBy(kv => kv.Key.QueryId)
+                         .Take(tally.Count - SamplerTallyCap).Select(kv => kv.Key).ToList())
+            {
+                tally.Remove(victim);
+            }
+        }
+
+        context.PendingState[TallyStateKey] = SerializeTally(tally);
+        context.PendingState[InstrumentStateKey] = PgWaitInstrument.ServiceSampled;
+
+        return tally
+            .OrderByDescending(kv => kv.Value)
+            .ThenBy(kv => kv.Key.Type, StringComparer.Ordinal)
+            .ThenBy(kv => kv.Key.Event, StringComparer.Ordinal)
+            .Select(kv => new Row(
+                EventType: kv.Key.Type,
+                Event: kv.Key.Event,
+                QueryId: kv.Key.QueryId,
+                SampleCount: kv.Value,
+                ProfilePeriodMs: SamplerPeriodMs,
+                BackendCount: window.TryGetValue(kv.Key, out var seen) ? seen.Pids.Count : 0))
+            .ToList();
+    }
+
+    /// <summary>The tally's text form: one <c>type\tevent\tquery_id\tcount</c> line per key. Tabs because
+    /// no wait event name carries one; a line that does not parse is skipped rather than failing the cycle.</summary>
+    public static Dictionary<(string Type, string Event, long QueryId), long> ParseTally(string? text)
+    {
+        var tally = new Dictionary<(string, string, long), long>();
+        if (string.IsNullOrEmpty(text))
+        {
+            return tally;
+        }
+
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.Split('\t');
+            if (parts.Length != 4
+                || !long.TryParse(parts[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var queryId)
+                || !long.TryParse(parts[3], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var count))
+            {
+                continue;
+            }
+
+            tally[(parts[0], parts[1], queryId)] = count;
+        }
+
+        return tally;
+    }
+
+    public static string SerializeTally(Dictionary<(string Type, string Event, long QueryId), long> tally)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var (key, count) in tally.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key.Type, StringComparer.Ordinal).ThenBy(kv => kv.Key.Event, StringComparer.Ordinal))
+        {
+            sb.Append(key.Type).Append('\t').Append(key.Event).Append('\t')
+              .Append(key.QueryId.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\t')
+              .Append(count.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
+        }
+
+        return sb.ToString();
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)

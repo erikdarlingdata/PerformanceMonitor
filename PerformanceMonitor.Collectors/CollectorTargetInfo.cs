@@ -127,4 +127,30 @@ public sealed class CollectorTargetInfo
     /// surfaces are writer-only and gate off this.</para>
     /// </summary>
     public bool IsInRecovery { get; init; }
+
+    /// <summary>
+    /// True when the <c>pg_wait_sampling</c> extension is CREATED in the database the monitoring connection
+    /// lands in (<c>pg_extension</c>, probed once at connect), which is the fact that decides which of the two
+    /// stock-PostgreSQL wait instruments <see cref="PgWaitSamplingCollector"/> reads on this target (#3604).
+    ///
+    /// <para><b>Why a connect-time fact rather than a per-cycle probe.</b> The three wait tiers — Aurora's
+    /// engine-cumulative counters, the extension's 10 ms profiler, and the service-side sampler that is the
+    /// floor under both — are ONE readiness decision made at target attach, the same way <see cref="IsAurora"/>
+    /// decides <c>pg_wait_stats</c>: exactly one instrument feeds each target's wait history, and a reader
+    /// asking "which one, and why" gets an answer that holds for the connection's life rather than one that
+    /// could flip between two cycles. Installing the extension is a deliberate act followed by a
+    /// <c>shared_preload_libraries</c> restart, so "re-derived at the next connect" is the natural moment for
+    /// the tier to move, and the connect-scoped precondition vocabulary already tells operators so.</para>
+    ///
+    /// <para><b>A FIXABLE fact, so the engine-capability sweep varies it</b>
+    /// (<c>CollectorEngineCapability.TargetsWithEngineKind</c>): a target without the extension today may
+    /// have it tomorrow, so no permanence claim is ever made on it — the same rule the version floors and
+    /// <see cref="IsInRecovery"/> follow. <c>EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind</c>
+    /// fails the build if a gate reads this and the sweep leaves it at its default.</para>
+    ///
+    /// <para>Default false. A SQL Server target never has it; a PostgreSQL target that was not probed (a
+    /// test double, a hand-built shape) is treated as NOT having the extension, which routes it to the
+    /// sampler arm — the direction that produces a floor rather than an empty read.</para>
+    /// </summary>
+    public bool HasPgWaitSamplingExtension { get; init; }
 }

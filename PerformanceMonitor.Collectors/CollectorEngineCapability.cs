@@ -332,14 +332,25 @@ public static class CollectorEngineCapability
                     {
                         foreach (var isInRecovery in new[] { false, true })
                         {
-                            yield return new CollectorTargetInfo
+                            /* #3604: the pg_wait_sampling extension is a FIXABLE fact (CREATE EXTENSION plus a
+                               preload restart), so it varies here rather than being fixed by the kind - the
+                               sampler arm's gate reads it, and a sweep that left it false would answer that
+                               gate from one shape. Aurora cannot load the module at all, but that is what
+                               IsAurora above already says; the two facts are deliberately not coupled here
+                               because the sweep's job is to be a SUPERSET of the real shapes, never a model
+                               of which ones can co-occur. */
+                            foreach (var hasWaitSampling in new[] { false, true })
                             {
-                                Engine = CollectorTargetEngine.PostgreSql,
-                                IsAurora = isAurora,
-                                PostgresMajorVersion = major,
-                                PostgresVersionNum = versionNum,
-                                IsInRecovery = isInRecovery,
-                            };
+                                yield return new CollectorTargetInfo
+                                {
+                                    Engine = CollectorTargetEngine.PostgreSql,
+                                    IsAurora = isAurora,
+                                    PostgresMajorVersion = major,
+                                    PostgresVersionNum = versionNum,
+                                    IsInRecovery = isInRecovery,
+                                    HasPgWaitSamplingExtension = hasWaitSampling,
+                                };
+                            }
                         }
                     }
                 }
@@ -428,6 +439,12 @@ public static class CollectorEngineCapability
             /* Aurora's aurora_stat_system_waits() vs. the pg_wait_sampling extension: different sources,
                same question - which wait events this server is spending time in. */
             ["pg_wait_stats"] = "pg_wait_sampling",
+            /* The mirror (#3604). pg_wait_sampling is gated OFF on Aurora now - the module is not among the
+               libraries Aurora permits preloading, so the hourly EXTENSION_MISSING skip it used to record
+               there was a permanent gap wearing a fixable precondition's clothes - and an Aurora operator who
+               reaches get_pg_wait_sampling must be sent to the instrument that DOES answer on that engine
+               rather than told to install something they cannot. */
+            ["pg_wait_sampling"] = "pg_wait_stats",
         };
 
     /// <summary>

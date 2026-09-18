@@ -35,6 +35,9 @@ public class PgWaitSamplingCollectorDefinitionTests
                 Engine = CollectorTargetEngine.PostgreSql,
                 PostgresMajorVersion = 17,
                 PostgresVersionNum = 170000,
+                /* #3604: the EXTENSION arm. The definition forks on this fact, and every pin in this file is
+                   about the profile query; the sampler arm has its own tests. */
+                HasPgWaitSamplingExtension = true,
             },
         };
 

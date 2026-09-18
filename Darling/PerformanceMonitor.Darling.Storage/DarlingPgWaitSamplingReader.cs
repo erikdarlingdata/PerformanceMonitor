@@ -120,6 +120,49 @@ public static class DarlingPgWaitSamplingReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// Which instrument is feeding this server's <c>pg_wait_sampling</c> rows (#3604), read from the
+    /// collector's own state: <c>PgWaitSamplingCollector</c> records a <c>PgWaitInstrument</c> token under
+    /// <c>collector_state (server_id, 'pg_wait_sampling', 'instrument')</c> on every cycle, whichever arm ran.
+    /// Off the store rather than re-derived here because the decision was made once at connect and the
+    /// collector is the only thing that knows which arm its last cycle took; a read guessing from
+    /// <c>profile_period_ms</c> would be right until an operator set the extension's period to a second.
+    /// <para>Null when no cycle has recorded one — a store written before #3604, or a server whose collector
+    /// has not completed a cycle since. The tool says so rather than picking a default.</para>
+    /// </summary>
+    public const string InstrumentSql = """
+        SELECT state_value, updated_at
+        FROM collector_state
+        WHERE server_id = $1
+        AND   collector_name = 'pg_wait_sampling'
+        AND   state_key = 'instrument'
+        """;
+
+    /// <summary>The recorded instrument and when the collector last recorded it (UTC), or null.</summary>
+    public sealed record WaitInstrumentState(string Instrument, DateTime RecordedAtUtc);
+
+    /// <summary>Runs <see cref="InstrumentSql"/>. An unrecognised token is returned as-is; the tool decides
+    /// whether to echo it.</summary>
+    public static async Task<WaitInstrumentState?> GetWaitInstrumentAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(InstrumentSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+        {
+            return null;
+        }
+
+        return new WaitInstrumentState(
+            reader.GetString(0),
+            reader.IsDBNull(1) ? default : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
+
     /// <summary>The rows alone — the WPF Viewer's grid, which has no column for the window total.</summary>
     public static async Task<List<PgWaitSamplingRow>> GetPgWaitSamplingAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,

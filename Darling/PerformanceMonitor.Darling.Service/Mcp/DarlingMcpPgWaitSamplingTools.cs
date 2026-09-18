@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -45,11 +46,22 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// mostly CPU and a profile that is mostly IO call for opposite next steps, and a wait-only view cannot
 /// tell them apart.
 /// </para>
+///
+/// <para>
+/// <b>It discloses its INSTRUMENT (#3604).</b> Since the collector grew a service-side sampler arm for
+/// targets without the extension, the same table holds two grains: the extension's 10 ms in-engine samples
+/// and this service's one-second <c>pg_stat_activity</c> polls over a 30 s window each cycle. A count of 300
+/// is three seconds of waiting under one and five minutes under the other, and <c>estimated_wait_ms</c> is
+/// right on both only because each arm stores its own period. So every non-empty answer carries
+/// <c>instrument</c> (<c>extension_sampled</c> or <c>service_sampled</c>, read from the collector's own
+/// per-server state) and, on the service tier, the floor caveat in <see cref="PgWaitInstrument.ServiceSampledCaveat"/>
+/// — the same disclose-the-instrument pattern <c>get_pg_plan_capture_readiness</c> established for plans.
+/// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPgWaitSamplingTools
 {
-    [McpServerTool(Name = "get_pg_wait_sampling"), Description("Gets sampled PostgreSQL wait events attributed to query shapes, from the pg_wait_sampling extension. This is the stock-PostgreSQL counterpart of get_pg_wait_stats, which reads an Aurora-only source: use this tool on any self-hosted or non-Aurora PostgreSQL target. A sampling profiler periodically records what each backend is doing, so results are sample COUNTS, and estimated_wait_ms is samples multiplied by the sampling period rather than a measured duration - treat a rare event's estimate as approximate. Rows with event_type CPU mean the backend was running, not waiting, so the profile answers 'waiting or working' as well as 'waiting on what'. queryid joins get_pg_top_queries; queryid 0 is work belonging to no statement, such as a background worker. The profile is cluster-wide and carries no database attribution by design. THE PAGE IS BOUNDED BY limit: waits_returned is how many rows you got, truncated says the window held more, and the rows are the most-sampled so the ones past the cap are rarer. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples' denominator is total_samples, the WHOLE window's differenced sample count across every (event type, event, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_samples (what the page adds up to) and total_samples is the activity the cap left out; returned_pct_of_total is that ratio stated once.")]
+    [McpServerTool(Name = "get_pg_wait_sampling"), Description("Gets sampled PostgreSQL wait events attributed to query shapes, for any non-Aurora PostgreSQL target. This is the stock-PostgreSQL counterpart of get_pg_wait_stats, which reads an Aurora-only source. PostgreSQL wait history comes from one of THREE instruments, chosen once per target when the service connects (Aurora native > pg_wait_sampling extension > service sampler), and the answer's instrument field says which one fed these rows: extension_sampled means the pg_wait_sampling extension's in-engine 10 ms profiler; service_sampled means this service polled pg_stat_activity once a second for a 30-second window every five minutes because the extension is not installed - a FLOOR, not parity, that under-counts waits shorter than a second and cannot see between windows (instrument_note spells out the limit and the one-step upgrade). Either way a sampler periodically records what each backend is doing, so results are sample COUNTS, and estimated_wait_ms is samples multiplied by that instrument's own period rather than a measured duration - treat a rare event's estimate as approximate. Rows with event_type CPU mean the backend was running, not waiting, so the profile answers 'waiting or working' as well as 'waiting on what'. queryid joins get_pg_top_queries; queryid 0 is work belonging to no statement, such as a background worker. The profile is cluster-wide and carries no database attribution by design. THE PAGE IS BOUNDED BY limit: waits_returned is how many rows you got, truncated says the window held more, and the rows are the most-sampled so the ones past the cap are rarer. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples' denominator is total_samples, the WHOLE window's differenced sample count across every (event type, event, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_samples (what the page adds up to) and total_samples is the activity the cap left out; returned_pct_of_total is that ratio stated once.")]
     public static async Task<string> GetPgWaitSampling(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -73,6 +85,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
             var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(
                 postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
 
+            /* #3604: which arm fed these rows, off the collector's own state. Read on the empty path too, so
+               a service-tier target that is genuinely idle is told it is being sampled at the floor grain
+               rather than left to wonder whether the extension tier was ever in play. */
+            var instrument = await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId);
+
             if (page.Rows.Count == 0)
             {
                 /* Three distinct empty states, and only the last of them is "nothing happened". The
@@ -90,10 +107,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
                         + "figures here are per-interval deltas, so a single collection has nothing to "
                         + "difference against and the window fills on the second one. On a genuinely idle "
                         + "server this is the healthy state: the profiler samples backends, and an idle "
-                        + "server has none to sample.");
+                        + "server has none to sample."
+                        + DescribeInstrumentForEmpty(instrument));
             }
 
-            return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit);
+            return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument);
         }
         catch (Exception ex)
         {
@@ -115,12 +133,39 @@ public sealed class DarlingMcpPgWaitSamplingTools
     /// same period, so the two shares are arithmetically identical — and taking it from the count keeps
     /// the percentage anchored to what was actually observed.</para>
     /// </summary>
+    /// <summary>
+    /// The sentence the empty arm appends about the instrument (#3604): the service tier's floor caveat when
+    /// that is what is sampling, nothing when the extension is (its idle answer needs no qualification), and a
+    /// plain "not yet recorded" when no cycle has stated an arm.
+    /// </summary>
+    internal static string DescribeInstrumentForEmpty(DarlingPgWaitSamplingReader.WaitInstrumentState? instrument)
+    {
+        if (instrument is null)
+        {
+            return " No collection cycle has recorded which wait instrument this server is on yet, so the "
+                 + "first answer here will also say whether it is the extension's profiler or the service sampler.";
+        }
+
+        return string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal)
+            ? " This server is on the service_sampled tier (the pg_wait_sampling extension is not installed), "
+              + "so \"none to sample\" was measured over one-second polls in a 30-second window each cycle. "
+              + PgWaitInstrument.ServiceSampledCaveat
+            : string.Empty;
+    }
+
     internal static string BuildWaitSamplingJson(
         string serverName,
         int hoursBack,
         DarlingPgWaitSamplingReader.PgWaitSamplingPage page,
-        int limit)
+        int limit,
+        DarlingPgWaitSamplingReader.WaitInstrumentState? instrument = null)
     {
+        /* #3604: an unrecognised token is not echoed as an instrument - a future arm this build does not know
+           reads as unknown, which is the honest word, rather than as a grain the caller might act on. */
+        var instrumentToken = instrument is not null && PgWaitInstrument.IsKnown(instrument.Instrument)
+            ? instrument.Instrument
+            : "unknown";
+        var serviceTier = string.Equals(instrumentToken, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
 
@@ -158,6 +203,22 @@ public sealed class DarlingMcpPgWaitSamplingTools
             waits_returned = waits.Count,
             truncated,
             order = "samples_desc",
+            /* #3604: the grain. Beside the page facts rather than buried in the note, because it changes what
+               every number below means and a reader comparing two servers must see it first. */
+            instrument = instrumentToken,
+            instrument_recorded_at = instrument?.RecordedAtUtc,
+            instrument_note = instrumentToken switch
+            {
+                PgWaitInstrument.ExtensionSampled =>
+                    "The pg_wait_sampling extension's in-engine profiler: every backend sampled every "
+                    + "profile_period (10 ms by default) and attributed to its queryid. The finest grain "
+                    + "available on stock PostgreSQL.",
+                PgWaitInstrument.ServiceSampled => PgWaitInstrument.ServiceSampledCaveat,
+                _ => "No collection cycle has recorded which arm fed these rows (a store written before the "
+                     + "service sampler existed, or a collector that has not completed a cycle since). Read "
+                     + "profile_period_ms per row with that in mind: 10 is the extension's default, 1000 is "
+                     + "the service sampler's.",
+            },
             /* The WINDOW's samples, across every series — the denominator of every pct_of_samples above.
                NOT the sum of the rows; that is returned_samples. */
             total_samples = windowTotalSamples,
@@ -172,6 +233,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
                  + "same statement as the rows; each row's pct_of_samples divides by it, so the shares on a "
                  + "page do not sum to 100 unless the page is the whole window (truncated = false). "
                  + "returned_samples is what the rows returned add up to."
+                 + (serviceTier
+                     ? " backend_count on this tier is the distinct backends seen in the LAST window, not "
+                       + "since the profile started; a series' counter also resets when the service restarts, "
+                       + "which the counter_reset flag reports the same way it reports an extension reset."
+                     : string.Empty)
                  + (resetInWindow
                      ? " At least one series was RESET inside this window, so its figures cover only "
                        + "the time since the reset."
