@@ -193,7 +193,12 @@ public sealed class ForcePlanFailuresAccessPathTests
                servers in turn, each server's batch contiguous \u2014 the write pattern that makes server_id's
                correlation near zero, which is the condition the production plan was chosen under. All
                Kind-Unspecified: naive-UTC storage, see PgCollectorRowWriter. */
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            /* Floored to whole microseconds: PostgreSQL timestamp is microsecond-resolution and .NET ticks are
+               100 ns, so a raw UtcNow does not survive the round trip and the #3579 stamp assertion below
+               (tick-equality against what was seeded) would fail on any clock that is not itself
+               microsecond-aligned — Windows' is not; the first CI run proved it by three ticks. */
+            var rawNow = DateTime.UtcNow;
+            var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
             for (var pass = 7; pass >= 0; pass--)
             {
                 var collectionTime = utcNow.AddMinutes(-2 - pass * 15);
