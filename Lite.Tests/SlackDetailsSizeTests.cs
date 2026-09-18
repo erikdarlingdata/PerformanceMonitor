@@ -47,6 +47,16 @@ namespace PerformanceMonitorLite.Tests;
 /// knows exactly where the message stopped. And a bounding pass that changed the SMALL case would repaint
 /// every engine alert and every analysis page that delivered before it, so the fitting shapes are pinned
 /// against the pre-#3612 rendering byte for byte — the oracle is the old loop, restated here verbatim.</para>
+///
+/// <para><b>#3622: the per-text-object cuts land on whole characters, and the stated count is in
+/// characters.</b> The heading cap, the field cap (label and value) and the omitted-headings list were all
+/// cut by UTF-16 index; an emoji or a combining sequence astride the boundary was cut in half, the
+/// serializer relaxed the unpaired half to U+FFFD (measured — the payload delivered, contrary to the
+/// issue's expectation of a rejection), and the reader was shown a replacement glyph in a value that never
+/// held one, under a "leading stretch" that was no longer a prefix, beside a "more characters" count in
+/// units the reader cannot see. The arms in the #3622 section place a character astride each boundary and
+/// assert: no text a reader was sent carries U+FFFD, the cut landed one character earlier, and kept plus
+/// omitted is the value's own character count.</para>
 /// </summary>
 public class SlackDetailsSizeTests
 {
@@ -282,6 +292,28 @@ public class SlackDetailsSizeTests
 
     private static string OmissionText(List<JsonElement> blocks) =>
         Assert.Single(blocks.Select(SectionText), t => t is not null && t.StartsWith(OmissionHeading, StringComparison.Ordinal))!;
+
+    /* #3622 fixtures: one character each to a reader, two or four UTF-16 units to the index arithmetic. */
+    private const string Fire = "\U0001F525";              // 🔥, a surrogate pair
+    private const string EAcute = "e\u0301";               // e + combining acute, two code points
+    private const string ThumbsUpMedium = "\U0001F44D\U0001F3FD"; // 👍🏽, two pairs in one grapheme
+
+    private static void AssertNoReplacementGlyph(List<JsonElement> blocks) =>
+        Assert.All(AllTexts(blocks), t => Assert.DoesNotContain('\uFFFD', t));
+
+    /// <summary>The one cut field text of a payload, and its parts: the kept stretch of the value and the
+    /// omitted count the note states — read from the payload, never restated from the builder.</summary>
+    private static (string Kept, int Omitted) CutField(List<JsonElement> blocks, string prefix)
+    {
+        var cut = Assert.Single(blocks.SelectMany(FieldTexts), f => f.StartsWith(prefix, StringComparison.Ordinal) && f.Contains("... (", StringComparison.Ordinal));
+        Assert.True(cut.Length <= FieldTextLimit, $"the cut field is {cut.Length} chars");
+        var noteAt = cut.IndexOf("... (", StringComparison.Ordinal);
+        var kept = cut[prefix.Length..noteAt];
+        var omitted = int.Parse(cut[(noteAt + 5)..cut.IndexOf(" more characters", StringComparison.Ordinal)], NumberStyles.AllowThousands, CultureInfo.InvariantCulture);
+        return (kept, omitted);
+    }
+
+    private static int Characters(string s) => new StringInfo(s).LengthInTextElements;
 
     /// <summary>
     /// The pre-#3612 details loop, verbatim: divider, then a pointer section, a body section, or heading +
@@ -701,6 +733,195 @@ public class SlackDetailsSizeTests
         Assert.Equal(value[..kept.Length], kept);
 
         Assert.Contains("*#1 Database:*\nReportingDB", fields);
+    }
+
+    /* ---------------- #3622: the cuts land on whole characters ---------------- */
+
+    /// <summary>
+    /// A field value with a character astride the field cut keeps everything before the character and
+    /// states the omission in characters. Self-calibrating: the control arm — an all-ASCII value of the
+    /// same length — reads the builder's own kept length K from the payload, and the value under test puts
+    /// the character at units K−1 and K, exactly one unit into the old cut. Before #3622 the kept stretch
+    /// ended in the character's first unit (a replacement glyph to the reader, and no longer a prefix of
+    /// the value) and the count was in UTF-16 units. Now the cut lands at K−1, the kept stretch is a
+    /// prefix, and kept + omitted is the value's own character count.
+    /// </summary>
+    [Theory]
+    [InlineData(Fire)]
+    [InlineData(EAcute)]
+    [InlineData(ThumbsUpMedium)]
+    public void AFieldValueWithACharacterAstrideTheCut_KeepsAPrefix_AndCountsInCharacters(string character)
+    {
+        const string prefix = "*#1 Query Text:*\n";
+        const int length = 5000;
+
+        static AlertContext ContextFor(string value)
+        {
+            var context = new AlertContext();
+            var item = new AlertDetailItem { Heading = "Regressed Queries" };
+            item.Fields.Add(("#1 Query Text", value));
+            context.Details.Add(item);
+            return context;
+        }
+
+        /* Control: where does the builder cut a plain value of this length? */
+        using var controlDoc = JsonDocument.Parse(Payload(ContextFor(new string('x', length))));
+        var (controlKept, controlOmitted) = CutField(Blocks(controlDoc), prefix);
+        var k = controlKept.Length;
+        Assert.Equal(length, k + controlOmitted);
+        Assert.InRange(k, 1000, FieldTextLimit);
+
+        /* The character's first unit sits at K−1, so the old cut at K went through it. */
+        var value = new string('x', k - 1) + character + new string('y', length - (k - 1) - character.Length);
+        Assert.Equal(length, value.Length);
+        Assert.True(char.IsHighSurrogate(value[k - 1]) || value[k] == '\u0301');
+
+        using var doc = JsonDocument.Parse(Payload(ContextFor(value)));
+        var blocks = Blocks(doc);
+        AssertInsideEveryCeiling(blocks);
+        AssertNoReplacementGlyph(blocks);
+
+        var (kept, omitted) = CutField(blocks, prefix);
+        Assert.Equal(new string('x', k - 1), kept);
+        Assert.Equal(Characters(value) - Characters(kept), omitted);
+        Assert.Equal(Characters(value[(k - 1)..]), omitted);
+    }
+
+    /// <summary>
+    /// The count is in the characters a reader would count for the whole value, not only at the cut: a
+    /// value that is nothing but multi-unit characters states an omitted count equal to how many of them
+    /// the reader is not shown, and the kept stretch is a whole number of them.
+    /// </summary>
+    [Theory]
+    [InlineData(Fire)]
+    [InlineData(EAcute)]
+    [InlineData(ThumbsUpMedium)]
+    public void AFieldValueOfMultiUnitCharacters_IsCutOnACharacter_AndCountedInCharacters(string character)
+    {
+        const string prefix = "*Advice:*\n";
+        var value = string.Concat(Enumerable.Repeat(character, 1500));
+
+        var context = new AlertContext();
+        var item = new AlertDetailItem { Heading = "Diagnosis" };
+        item.Fields.Add(("Advice", value));
+        context.Details.Add(item);
+
+        using var doc = JsonDocument.Parse(Payload(context));
+        var blocks = Blocks(doc);
+        AssertInsideEveryCeiling(blocks);
+        AssertNoReplacementGlyph(blocks);
+
+        var (kept, omitted) = CutField(blocks, prefix);
+        Assert.Equal(0, kept.Length % character.Length);
+        Assert.Equal(value[..kept.Length], kept);
+        Assert.Equal(1500 - kept.Length / character.Length, omitted);
+    }
+
+    /// <summary>
+    /// The label side of the same field: a label so long it alone crowds the field is bounded to half of
+    /// it, and that cut, too, lands on a whole character. Pathological (labels are producer literals), but
+    /// it is the same slice by the same arithmetic, and a fix that left it would be a fifth door.
+    /// </summary>
+    [Fact]
+    public void AFieldLabelWithACharacterAstrideItsBound_IsCutBeforeTheCharacter()
+    {
+        /* The prefix is "*" + label + ":*\n"; the bound is 1,000, so a character at label units 998–999
+           sits at prefix units 999–1,000 — one unit into the old cut. */
+        var label = new string('L', 998) + Fire + new string('L', 50);
+        var context = new AlertContext();
+        var item = new AlertDetailItem { Heading = "Wide label" };
+        item.Fields.Add((label, new string('v', 1500)));
+        context.Details.Add(item);
+
+        using var doc = JsonDocument.Parse(Payload(context));
+        var blocks = Blocks(doc);
+        AssertInsideEveryCeiling(blocks);
+        AssertNoReplacementGlyph(blocks);
+
+        var cut = Assert.Single(blocks.SelectMany(FieldTexts), f => f.StartsWith("*LLLL", StringComparison.Ordinal));
+        Assert.StartsWith("*" + new string('L', 998) + "vvv", cut, StringComparison.Ordinal);
+        Assert.Contains("more characters", cut, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A detail heading with a character astride the heading cap is cut before the character: the heading
+    /// is the detail's identity, and one ending in half an emoji names a different thing. Rendered as the
+    /// leading field of a field detail and as the header of a body detail alike.
+    /// </summary>
+    [Theory]
+    [InlineData(Fire)]
+    [InlineData(EAcute)]
+    public void ADetailHeadingWithACharacterAstrideTheCap_IsCutBeforeTheCharacter(string character)
+    {
+        var heading = new string('h', 499) + character + new string('h', 50);
+        var context = new AlertContext();
+        var fieldItem = new AlertDetailItem { Heading = heading };
+        fieldItem.Fields.Add(("Dedup Key", "k"));
+        context.Details.Add(fieldItem);
+        context.Details.Add(new AlertDetailItem { Heading = heading, Body = "Investigation: look." });
+
+        using var doc = JsonDocument.Parse(Payload(context));
+        var blocks = Blocks(doc);
+        AssertInsideEveryCeiling(blocks);
+        AssertNoReplacementGlyph(blocks);
+
+        var expected = "*" + new string('h', 499) + "...*";
+        Assert.Contains(expected, blocks.SelectMany(FieldTexts));
+        Assert.Contains(blocks.Select(SectionText), t => t?.StartsWith(expected + "\nInvestigation:", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(AllTexts(blocks), t => t.Contains(character, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The omission item's heading list is quoted to 1,000 characters; a character astride that boundary
+    /// is left out rather than cut in half. The mixed page from <see cref="TheBudgetIsOnBlocks_NotOnTheDetailCount"/>
+    /// drops exactly "Wide 5" and "Wide 6"; "Wide 5; " is eight units, so a character at units 991–992 of
+    /// the sixth heading sits at list units 999–1,000.
+    /// </summary>
+    [Fact]
+    public void TheOmittedHeadingsList_WithACharacterAstrideItsBound_IsCutBeforeTheCharacter()
+    {
+        static AlertDetailItem Narrow(int i)
+        {
+            var item = new AlertDetailItem { Heading = string.Create(CultureInfo.InvariantCulture, $"Narrow {i}") };
+            item.Fields.Add(("Dedup Key", "k"));
+            return item;
+        }
+
+        static AlertDetailItem Wide(string heading)
+        {
+            var item = new AlertDetailItem { Heading = heading };
+            for (var f = 0; f < 25; f++)
+            {
+                item.Fields.Add((string.Create(CultureInfo.InvariantCulture, $"f{f}"), "v"));
+            }
+
+            return item;
+        }
+
+        var context = new AlertContext();
+        for (var i = 0; i < 11; i++)
+        {
+            context.Details.Add(Narrow(i));
+        }
+
+        for (var i = 0; i < 6; i++)
+        {
+            context.Details.Add(Wide(string.Create(CultureInfo.InvariantCulture, $"Wide {i}")));
+        }
+
+        var sixth = new string('w', 991) + Fire + new string('w', 100);
+        context.Details.Add(Wide(sixth));
+
+        using var doc = JsonDocument.Parse(Payload(context));
+        var blocks = Blocks(doc);
+        Assert.Equal(47, blocks.Count);
+        AssertInsideEveryCeiling(blocks);
+        AssertNoReplacementGlyph(blocks);
+
+        var omission = OmissionText(blocks);
+        Assert.Contains("2 more details did not fit", omission, StringComparison.Ordinal);
+        Assert.Contains("Wide 5; " + new string('w', 991) + "... - " + Pointer, omission, StringComparison.Ordinal);
+        Assert.DoesNotContain(Fire, omission, StringComparison.Ordinal);
     }
 
     /* ---------------- Teams ---------------- */
