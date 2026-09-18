@@ -198,6 +198,69 @@ public sealed class ServerHealthClassifierTests
         Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.OverallMetricSeverity(m));
     }
 
+    /* ── measured-metric coverage (#3528) ── */
+
+    [Fact]
+    public void MeasuredMetricCounts_FullyMeasuredBundle_CountsAllSix()
+    {
+        var m = new ServerHealthMetrics
+        {
+            CpuPercentForAlert = 50,
+            TotalThreads = 512,
+            AvailableThreads = 400,
+            HasMemoryPressure = false,
+            BlockingCount = 0,
+            DeadlockCount = 0,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };
+
+        Assert.Equal((6, 6), ServerHealthClassifier.MeasuredMetricCounts(m));
+    }
+
+    [Fact]
+    public void MeasuredMetricCounts_UnknownHeavyBundle_SaysSo_WhileTheFoldStillReadsHealthy()
+    {
+        /* The PostgreSQL-card shape #3528 was filed about: five of the six metrics structurally Unknown
+           (no CPU/threads snapshot, DMV-sourced memory/blocking/deadlocks nulled), only the collector row
+           measured. The fold deliberately skips Unknown, so the band label is still Healthy — and the
+           counts are what let a consumer render that label as "Healthy — 1 of 6 measured" instead of an
+           unqualified green. */
+        var m = new ServerHealthMetrics();
+
+        Assert.Equal((1, 6), ServerHealthClassifier.MeasuredMetricCounts(m));
+
+        var overall = ServerHealthClassifier.OverallMetricSeverity(m);
+        Assert.Equal(HealthSeverity.Healthy, overall);
+        Assert.Equal(FleetHealthBand.Healthy,
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, overall));
+    }
+
+    [Fact]
+    public void MeasuredMetricCounts_AreRankNeutral()
+    {
+        /* The counts describe, they never rank: two bundles differing only in how many metrics are
+           measured score identically, which is the Unknown rank-neutrality
+           UnmeasuredMetricsAreNotHealthyTests pins, restated against the new fields' own inputs. */
+        var measured = new ServerHealthMetrics
+        {
+            CpuPercentForAlert = 50,
+            TotalThreads = 512,
+            AvailableThreads = 400,
+            HasMemoryPressure = false,
+            BlockingCount = 0,
+            DeadlockCount = 0,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };
+        var unmeasured = new ServerHealthMetrics();
+
+        Assert.NotEqual(
+            ServerHealthClassifier.MeasuredMetricCounts(measured),
+            ServerHealthClassifier.MeasuredMetricCounts(unmeasured));
+        Assert.Equal(
+            ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Healthy, measured),
+            ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Healthy, unmeasured));
+    }
+
     /* ── fleet band (collapse) ── */
 
     [Fact]

@@ -178,7 +178,9 @@ LIMIT $3";
         /* #3466 (V124): the fleet sweep's cadence knobs. APPENDED, same reason. Darling-only: Lite has
            no fleet to sweep, so McpAlertSettingsKeyTests records the omitted group as a decision. */
         bool FleetSweepEnabled,
-        int FleetSweepIntervalMinutes);
+        int FleetSweepIntervalMinutes,
+        /* #3528 (V126): the Store Disk Pressure warning's GB floor. APPENDED, same reason. */
+        int SelfDiskFreeWarnGb);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -209,7 +211,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        retention_hold_warn_ratio, retention_hold_critical_ratio,
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
-       fleet_sweep_enabled, fleet_sweep_interval_minutes
+       fleet_sweep_enabled, fleet_sweep_interval_minutes,
+       self_disk_free_warn_gb
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -260,7 +263,9 @@ WHERE id = 1";
             /* #3444: V122 PostgreSQL Deadlocks/Blocking count thresholds at 62–63. */
             reader.GetInt32(62), reader.GetInt32(63),
             /* #3466: V124 fleet-sweep cadence knobs at 64–65. */
-            reader.GetBoolean(64), reader.GetInt32(65));
+            reader.GetBoolean(64), reader.GetInt32(65),
+            /* #3528: V126 store-disk-warn GB floor at 66. */
+            reader.GetInt32(66));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

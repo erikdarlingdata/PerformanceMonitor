@@ -238,6 +238,10 @@ public sealed class DarlingFleetDtoJsonTests
             FailedCollectorCount = 0,
             CollectorSeverity = HealthSeverity.Healthy,
             OverallMetricSeverity = HealthSeverity.Critical,
+            /* #3528: deliberately measured < total, so the value pins below cannot pass off a card that
+               serialized one count under both keys. */
+            MeasuredMetricCount = 1,
+            MetricCount = 6,
         };
 
         var json = JsonSerializer.Serialize(card, DarlingFleetReader.JsonOptions);
@@ -251,10 +255,17 @@ public sealed class DarlingFleetDtoJsonTests
             "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_rate_per_hour\"",
             "\"deadlock_severity\"", "\"threads_severity\"",
             "\"failed_collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
+            "\"measured_metric_count\"", "\"metric_count\"",
         })
         {
             Assert.Contains(field, json, StringComparison.Ordinal);
         }
+
+        /* #3528: the coverage counts ride every card so a consumer can qualify the band label
+           ("Healthy — 1 of 6 measured") — values pinned, not just keys, so the two cannot be swapped or
+           collapsed into one. */
+        JsonAssert.Contains("\"measured_metric_count\": 1", json);
+        JsonAssert.Contains("\"metric_count\": 6", json);
 
         /* Bands / severities serialize as strings, not ordinals — the frontend maps a name to a color. */
         JsonAssert.Contains("\"band\": \"Critical\"", json);

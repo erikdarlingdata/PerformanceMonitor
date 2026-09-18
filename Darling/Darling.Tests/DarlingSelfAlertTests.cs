@@ -78,6 +78,7 @@ public sealed class DarlingSelfAlertTests
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
@@ -824,9 +825,37 @@ public sealed class DarlingSelfAlertTests
     [Fact]
     public void IsDiskPressure_JustBelowThreshold_Pressure()
     {
-        /* 9.9% free trips it — the threshold is a real edge, not a wide band. */
-        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _, out var percentFree));
+        /* 9.9% free trips it — the threshold is a real edge, not a wide band. The volume is small enough
+           (100 GiB) that the #3528 GB floor is far above the free space, so the percent is what decides. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            (long)(9.9 * Gib), 100 * Gib, out _, out var percentFree));
         Assert.Equal(9.9, percentFree, precision: 6);
+    }
+
+    [Fact]
+    public void IsDiskPressure_BigVolumeAtLowPercent_IsNotPressure_TheGbFloorQualifies()
+    {
+        /* #3528's own example, scaled: 99 GiB free on a 1000 GiB store volume is 9.9% — below the percent
+           threshold — but 99 GiB of runway is nothing to page CRITICAL about, and it is ABOVE the shipped
+           50 GB floor, so the composed shipped default stays quiet. Before #3528 this exact call fired. */
+        Assert.False(DarlingSelfAlertEvaluator.IsDiskPressure(99 * Gib, 1000 * Gib, out _, out var percentFree));
+
+        /* Measured whenever the total is usable, firing or not (#1881). */
+        Assert.Equal(9.9, percentFree, precision: 6);
+
+        /* The floor only QUALIFIES: once free space is genuinely below it too, the same volume fires. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(45 * Gib, 1000 * Gib, out _, out _));
+    }
+
+    [Fact]
+    public void IsDiskPressure_FloorOfZero_RestoresThePercentOnlyCondition()
+    {
+        /* 0 removes the floor (the pvs_floor_gb reading), so the pre-#3528 percent-only behaviour is one
+           setting away — and the percent-only overload is that same condition, pinned equal here. */
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            99 * Gib, 1000 * Gib, DarlingSelfAlertEvaluator.DiskFreeWarnPercent, 0.0, out _, out _));
+        Assert.True(DarlingSelfAlertEvaluator.IsDiskPressure(
+            99 * Gib, 1000 * Gib, DarlingSelfAlertEvaluator.DiskFreeWarnPercent, out _, out _));
     }
 
     [Fact]
@@ -890,6 +919,36 @@ public sealed class DarlingSelfAlertTests
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyDiskPressureAsync(35 * Gib, 1000 * Gib, null, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task DiskPressure_ReadsTheGbFloorThroughTheSettingsSeam()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 9% free on a 1 TiB store volume: the percent is breached, but ~92 GiB of runway sits above the
+           fake's 50 GB floor — the sweep stays quiet. This drives the SEAM (the store-backed knob the
+           sweep reads), not the constant the pure tests pin, and the fired threshold text below is what
+           proves which condition judged. */
+        await e.ApplyDiskPressureAsync(92 * Gib, 1024 * Gib, null, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* An operator setting the floor to 0 restores the percent-only condition on the next sweep —
+           read live through the by-reference seam, no rebuild. */
+        h.Settings.SelfDiskFreeWarnGb = 0;
+        await e.ApplyDiskPressureAsync(92 * Gib, 1024 * Gib, null, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Disk Pressure", fired.MetricName);
+        /* With the floor off the threshold string names the percent alone... */
+        Assert.Equal("10% free", fired.ThresholdValue);
+
+        /* ...and with it on, a breach BELOW both gates fires and the string names both. */
+        var h2 = new Harness();
+        var e2 = h2.Build();
+        await e2.ApplyDiskPressureAsync(40 * Gib, 1024 * Gib, null, Ct);
+        var both = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Equal("10% free and under 50 GB", both.ThresholdValue);
     }
 
     /* ---------------- custom-alert-rule health edge (#3304) ---------------- */

@@ -615,9 +615,17 @@ public sealed class AlertsConfig
     public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
-    /// 0 disables the check — percent is its only trigger).</summary>
+    /// 0 disables the check).</summary>
     [JsonPropertyName("selfDiskFreeWarnPercent")]
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#3528: the store warning's GB floor — the percent above additionally requires free space
+    /// below this many GB, an AND qualifier so a large volume at a low percent never pages (0 removes the
+    /// floor). The PVS-floor composition, not the target pair's OR. 50 puts the crossover at a 500 GB
+    /// store volume: below that the percent governs exactly as before; above it, 50 GB free is the line —
+    /// which is what stops 400 GB free on a 4 TB volume reading as "act now".</summary>
+    [JsonPropertyName("selfDiskFreeWarnGb")]
+    public int SelfDiskFreeWarnGb { get; set; } = 50;
 
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
     /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
