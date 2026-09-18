@@ -126,6 +126,25 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_memory_pressure_events", sql, StringComparison.Ordinal);
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("day_spine", sql, StringComparison.Ordinal);
+
+        /* #3541 A9: the presence count is the LAST projection, after collection_runs, so the thirteen positional
+           reads before it stay put — and it counts the seven signal joins, never the collection log or the
+           alert log, whose survival is the reason a day can outlive its signals. The same pin is written for
+           Lite's copy in DailySummaryCpuBarPinTests' neighbourhood by construction: both SQLs are read by the
+           SAME ordinal (13) and judged by the SAME DailySummaryRetention.StateFor. */
+        Assert.True(sql.IndexOf("AS collection_runs", StringComparison.Ordinal) < sql.IndexOf("AS signal_sources_present", StringComparison.Ordinal),
+            "signal_sources_present must trail collection_runs so the positional reads before it stay put");
+        Assert.Equal(DailySummaryRetention.SignalSourceCount, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
+        Assert.DoesNotContain("CASE WHEN cl.d IS NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CASE WHEN al.d IS NULL", sql, StringComparison.Ordinal);
+        Assert.True(sql.TrimEnd().EndsWith("ORDER BY s.d", StringComparison.Ordinal));
+
+        /* And Lite's copy carries the same arm, in the same position, read at the same ordinal. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.DailySummary.cs");
+        Assert.True(lite.IndexOf("AS collection_runs", StringComparison.Ordinal) < lite.IndexOf("AS signal_sources_present", StringComparison.Ordinal));
+        Assert.Equal(DailySummaryRetention.SignalSourceCount, System.Text.RegularExpressions.Regex.Matches(lite, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
+        Assert.Contains("SignalSourcesPresent = reader.IsDBNull(13)", lite, StringComparison.Ordinal);
+        Assert.Contains("SignalSourcesPresent = reader.IsDBNull(13)", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingHealthReader.cs"), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -181,6 +200,143 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         var noData = new Reader.DailySummaryReadRow(date, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: false);
         Assert.Equal(DailyHealthBand.NoData, noData.HealthBand);
         Assert.Equal("No Data", noData.OverallHealth);
+    }
+
+    /* ---------------- #3541 A9: retention ghosts (no live PG) ---------------- */
+
+    /// <summary>
+    /// The row the reader stamps <c>Purged</c> bands No Data whatever the spine still holds for it. This is
+    /// the defect in one row: <c>HasData: true</c> (a spine row exists — the run record outlives the signals
+    /// by 30 days), <c>CollectionRuns</c> non-zero, every signal a COALESCEd zero — and before the state
+    /// existed that banded Healthy. The same row judged Collected is the Healthy it always was, so the state
+    /// is the ONLY thing that moved the verdict.
+    /// </summary>
+    [Fact]
+    public void DailySummaryRow_PurgedOrUncollected_IsNoData_NeverHealthy()
+    {
+        var date = new DateTime(2026, 7, 9, 0, 0, 0, DateTimeKind.Unspecified);
+        var shell = new Reader.DailySummaryReadRow(date, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: true) { CollectionRuns = 1_440 };
+
+        Assert.Equal(DailyHealthBand.Healthy, shell.HealthBand);
+        Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.Purged }).HealthBand);
+        Assert.Equal("No Data", (shell with { DataState = DailySummaryDataState.Purged }).OverallHealth);
+        Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.PastHorizon }).HealthBand);
+        Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.NoRunRecord }).HealthBand);
+
+        /* A purged day with a real, surviving alert is STILL No Data: the composite band needs every input,
+           and Warning-on-alerts-alone would understate a day whose deadlocks are gone. */
+        var withAlert = shell with { AlertCount = 3, DataState = DailySummaryDataState.Purged };
+        Assert.Equal(DailyHealthBand.NoData, withAlert.HealthBand);
+        Assert.False(withAlert.ToSignals().HasData);
+    }
+
+    /// <summary>
+    /// The horizon is the SHORTEST effective retention among the sources — on a default store the signal
+    /// collectors' shared 30 (<see cref="DarlingRetention.DataRetentionBaseDays"/>), never the collection
+    /// log's 60 or the alert log's 90, which are precisely the horizons that let a spine row outlive its
+    /// signals. A fleet override on one signal collector moves it; raising every collector past the log
+    /// leaves the log as the floor.
+    /// </summary>
+    [Fact]
+    public void ShortestSignalRetention_IsTheSignalsDefault_AndFollowsFleetOverrides()
+    {
+        var none = System.Array.Empty<PerformanceMonitor.Darling.Service.ScheduleOverride>();
+        Assert.Equal(PerformanceMonitor.Darling.Service.DarlingRetention.DataRetentionBaseDays, Reader.ShortestSignalRetentionDays(none));
+        Assert.Equal(30, PerformanceMonitor.Darling.Service.DarlingRetention.DataRetentionBaseDays);
+        Assert.True(Reader.ShortestSignalRetentionDays(none) < PerformanceMonitor.Darling.Service.DarlingRetention.CollectionLogRetentionDays);
+        Assert.True(Reader.ShortestSignalRetentionDays(none) < PerformanceMonitor.Darling.Service.DarlingRetention.AlertHistoryRetentionDays);
+
+        /* Every signal collector the aggregate reads has a schedule entry — the resolver indexes by name. */
+        foreach (var collector in Reader.DailySummarySignalCollectors)
+            Assert.True(CollectorScheduleDefaults.All.ContainsKey(collector), $"{collector} has no CollectorScheduleDefaults entry");
+
+        var shortened = new[] { new PerformanceMonitor.Darling.Service.ScheduleOverride(null, "deadlocks", null, 10, true) };
+        Assert.Equal(10, Reader.ShortestSignalRetentionDays(shortened));
+
+        /* A PER-SERVER override does not move a shared-table purge, so it does not move the horizon. */
+        var perServer = new[] { new PerformanceMonitor.Darling.Service.ScheduleOverride(42, "deadlocks", null, 10, true) };
+        Assert.Equal(30, Reader.ShortestSignalRetentionDays(perServer));
+
+        /* cpu_utilization is floored at the baseline window exactly as the purge floors it. */
+        var cpuShort = new[] { new PerformanceMonitor.Darling.Service.ScheduleOverride(null, "cpu_utilization", null, 5, true) };
+        Assert.Equal(30, Reader.ShortestSignalRetentionDays(cpuShort));
+
+        var lengthened = Reader.DailySummarySignalCollectors
+            .Select(c => new PerformanceMonitor.Darling.Service.ScheduleOverride(null, c, null, 365, true)).ToArray();
+        Assert.Equal(PerformanceMonitor.Darling.Service.DarlingRetention.CollectionLogRetentionDays, Reader.ShortestSignalRetentionDays(lengthened));
+    }
+
+    /// <summary>
+    /// The fleet-override read names the same table and the same fleet predicate the purge's resolver uses,
+    /// so the horizon this tool publishes is the horizon the purge enforces.
+    /// </summary>
+    [Fact]
+    public void FleetRetentionOverridesSql_ReadsTheFleetRows_OfTheSignalCollectors()
+    {
+        var sql = Reader.FleetRetentionOverridesSql;
+        Assert.Contains("FROM config_collector_schedules", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("collector_name = ANY($1)", sql, StringComparison.Ordinal);
+        Assert.Contains("retention_days IS NOT NULL", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The descriptions carry the vocabulary an agent will branch on: the horizon field, the count of days
+    /// before it, the purged state, and the promise that such a day is never Healthy.
+    /// </summary>
+    [Fact]
+    public void DailySummaryDescriptions_NameTheHorizon_ThePurgedState_AndTheExactDateFormat()
+    {
+        var range = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_daily_summary_range");
+        var rangeText = range.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("retention_horizon", rangeText, StringComparison.Ordinal);
+        Assert.Contains("days_before_horizon", rangeText, StringComparison.Ordinal);
+        Assert.Contains("data_state=purged", rangeText, StringComparison.Ordinal);
+        Assert.Contains("NEVER Healthy", rangeText, StringComparison.Ordinal);
+
+        var single = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_daily_summary");
+        Assert.Contains("data_state=purged", single.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        var date = single.GetParameters().Single(p => p.Name == "summary_date");
+        Assert.Contains("yyyy-MM-dd ONLY", date.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>summary_date</c> is EXACT ISO-8601 on both SKUs' tools (through the shared parser): the spelling
+    /// the description promised parses, the ambiguous <c>01/02/2026</c> the general parser used to accept
+    /// as 2 January is refused, and the refusal names the one accepted form.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-07-09", true)]
+    [InlineData(" 2026-07-09 ", true)]
+    [InlineData("01/02/2026", false)]
+    [InlineData("07/09/2026", false)]
+    [InlineData("2026-7-9", false)]
+    [InlineData("2026-07-09T00:00:00Z", false)]
+    [InlineData("July 9, 2026", false)]
+    public void SummaryDate_IsParsedExactly_OrRefusedNamingTheFormat(string input, bool accepted)
+    {
+        var error = McpHelpers.ParseSummaryDate(input, out var date);
+        if (accepted)
+        {
+            Assert.Null(error);
+            Assert.Equal(new DateTime(2026, 7, 9), date!.Value);
+            Assert.Equal(DateTimeKind.Utc, date.Value.Kind);
+        }
+        else
+        {
+            Assert.Null(date);
+            Assert.StartsWith($"Invalid summary_date value '{input}'", error, StringComparison.Ordinal);
+            Assert.Contains("yyyy-MM-dd", error, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void SummaryDate_Absent_MeansToday_ResolvedByTheReader()
+    {
+        Assert.Null(McpHelpers.ParseSummaryDate(null, out var none));
+        Assert.Null(none);
+        Assert.Null(McpHelpers.ParseSummaryDate("  ", out var blank));
+        Assert.Null(blank);
     }
 
     /* ---------------- advertised MCP schema ---------------- */
@@ -281,12 +437,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 postgres, ServerName, boundary.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
 
             DarlingMcpTestData.AssertEnvelope(onItsOwnDay, ServerName, "overall_health");
-            /* #3525: deadlocks band as a per-hour RATE through the card band's tiers now, so one deadlock
-               across a 24h day (0.04/hr, far below the measured Warning tier of 5/hr) is a Healthy day —
-               the old any-deadlock-is-Critical reading is gone by design. The row's VISIBILITY to the
-               explicit-date read is what this test pins, so assert the evidence and the honest band. */
+            /* The row's VISIBILITY to the explicit-date read is what this test pins, so assert the evidence
+               first. The band it carries changed twice on purpose: #3525 made one deadlock across a 24h day
+               (0.04/hr) Healthy rather than Critical, and #3541 A9 then withheld the verdict altogether for
+               THIS row — a fixed day two months back is before the store's 30-day retention horizon, and a
+               deadlock row surviving there means the purge has not reached the day (data_state
+               past_horizon: the row is real, the zeros beside it may not be, so No Data rather than a green
+               cell). A day with no run record inside the horizon would read no_run_record, likewise No Data. */
             Assert.Contains("\"deadlock_count\":1", onItsOwnDay, StringComparison.Ordinal);
-            Assert.Contains("Healthy", onItsOwnDay, StringComparison.Ordinal);
+            var judged = JsonDocument.Parse(onItsOwnDay).RootElement;
+            Assert.Equal("past_horizon", judged.GetProperty("data_state").GetString());
+            Assert.Equal("No Data", judged.GetProperty("overall_health").GetString());
+            Assert.Contains("1 of 7 signal sources", judged.GetProperty("data_note").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Healthy", onItsOwnDay, StringComparison.Ordinal);
             Assert.Contains("2026-07-20", onItsOwnDay, StringComparison.Ordinal);
 
             /* The bug: the same rows are invisible to an implicit "today", which is what the sibling test

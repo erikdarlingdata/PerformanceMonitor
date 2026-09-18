@@ -11,6 +11,14 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpAnalysisTools
 {
+    /// <summary>
+    /// The <c>source</c> parameter's description, verbatim Darling's <c>DarlingMcpTools.FactSourceFilterDescription</c>,
+    /// built from <see cref="FactScorer.KnownSources"/> so the documented set IS the accepted set (#3541 A13).
+    /// </summary>
+    internal const string FactSourceFilterDescription =
+        "Filter to one source category. Accepted values (the engine's complete source registry, refused otherwise): "
+        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, queries, sessions, tempdb, waits. Omit for all.";
+
     [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
     public static async Task<string> AnalyzeServer(
         AnalysisService analysisService,
@@ -200,7 +208,7 @@ public sealed class McpAnalysisTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 4.")] int hours_back = 4,
-        [Description("Filter to a specific source category: waits, blocking, config, memory. Omit for all.")] string? source = null,
+        [Description(FactSourceFilterDescription)] string? source = null,
         [Description("Minimum severity to include. Default 0 (all facts). Use 0.5 to see only significant facts.")] double min_severity = 0,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
@@ -208,6 +216,11 @@ public sealed class McpAnalysisTools
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+
+        /* #3541 A13: an unknown source is refused with the whole accepted set, never applied as a filter
+           that matches nothing. The set is the scorer's registry, not a copy of it. */
+        validation = McpHelpers.ValidateChoice(source, FactScorer.KnownSources, "source");
         if (validation != null) return validation;
 
         /* Null for an absent anchor — see analyze_server's note. Nothing here persists, so the

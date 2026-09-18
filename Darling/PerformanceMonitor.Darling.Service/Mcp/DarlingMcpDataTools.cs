@@ -513,7 +513,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -543,18 +543,39 @@ public sealed class DarlingMcpDataTools
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
 
+        /* #3541 A13: the parallelism filter goes INTO the read as a lifetime max_dop floor on the grouped
+           population, applied before the CPU ranking and the cap (see TopQueriesSql's HAVING note). It used
+           to be a .Where over the returned top-N page: parallel_only=true on a box whose twenty hottest plans
+           were serial came back EMPTY while the window held parallel plans, and the engine's own CXPACKET
+           advice steers agents to exactly that call. The floor is 2 for parallel_only (the smallest DOP that
+           is parallel), min_dop when the caller set one above that, 0 (admit all) otherwise; min_dop implies
+           parallel filtering, as its description has always said. */
+        var minMaxDop = min_dop > 1 ? min_dop : parallel_only ? 2 : 0;
+        var filterApplied = minMaxDop > 0
+            ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
+            : null;
+
         try
         {
             var now = windowEnd;
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop);
             if (rows.Count == 0)
+            {
+                /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
+                   parallel_only means the window held no group whose plan ever ran parallel, and saying
+                   "no query stats available" for that would send the caller to collection health. */
+                if (minMaxDop > 0)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                        new { filter_applied = filterApplied });
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
-
-            var filtered = rows
-                .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
-                .ToList();
+            }
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -566,12 +587,12 @@ public sealed class DarlingMcpDataTools
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
-                filtered.Sum(r => r.TotalCpuUs) / 1_000_000.0,
+                rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 now.AddHours(-hours_back), now,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
-            var result = filtered.Select(r => new
+            var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
                 query_hash = r.QueryHash,
@@ -629,6 +650,8 @@ public sealed class DarlingMcpDataTools
                 /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
                    the two answer different questions and the rows look alike. */
                 group_by = rollUp ? "host_object" : "query_hash",
+                /* #3541 A13: the filter that shaped the population, stated on the payload; null when none. */
+                filter_applied = filterApplied,
                 cpu_attribution = new
                 {
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
@@ -1388,7 +1411,7 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
         [Description("Server name or display name, or the reserved name (fleet) for the fleet-maintenance run-records.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 200. Applied AFTER the two filters, so it caps the matching rows rather than the window.")] int limit = 200,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         /*
@@ -1421,18 +1444,19 @@ public sealed class DarlingMcpDataTools
         var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
         if (invalidFloor != null) return invalidFloor;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, like every other unusable parameter here. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
             var end = windowEnd;
-            var start = end.AddHours(-Math.Abs(hours_back));
+            var start = end.AddHours(-hours_back);
 
             /* Over-fetch by one so truncation is OBSERVED rather than inferred. Comparing count to the
                cap cannot tell a window holding exactly `limit` runs from one holding more, and this
@@ -1485,7 +1509,7 @@ public sealed class DarlingMcpDataTools
                 if (resolved.ServerId == DarlingObservability.FleetServerId)
                 {
                     var (state, text) = FleetMaintenanceLogMiss(
-                        everCollected, collector_name, min_duration_ms, Math.Abs(hours_back));
+                        everCollected, collector_name, min_duration_ms, hours_back);
 
                     return McpHelpers.Status(state, text);
                 }
@@ -1501,12 +1525,12 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(r => new
@@ -1633,7 +1657,7 @@ public sealed class DarlingMcpDataTools
                 server = resolved.ServerName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span reported --
                    see the two timestamps below. */
-                hours_back = Math.Abs(hours_back),
+                hours_back = hours_back,
                 run_count = rows.Count,
                 /* Observed by the over-fetch above, not inferred from the row count. */
                 truncated,
@@ -1692,25 +1716,26 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetCurrentWaitsTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, like every other unusable parameter here. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
             var end = windowEnd;
-            var start = end.AddHours(-Math.Abs(hours_back));
+            var start = end.AddHours(-hours_back);
 
             var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
@@ -1733,7 +1758,7 @@ public sealed class DarlingMcpDataTools
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        $"Nothing was waiting on {resolved.ServerName} in the last {hours_back} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
                         $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
@@ -1742,7 +1767,7 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                hours_back = Math.Abs(hours_back),
+                hours_back = hours_back,
                 database_name,
                 /*
                     Two series in one payload because they are read together: a wait-type spike with no
@@ -1773,24 +1798,25 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetBlockingStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
-           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
-           shared validator would impose the 168-hour ceiling every other read carries, and take reach
-           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
-           is validated because it is new; the span keeps the behaviour callers already have. */
-        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
+           other read carries and take reach away from exactly the read whose premise is looking FURTHER back
+           than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
+           ends before it starts is a caller error, and flipping the sign answered a different question with
+           nothing to say so. Refused, like every other unusable parameter here. */
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
         {
             var end = windowEnd;
-            var start = end.AddHours(-Math.Abs(hours_back));
+            var start = end.AddHours(-hours_back);
 
             var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end);
 
@@ -1824,7 +1850,7 @@ public sealed class DarlingMcpDataTools
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
@@ -1833,7 +1859,7 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                hours_back = Math.Abs(hours_back),
+                hours_back = hours_back,
                 /*
                     Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
                     blocks and one ten-minute block share a count and are different problems.

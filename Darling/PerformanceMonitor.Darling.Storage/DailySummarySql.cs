@@ -154,8 +154,24 @@ public static class DailySummarySql
                the count. 0 when the blocking came from a source without a wait time. */
             COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
             /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors
-               into a share. Appended LAST so every existing ordinal read stays where it was. */
-            COALESCE(cl.runs, 0) AS collection_runs
+               into a share. Appended after peak_block_wait_ms so every existing ordinal read stays where it was. */
+            COALESCE(cl.runs, 0) AS collection_runs,
+            /* #3541 A9: how many of the seven per-signal sources hold at least one row for the day — the
+               retention arm's PRESENCE fact. The spine is a UNION over nine sources aging out at different
+               horizons, each LEFT JOINed and COALESCEd to zero, so a day the collection log (60 days) or the
+               alert log (90) still names can have every signal (30) purged and read as measured-zero-Healthy.
+               The reader judges such a day by this count against the store's retention horizon: zero sources
+               past the horizon is a purged shell, some sources past it is a day the purge has not reached.
+               A source counts as present when its grouped CTE produced a row for the day, which for cpu is
+               "any sample" (the FILTER is inside the aggregate) and for waits is "any positive delta".
+               Appended LAST, after collection_runs, for the same ordinal reason. */
+            (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN q.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d

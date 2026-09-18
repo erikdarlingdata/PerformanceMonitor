@@ -762,7 +762,8 @@ internal static class DarlingDataReader
     /// 5 to drop WAITFOR shells via the latest-text LATERAL, cap at top. Summed bigints CAST back to bigint
     /// for the typed reader. The aggregate reads the base <c>query_stats</c> table (it projects no text);
     /// the text LATERAL reads <c>v_query_stats</c>, which resolves the #1767 payload dimension — the plan
-    /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top.
+    /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
+    /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
     /// </summary>
     public const string TopQueriesSql = """
         WITH ranked AS (
@@ -804,7 +805,16 @@ internal static class DarlingDataReader
                (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
                NULL and keep collapsing into one group per hash exactly as before. */
             GROUP BY database_name, query_hash, host_object_name
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: the parallelism filter is part of the QUERY, applied to the grouped population
+               BEFORE the CPU ranking and the cap. It used to run in C# over the returned top-N page, so
+               parallel_only=true on a box whose twenty hottest plans were serial answered an empty page while
+               the window held parallel plans further down — and the engine's own CXPACKET advice sends agents
+               to exactly that call. $6 is the group's lifetime max_dop floor: 0 admits every group (the
+               unfiltered read, byte-identical in result to before), 2 is parallel_only, min_dop is itself. The
+               COALESCE keeps a group whose max_dop was never captured (NULL) out of a filtered page, which is
+               what the C# arm did too (null read as 0, and 0 > 1 is false). */
+            AND COALESCE(MAX(max_dop), 0) >= $6
             ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
@@ -915,7 +925,11 @@ internal static class DarlingDataReader
                without that arm every unrelated ad-hoc statement in a database would pool into one row. */
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
-            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: same in-query parallelism floor as TopQueriesSql — see its note. Under the rollup
+               the group's max_dop is the max across every fragment, so a procedure whose dynamic SQL went
+               parallel in ANY fragment passes parallel_only, which is the question being asked. */
+            AND COALESCE(MAX(max_dop), 0) >= $6
             ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
@@ -963,9 +977,16 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// The top-N groups by CPU, ranked over the population that passes every filter. <paramref name="minMaxDop"/>
+    /// is the lifetime <c>max_dop</c> floor a group must reach to be ranked at all (#3541 A13): 0 for no
+    /// parallelism filter, 2 for <c>parallel_only</c>, the caller's <c>min_dop</c> otherwise — see
+    /// <see cref="TopQueriesSql"/>'s HAVING note. The filter is IN the statement so the page is the top-N of the
+    /// filtered population, not the filtered remainder of an unfiltered top-N.
+    /// </summary>
     public static async Task<List<TopQueryRow>> GetTopQueriesByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
-        bool rollUpByHostObject = false, CancellationToken cancellationToken = default)
+        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
     {
         var rows = new List<TopQueryRow>();
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
@@ -974,6 +995,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddInt(command, minMaxDop);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

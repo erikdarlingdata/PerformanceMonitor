@@ -89,14 +89,23 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    /// <summary>
+    /// The top-N query-stats groups by CPU over the window. <paramref name="minMaxDop"/> is the lifetime
+    /// <c>max_dop</c> floor a group must reach to be RANKED at all (#3541 A13): 0 for no parallelism filter
+    /// (the grids' read, byte-identical to before), 2 for the MCP tool's <c>parallel_only</c>, the caller's
+    /// <c>min_dop</c> otherwise. It is a HAVING predicate on the grouped population, before the CPU ordering
+    /// and the cap, so the page is the top-N of the filtered population — the tool used to filter the
+    /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
+    /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
+    /// </summary>
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
         command.CommandText = @"
 WITH ranked AS (
@@ -157,7 +166,11 @@ WITH ranked AS (
     AND   collection_time <= $3
     AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
     GROUP BY database_name, query_hash, host_object_name
-    HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
+       and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
+       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
+    AND   COALESCE(MAX(max_dop), 0) >= $6
     ORDER BY SUM(delta_worker_time) DESC
     LIMIT $4 + 5
 ),
@@ -218,6 +231,7 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = top });
         command.Parameters.Add(new DuckDBParameter { Value = utcOffsetMinutes });
+        command.Parameters.Add(new DuckDBParameter { Value = minMaxDop });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

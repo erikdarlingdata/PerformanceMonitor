@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 
@@ -100,6 +101,105 @@ internal static class McpHelpers
         }
 
         return ResolveAsOf(asOf, out endUtc);
+    }
+
+    /// <summary>
+    /// The window validation for the three UNCAPPED reads (<c>get_collection_log</c>, <c>get_current_waits_trend</c>,
+    /// <c>get_blocking_stats</c>): a positive span of any length, then the anchor — <see cref="ValidateWindow"/>
+    /// minus its <see cref="MaxHoursBack"/> ceiling.
+    ///
+    /// <para><b>What this replaces (#3541 A13).</b> Those three tools never went through <see cref="ValidateHoursBack"/>
+    /// because its 168-hour ceiling would take reach away from exactly the reads whose premise is looking further
+    /// back than the default — and having stepped around the validator they <c>Math.Abs</c>'d the span instead.
+    /// A caller who sent <c>hours_back = -24</c> asked a question with no meaning (a window that ends before it
+    /// starts), and got the last 24 hours back with nothing to say the sign had been flipped: an answer to a
+    /// different question, indistinguishable from a correct one, which is the silently-different-answer class
+    /// every validator in this file exists to remove. Zero is refused with it — a zero-length window holds
+    /// nothing by construction, and an empty result under a "genuinely quiet" sentence would be a lie.</para>
+    ///
+    /// <para>The refusal borrows <see cref="ValidateHoursBack"/>'s first sentence so a caller who has seen the
+    /// capped reads' message recognises it, and then says the one thing that differs: there is no ceiling.</para>
+    /// </summary>
+    public static string? ValidateUncappedWindow(int hoursBack, string? asOf, out DateTime endUtc)
+    {
+        endUtc = DateTime.UtcNow;
+
+        if (hoursBack <= 0)
+        {
+            return $"Invalid hours_back value '{hoursBack}'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.";
+        }
+
+        return ResolveAsOf(asOf, out endUtc);
+    }
+
+    /// <summary>
+    /// The ONLY spelling <c>summary_date</c> accepts on both SKUs' daily-summary tools: the ISO-8601 calendar
+    /// date its own description has always promised.
+    /// </summary>
+    public const string SummaryDateFormat = "yyyy-MM-dd";
+
+    /// <summary>
+    /// Parses <c>get_daily_summary</c>'s <c>summary_date</c>: <paramref name="date"/> is <c>null</c> when the
+    /// caller sent nothing (today, resolved by the reader), the UTC date when they sent a usable one. Returns
+    /// null when usable, the refusal when not.
+    ///
+    /// <para><b>Exact, not general (#3541 A9).</b> This sat in the same file as <see cref="AsOfFormats"/>'s
+    /// strict allowlist and used a general <see cref="DateTime.TryParse(string, IFormatProvider, DateTimeStyles, out DateTime)"/>,
+    /// which under the invariant culture also accepts <c>01/02/2026</c> as <c>M/d/yyyy</c> — so a caller who
+    /// meant 1 February was answered about 2 January, correctly formatted, with nothing to say so. The tool's
+    /// description promised <c>yyyy-MM-dd</c>; the parser now agrees with it instead of exceeding it, exactly as
+    /// <see cref="ResolveAsOf"/> does for <c>as_of</c>. The refusal names the one accepted form.</para>
+    /// </summary>
+    public static string? ParseSummaryDate(string? summaryDate, out DateTime? date)
+    {
+        date = null;
+        if (string.IsNullOrWhiteSpace(summaryDate))
+        {
+            return null;
+        }
+
+        if (!DateTime.TryParseExact(
+                summaryDate.Trim(),
+                SummaryDateFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            return $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.";
+        }
+
+        date = DateTime.SpecifyKind(parsed, DateTimeKind.Utc).Date;
+        return null;
+    }
+
+    /// <summary>
+    /// Validates an optional ENUMERATED filter — a parameter whose usable values are a closed set the
+    /// caller cannot see. Returns null when the caller sent nothing or a member of the set, the refusal
+    /// naming the whole set when not. The match is case-insensitive, and the caller is expected to use the
+    /// canonical spelling from <paramref name="accepted"/> downstream rather than the caller's.
+    ///
+    /// <para><b>Refuses rather than filters to nothing (#3541 A13).</b> <c>get_analysis_facts</c> applied an
+    /// unknown <c>source</c> as an equality filter and returned an empty list, under a description that
+    /// documented four of the engine's source names — so a caller who typed the fifth read "no facts of that
+    /// kind" for a value that could never have matched. An unknown member of a closed set is a caller error,
+    /// and the refusal that lists the set is the only answer that lets the caller fix it.</para>
+    /// </summary>
+    public static string? ValidateChoice(string? value, IReadOnlyCollection<string> accepted, string paramName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        foreach (var candidate in accepted)
+        {
+            if (string.Equals(candidate, value.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+        }
+
+        return $"Invalid {paramName} value '{value}'. Accepted values: {string.Join(", ", accepted)}. Omit it for all.";
     }
 
     /// <summary>

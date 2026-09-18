@@ -370,7 +370,7 @@ public class CollectionBackgroundService : BackgroundService
 
         try
         {
-            _retentionService.CleanupOldArchives(retentionMonths: 3);
+            _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
             _lastRetentionTime = DateTime.UtcNow;
         }
         catch (Exception ex)

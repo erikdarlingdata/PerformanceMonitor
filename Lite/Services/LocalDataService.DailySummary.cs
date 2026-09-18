@@ -140,8 +140,19 @@ SELECT
        count. 0 when the blocking came from a source without a wait time. */
     COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
     /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors into a
-       share. Appended LAST so every existing ordinal read stays where it was. */
-    COALESCE(cl.runs, 0) AS collection_runs
+       share. Appended after peak_block_wait_ms so every existing ordinal read stays where it was. */
+    COALESCE(cl.runs, 0) AS collection_runs,
+    /* #3541 A9: how many of the seven per-signal sources hold at least one row for the day — the retention
+       arm's PRESENCE fact, Darling's DailySummarySql column of the same name (its comment carries the
+       reasoning). Lite's sources share one archive horizon, so the ghost is narrower here, but the reader
+       judges the day the same way from the same fact. Appended LAST, after collection_runs. */
+    (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN q.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
 FROM day_spine s
 LEFT JOIN waits w ON w.d = s.d
 LEFT JOIN queries q ON q.d = s.d
@@ -174,15 +185,33 @@ ORDER BY s.d";
            clock; the live calendar read leaves this null. */
         var referenceUtc = asOfUtc ?? DateTime.UtcNow;
 
+        /* #3541 A9: the retention horizon, from the READER's wall clock and never the anchor — a purge is a
+           wall-clock event and a backdated as_of cannot un-purge an archive; DailySummaryRetention.HorizonFor
+           says why in full. Lite has ONE horizon for every source (RetentionService.ArchiveRetentionMonths),
+           so a day past it is gone from every table together and cannot ghost the way Darling's per-signal
+           horizons let a day do; the state is stamped all the same so the two SKUs publish one vocabulary
+           and the same day is judged the same way on both. */
+        var retentionHorizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
+
         var results = new List<DailySummaryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add(ReadDailySummaryRow(reader, referenceUtc));
+            results.Add(ReadDailySummaryRow(reader, referenceUtc, retentionHorizon));
         }
 
         return results;
     }
+
+    /// <summary>
+    /// The oldest UTC day every daily-summary source still holds on Lite (#3541 A9): today minus the archive
+    /// retention. Month arithmetic rather than <see cref="DailySummaryRetention.HorizonFor"/>'s day count
+    /// because Lite's horizon is DECLARED in months (<see cref="RetentionService.ArchiveRetentionMonths"/>)
+    /// and the cleanup that enforces it subtracts months; converting to a day count here would make the two
+    /// disagree by a day or two around month ends.
+    /// </summary>
+    internal static DateTime DailySummaryRetentionHorizon(DateTime utcNow) =>
+        utcNow.AddMonths(-RetentionService.ArchiveRetentionMonths).Date;
 
     /// <summary>
     /// Gets the daily summary for a specific date (or today if null). Delegates to the range query for a
@@ -193,16 +222,30 @@ ORDER BY s.d";
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
         var rows = await GetDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1));
-        return rows.Count > 0
-            ? rows[0]
-            : new DailySummaryRow { SummaryDate = targetDate, HasData = false, HealthBand = DailyHealthBand.NoData };
+        if (rows.Count > 0)
+        {
+            return rows[0];
+        }
+
+        /* #3541 A9: a day the spine does not hold is not "collected" either — before the horizon it is purged
+           like any other, inside it simply without a run record — so the single-day tool can say which. */
+        var horizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
+        return new DailySummaryRow
+        {
+            SummaryDate = targetDate,
+            HasData = false,
+            HealthBand = DailyHealthBand.NoData,
+            DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, horizon),
+            RetentionHorizon = horizon,
+        };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc)
+    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc, DateTime retentionHorizon)
     {
         var row = new DailySummaryRow
         {
             ReferenceUtc = referenceUtc,
+            RetentionHorizon = retentionHorizon,
             SummaryDate = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
             TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
             TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
@@ -217,8 +260,14 @@ ORDER BY s.d";
             MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
             /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
             CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            /* #3541 A9: the signal-presence count, after collection_runs. */
+            SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
             HasData = true,
         };
+        /* #3541 A9: judged from the day, its run count, its signal presence and the horizon; ToSignals folds
+           a non-collected state into HasData = false so the shared band reads NoData rather than
+           measured-zero-Healthy. */
+        row.DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, retentionHorizon);
         row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals());
         return row;
     }
@@ -252,8 +301,23 @@ public class DailySummaryRow
     /// (#3539 A2).</summary>
     public long MaxBlockDurationMs { get; set; }
 
-    /// <summary>True when the day had any collection. False renders the calendar cell as No-Data (grey).</summary>
+    /// <summary>True when the spine holds the day at all. Together with <see cref="DataState"/> this decides
+    /// the band's HasData: a held day that is purged, past the horizon or without a run record renders the calendar cell No-Data (grey)
+    /// exactly as an absent day does (#3541 A9).</summary>
     public bool HasData { get; set; }
+
+    /// <summary>Whether this row's counts are a measurement or the shape retention left behind (#3541 A9) —
+    /// see <see cref="DailySummaryDataState"/>. Defaults to Collected so a row built without the reader
+    /// (the tests' hand-built rows) bands as it always did.</summary>
+    public DailySummaryDataState DataState { get; set; } = DailySummaryDataState.Collected;
+
+    /// <summary>The horizon <see cref="DataState"/> was judged against; null on a row nobody judged.</summary>
+    public DateTime? RetentionHorizon { get; set; }
+
+    /// <summary>How many of the seven per-signal sources hold at least one row for the day (#3541 A9) — the
+    /// aggregate's trailing <c>signal_sources_present</c> column, the fact that tells a purged shell from a
+    /// day the purge has not reached.</summary>
+    public int SignalSourcesPresent { get; set; }
 
     /// <summary>The composite health band that colors this day's calendar cell.</summary>
     public DailyHealthBand HealthBand { get; set; } = DailyHealthBand.NoData;
@@ -272,7 +336,9 @@ public class DailySummaryRow
     /// <summary>Projects this row's counts into the shared banding input.</summary>
     public DailyHealthSignals ToSignals() => new()
     {
-        HasData = HasData,
+        /* #3541 A9: a purged, past-horizon or run-record-less day is a NoData day to the band, whatever the spine still holds
+           for it — its COALESCEd zeros are absences, and measured-zero-Healthy was the lie. */
+        HasData = HasData && DataState == DailySummaryDataState.Collected,
         Deadlocks = DeadlockCount,
         CollectionErrors = CollectionErrors,
         CollectionRuns = CollectionRuns,

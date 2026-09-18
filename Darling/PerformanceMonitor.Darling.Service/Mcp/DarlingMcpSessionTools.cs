@@ -87,14 +87,14 @@ public sealed class DarlingMcpSessionTools
         }
     }
 
-    [McpServerTool(Name = "get_active_queries"), Description("Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event.")]
+    [McpServerTool(Name = "get_active_queries"), Description("Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name and blocking_only are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocking has its input buffer from the blocked-process report), filtered (your database_name filter excluded it), or past_page (it is in the filtered population but beyond limit).")]
     public static async Task<string> GetActiveQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to retrieve. Default 1.")] int hours_back = 1,
-        [Description("Filter to a specific database.")] string? database_name = null,
-        [Description("Show only queries involved in blocking (blocking_session_id > 0 or is a head blocker).")] bool blocking_only = false,
-        [Description("Maximum number of rows to return. Default 50.")] int limit = 50,
+        [Description("Filter to a specific database. Applied in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
+        [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture. Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it.")] bool blocking_only = false,
+        [Description("Maximum number of rows to return. Default 50. The page is bounded by limit, not by hours_back — truncated says whether the filtered window held more.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -108,22 +108,40 @@ public sealed class DarlingMcpSessionTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var filter = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+
+            /* #3541 A13: the filters ride INTO the read (see ActiveQueriesSql), and the read is asked for one
+               row past the cap so truncation is OBSERVED on the filtered population rather than inferred from
+               the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
+               used to be rows.Count of an unfiltered window read, a different population from the rows. */
+            var page = await DarlingSessionReader.GetActiveQueriesAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only);
+            var rows = page.Rows;
+
             if (rows.Count == 0)
+            {
+                /* A filtered miss is not a collection miss: with the filters in the query, an empty page under
+                   database_name or blocking_only means the window held no snapshot matching them. */
+                if (filter != null || blocking_only)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
+                        + DescribeActiveQueryFilters(filter, blocking_only)
+                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.");
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots")
                     ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+            }
 
-            IEnumerable<DarlingSessionReader.ActiveQueryRow> filtered = rows;
+            var truncated = rows.Count > limit;
+            var shown = truncated ? rows.GetRange(0, limit) : rows;
 
-            if (!string.IsNullOrEmpty(database_name))
-                filtered = filtered.Where(r => (r.DatabaseName ?? "").Equals(database_name, StringComparison.OrdinalIgnoreCase));
+            /* The page's own (capture, session) pairs, so a victim can say whether its blocker made the page. */
+            var onPage = new HashSet<(DateTime, int)>(shown.Select(r => (r.CollectionTime, r.SessionId)));
 
-            if (blocking_only)
-                filtered = filtered.Where(r => r.BlockingSessionId > 0
-                    || rows.Any(other => other.BlockingSessionId == r.SessionId));
-
-            var result = filtered.Take(limit).Select(r => new
+            var result = shown.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 session_id = r.SessionId,
@@ -138,6 +156,10 @@ public sealed class DarlingMcpSessionTools
                 wait_type = string.IsNullOrEmpty(r.WaitType) ? null : r.WaitType,
                 wait_time_ms = r.WaitTimeMs > 0 ? r.WaitTimeMs : (long?)null,
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
+                /* #3541 A13: the two blocking disclosures. is_head_blocker is why a WAITFOR row can be here;
+                   blocker_not_shown names the ONE reason a victim's blocker is not, or is null when it is. */
+                is_head_blocker = r.IsHeadBlocker ? true : (bool?)null,
+                blocker_not_shown = BlockerNotShown(r, onPage),
                 dop = r.Dop > 0 ? r.Dop : (int?)null,
                 parallel_worker_count = r.ParallelWorkerCount > 0 ? r.ParallelWorkerCount : (int?)null,
                 granted_query_memory_gb = r.GrantedQueryMemoryGb > 0 ? r.GrantedQueryMemoryGb : (double?)null,
@@ -153,8 +175,18 @@ public sealed class DarlingMcpSessionTools
             {
                 server = resolved.ServerName,
                 hours_back,
-                total_snapshots = rows.Count,
-                shown = result.Count,
+                filters_applied = new
+                {
+                    database_name = filter,
+                    blocking_only,
+                },
+                /* The FILTERED population's size, computed in SQL on the same statement as the rows. */
+                total_snapshots = page.PopulationCount,
+                snapshots_returned = result.Count,
+                truncated,
+                order = "collection_time_desc",
+                oldest_returned_collection_time = shown[^1].CollectionTime.ToString("o"),
+                newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -162,6 +194,33 @@ public sealed class DarlingMcpSessionTools
         {
             return McpHelpers.FormatError("get_active_queries", ex);
         }
+    }
+
+    /// <summary>
+    /// The one reason a victim's head blocker is not on the page, or null when it is (or the row is not a
+    /// victim). Ordered from the reader's facts outward: never captured (no running request — the idle
+    /// open-transaction case) beats filtered beats past the page, because each later reason presupposes the
+    /// earlier one did not apply.
+    /// </summary>
+    private static string? BlockerNotShown(DarlingSessionReader.ActiveQueryRow row, HashSet<(DateTime, int)> onPage)
+    {
+        if (row.BlockingSessionId <= 0)
+            return null;
+        if (!row.BlockerInCapture)
+            return "not_captured";
+        if (!row.BlockerInPopulation)
+            return "filtered";
+        return onPage.Contains((row.CollectionTime, row.BlockingSessionId)) ? null : "past_page";
+    }
+
+    /// <summary>Names the active filters for the filtered-miss sentence, in the caller's own vocabulary.</summary>
+    private static string DescribeActiveQueryFilters(string? databaseName, bool blockingOnly)
+    {
+        if (databaseName != null && blockingOnly)
+            return $"database_name '{databaseName}' with blocking_only";
+        if (databaseName != null)
+            return $"database_name '{databaseName}'";
+        return "blocking_only";
     }
 
     [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true.")]

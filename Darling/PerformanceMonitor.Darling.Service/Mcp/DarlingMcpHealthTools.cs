@@ -88,26 +88,42 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation.")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; No Data, non-zero counts real) or no_run_record (no collector run recorded — No Data, counts shown as read).")]
     public static async Task<string> GetDailySummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Summary date (yyyy-MM-dd), interpreted as a UTC day. Default is today.")] string? summary_date = null)
+        [Description("Summary date, ISO-8601 yyyy-MM-dd ONLY (e.g. 2026-07-09), interpreted as a UTC day; any other spelling is refused rather than guessed at. Default is today.")] string? summary_date = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        DateTime? date = null;
-        if (!string.IsNullOrEmpty(summary_date))
-        {
-            if (!DateTime.TryParse(summary_date, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed))
-                return $"Invalid date format '{summary_date}'. Use yyyy-MM-dd format (e.g., 2026-07-09).";
-            date = parsed;
-        }
+        /* #3541 A9: exact ISO-8601, refused otherwise — McpHelpers.ParseSummaryDate says why the general
+           parse this replaced was the wrong tool in a file that already held as_of's strict allowlist. */
+        var dateError = McpHelpers.ParseSummaryDate(summary_date, out var date);
+        if (dateError != null) return dateError;
 
         try
         {
             var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.ServerId, date);
+
+            /* #3541 A9: a day before the retention horizon is "unavailable" in the miss vocabulary's own
+               sense — it existed and is not retrievable now — and it is told apart from a never-collected
+               day because the two send a caller to different places (nowhere useful, versus collection
+               health). What the spine still holds for it rides in the hints, named for what it is. */
+            if (row.DataState == DailySummaryDataState.Purged)
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.ServerName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+                    new
+                    {
+                        summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
+                        overall_health = row.OverallHealth,
+                        data_state = DailySummaryRetention.Label(row.DataState),
+                        retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
+                        collection_runs = row.CollectionRuns,
+                        alert_count = row.AlertCount,
+                    });
+
             if (!row.HasData)
                 return McpHelpers.Status(
                     "empty",
@@ -120,6 +136,11 @@ public sealed class DarlingMcpHealthTools
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 overall_health = row.OverallHealth,
                 health_band = row.HealthBand.ToString(),
+                /* #3541 A9: collected, past_horizon or no_run_record here (purged returned above); the note
+                   says what the zeros are on a non-collected day, null on a collected one. */
+                data_state = DailySummaryRetention.Label(row.DataState),
+                data_note = row.RetentionHorizon is { } horizon ? DailySummaryRetention.Note(row.DataState, horizon, row.SignalSourcesPresent) : null,
+                retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
                 total_wait_time_sec = row.TotalWaitTimeSec,
                 top_wait_type = row.TopWaitType,
                 unique_queries = row.UniqueQueries,
@@ -145,7 +166,7 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION.")]
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION — INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do — the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy — a purged day's zeros are absences, and days_before_horizon counts both kinds. A day with no collector run recorded is data_state=no_run_record (No Data, counts as read). Only data_state=collected rows carry a verdict.")]
     public static async Task<string> GetDailySummaryRange(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -181,8 +202,9 @@ public sealed class DarlingMcpHealthTools
 
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
                a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
-            var rows = await DarlingHealthReader.GetDailySummaryRangeAsync(
+            var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
                 postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd);
+            var rows = range.Rows;
 
             if (rows.Count == 0)
             {
@@ -218,14 +240,23 @@ public sealed class DarlingMcpHealthTools
                    otherwise tell which days they were given from the days they got. */
                 from_date = fromDate.ToString("yyyy-MM-dd"),
                 to_date = lastDay.ToString("yyyy-MM-dd"),
-                /* Days WITH data, not days in the span. The two differ exactly where collection has a hole,
-                   and that difference is the most useful thing on this payload. */
+                /* Days the spine holds, not days in the span. The two differ exactly where collection has a
+                   hole, and that difference is the most useful thing on this payload — read it together with
+                   days_before_horizon, because a held day before the horizon is a shell, not a collected day. */
                 day_count = rows.Count,
+                /* #3541 A9: the store's horizon (reader clock, effective retention — see the reader) and how
+                   many returned days fall before it. */
+                retention_horizon = range.RetentionHorizon.ToString("yyyy-MM-dd"),
+                days_before_horizon = rows.Count(row => row.DataState is DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                purged_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Purged),
+                collected_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Collected),
                 days = rows.Select(row => new
                 {
                     summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                     overall_health = row.OverallHealth,
                     health_band = row.HealthBand.ToString(),
+                    data_state = DailySummaryRetention.Label(row.DataState),
+                    data_note = DailySummaryRetention.Note(row.DataState, range.RetentionHorizon, row.SignalSourcesPresent),
                     total_wait_time_sec = row.TotalWaitTimeSec,
                     top_wait_type = row.TopWaitType,
                     unique_queries = row.UniqueQueries,
