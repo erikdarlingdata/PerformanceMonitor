@@ -52,6 +52,14 @@ public enum RecommendationsState
     /// </summary>
     InsufficientData,
 
+    /// <summary>
+    /// The read produced zero recommendations AND the persisted marker records a window-empty pass
+    /// (#3524/#3551): the span gate passed on lifetime history but the analysis window itself collected
+    /// zero facts — a dead collector or an unreachable target, not a healthy server, so a distinct
+    /// "collection appears broken" notice is shown, never the all-clear.
+    /// </summary>
+    WindowEmpty,
+
     /// <summary>The read completed and produced zero recommendations — the all-clear.</summary>
     Empty,
 
@@ -378,15 +386,24 @@ public sealed class RecommendationsViewModel
     /// </summary>
     public string InsufficientDataMessage { get; }
 
+    /// <summary>
+    /// The message shown in the <see cref="RecommendationsState.WindowEmpty"/> state — the engine's own
+    /// persisted message (or <see cref="DefaultWindowEmptyMessage"/> when it supplied none), always
+    /// suffixed with the Collection Health pointer. Empty in every other state.
+    /// </summary>
+    public string WindowEmptyMessage { get; }
+
     /// <summary>Total card count across all sections.</summary>
     public int TotalCount => Sections.Sum(s => s.Count);
 
     private RecommendationsViewModel(
-        IReadOnlyList<RecommendationSectionViewModel> sections, RecommendationsState state, string insufficientDataMessage)
+        IReadOnlyList<RecommendationSectionViewModel> sections, RecommendationsState state, string insufficientDataMessage,
+        string windowEmptyMessage = "")
     {
         Sections = sections;
         State = state;
         InsufficientDataMessage = insufficientDataMessage;
+        WindowEmptyMessage = windowEmptyMessage;
     }
 
     /// <summary>The default insufficient-data prose when the engine supplied no message (mirrors Lite's).</summary>
@@ -410,29 +427,58 @@ public sealed class RecommendationsViewModel
             RecommendationsState.InsufficientData,
             string.IsNullOrWhiteSpace(message) ? DefaultInsufficientDataMessage : message!);
 
+    /// <summary>The default window-empty prose when the marker carried no message (mirrors Lite's).</summary>
+    public const string DefaultWindowEmptyMessage =
+        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+
     /// <summary>
-    /// Builds a loaded/empty/insufficient-data view-model from the persisted finding rows and the
-    /// per-server analysis-state marker. Maps each row to an advise-only item, appends the co-fired
+    /// Appended to every window-empty message so the operator lands on the surface that diagnoses a
+    /// dead collector — the viewer's rendering of the same pointer the MCP <c>analyze_server</c> tool
+    /// appends (<c>get_collection_health</c> there, the in-app tab here). Mirrors Lite's.
+    /// </summary>
+    public const string WindowEmptyCollectionHealthPointer =
+        "Check the Collection Health tab to see when collectors last succeeded.";
+
+    /// <summary>
+    /// Builds the window-empty-state view-model (#3524/#3551) from the persisted marker's message (or
+    /// the default when it is null/blank), suffixed with the Collection Health pointer — the viewer's
+    /// mirror of Lite's <c>LiteRecommendationsViewModel.WindowEmpty</c>, sourced from the V19 marker's
+    /// window-empty shape (<see cref="AnalysisStateMarker.WindowEmpty"/>) rather than a live engine call.
+    /// </summary>
+    public static RecommendationsViewModel WindowEmpty(string? message) =>
+        new(
+            Array.Empty<RecommendationSectionViewModel>(),
+            RecommendationsState.WindowEmpty,
+            string.Empty,
+            (string.IsNullOrWhiteSpace(message) ? DefaultWindowEmptyMessage : message!) +
+            " " + WindowEmptyCollectionHealthPointer);
+
+    /// <summary>
+    /// Builds a loaded/empty/insufficient-data/window-empty view-model from the persisted finding rows
+    /// and the per-server analysis-state marker. Maps each row to an advise-only item, appends the co-fired
     /// cross-reference, and groups by incident. State selection:
     /// <list type="bullet">
     /// <item>one or more findings -> <see cref="RecommendationsState.Loaded"/> (findings always win);</item>
     /// <item>zero findings AND <paramref name="insufficientData"/> (the persisted marker says the engine
     /// has not cleared its 24h data-span gate) -> <see cref="RecommendationsState.InsufficientData"/>
     /// ("still collecting");</item>
-    /// <item>zero findings and no insufficient-data marker -> <see cref="RecommendationsState.Empty"/>
-    /// (the genuine all-clear — enough data, nothing to report).</item>
+    /// <item>zero findings AND <paramref name="windowEmpty"/> (the marker records a window-empty pass,
+    /// #3524/#3551) -> <see cref="RecommendationsState.WindowEmpty"/> ("collection appears broken");</item>
+    /// <item>zero findings and neither marker -> <see cref="RecommendationsState.Empty"/>
+    /// (the genuine all-clear — enough data, facts measured, nothing to report).</item>
     /// </list>
     /// <paramref name="utcOffsetMinutes"/> is carried onto each card for the Ask-AI prompt's window. The
     /// rows arrive pre-sorted (severity band desc, raw desc, database, title) from the read, and grouping
-    /// preserves that order. <paramref name="insufficientData"/> defaults false so the callers that carry
-    /// no marker keep the prior loaded/empty behavior.
+    /// preserves that order. <paramref name="insufficientData"/> and <paramref name="windowEmpty"/> default
+    /// false so the callers that carry no marker keep the prior loaded/empty behavior.
     /// </summary>
     public static RecommendationsViewModel FromFindings(
         IReadOnlyList<ViewerFindingRow> rows, string serverName, int utcOffsetMinutes = 0,
-        bool insufficientData = false, string? insufficientDataMessage = null)
+        bool insufficientData = false, string? insufficientDataMessage = null,
+        bool windowEmpty = false, string? windowEmptyMessage = null)
     {
         if (rows is null || rows.Count == 0)
-            return ZeroFindingState(insufficientData, insufficientDataMessage);
+            return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
 
         var items = new List<RecommendationItem>(rows.Count);
         foreach (var row in rows)
@@ -443,7 +489,7 @@ public sealed class RecommendationsViewModel
         }
 
         if (items.Count == 0)
-            return ZeroFindingState(insufficientData, insufficientDataMessage);
+            return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
 
         AppendCoFired(items);
         return new(GroupByIncident(items, utcOffsetMinutes), RecommendationsState.Loaded, string.Empty);
@@ -452,13 +498,20 @@ public sealed class RecommendationsViewModel
     /// <summary>
     /// Picks the state for a zero-finding read: <see cref="RecommendationsState.InsufficientData"/> when
     /// the persisted marker says the analysis pass has not cleared the 24h data-span gate (so the tab
-    /// shows "still collecting" rather than a false all-clear), else <see cref="RecommendationsState.Empty"/>
-    /// (a genuine all-clear).
+    /// shows "still collecting" rather than a false all-clear), <see cref="RecommendationsState.WindowEmpty"/>
+    /// when it records a window-empty pass instead (#3524/#3551 — "collection appears broken", also never
+    /// the all-clear; the two marker shapes are mutually exclusive at the writer, and insufficient-data is
+    /// checked first defensively), else <see cref="RecommendationsState.Empty"/> (a genuine all-clear).
     /// </summary>
-    private static RecommendationsViewModel ZeroFindingState(bool insufficientData, string? message) =>
-        insufficientData
-            ? InsufficientData(message)
-            : new(Array.Empty<RecommendationSectionViewModel>(), RecommendationsState.Empty, string.Empty);
+    private static RecommendationsViewModel ZeroFindingState(
+        bool insufficientData, string? insufficientMessage, bool windowEmpty, string? windowEmptyMessage)
+    {
+        if (insufficientData)
+            return InsufficientData(insufficientMessage);
+        if (windowEmpty)
+            return WindowEmpty(windowEmptyMessage);
+        return new(Array.Empty<RecommendationSectionViewModel>(), RecommendationsState.Empty, string.Empty);
+    }
 
     /// <summary>
     /// Maps one persisted finding row to an advise-only <see cref="RecommendationItem"/>. Reuses the

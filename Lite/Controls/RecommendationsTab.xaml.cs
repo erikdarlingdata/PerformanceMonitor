@@ -193,7 +193,10 @@ public partial class RecommendationsTab : UserControl
     /// Runs an on-demand analysis for the selected server (same construction path the background
     /// collector uses), then renders the freshly-enriched in-memory findings directly — which, unlike
     /// the stored-finding read path, carry drill-down detail, so copy-paste SQL is populated. If the
-    /// engine reports insufficient collected history, surfaces the insufficient-data state.
+    /// engine reports insufficient collected history, surfaces the insufficient-data state; if it
+    /// reports an empty analysis window (#3524/#3551 — the span gate passed on lifetime history but
+    /// the window itself collected nothing, a dead-collector shape), surfaces the window-empty
+    /// notice instead of the false all-clear an empty findings list would render as.
     /// </summary>
     private async void GenerateNowButton_Click(object sender, RoutedEventArgs e)
     {
@@ -240,6 +243,15 @@ public partial class RecommendationsTab : UserControl
             {
                 StatusText.Text = string.Empty;
                 ApplyViewModel(LiteRecommendationsViewModel.InsufficientData(message));
+                return;
+            }
+
+            /* #3524/#3551: zero facts in the window is a dead-collector shape, not a clean bill of
+               health — mapping the empty findings list below would render the all-clear. */
+            if (analysisService.WindowEmptyMessage is { Length: > 0 } windowEmptyMessage)
+            {
+                StatusText.Text = string.Empty;
+                ApplyViewModel(LiteRecommendationsViewModel.WindowEmpty(windowEmptyMessage));
                 return;
             }
 
@@ -324,14 +336,25 @@ public partial class RecommendationsTab : UserControl
                 SectionsScroll.Visibility = Visibility.Collapsed;
                 EmptyMessage.Visibility = Visibility.Collapsed;
                 InsufficientDataMessage.Visibility = Visibility.Collapsed;
+                WindowEmptyMessage.Visibility = Visibility.Collapsed;
                 break;
 
             case LiteRecommendationsState.InsufficientData:
                 LoadingOverlay.IsLoading = false;
                 SectionsScroll.Visibility = Visibility.Collapsed;
                 EmptyMessage.Visibility = Visibility.Collapsed;
+                WindowEmptyMessage.Visibility = Visibility.Collapsed;
                 InsufficientDataMessage.Text = vm.InsufficientDataMessage;
                 InsufficientDataMessage.Visibility = Visibility.Visible;
+                break;
+
+            case LiteRecommendationsState.WindowEmpty:
+                LoadingOverlay.IsLoading = false;
+                SectionsScroll.Visibility = Visibility.Collapsed;
+                EmptyMessage.Visibility = Visibility.Collapsed;
+                InsufficientDataMessage.Visibility = Visibility.Collapsed;
+                WindowEmptyMessage.Text = vm.WindowEmptyMessage;
+                WindowEmptyMessage.Visibility = Visibility.Visible;
                 break;
 
             case LiteRecommendationsState.Empty:
@@ -339,6 +362,7 @@ public partial class RecommendationsTab : UserControl
                 SectionsList.ItemsSource = null;
                 SectionsScroll.Visibility = Visibility.Collapsed;
                 InsufficientDataMessage.Visibility = Visibility.Collapsed;
+                WindowEmptyMessage.Visibility = Visibility.Collapsed;
                 EmptyMessage.Visibility = Visibility.Visible;
                 break;
 
@@ -347,6 +371,7 @@ public partial class RecommendationsTab : UserControl
                 LoadingOverlay.IsLoading = false;
                 EmptyMessage.Visibility = Visibility.Collapsed;
                 InsufficientDataMessage.Visibility = Visibility.Collapsed;
+                WindowEmptyMessage.Visibility = Visibility.Collapsed;
                 SectionsList.ItemsSource = vm.Sections;
                 SectionsScroll.Visibility = Visibility.Visible;
                 break;
