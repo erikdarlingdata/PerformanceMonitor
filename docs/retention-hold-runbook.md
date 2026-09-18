@@ -60,6 +60,28 @@ Two independent confirmations:
 `query_store_*` is the family most likely to be the one behind. It carries by far the heaviest raw volume,
 so it falls behind first and its hold costs the most disk — check it first if this recurs.
 
+## The store's background jobs, so a catalog read is not a surprise
+
+`timescaledb_information.jobs` on a Darling store carries four families of jobs this product creates, and an
+operator checking whether a hold has released will meet all of them:
+
+- `policy_retention` — one per retained tier (raw tables, hourly history rollups, the interval-dedup layers, the
+  baselines). `scheduled = false` on one of these is the hold this runbook is about.
+- `policy_refresh_continuous_aggregate` — one per rollup; hourly ones on a fixed minute of the hour, daily ones on
+  TimescaleDB's finish-to-start scheduling.
+- `policy_compression` on a **raw hypertable** (`collect.query_stats`, `collect.wait_stats`, ...) — hourly tick,
+  chunks older than 1 day, on the hourly phase grid's compression band.
+- `policy_compression` on a **continuous aggregate** (`collect.query_stats_hourly`, `collect.procedure_stats_daily`,
+  ...) — **once a day**, one aggregate per hour at `:35` UTC, compressing chunks older than 2 days (hourly-refreshed
+  rollups) or 4 days (daily rollups). Added by #3581; before it the rollups were never compressed at all. On a store
+  that had already materialized weeks of history their `next_start` values read as consecutive calendar days on
+  the first pass — that is the backlog being staged one aggregate per night, largest first, not a scheduling
+  fault. Every run after the first finds only the chunks that aged in since the day before.
+
+None of the compression jobs participate in the coverage gate, and pausing or re-arming them has no effect on a
+`Retention Held` alert. A `policy_compression` job on a rollup with `scheduled = false` is not a hold — the hold
+mechanism only ever touches `policy_retention` rows.
+
 ## Where the rest of the verbs are
 
 `--backfill-rollups` is one of about two dozen service verbs. Rather than copy a list here that would drift

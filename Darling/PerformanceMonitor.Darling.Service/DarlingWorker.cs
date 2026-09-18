@@ -1403,6 +1403,17 @@ public sealed class DarlingWorker : BackgroundService
 
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
 
+                /* #3581: AFTER the aggregates exist, put their materializations on the compression ladder the raw
+                   tier has been on since the archival tier existed — none of the twenty ever was, and on the
+                   largest store they were 235 GiB of a 415 GiB database, larger than the 9x-compressed raw they
+                   roll up. Enables compression per materialization, attaches a once-a-day policy per aggregate
+                   on a daily band off the hourly phase grid (one aggregate per hour at :35Z), and stages the
+                   first runs one aggregate per night, largest first, so the backlog pass on an existing store
+                   is one bounded relation a night. The raw compression converge above skips these jobs by name
+                   or it would retune them to the hourly tick. Idempotent under the catalog, failure-isolated
+                   per aggregate, and a no-op on every start after the first. */
+                await TimescaleSupport.EnsureAggregateCompressionAsync(timescaleConnection, _logger, stoppingToken);
+
                 // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
                 // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);

@@ -984,6 +984,36 @@ $do$";
         (CreateMemoryBaselineSql,         MemoryBaselineView),
     };
 
+    /// <summary>
+    /// The seven DAILY continuous aggregates in CREATION order — every one of them hierarchical, sourced from
+    /// an hourly aggregate rather than from raw, which is why the ensure sweep creates them after
+    /// <see cref="HourlyAggregates"/> and why the order inside this list is load-bearing too: the day-grain
+    /// corrected daily (#1869) is THREE levels deep (L1 → L2 <see cref="QueryStoreStatsIntervalDailyView"/> →
+    /// <see cref="QueryStoreStatsDayGrainDailyView"/>), so L2 must precede its own child. The corrected DAILY
+    /// is L1's SIBLING rather than the corrected hourly's child — an identity-width hierarchical aggregate is a
+    /// leaf (see <see cref="CreateQueryStoreStatsCorrectedDailySql"/>) — so it carries no ordering requirement
+    /// against the corrected hourly and simply follows the whole hourly tier like the others.
+    ///
+    /// <para>Hoisted out of <see cref="EnsureContinuousAggregatesAsync"/> (#3581) for the reason
+    /// <see cref="HourlyAggregates"/> was hoisted at #3012: the aggregate-compression ensure needs the same
+    /// list to know which materializations it owns and which tier's <c>compress_after</c> each one takes, and
+    /// a second hand-kept copy of seven names is a copy that drifts. The ensure sweep, the compression
+    /// registry (<see cref="AggregateCompressionTargets"/>) and the tests now read ONE list.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] DailyAggregates =
+    {
+        (CreateQueryStatsDailySql,                QueryStatsDailyView),
+        (CreateProcedureStatsDailySql,            ProcedureStatsDailyView),
+        (CreateQueryStoreStatsDailySql,           QueryStoreStatsDailyView),
+        (CreateQueryStoreStatsCorrectedDailySql,  QueryStoreStatsCorrectedDailyView),
+        (CreateQueryStatsDbDailySql,              QueryStatsDbDailyView),
+        /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (an hourly) -> L2 interval_daily ->
+           daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered list
+           gives — the same requirement the daily tier has, one level longer. */
+        (CreateQueryStoreStatsIntervalDailySql,   QueryStoreStatsIntervalDailyView),
+        (CreateQueryStoreStatsDayGrainDailySql,   QueryStoreStatsDayGrainDailyView),
+    };
+
     public const string QueryStatsHourlyView = "query_stats_hourly";
 
     /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
@@ -4016,21 +4046,13 @@ WITH NO DATA";
            precede the corrected view, which is hierarchical from it. (The corrected DAILY is L1's SIBLING, not
            the hourly's child: an identity-width hierarchical CAGG is a leaf — see
            CreateQueryStoreStatsCorrectedDailySql.) */
+        /* The daily tier comes from DailyAggregates for the same reason (#3581): the aggregate-compression
+           ensure decides each materialization's compress_after by tier, and it must read the same seven
+           names this sweep creates rather than a second copy of them. The list carries its own ordering
+           requirement — L2 before the day-grain daily it feeds — on its declaration. */
         var aggregates = HourlyAggregates
             .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
-            .Concat(new[]
-        {
-            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       Hourly: false),
-            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   Hourly: false),
-            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  Hourly: false),
-            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, Hourly: false),
-            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     Hourly: false),
-            /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
-               daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
-               gives — the same requirement the daily tier has, one level longer. */
-            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, Hourly: false),
-            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, Hourly: false),
-        })
+            .Concat(DailyAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: false)))
         /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
@@ -4908,6 +4930,877 @@ AND   j.hypertable_name = '{relation}'";
         return applied;
     }
 
+    /* ─────────────── continuous-aggregate compression (#3581) ─────────────── */
+
+    /// <summary>
+    /// The margin a continuous aggregate's <c>compress_after</c> carries ABOVE its refresh policy's
+    /// <c>start_offset</c>: one raw chunk, <see cref="ChunkIntervalDays"/>.
+    ///
+    /// <para><b>Why the aggregates need a margin at all, measured.</b> A refresh that reaches into a compressed
+    /// materialization chunk does not fail on 2.28.1 — it decompresses every compressed batch that overlaps the
+    /// buckets it re-materializes (1,000 rows per <c>server_id</c> segment, measured on the rig: a six-row
+    /// backdated write into one hourly bucket staged 6,006 rows), rewrites them into the chunk's heap side, and
+    /// leaves the chunk PARTIAL (catalog status 9) until the next compression run recompresses it. Against an
+    /// uncompressed chunk the same single-bucket refresh took 8 ms; against the compressed one 29 ms plus a
+    /// 195 ms recompression on the next policy pass. A forced eight-day refresh went 1,150 ms → 1,514 ms and
+    /// left 180,000 heap rows for the policy to take back. So a refresh window that overlapped the compressed
+    /// region would not break anything; it would turn the newest chunk into a permanent decompress-and-
+    /// recompress churn, once an hour on the hourly tier, forever — which is why the two boundaries are kept
+    /// APART rather than merely non-failing when they meet.</para>
+    ///
+    /// <para><b>Why one raw chunk, derived rather than chosen.</b> The refresh window reaches back
+    /// <c>start_offset</c> and then aligns its start DOWN to a bucket boundary, so the furthest it can reach is
+    /// <c>start_offset</c> plus one bucket. A chunk becomes eligible only when its WHOLE range is older than
+    /// <c>compress_after</c>. The two regions are therefore disjoint at any chunk width whenever
+    /// <c>compress_after ≥ start_offset + bucket</c>: 1 day 1 hour for the hourly tier, 4 days for the daily.
+    /// The daily tier's bucket IS a day, so the floor is a day there already; the hourly tier's is an hour, and
+    /// an hour is the wrong unit for the gap. Every other boundary in this store moves in days — chunks close at
+    /// UTC midnight (<see cref="ChunkIntervalDays"/>), raw eligibility flips at UTC midnight
+    /// (<see cref="CompressAfterDays"/>) — and a sub-day margin would put the refresh's aligned start and the
+    /// compression boundary within one scheduling jitter of each other on every run. Taking the margin as one
+    /// raw chunk, on every tier, puts a whole day between the two on the hourly tier and lands the daily tier on
+    /// exactly its own floor. The result — 2 days hourly, 4 days daily — is the ruling #3581 was opened for,
+    /// reached as an expression rather than written down.</para>
+    ///
+    /// <para><b>What this does NOT protect, stated so it is not assumed.</b> Two refreshes reach past every
+    /// policy window by design: the coverage-gated baseline backfill
+    /// (<see cref="BackfillBaselineAggregatesAsync"/>, up to <see cref="BaselineRetentionSpan"/> back) and the
+    /// operator's <c>--backfill-rollups</c> verb. Both write below the materialized floor, where there are no
+    /// chunks to be compressed yet, except for the one chunk the floor sits inside — and that one they handle
+    /// through the partial-chunk path above, at the measured cost, once. That is a cost, not a hazard, and it
+    /// is bounded by being a one-time backfill rather than an hourly policy.</para>
+    /// </summary>
+    public static readonly TimeSpan AggregateCompressMarginSpan = TimeSpan.FromDays(ChunkIntervalDays);
+
+    /// <summary>
+    /// <c>compress_after</c> for every aggregate whose refresh policy is HOURLY —
+    /// <see cref="HourlyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 2 days. That is
+    /// the six <see cref="HourlyAggregates"/> and the seven <see cref="BaselineAggregates"/>: thirteen of the
+    /// twenty, including the two interval-identity layers whose retention is the shortest in the store
+    /// (<see cref="IntervalRetentionInterval"/>, 7 days) — which at 1-day materialization chunks leaves five
+    /// of those seven days compressed, and at 10-day chunks leaves the tier mostly uncompressed; see the
+    /// chunk-width paragraph on <see cref="EnsureAggregateCompressionAsync"/>.
+    /// </summary>
+    public static readonly TimeSpan HourlyAggregateCompressAfterSpan = HourlyRefreshStartSpan + AggregateCompressMarginSpan;
+
+    /// <summary>
+    /// <c>compress_after</c> for every aggregate whose refresh policy is DAILY —
+    /// <see cref="DailyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 4 days. That is
+    /// the seven <see cref="DailyAggregates"/>. Their refresh keeps TimescaleDB's finish-to-start scheduling
+    /// (<see cref="AddDailyRefreshPolicySql"/>), so the instant it runs drifts — which is one more reason the
+    /// separation between refresh and compression is carried by the WINDOW arithmetic here rather than by
+    /// where on the clock either job happens to start.
+    /// </summary>
+    public static readonly TimeSpan DailyAggregateCompressAfterSpan = DailyRefreshStartSpan + AggregateCompressMarginSpan;
+
+    /// <summary>The INTERVAL literal of <see cref="HourlyAggregateCompressAfterSpan"/> — rendered from the span
+    /// rather than kept as a second constant, so the statement and the arithmetic cannot disagree.</summary>
+    public static string HourlyAggregateCompressAfter => WholeDaysInterval(HourlyAggregateCompressAfterSpan);
+
+    /// <summary>The INTERVAL literal of <see cref="DailyAggregateCompressAfterSpan"/>.</summary>
+    public static string DailyAggregateCompressAfter => WholeDaysInterval(DailyAggregateCompressAfterSpan);
+
+    /// <summary>
+    /// Renders a whole-day span as the PostgreSQL interval literal the policy statements interpolate, and
+    /// refuses anything else: a <c>compress_after</c> that was not a whole number of days would mean one of
+    /// its two inputs stopped being one, which is a design change and not a rendering problem.
+    /// </summary>
+    internal static string WholeDaysInterval(TimeSpan span)
+    {
+        if (span <= TimeSpan.Zero || span.Ticks % TimeSpan.TicksPerDay != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(span), span, "an aggregate compress_after must be a positive whole number of days");
+        }
+
+        return $"{((long)span.TotalDays).ToString(CultureInfo.InvariantCulture)} days";
+    }
+
+    /// <summary>
+    /// The aggregate compression policies' cadence — once a day, not <see cref="CompressScheduleInterval"/>'s
+    /// hour.
+    ///
+    /// <para>The hourly tick on the raw hypertables exists because their newest closed chunk is the least
+    /// compressed data on disk and a chunk that had already aged in was waiting up to half a day for a tick to
+    /// take it (#1778). Nothing here has that exposure: an aggregate chunk becomes eligible once, at a UTC
+    /// midnight, a whole <see cref="AggregateCompressMarginSpan"/> after its refresh policy last touched it, and
+    /// a run that finds it within the day is exactly as good as one that finds it within the hour. What an
+    /// hourly cadence WOULD do is put twenty more jobs on the hourly phase grid — the thing
+    /// <see cref="AggregateCompressionBandMinute"/> exists to avoid.</para>
+    /// </summary>
+    public const string AggregateCompressionScheduleInterval = "1 day";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="AggregateCompressionScheduleInterval"/>, pinned equal
+    /// by test; <see cref="EnsureAggregateCompressionAsync"/> compares a live job's cadence against this in
+    /// seconds, the same way the raw converge does, so <c>1 day</c> and <c>24:00:00</c> never read as a
+    /// difference.</summary>
+    public static readonly TimeSpan AggregateCompressionScheduleSpan = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The <c>segmentby</c> column for every aggregate — the same <c>server_id</c> the raw hypertables use
+    /// (<see cref="EnableCompressionSql(string)"/>), for the same reason: every read of these relations filters
+    /// <c>server_id</c> first (the viewer's month-scale trend reads are <c>WHERE server_id = $1 AND bucket
+    /// BETWEEN</c>, and the retrieval indexes lead with it), so one segment IS one server's rows and a
+    /// compressed read touches only the segment it asked for. Measured on the rig against the trend read's own
+    /// SQL over <see cref="QueryStoreStatsCorrectedHourlyView"/>: the compressed chunks are read through a
+    /// <c>ColumnarScan</c> whose index condition is exactly <c>server_id = $1</c> with the bucket range as a
+    /// vectorized filter over the batches' min/max metadata — 15,179 shared buffers before compression and
+    /// 3,522 after for the same 30-day window, 11.2 ms → 6.6 ms.
+    ///
+    /// <para>Every registered aggregate groups by it — asserted per definition by test from the shipped
+    /// CREATE text through <see cref="RefreshGroupingTermsFor"/>, not assumed — so this is a property of the
+    /// registry rather than a constant that happens to be true today.</para>
+    /// </summary>
+    public const string AggregateCompressionSegmentBy = "server_id";
+
+    /// <summary>
+    /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
+    /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
+    /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
+    ///
+    /// <para>Derived from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> and
+    /// <see cref="BaselineAggregates"/> — the same three lists the ensure sweep creates from, in the same order
+    /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
+    /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
+    ///
+    /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
+    /// order, and this one reads all three.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
+        HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
+            .Concat(DailyAggregates.Select(a => (a.CreateSql, a.View, Hourly: false)))
+            .Concat(BaselineAggregates.Select(a => (a.CreateSql, a.View, Hourly: true)))
+            .ToArray();
+
+    /// <summary>
+    /// Is <paramref name="view"/> one of the continuous aggregates whose compression this product owns? Accepts
+    /// a bare or <c>collect.</c>-qualified name, the way <see cref="TryCompressionPhaseMinutesFor"/> does.
+    ///
+    /// <para>This is the predicate <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
+    /// excludes on, and that exclusion is load-bearing rather than tidy. An aggregate's compression job reports
+    /// the aggregate's USER VIEW as its hypertable (<c>collect</c> / <c>&lt;view&gt;</c> — measured on 2.28.1,
+    /// the same resolution <see cref="ContinuousAggregateRefreshStateSql"/> documents for refresh jobs), so it
+    /// lands in the raw converge's unscoped <c>proc_name LIKE '%compression%'</c> read, where a cadence other
+    /// than <see cref="CompressScheduleInterval"/> IS the staleness test (#1778). Without this, the first start
+    /// after this family exists would retune every one of its once-a-day jobs to an hourly tick — and put all
+    /// twenty on the hourly phase grid, which is precisely the placement #3581 ruled out.</para>
+    /// </summary>
+    public static bool IsAggregateCompressionTarget(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+
+        foreach (var target in AggregateCompressionTargets)
+        {
+            if (string.Equals(target.View, bare, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Looks up a registered aggregate by view name. Throws for an unregistered one, for the same reason
+    /// <see cref="RefreshPhaseMinutesFor(string)"/> does: a defaulted tier here would give an aggregate a
+    /// <c>compress_after</c> nobody derived for it.
+    /// </summary>
+    private static (string CreateSql, string View, bool Hourly) AggregateCompressionTargetFor(string view)
+    {
+        foreach (var target in AggregateCompressionTargets)
+        {
+            if (string.Equals(target.View, view, StringComparison.Ordinal))
+            {
+                return target;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not a registered continuous aggregate — it is in none of HourlyAggregates, DailyAggregates or BaselineAggregates, so it has no compression tier");
+    }
+
+    /// <summary>Which <c>compress_after</c> <paramref name="view"/> takes, decided by its refresh tier — the
+    /// hourly one for every hourly-refreshed aggregate (including the baselines), the daily one for the
+    /// daily tier.</summary>
+    public static TimeSpan AggregateCompressAfterSpanFor(string view)
+        => AggregateCompressionTargetFor(view).Hourly ? HourlyAggregateCompressAfterSpan : DailyAggregateCompressAfterSpan;
+
+    /// <summary>The INTERVAL literal of <see cref="AggregateCompressAfterSpanFor"/>.</summary>
+    public static string AggregateCompressAfterFor(string view)
+        => WholeDaysInterval(AggregateCompressAfterSpanFor(view));
+
+    /// <summary>
+    /// The bucket column of one aggregate — the alias its CREATE gives <c>time_bucket(...)</c> — recovered from
+    /// the shipped text, because that column is the materialization hypertable's time dimension and therefore
+    /// the <c>orderby</c> the compression settings need.
+    ///
+    /// <para>Parsed at parenthesis depth rather than by a regex over <c>AS bucket</c>, so a CREATE that aliased
+    /// its bucket differently would compress in that column's order instead of in a column that does not exist.
+    /// Every shipped definition aliases it <c>bucket</c> and a test asserts that per definition; this recovers
+    /// it anyway so the assertion is about the registry and not about this method agreeing with itself.</para>
+    /// </summary>
+    internal static string AggregateBucketColumnFor(string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        const string TimeBucket = "time_bucket(";
+        var start = createSql.IndexOf(TimeBucket, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            throw new ArgumentException("the CREATE has no time_bucket(...) projection, so its bucket column cannot be recovered", nameof(createSql));
+        }
+
+        var depth = 0;
+        var index = start + TimeBucket.Length - 1;
+        for (; index < createSql.Length; index++)
+        {
+            if (createSql[index] == '(')
+            {
+                depth++;
+            }
+            else if (createSql[index] == ')' && --depth == 0)
+            {
+                break;
+            }
+        }
+
+        var rest = createSql[(index + 1)..].TrimStart();
+        if (!rest.StartsWith("AS ", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("the CREATE's time_bucket(...) projection carries no alias, so its bucket column cannot be recovered", nameof(createSql));
+        }
+
+        var alias = rest[3..].TrimStart();
+        var end = 0;
+        while (end < alias.Length && (char.IsLetterOrDigit(alias[end]) || alias[end] == '_'))
+        {
+            end++;
+        }
+
+        if (end == 0)
+        {
+            throw new ArgumentException("the CREATE's time_bucket(...) alias is empty", nameof(createSql));
+        }
+
+        return alias[..end];
+    }
+
+    /// <summary>
+    /// THE DAILY BAND'S MINUTE (#3581) — the last minute of the heaviest refresh's window, stated as a method
+    /// because a table of minutes cannot be re-derived by the next reader and a method can.
+    ///
+    /// <para><b>What the hour has left, read off the grid.</b> <see cref="RefreshPhaseMinutesFor(string)"/>
+    /// tiles the hour with three bands: the light refreshes start on <c>:00</c> through <c>:11</c>, the heaviest
+    /// refresh at <see cref="HeaviestRefreshStartMinute"/>, and the raw compression band takes
+    /// <see cref="CompressionPhaseMinutes"/> to the end of the hour. No minute is unassigned — the tiling
+    /// identity TimescaleContinuousAggregateTests holds says so — but two stretches carry no START: the guard
+    /// after the light band, where the light refreshes are still finishing, and the heaviest refresh's window
+    /// past its own start. The compression grid deliberately leaves the tail of that window unused
+    /// (<see cref="CompressionPhaseMinutes"/>: "the other 6 minutes of the window are past the refresh and are
+    /// left on the table"), because recovering them for HOURLY policies would size a band for one window
+    /// against a still-moving ceiling. A once-a-day job is a different trade, and this is the minute it
+    /// takes.</para>
+    ///
+    /// <para><b>The last minute, not the first clear one, and the difference is 296 seconds.</b> The first
+    /// minute past the recorded ceiling is <see cref="HeaviestRefreshStartMinute"/> plus
+    /// <c>ceil(<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> / 60)</c> = :30, which is 900 s after
+    /// the heaviest refresh starts against an 896 s ceiling — a four-second margin. The window's last minute is
+    /// 1,200 s after it. Both are pinned: this minute is asserted past the ceiling by test in the same way the
+    /// grid asserts the ceiling inside the window, so a ceiling that grew to meet it goes red rather than
+    /// quietly putting a daily rewrite into the heaviest refresh's tail. And it is derived from GEOMETRY —
+    /// start plus width — rather than from the ceiling constant, so re-taking the ceiling (#3182, #3188) moves
+    /// no job here.</para>
+    ///
+    /// <para><b>What sits on either side, and why neither is a lock hazard.</b> The minute after this one is
+    /// <see cref="CompressionPhaseMinutes"/>' first, where the raw compression policies start; they lock raw
+    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on
+    /// twenty-three hours of the day those policies find nothing eligible and finish in tens of milliseconds.
+    /// The next refresh START is the next hour's <c>:00</c>, 25 minutes away — and a compression run cannot
+    /// block an aggregate's own refresh in any case: <c>compress_chunk</c> on 2.28.1 holds
+    /// <c>AccessShareLock</c> on the materialization hypertable and escalates only on the CHUNK it is rewriting
+    /// (<c>ShareLock</c>, <c>ExclusiveLock</c>, then <c>AccessExclusiveLock</c> at the swap — all three observed
+    /// on the rig inside one run), while the refresh writes the newest chunk, which
+    /// <see cref="AggregateCompressMarginSpan"/> keeps out of the eligible set. What a run CAN hold up is a
+    /// reader of exactly the chunk being swapped, for the swap; that is the ordinary cost of compressing and
+    /// the same one the raw tier pays today.</para>
+    ///
+    /// <para><b>Why not #3174's compression band.</b> That band's width is derived from
+    /// <see cref="HypertableCount"/> over <see cref="CompressionPhaseMaxPerMinute"/>, and every minute it
+    /// takes comes out of <see cref="HeaviestRefreshWindowMinutes"/>. Twenty more members would widen it from
+    /// 24 minutes to 31 and shrink the window from 21 minutes to 14 — 840 s against the 896 s ceiling, which
+    /// is the envelope TimescaleSupportTests holds red. #3185 measured what stepping a band by member count
+    /// does to per-group cost; this is the same lesson from the other side. So this family does not join that
+    /// band, and its own minute is one the hourly grid already has and does not use.</para>
+    /// </summary>
+    public static int AggregateCompressionBandMinute =>
+        HeaviestRefreshStartMinute + HeaviestRefreshWindowMinutes - 1;
+
+    /// <summary>
+    /// The hour of the day (UTC) the first registered aggregate compresses at; each later one takes the next
+    /// hour (<see cref="AggregateCompressionBandHourFor"/>).
+    ///
+    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's daily rewrite.</b>
+    /// <see cref="CompressAfterDays"/> and <see cref="ChunkIntervalDays"/> are both one, and 1-day chunks are
+    /// epoch-aligned, so every raw hypertable's newest closed chunk becomes eligible at the same UTC midnight and
+    /// the <c>00:</c> hour's compression band is the one that does a day's compressing (#3112's midnight band —
+    /// its largest run, <c>query_store_stats</c>, measured at 552 s from <c>:42</c>). The aggregates' chunks
+    /// become eligible at the same midnight, for the same epoch-alignment reason, so the earliest hour that both
+    /// sees the new eligibility and is clear of that rewrite is the next one. Later hours would only add
+    /// latency to the newest eligible chunk; earlier there is none.</para>
+    /// </summary>
+    public const int AggregateCompressionBandFirstHour = 1;
+
+    /// <summary>The hours in a day, named so the band's fit is an identity against the cadence it tiles rather
+    /// than a literal 24.</summary>
+    public static int HoursInDailyCadence => (int)AggregateCompressionScheduleSpan.TotalHours;
+
+    /// <summary>
+    /// Which hour of the day (UTC) <paramref name="view"/>'s compression policy runs at: one aggregate per
+    /// hour, in <see cref="AggregateCompressionTargets"/> order from <see cref="AggregateCompressionBandFirstHour"/>.
+    ///
+    /// <para><b>An hour apart rather than a few minutes apart, because distinct STARTS are not the
+    /// guarantee that was asked for (#3185).</b> Staggering twenty jobs a few minutes apart inside one hour
+    /// gives twenty distinct starts and nothing about overlap: a run longer than the step overlaps its successor
+    /// for the rest of its run, and the runs here are minutes — a day's chunk of the largest aggregate is
+    /// roughly the raw table's, which #3112 measured at 552 s. The hour also has only six minutes that are past
+    /// every recorded refresh ceiling and on no hourly-grid start (<see cref="AggregateCompressionBandMinute"/>),
+    /// so the stagger had nowhere to go in any case. Placing one aggregate per hour makes the property "no two
+    /// aggregates decompress and recompress at once" hold by construction: a run would have to exceed an hour
+    /// to meet the next, and a run that long is the stuck-job check's business
+    /// (<see cref="StuckRunningBound"/>, 48 hours at this cadence). It also keeps this family inside the
+    /// background-worker headroom the managed store already sizes — at most one of these jobs runs at a time,
+    /// so the <c>+ 2</c> over <see cref="HypertableCount"/> is not re-derived.</para>
+    ///
+    /// <para><b>Keyed on the VIEW's registry position, never on a job id or on a store measurement</b>, for
+    /// the reason <see cref="HourlyRefreshPhaseOrder"/> gives: the same configuration has to be reproducible on
+    /// a store that has never seen this one's ids or sizes. The staging of FIRST runs is by measured size
+    /// (<see cref="StageAggregateCompressionNights"/>); the hour is by identity. An operator reading
+    /// <c>timescaledb_information.jobs</c> therefore sees the same aggregate at the same hour on every
+    /// store.</para>
+    ///
+    /// <para>Throws for an unregistered view (<see cref="RefreshPhaseMinutesFor(string)"/>'s reasoning), and for
+    /// a registry too long for the day — twenty-three hours are available, and a twenty-fourth member would land
+    /// on the midnight hour <see cref="AggregateCompressionBandFirstHour"/> exists to avoid. The ensure builds
+    /// each statement inside its per-aggregate try, so either throw costs one aggregate and names it.</para>
+    /// </summary>
+    public static int AggregateCompressionBandHourFor(string view)
+    {
+        for (var index = 0; index < AggregateCompressionTargets.Count; index++)
+        {
+            if (!string.Equals(AggregateCompressionTargets[index].View, view, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var hour = AggregateCompressionBandFirstHour + index;
+            if (hour >= HoursInDailyCadence)
+            {
+                throw new InvalidOperationException(
+                    $"the aggregate compression band has {AggregateCompressionTargets.Count} members from hour {AggregateCompressionBandFirstHour}, which runs past the day — {view} would land on hour {hour}. Re-derive the band (two per hour, or a second minute) rather than wrapping onto the midnight hour");
+            }
+
+            return hour;
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not a registered continuous aggregate — register it in HourlyAggregates, DailyAggregates or BaselineAggregates before giving it a compression policy");
+    }
+
+    /// <summary>
+    /// One aggregate's compression enablement: the same <c>server_id</c> segmentation the raw tier uses, ordered
+    /// by the aggregate's own bucket column descending — the read order of every trend query.
+    ///
+    /// <para><c>ALTER MATERIALIZED VIEW</c> rather than <c>ALTER TABLE</c> on the materialization: TimescaleDB
+    /// resolves the settings onto the materialization hypertable itself, and the statement is idempotent — on a
+    /// view already compressed it re-states the settings with a NOTICE that existing compressed chunks keep
+    /// theirs, measured on 2.28.1. The ensure still gates it on the catalog
+    /// (<c>continuous_aggregates.compression_enabled</c>) so a settled store runs no ALTER at all. Same pre-2.18
+    /// vocabulary as <see cref="EnableCompressionSql(string)"/>, for the same cross-2.x reason.</para>
+    /// </summary>
+    public static string EnableAggregateCompressionSql(string view)
+    {
+        var target = AggregateCompressionTargetFor(view);
+        return $"ALTER MATERIALIZED VIEW collect.{view} SET (timescaledb.compress, timescaledb.compress_segmentby = '{AggregateCompressionSegmentBy}', timescaledb.compress_orderby = '{AggregateBucketColumnFor(target.CreateSql)} DESC')";
+    }
+
+    /// <summary>
+    /// The <c>initial_start</c> expression for an aggregate compression job: <paramref name="nightOffset"/>
+    /// UTC midnights after the NEXT one, at <paramref name="hour"/>:<paramref name="minute"/>.
+    ///
+    /// <para>Anchored to the next UTC midnight rather than to "the next occurrence of this hour" so that night
+    /// <c>k</c> is the same calendar day for every aggregate — which is what makes "one aggregate per night,
+    /// largest first" (<see cref="StageAggregateCompressionNights"/>) mean consecutive calendar nights rather
+    /// than a sequence that folds when one aggregate's hour has already passed today and another's has not.
+    /// Always in the future, so the statement never depends on TimescaleDB's handling of a past anchor; computed
+    /// in UTC and cast back, for the reason <see cref="AddContinuousAggregatePolicySql"/> gives — a bare
+    /// <c>date_trunc('day', now())</c> truncates in the SESSION time zone.</para>
+    /// </summary>
+    public static string AggregateCompressionInitialStartSql(int hour, int minute, int nightOffset)
+    {
+        if (hour < 0 || hour >= 24 || minute < 0 || minute >= 60 || nightOffset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(nightOffset), "the band instant must be a valid hour and minute of the day and a non-negative night");
+        }
+
+        return "(date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day'"
+            + $" + INTERVAL '{nightOffset.ToString(CultureInfo.InvariantCulture)} days'"
+            + $" + INTERVAL '{hour.ToString(CultureInfo.InvariantCulture)} hours {minute.ToString(CultureInfo.InvariantCulture)} minutes') AT TIME ZONE 'UTC'";
+    }
+
+    /// <summary>
+    /// One aggregate's compression policy: its tier's <c>compress_after</c>, the once-a-day cadence, and a
+    /// FIXED schedule pinned to its hour on the daily band, first running <paramref name="nightOffset"/> nights
+    /// after the next UTC midnight. <c>if_not_exists</c> so a restart re-converges; the -1 it returns for a
+    /// policy the store already has is the quiet skip <c>add_compression_policy</c> is documented to give
+    /// (<see cref="AddCompressionPolicySql(string)"/>), which is why parameter drift on an EXISTING policy is
+    /// the converge's business (<see cref="SetAggregateCompressionPolicySql"/>) and not this statement's.
+    /// </summary>
+    public static string AddAggregateCompressionPolicySql(string view, int nightOffset)
+        => $"SELECT add_compression_policy('collect.{view}', compress_after => INTERVAL '{AggregateCompressAfterFor(view)}', schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}', if_not_exists => true, initial_start => {AggregateCompressionInitialStartSql(AggregateCompressionBandHourFor(view), AggregateCompressionBandMinute, nightOffset)})";
+
+    /// <summary>
+    /// Every registered aggregate's compression state in one read: whether compression is enabled on the
+    /// materialization, its compression job if any (with the four things a converged policy is made of —
+    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to), how large the
+    /// materialization is, and how many of its chunks would compress on the policy's first run under EACH
+    /// tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier is a C#
+    /// registry fact and the read should not restate it.
+    ///
+    /// <para>Joins the job on EITHER identity, the view or its materialization, for the reason
+    /// <see cref="ContinuousAggregateRefreshStateSql"/> documents: the job catalog resolves an aggregate's
+    /// jobs back to the user view (measured for compression jobs too — <c>collect</c> / <c>&lt;view&gt;</c>),
+    /// but the underlying row carries the materialization, and the two schemas are disjoint so no job can
+    /// match twice. Chunks are keyed by the MATERIALIZATION, which is the only identity
+    /// <c>timescaledb_information.chunks</c> knows an aggregate by — a count keyed by the view name reads zero
+    /// forever, silently, which is the shape #3582 recorded for the store-metrics tool.</para>
+    ///
+    /// <para>Sizes come from <c>hypertable_size</c> over the materialization — the whole relation, indexes
+    /// included, because indexes are what compression removes on a chunk — and the hour and minute are
+    /// extracted in UTC so a session time zone cannot make a correctly pinned job read as stale.</para>
+    /// </summary>
+    public static string AggregateCompressionStateSql =>
+        $@"
+SELECT
+    ca.view_name,
+    ca.compression_enabled,
+    j.job_id,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute,
+    hypertable_size(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS materialization_bytes,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+        AND   c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}'
+    ) AS eligible_under_hourly_rule,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+        AND   c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}'
+    ) AS eligible_under_daily_rule
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN timescaledb_information.jobs AS j
+  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+  AND (
+        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
+      )
+WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves one EXISTING aggregate compression policy onto the shipped <c>compress_after</c>, cadence and band
+    /// instant. <c>$1</c> the job id (<c>::integer</c>, the #1586 trap), <c>$2</c> the <c>compress_after</c>
+    /// text, <c>$3</c> the hour, <c>$4</c> the minute.
+    ///
+    /// <para>Exists because <c>add_compression_policy(if_not_exists =&gt; true)</c> returns -1 and changes
+    /// nothing against a policy the store already has (<see cref="AddCompressionPolicySql(string)"/> measured
+    /// it), so a later change to either tier's <c>compress_after</c>, or to the band, would reach fresh stores
+    /// only — the #1937/#1778 drift this project treats as a defect, pre-empted here rather than filed later.
+    /// <c>config</c> is updated with <c>jsonb_set</c> against the job's OWN config so its other keys survive;
+    /// <c>scheduled</c> is not named, so this can neither arm nor pause. The anchor is re-taken at night zero:
+    /// a policy this converges is one whose hour, minute, cadence or window DIFFERS from the shipped values, and
+    /// a policy created by this build cannot differ before its first run — so re-anchoring never disturbs a
+    /// staged first night, and never re-anchors a policy that merely has not run yet.</para>
+    /// </summary>
+    public static string SetAggregateCompressionPolicySql =>
+        $@"SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{{compress_after}}', to_jsonb($2::text)),
+    schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}',
+    fixed_schedule => true,
+    initial_start => (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day' + ($3::int * INTERVAL '1 hour') + ($4::int * INTERVAL '1 minute')) AT TIME ZONE 'UTC')
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// One aggregate as the ensure read it: what the store holds for it right now.
+    /// </summary>
+    public sealed record AggregateCompressionState(
+        string View,
+        bool CompressionEnabled,
+        int? JobId,
+        long? CompressAfterSeconds,
+        long? ScheduleIntervalSeconds,
+        bool FixedSchedule,
+        int? PhaseHour,
+        int? PhaseMinute,
+        long MaterializationBytes,
+        long EligibleChunksNow);
+
+    /// <summary>
+    /// THE STAGING (#3581): which night each aggregate that still needs a compression policy gets its FIRST run
+    /// — one aggregate per night, largest first, and every aggregate with nothing to compress on night zero.
+    /// Returns <c>(view, nightOffset)</c> in the order the policies should be created.
+    ///
+    /// <para><b>Why a first run is the heavy event and a steady-state run is not.</b> A compression policy's
+    /// first run compresses EVERY chunk older than <c>compress_after</c>, one chunk per transaction, in one
+    /// pass. On a store that has been materializing for weeks that is the whole aggregate minus its newest
+    /// <see cref="AggregateCompressMarginSpan"/> — on the largest production store, four Query Store aggregates
+    /// of 71.5, 55.6, 54.7 and 33.5 GiB, ~235 GiB across all twenty. Every run after the first finds at most the
+    /// chunks that aged in since yesterday. So the question the staging answers is only ever about the first
+    /// run, and it answers it the way #3581 ruled: one aggregate's backlog per night, so each night's rewrite
+    /// is one bounded relation and the phase grid's runtime watch (#3044/#3166) sees the effect of one before
+    /// the next begins.</para>
+    ///
+    /// <para><b>Largest first, by measured materialization size.</b> The largest aggregate is the one whose
+    /// backlog pass costs the most and saves the most disk; taking it first front-loads the saving onto the
+    /// store that needs it and puts the biggest single night where the operator is watching most closely —
+    /// the first one. Size is read from the store (<see cref="AggregateCompressionStateSql"/>) rather than
+    /// assumed from the registry, because which aggregate is largest is a property of the workload: on a store
+    /// with no writable Query Store primary the Query Store family is empty and the query_stats rollups
+    /// lead.</para>
+    ///
+    /// <para><b>Nothing to compress means night zero, not a place in the queue.</b> An aggregate with no chunk
+    /// past its <c>compress_after</c> — every aggregate on a fresh store, and the empty ones on any store — has
+    /// no backlog pass to stage, so its policy simply starts tomorrow and finds nothing. A fresh store therefore
+    /// gets all twenty policies at once, exactly as the ruling asks, with no special case: the queue is empty
+    /// and everything is on night zero.</para>
+    ///
+    /// <para><b>Carried by the schedule, not by state.</b> The nights are written into each policy's
+    /// <c>initial_start</c> when it is created, so the plan is visible in <c>timescaledb_information.jobs</c>
+    /// (<c>next_start</c> reads as consecutive calendar days) and survives a restart with nothing to remember —
+    /// the alternative, adding one policy per daily tick, needs a tick the startup path does not have and a
+    /// cursor that a restart mid-sequence would have to recover. The one thing this shape does not do is
+    /// re-plan around a partial failure: a start that created ten of twenty policies and lost its connection
+    /// stages the remaining ten from night zero on the next start, so up to two aggregates can share a night
+    /// on that path, each still at its own hour. That is the bounded, visible consequence and it is accepted
+    /// over a stateful cursor.</para>
+    ///
+    /// <para>Pure — no clock, no catalog — so the order pins directly, and ties on size break on registry
+    /// order so the result is deterministic on a store where two empty aggregates read the same bytes.</para>
+    /// </summary>
+    public static IReadOnlyList<(string View, int NightOffset)> StageAggregateCompressionNights(
+        IReadOnlyList<AggregateCompressionState> needingPolicy)
+    {
+        if (needingPolicy is null)
+        {
+            throw new ArgumentNullException(nameof(needingPolicy));
+        }
+
+        var registryIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < AggregateCompressionTargets.Count; index++)
+        {
+            registryIndex[AggregateCompressionTargets[index].View] = index;
+        }
+
+        var staged = new List<(string View, int NightOffset)>();
+
+        var night = 0;
+        foreach (var state in needingPolicy
+            .Where(s => s.EligibleChunksNow > 0)
+            .OrderByDescending(s => s.MaterializationBytes)
+            .ThenBy(s => registryIndex.TryGetValue(s.View, out var at) ? at : int.MaxValue))
+        {
+            staged.Add((state.View, night++));
+        }
+
+        foreach (var state in needingPolicy
+            .Where(s => s.EligibleChunksNow <= 0)
+            .OrderBy(s => registryIndex.TryGetValue(s.View, out var at) ? at : int.MaxValue))
+        {
+            staged.Add((state.View, 0));
+        }
+
+        return staged;
+    }
+
+    /// <summary>
+    /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
+    /// compression on each materialization, attaches a once-a-day compression policy on the daily band, stages
+    /// the first runs one aggregate per night largest first, and converges any policy an earlier build left on
+    /// different values. Idempotent under the catalog — a settled store runs no ALTER, adds no policy and
+    /// alters no job — and failure-isolated per aggregate, the <see cref="EnsureRetentionPoliciesAsync"/>
+    /// shape. Returns the number of aggregates with a compression policy in place afterwards.
+    ///
+    /// <para><b>The omission this closes, with the production numbers that set its stakes.</b> Every raw
+    /// hypertable has compressed since the archival tier existed (<see cref="CompressAfterDays"/>); no
+    /// continuous aggregate ever did, and nothing in this file said so — an omission, not a decision. On the
+    /// largest production store the twenty materializations were 235 GiB of a 415 GiB database with every one
+    /// reading <c>compression_enabled = false</c>: the four Query Store aggregates alone 71.5 / 55.6 / 54.7 /
+    /// 33.5 GiB against a raw <c>query_store_stats</c> of 25 GiB compressing at ~9x, because the hourly grain is
+    /// only a ~4x row reduction and an uncompressed rollup of a 9x-compressed source is LARGER than the source.
+    /// The 90-day hourly tier was a month into its first fill, so uncompressed the store was on course for a
+    /// 600–650 GB plateau in mid-November; at the raw tier's measured ratio the same plateau is ~200 GB. The
+    /// rig reproduces the shape in miniature — 1,056 MB of raw compressing to 32 MB while its five Query Store
+    /// aggregates held 110 / 110 / 179 / 148 / 5 MB uncompressed — and the aggregates compressed at 10.1x to
+    /// 18.6x once enabled.</para>
+    ///
+    /// <para><b>A startup ensure, not a schema rung</b>, for the reason the retention and raw-compression
+    /// policies are: <c>ALTER MATERIALIZED VIEW ... SET (timescaledb.compress ...)</c> is idempotent under a
+    /// catalog check and <c>add_compression_policy</c> has <c>if_not_exists</c>, so this re-converges on every
+    /// start and contends for nothing on the migration ladder.</para>
+    ///
+    /// <para><b>Ordering.</b> MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> — the aggregates have
+    /// to exist, and compression has to be enabled on a materialization BEFORE a policy is attached to it (the
+    /// ALTER precedes the <c>add_compression_policy</c> inside each aggregate's own try, so a failed ALTER costs
+    /// that aggregate its policy too rather than attaching a policy to an uncompressible relation). It runs
+    /// BEFORE <see cref="EnsureRetentionPoliciesAsync"/> only because that is where the raw tier's compression
+    /// sits relative to its retention; nothing here depends on the retention sweep either way.</para>
+    ///
+    /// <para><b>The materialization chunk width, which the issue's arithmetic and the rig disagree on, and
+    /// which this design is correct at either value of.</b> TimescaleDB sizes a continuous aggregate's
+    /// materialization chunks at ten times the ROOT raw hypertable's chunk interval — measured on 2.28.1: a
+    /// 1-day raw table yields 10-day materialization chunks on every aggregate built over it, hierarchical
+    /// ones included (a 7-day raw yields 70-day, a 1-hour raw 10-hour). #3581's staging note describes the
+    /// production backlog as "~60 1-day chunks" per aggregate; a store whose raw tables were created with
+    /// <see cref="ChunkIntervalDays"/> = 1 has 10-day materialization chunks instead, and one whose raw tables
+    /// predate that constant has 70-day ones. The separation argument on
+    /// <see cref="AggregateCompressMarginSpan"/> holds at any width, because a chunk compresses only when its
+    /// whole range is past <c>compress_after</c>. What changes with the width is the SHAPE of the work: at 1-day
+    /// chunks each aggregate compresses one day's chunk every night and the 7-day interval tier spends five of
+    /// its seven days compressed; at 10-day chunks each aggregate compresses one 10-day chunk every tenth
+    /// night, a 10-day chunk of the 7-day tier lives seventeen days and is compressed for the last five of
+    /// them, and the 90-day tiers hold up to 100 days. The width on a given store is one catalog read
+    /// (<c>range_end - range_start</c> over <c>timescaledb_information.chunks</c> for a materialization), and
+    /// narrowing new materialization chunks to a day is a separate decision this ensure does not take.</para>
+    ///
+    /// <para><b>Concurrency with the rest of the store.</b> A compression run holds <c>AccessShareLock</c> on
+    /// the materialization and escalates only on the chunk it rewrites
+    /// (<see cref="AggregateCompressionBandMinute"/>), so it cannot block the aggregate's own refresh; a
+    /// hierarchical daily's refresh READS the compressed hourly region (measured at 578 ms for three days on
+    /// the rig, working) and a reader of the chunk being swapped waits for the swap. The daily refreshes and the
+    /// nightly purge (<c>DarlingWorker</c>'s <c>_nextPurgeUtc</c>, anchored to service start) run at drifting
+    /// or per-process instants that no fixed band can avoid by construction; the purge is chunk drops on a
+    /// TimescaleDB store and the refreshes are read-only against these chunks, so neither is a lock hazard, and
+    /// that is stated rather than papered over with a schedule that claims to dodge them.</para>
+    ///
+    /// <para><b>What the raw converge must not do to these jobs</b> is handled on its side:
+    /// <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/> skips every
+    /// <see cref="IsAggregateCompressionTarget"/> job, because its cadence test would otherwise retune this
+    /// family to the hourly tick on the first start after it exists. The stuck-job check (#1581/#3575) covers
+    /// these jobs as it covers every compression job, with a <see cref="StuckRunningBound"/> of 48 hours at this
+    /// cadence, and its samples at <c>:30</c> of the minute stay off these jobs' <c>:00</c> starts exactly as
+    /// they stay off the raw band's.</para>
+    ///
+    /// <para><b>The summary line names every aggregate and its window</b>, the #1958 way: an operator
+    /// cross-checking it against <c>timescaledb_information.jobs</c> should meet every job it promises and no
+    /// job it does not.</para>
+    /// </summary>
+    public static async Task<int> EnsureAggregateCompressionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var states = new Dictionary<string, AggregateCompressionState>(StringComparer.Ordinal);
+        try
+        {
+            using var probe = new NpgsqlCommand(AggregateCompressionStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(0);
+                if (!IsAggregateCompressionTarget(view))
+                {
+                    continue;
+                }
+
+                var hourly = AggregateCompressionTargetFor(view).Hourly;
+                states[view] = new AggregateCompressionState(
+                    View: view,
+                    CompressionEnabled: !reader.IsDBNull(1) && reader.GetBoolean(1),
+                    JobId: reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
+                    CompressAfterSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    ScheduleIntervalSeconds: reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    FixedSchedule: !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    PhaseHour: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                    PhaseMinute: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                    MaterializationBytes: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
+                    EligibleChunksNow: Convert.ToInt64(reader.GetValue(hourly ? 9 : 10), CultureInfo.InvariantCulture));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store, or a catalog too old for one of these columns. The caller already gates
+               on the extension; with no state there is nothing safe to add, and a warning names the cost. */
+            logger?.LogWarning(
+                "TimescaleDB: could not read the continuous aggregates' compression state, so none was enabled or converged this start — the aggregates keep whatever they have (uncompressed, on a store that never had this build) until the next start reads it: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var enabled = 0;
+        var needingPolicy = new List<AggregateCompressionState>();
+        var absent = new List<string>();
+
+        foreach (var (_, view, _) in AggregateCompressionTargets)
+        {
+            if (!states.TryGetValue(view, out var state))
+            {
+                /* The creation sweep is failure-isolated per aggregate and has already warned about this one;
+                   there is no materialization to compress. Named in the summary rather than re-warned. */
+                absent.Add(view);
+                continue;
+            }
+
+            try
+            {
+                if (!state.CompressionEnabled)
+                {
+                    using var enable = new NpgsqlCommand(EnableAggregateCompressionSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await enable.ExecuteNonQueryAsync(cancellationToken);
+                    state = state with { CompressionEnabled = true };
+                    states[view] = state;
+                }
+
+                enabled++;
+
+                if (state.JobId is null)
+                {
+                    needingPolicy.Add(state);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Compression could not be enabled on continuous aggregate {View} — it stays uncompressed, at its full materialized size, until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        var added = 0;
+        var stagedLines = new List<string>();
+        foreach (var (view, nightOffset) in StageAggregateCompressionNights(needingPolicy))
+        {
+            try
+            {
+                using var policy = new NpgsqlCommand(AddAggregateCompressionPolicySql(view, nightOffset), connection) { CommandTimeout = SetupTimeoutSeconds };
+                var jobId = Convert.ToInt32(await policy.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+                added++;
+
+                var state = states[view];
+                var hour = AggregateCompressionBandHourFor(view);
+                stagedLines.Add($"{view} night {nightOffset} at {hour:00}:{AggregateCompressionBandMinute:00}Z ({FormatGiB(state.MaterializationBytes)}, {state.EligibleChunksNow} chunk(s) eligible now)");
+
+                logger?.LogInformation(
+                    "TimescaleDB: continuous aggregate {View} ({Size}) gets a once-a-day compression policy (job {JobId}, compress_after {CompressAfter}) at {Hour:00}:{Minute:00}Z, first running {Nights} night(s) after the next UTC midnight — {Eligible} chunk(s) are past the window now and that first run compresses all of them, chunk by chunk, in one pass (#3581).",
+                    view, FormatGiB(state.MaterializationBytes), jobId, AggregateCompressAfterFor(view), hour, AggregateCompressionBandMinute, nightOffset, state.EligibleChunksNow);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Compression policy for continuous aggregate {View} failed — compression is enabled on it but nothing compresses its chunks until the next restart retries: {Message}",
+                    view, ex.Message);
+            }
+        }
+
+        var converged = 0;
+        foreach (var state in states.Values)
+        {
+            if (state.JobId is not int jobId)
+            {
+                continue;
+            }
+
+            var wantedSeconds = (long)AggregateCompressAfterSpanFor(state.View).TotalSeconds;
+            var wantedCadence = (long)AggregateCompressionScheduleSpan.TotalSeconds;
+            int wantedHour;
+            try
+            {
+                wantedHour = AggregateCompressionBandHourFor(state.View);
+            }
+            catch (InvalidOperationException ex)
+            {
+                logger?.LogWarning("Continuous aggregate {View}'s compression policy cannot be placed on the daily band: {Message}", state.View, ex.Message);
+                continue;
+            }
+
+            if (state.CompressAfterSeconds == wantedSeconds
+                && state.ScheduleIntervalSeconds == wantedCadence
+                && state.FixedSchedule
+                && state.PhaseHour == wantedHour
+                && state.PhaseMinute == AggregateCompressionBandMinute)
+            {
+                continue;
+            }
+
+            try
+            {
+                using var alter = new NpgsqlCommand(SetAggregateCompressionPolicySql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(AggregateCompressAfterFor(state.View));
+                alter.Parameters.AddWithValue(wantedHour);
+                alter.Parameters.AddWithValue(AggregateCompressionBandMinute);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: moved {View}'s compression policy (job {JobId}) onto compress_after {CompressAfter}, a {Cadence} cadence and a fixed {Hour:00}:{Minute:00}Z schedule (was {WasSeconds}s of compress_after, {WasCadence}s of cadence, fixed_schedule={WasFixed}, {WasHour}:{WasMinute}) — add_compression_policy does not update a policy that already exists (#3581).",
+                    state.View, jobId, AggregateCompressAfterFor(state.View), AggregateCompressionScheduleInterval, wantedHour, AggregateCompressionBandMinute,
+                    state.CompressAfterSeconds, state.ScheduleIntervalSeconds, state.FixedSchedule, state.PhaseHour, state.PhaseMinute);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not converge {View}'s compression policy (job {JobId}) onto the shipped window and band — it keeps its old values (often a permission issue: the store login must own the job): {Message}",
+                    state.View, jobId, ex.Message);
+            }
+        }
+
+        var inPlace = states.Values.Count(s => s.JobId is not null) + added;
+        var hourlyTier = AggregateCompressionTargets.Where(t => t.Hourly).Select(t => t.View).ToArray();
+        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly).Select(t => t.View).ToArray();
+
+        /* EVERY aggregate is named with its window, and the windows are interpolated rather than restated
+           (#1958's rule for the retention line): an operator cross-checking timescaledb_information.jobs meets
+           thirteen policies at one compress_after and seven at another, and a line that said "the aggregates
+           compress after 2 days" would be a universal claim with seven counterexamples in the catalog. */
+        logger?.LogInformation(
+            "TimescaleDB: continuous-aggregate compression on {Enabled}/{Total} aggregates, {InPlace} once-a-day policies in place ({Added} added this start, {Converged} converged, {Absent} aggregate(s) absent: {AbsentViews}) — compress_after {HourlyAfter} for the hourly-refreshed tier ({HourlyViews}) and {DailyAfter} for the daily tier ({DailyViews}); one aggregate per hour, minute :{Minute:00}Z, from hour {FirstHour:00}Z; staged first runs, largest first: {Staged}",
+            enabled, AggregateCompressionTargets.Count, inPlace, added, converged, absent.Count, absent.Count == 0 ? "none" : string.Join(", ", absent),
+            HourlyAggregateCompressAfter, string.Join(", ", hourlyTier), DailyAggregateCompressAfter, string.Join(", ", dailyTier),
+            AggregateCompressionBandMinute, AggregateCompressionBandFirstHour,
+            stagedLines.Count == 0 ? "none this start" : string.Join("; ", stagedLines));
+
+        return inPlace;
+    }
+
+    /// <summary>A byte count as GiB with one decimal, for the log lines above — the unit the issue's own figures
+    /// are stated in.</summary>
+    private static string FormatGiB(long bytes)
+        => (bytes / 1073741824d).ToString("0.0", CultureInfo.InvariantCulture) + " GiB";
+
     /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
 
     /// <summary>
@@ -5426,6 +6319,19 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     && !reader.IsDBNull(6)
                     && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
 
+                /* The continuous aggregates' compression policies are NOT this converge's to retune (#3581).
+                   Their job reports the aggregate's user view as its hypertable (collect / <view>), so it
+                   lands in this unscoped read, and its once-a-day cadence would read as stale against the
+                   hourly tick — the first start after that family exists would put all twenty on the hourly
+                   grid, which is the placement #3581 ruled out. They have their own converge
+                   (EnsureAggregateCompressionAsync). Excluded by name on the narrow read, which carries no
+                   schema, and by name-in-collect on the wide one, so a foreign hypertable in another schema
+                   that happens to share an aggregate's name keeps #1778's cadence converge exactly as before. */
+                if (IsAggregateCompressionTarget(hypertable) && (!withPhase || ours))
+                {
+                    continue;
+                }
+
                 int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
                     ? slot
                     : null;
@@ -5700,7 +6606,10 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// product owns runs on a FIXED schedule whose <c>initial_start</c> is <c>date_trunc('hour', now()) +
     /// 1 hour + &lt;phase minutes&gt;</c> (<see cref="AddCompressionPolicySql(string)"/>, #3035), so its runs
     /// begin at <c>:MM:00.000</c> of the wall clock for the 24 minutes of <see cref="CompressionPhaseMinutes"/>
-    /// — three jobs to a minute, every hour, on every store. The health check, by contrast, was anchored to
+    /// — three jobs to a minute, every hour, on every store. The continuous aggregates' compression policies
+    /// (#3581) are anchored the same way at <c>:MM:00.000</c> of their own minute
+    /// (<see cref="AggregateCompressionBandMinute"/>), one job an hour once a day, so the half-step below is
+    /// as far from their starts as it is from the raw band's. The health check, by contrast, was anchored to
     /// nothing in the wall clock: its first sample was the first sweep pass after service start and each
     /// later one was scheduled as <c>UtcNow + 1 hour</c> at the moment of the previous fire, which lands on
     /// the first 15-second sweep pass at or after that instant. So its second-of-the-hour SLIPPED forward by
@@ -6649,6 +7558,21 @@ WHERE j.proc_name = 'policy_retention'
     /// reads <c>Running</c> while its start is still the sentinel. Un-guarded, this observability path would
     /// report that healthy first run as having been going for ~739,000 days. The two queries were written in
     /// parallel branches and each was green on its own; this is the seam between them, not either side.</para>
+    ///
+    /// <para><b>The backlog is counted on the relation the chunks actually belong to, at the job's OWN delay
+    /// (#3581).</b> A continuous aggregate's compression job reports the aggregate's user view as its
+    /// hypertable, while <c>timescaledb_information.chunks</c> knows the aggregate only by its materialization
+    /// hypertable — so a count keyed on the job's own name read ZERO for every aggregate job, forever, with
+    /// nothing to say it was looking at the wrong relation. The <c>LEFT JOIN</c> to
+    /// <c>continuous_aggregates</c> resolves the materialization when the job is an aggregate's and falls
+    /// through to the job's own identity for a raw hypertable. The eligibility delay comes from the job's
+    /// <c>config</c> for the same reason: the raw tier compresses after <see cref="CompressAfterDays"/>, the
+    /// aggregates after their tier's <see cref="AggregateCompressAfterSpanFor"/>, and a count taken at the
+    /// wrong delay reports a chunk as waiting that the policy is not yet allowed to take. The constant
+    /// remains as the fallback for a policy whose config carries no <c>compress_after</c> at all
+    /// (<c>compress_created_before</c> policies), which this product never creates. The delay is also emitted
+    /// as a column so the log line can name the delay it counted against rather than restating the raw
+    /// constant for every job.</para>
     /// </summary>
     public static string CompressionActivitySql =>
         $@"
@@ -6663,13 +7587,17 @@ SELECT
     (
         SELECT count(*)
         FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = j.hypertable_schema
-        AND   c.hypertable_name = j.hypertable_name
+        WHERE c.hypertable_schema = COALESCE(ca.materialization_hypertable_schema, j.hypertable_schema)
+        AND   c.hypertable_name = COALESCE(ca.materialization_hypertable_name, j.hypertable_name)
         AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{CompressAfterDays} days'
-    ) AS eligible_uncompressed
+        AND   c.range_end < now() - COALESCE((j.config->>'compress_after')::interval, INTERVAL '{CompressAfterDays} days')
+    ) AS eligible_uncompressed,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds
 FROM timescaledb_information.jobs      AS j
 JOIN timescaledb_information.job_stats AS js USING (job_id)
+LEFT JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.view_schema = j.hypertable_schema
+  AND ca.view_name = j.hypertable_name
 WHERE j.proc_name LIKE '%compression%'
    OR j.proc_name LIKE '%columnstore%'";
 
@@ -6700,7 +7628,10 @@ WHERE j.proc_name LIKE '%compression%'
                     reader.IsDBNull(3)
                         ? null
                         : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)),
-                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture)));
+                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5)
+                        ? null
+                        : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture))));
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -6779,9 +7710,15 @@ WHERE j.proc_name LIKE '%compression%'
             }
             else if (item.EligibleUncompressedChunks > 0)
             {
+                /* The delay and the cadence are the JOB's, not the raw constants: a continuous aggregate's policy
+                   (#3581) waits two or four days and wakes once a day, and a line that said "1d" and "1 hour"
+                   about it would be the #1958 drift in a new place. The raw constants are what a raw job's
+                   config reads back as, so a raw hypertable's line is byte-identical to what it was. */
                 logger.LogInformation(
                     "TimescaleDB: {Hypertable} has {Waiting} chunk(s) past the {Days}d compression delay and still uncompressed; its policy wakes every {Interval} (last completed run took {Seconds:F0}s).",
-                    item.HypertableName, item.EligibleUncompressedChunks, CompressAfterDays, CompressScheduleInterval,
+                    item.HypertableName, item.EligibleUncompressedChunks,
+                    item.CompressAfter?.TotalDays ?? CompressAfterDays,
+                    IsAggregateCompressionTarget(item.HypertableName) ? AggregateCompressionScheduleInterval : CompressScheduleInterval,
                     item.LastRunDuration?.TotalSeconds ?? 0d);
             }
 
@@ -6790,9 +7727,10 @@ WHERE j.proc_name LIKE '%compression%'
 
         if (running == 0 && backlog == 0)
         {
+            var aggregatePolicies = activity.Count(item => IsAggregateCompressionTarget(item.HypertableName));
             logger.LogDebug(
-                "TimescaleDB: {Count} compression policies on a {Interval} tick, nothing running, no eligible chunk uncompressed.",
-                activity.Count, CompressScheduleInterval);
+                "TimescaleDB: {Count} compression policies on a {Interval} tick and {AggregateCount} continuous-aggregate policies on a {AggregateInterval} cadence, nothing running, no eligible chunk uncompressed.",
+                activity.Count - aggregatePolicies, CompressScheduleInterval, aggregatePolicies, AggregateCompressionScheduleInterval);
         }
 
         LogCompressionClearance(activity, logger);
@@ -7219,13 +8157,20 @@ public sealed record RetentionHoldReading(
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
 /// long the last COMPLETED run took, and how many chunks are past the eligibility delay but still uncompressed.
+///
+/// <para><see cref="CompressAfter"/> is the delay the count was taken against — the job's own, read from its
+/// config (#3581): one day for a raw hypertable, two or four for a continuous aggregate by tier. Null only for
+/// a policy whose config carries no <c>compress_after</c>, which this product never creates; the log line then
+/// falls back to <see cref="TimescaleSupport.CompressAfterDays"/>. Optional and last so the five-argument
+/// shape every existing caller and test constructs is unchanged.</para>
 /// </summary>
 public sealed record CompressionActivity(
     string? HypertableName,
     string? JobStatus,
     DateTime? LastRunStartedAtUtc,
     TimeSpan? LastRunDuration,
-    long EligibleUncompressedChunks)
+    long EligibleUncompressedChunks,
+    TimeSpan? CompressAfter = null)
 {
     /// <summary>Is a compression run in progress right now?</summary>
     public bool IsRunning => string.Equals(JobStatus, "Running", StringComparison.OrdinalIgnoreCase);
@@ -7259,6 +8204,15 @@ public sealed record CompressionActivity(
     /// hypertable — a bring-your-own store's own table, or a fixture table. Null is what keeps every
     /// clearance figure below silent for a FOREIGN hypertable: this code chose no minute for it, so it has no
     /// standing to say whether its run overran anything.
+    ///
+    /// <para><b>Null for the continuous aggregates' compression jobs too, deliberately (#3581).</b> Those jobs
+    /// are on <see cref="TimescaleSupport.AggregateCompressionBandMinute"/> once a day rather than on this
+    /// hourly grid, and the clearance findings below reason from the raw tier's geometry — the #3112 overrun
+    /// text explains a run by the daily chunk close of a 1-day raw chunk, which is not what an aggregate's
+    /// run is. Reporting an aggregate job through that text would name the wrong mechanism; a watch over the
+    /// daily band's own clearance (25 minutes to the next hour's first refresh) is a separate instrument, and
+    /// until it exists these jobs are silent here the way a foreign hypertable is, rather than misdescribed.
+    /// The #1778 backlog count above DOES cover them, at their own delay.</para>
     /// </summary>
     public int? AssignedPhaseMinute =>
         HypertableName is not null
