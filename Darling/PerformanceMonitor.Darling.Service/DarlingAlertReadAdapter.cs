@@ -346,56 +346,88 @@ LIMIT 50";
     /* ---------------- poison waits ---------------- */
 
     /// <summary>
-    /// Lite's poison-wait read verbatim (wait_stats table instead of the v_ view). $2 is the
-    /// parameterized naive-UTC "now minus 10 minutes" — the parameterization style the
-    /// long-running-query twin copies.
+    /// Accumulated poison wait per wait type over the alert's window (#3539 A4) — the SQL Server twin of
+    /// <see cref="DarlingPostgresAlertReadAdapter.PoisonWaitSql"/>, over <c>wait_stats</c>. $1 server_id,
+    /// $2 the parameterized naive-UTC window floor (now minus <see cref="PoisonWaitEvaluator.WindowMinutes"/>;
+    /// the parameterization style the long-running-query twin copies — a bare <c>now()</c> is timestamptz
+    /// and would compare in the server's time zone against these naive-UTC columns).
+    ///
+    /// <para><b>What changed from the retired read and why.</b> The old text selected the newest three rows
+    /// with <c>delta_waiting_tasks &gt; 0</c> and let the engine judge each row's avg-ms-per-wait; this one
+    /// SUMs every row in the window per wait type and applies no threshold. Three consequences, each
+    /// deliberate: there is no <c>LIMIT</c>, because a limit on a sum is an undercount; the
+    /// <c>delta_waiting_tasks &gt; 0</c> filter is gone, because the measured fleet holds THREADPOOL rows with
+    /// hundreds of ms of wait and ZERO completed tasks (a task still waiting across the interval boundary)
+    /// and that wait is evidence — the old filter dropped it; and every wait type with any row in the window
+    /// comes back whatever its sum, because the engine needs "observed and quiet" as an answer distinct
+    /// from "not observed" (an empty result holds a standing alert open; a sub-bar row clears it).</para>
+    ///
+    /// <para><b>(0, 0) rows.</b> The delta calculator writes <c>delta_wait_time_ms = 0, delta_waiting_tasks
+    /// = 0</c> both for a genuinely idle interval and for "no delta is knowable here" (first sighting, counter
+    /// reset, a gap past the policy) — the two are indistinguishable in this table today. A SUM treats them
+    /// identically and correctly: zero contributes nothing to the accumulated wait, and the evaluator's
+    /// denominator is the window's wall clock, not a row count, so a fabricated zero neither inflates nor
+    /// deflates the figure. It does count toward <c>observed_intervals</c>, which is honest for the one
+    /// question that column answers — did the collector deliver a row — and is why that column is not a
+    /// "known quiet" claim. Deltas are never negative (the calculator returns 0 on a reset), so no floor is
+    /// applied; a defensive one would only hide a calculator regression.</para>
+    ///
+    /// <para><b>Cost, under the alert pass's 10-second read deadline while the hourly CAGG refresh runs</b>
+    /// (#3597: 4–7 minutes on the largest store). Cheap by SHAPE, not by any index the planner may or may not
+    /// pick: the WHERE is predicate-identical to the retired read's — one server_id, the three wait_type
+    /// literals, a collection_time floor ten minutes back — so it touches exactly the rows that read touched
+    /// and aggregates them instead of ordering them for a <c>LIMIT 3</c>. At the wait_stats collector's
+    /// one-minute cadence that is at most ~10 collections × 3 types ≈ 30 rows per server, all inside the
+    /// last ten minutes of the current one-day chunk (uncompressed head; chunk exclusion keeps compressed
+    /// history out of the plan). The PostgreSQL twin (<see cref="DarlingPostgresAlertReadAdapter.PoisonWaitSql"/>)
+    /// has run this exact aggregate shape over pg_wait_stats under the same deadline since #2711.</para>
+    ///
+    /// <para>The V128 keystone lane is adding <c>sample_interval_seconds</c> to this table and may later
+    /// guard readers on it; this text deliberately carries no interval handling so that lane can rebase
+    /// onto it cleanly.</para>
     /// </summary>
     public const string PoisonWaitsSql = @"
 SELECT
     wait_type,
-    delta_wait_time_ms AS delta_ms,
-    delta_waiting_tasks AS delta_tasks,
-    CASE WHEN delta_waiting_tasks > 0
-    THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks
-    ELSE 0 END AS avg_ms_per_wait,
-    collection_time
+    SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms,
+    SUM(delta_waiting_tasks)::bigint AS accumulated_waits,
+    COUNT(*)::bigint AS observed_intervals,
+    MAX(collection_time) AS newest_collection_time
 FROM wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
-AND delta_waiting_tasks > 0
 AND collection_time >= $2
-ORDER BY collection_time DESC
-LIMIT 3";
+GROUP BY wait_type
+ORDER BY accumulated_wait_ms DESC";
 
-    public async Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(
-        string serverKey, double thresholdMs, CancellationToken cancellationToken = default)
+    public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
 
-        var items = new List<PoisonWaitDelta>();
+        var items = new List<PoisonWaitAccumulation>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(PoisonWaitsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-10));
+        /* The engine's window, not a local recency constant: the window IS the denominator the bars
+           normalize against, so read and evaluation must agree on it or the "average tasks stuck"
+           arithmetic silently means something else (the PostgreSQL twin's reasoning, verbatim). */
+        command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-windowMinutes));
 
         using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                items.Add(new PoisonWaitDelta
-                {
-                    WaitType = reader.GetString(0),
-                    DeltaMs = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                    DeltaTasks = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                    CollectionTime = reader.GetDateTime(4)
-                });
+                items.Add(new PoisonWaitAccumulation(
+                    reader.GetString(0),
+                    reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4)));
             }
         }
 
-        /* Fetch-then-filter, exactly like Lite's loop: the 3-row window is selected before
-           thresholding (see the IAlertReadAdapter contract). */
-        return items.FindAll(w => w.AvgMsPerWait >= thresholdMs);
+        return items;
     }
 
     /* ---------------- long-running queries ---------------- */

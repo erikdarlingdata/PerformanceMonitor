@@ -76,6 +76,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int DeadlockCountThreshold => Math.Max(
         PostgresAlertEvaluator.CountThresholdFloor,
         _config.Alerts.DeadlockCountThreshold);
+    /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => _config.Alerts.PoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;

@@ -95,14 +95,13 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return new List<DeadlockAlertRow>(rows);
     }
 
-    public async Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(
-        string serverKey, double thresholdMs, CancellationToken cancellationToken = default)
+    /// <summary>#3539 A4: the accumulation read, delegated like every other member so the engine stays free
+    /// of DuckDB. No client-side threshold — the contract is a dumb sum; the engine grades it.</summary>
+    public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var poisonWaits = await Task.Run(() => _dataService.GetLatestPoisonWaitAvgsAsync(serverId), cancellationToken);
-        /* Fetch-then-filter, exactly like the pre-slice-B loop: the 3-row window is selected
-           before thresholding (see the IAlertReadAdapter contract). */
-        return poisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs);
+        return await Task.Run(() => _dataService.GetPoisonWaitAccumulationAsync(serverId, windowMinutes), cancellationToken);
     }
 
     public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(

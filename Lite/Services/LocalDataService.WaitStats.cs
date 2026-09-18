@@ -10,7 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
-
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -357,50 +357,55 @@ ORDER BY collection_time";
     }
 
     /// <summary>
-    /// Gets the latest poison wait deltas for alert checking.
-    /// Returns entries where delta_waiting_tasks > 0 with computed avg ms per wait.
+    /// Accumulated poison wait per wait type over the alert's window (#3539 A4) — the DuckDB twin of
+    /// <c>DarlingAlertReadAdapter.PoisonWaitsSql</c>, over <c>v_wait_stats</c>, for
+    /// <see cref="LiteAlertReadAdapter.GetPoisonWaitAccumulationAsync"/>. The Darling text carries the
+    /// full rationale (no LIMIT, no <c>delta_waiting_tasks &gt; 0</c> filter, every observed type returned,
+    /// how (0, 0) rows are treated); this is that text in DuckDB's dialect and nothing else.
+    /// <para>Dialect: DuckDB's <c>SUM(BIGINT)</c> is a HUGEINT, so both sums are CAST back to BIGINT for
+    /// <c>GetInt64</c>; <c>$2</c> is a naive-UTC <see cref="DateTime"/> parameter exactly as the retired
+    /// read bound it, computed from the CALLER's window so the read's cutoff and the evaluator's denominator
+    /// are the same number by construction.</para>
     /// </summary>
-    public async Task<List<PoisonWaitDelta>> GetLatestPoisonWaitAvgsAsync(int serverId)
+    public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(int serverId, int windowMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
-SELECT
-    wait_type,
-    delta_wait_time_ms AS delta_ms,
-    delta_waiting_tasks AS delta_tasks,
-    CASE WHEN delta_waiting_tasks > 0
-    THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks
-    ELSE 0 END AS avg_ms_per_wait,
-    collection_time
-FROM v_wait_stats
-WHERE server_id = $1
-AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
-AND delta_waiting_tasks > 0
-AND collection_time >= $2
-ORDER BY collection_time DESC
-LIMIT 3";
+        command.CommandText = PoisonWaitAccumulationSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-10) });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-windowMinutes) });
 
-        var items = new List<PoisonWaitDelta>();
+        var items = new List<PoisonWaitAccumulation>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new PoisonWaitDelta
-            {
-                WaitType = reader.GetString(0),
-                DeltaMs = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                DeltaTasks = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                CollectionTime = reader.GetDateTime(4)
-            });
+            items.Add(new PoisonWaitAccumulation(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4)));
         }
 
         return items;
     }
+
+    /// <summary>The SQL text of <see cref="GetPoisonWaitAccumulationAsync"/>, exposed for the parity pins.</summary>
+    public const string PoisonWaitAccumulationSql = @"
+SELECT
+    wait_type,
+    CAST(SUM(delta_wait_time_ms) AS BIGINT) AS accumulated_wait_ms,
+    CAST(SUM(delta_waiting_tasks) AS BIGINT) AS accumulated_waits,
+    CAST(COUNT(*) AS BIGINT) AS observed_intervals,
+    MAX(collection_time) AS newest_collection_time
+FROM v_wait_stats
+WHERE server_id = $1
+AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
+AND collection_time >= $2
+GROUP BY wait_type
+ORDER BY accumulated_wait_ms DESC";
 
     /// <summary>
     /// Gets query snapshots filtered by wait type, for the wait drill-down feature.

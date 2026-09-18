@@ -15,6 +15,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -123,12 +124,11 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.Contains("ORDER BY deadlock_time DESC", DarlingAlertReadAdapter.DeadlocksSql);
         Assert.Contains("LIMIT 50", DarlingAlertReadAdapter.DeadlocksSql);
 
-        /* Poison waits: Lite's exact wait-type list, 3-row window, parameterized 10-minute floor. */
+        /* Poison waits (#3539 A4): the same wait-type list, a parameterized window floor, and an
+           ACCUMULATION per wait type — see PoisonWaitsSql_IsAWindowAccumulation_NotTheNewestDeltas. */
         Assert.Contains("'THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE'",
             DarlingAlertReadAdapter.PoisonWaitsSql);
-        Assert.Contains("delta_waiting_tasks > 0", DarlingAlertReadAdapter.PoisonWaitsSql);
         Assert.Contains("collection_time >= $2", DarlingAlertReadAdapter.PoisonWaitsSql);
-        Assert.Contains("LIMIT 3", DarlingAlertReadAdapter.PoisonWaitsSql);
 
         /* Long-running queries: latest snapshot only, parameterized staleness floor ($4 — never
            now()), user sessions, parameterized cap, filter splice point. */
@@ -146,6 +146,38 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.Contains("avg_duration_seconds >= 60", DarlingAlertReadAdapter.AnomalousJobsSql);
         Assert.Contains("percent_of_average >= $2", DarlingAlertReadAdapter.AnomalousJobsSql);
         Assert.Contains("LIMIT 5", DarlingAlertReadAdapter.AnomalousJobsSql);
+    }
+
+    /// <summary>
+    /// #3539 A4: the poison read SUMs every row in the window per wait type. Three things the retired text
+    /// had must be ABSENT — the <c>delta_waiting_tasks &gt; 0</c> filter (a task waiting across the interval
+    /// boundary accrues time with zero completed tasks, and the measured fleet holds such rows), the
+    /// <c>LIMIT 3</c> (a limit on a sum is an undercount) and any threshold — and the shape must be the sums,
+    /// the row count and the newest collection_time, grouped by wait type. The Lite twin's DuckDB text is
+    /// pinned to the same clauses in Lite.Tests so the two SKUs cannot drift.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitsSql_IsAWindowAccumulation_NotTheNewestDeltas()
+    {
+        var sql = DarlingAlertReadAdapter.PoisonWaitsSql;
+
+        Assert.DoesNotContain("delta_waiting_tasks > 0", sql);
+        Assert.DoesNotContain("LIMIT", sql);
+        Assert.DoesNotContain("avg_ms_per_wait", sql);
+
+        Assert.Contains("SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms", sql);
+        Assert.Contains("SUM(delta_waiting_tasks)::bigint AS accumulated_waits", sql);
+        Assert.Contains("COUNT(*)::bigint AS observed_intervals", sql);
+        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql);
+        Assert.Contains("GROUP BY wait_type", sql);
+        /* No interval handling: the V128 lane owns sample_interval_seconds and rebases onto this text. */
+        Assert.DoesNotContain("sample_interval", sql);
+
+        /* The read-side wait-type list IS the evaluator's, spelled once each and equal. */
+        foreach (var waitType in PoisonWaitEvaluator.SqlServerWaitTypes)
+        {
+            Assert.Contains($"'{waitType}'", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -213,10 +245,30 @@ public sealed class DarlingAlertReadAdapterTests
                 1L, collectionTime, TestServerId, TestServerName, utcNow.AddMinutes(-4),
                 "process1", "UPDATE Users SET Reputation = 1", DeadlockGraphXml);
 
-            /* --- poison waits: 100000ms over 50 tasks -> 2000ms avg --- */
+            /* --- poison waits (#3539 A4): four THREADPOOL rows inside the window that the retired read
+                   judged wrongly or not at all — a 703-task 8 ms storm row, a time-with-no-completed-task
+                   row (the old tasks > 0 filter dropped it), a (0, 0) calculator marker, and one more storm
+                   row; plus one RESOURCE_SEMAPHORE row, and a THREADPOOL row OUTSIDE the window that must
+                   not be summed. Expected THREADPOOL: 5,779 + 304 + 0 + 594,000 = 600,083 ms across
+                   703 + 0 + 0 + 29,700 waits over 4 observed intervals. --- */
             await InsertAsync(connection,
                 "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 50L, 100000L);
+                1L, collectionTime.AddMinutes(-3), TestServerId, TestServerName, "THREADPOOL", 703L, 5779L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                2L, collectionTime.AddMinutes(-2), TestServerId, TestServerName, "THREADPOOL", 0L, 304L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                3L, collectionTime.AddMinutes(-1), TestServerId, TestServerName, "THREADPOOL", 0L, 0L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                4L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 29700L, 594000L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                4L, collectionTime, TestServerId, TestServerName, "RESOURCE_SEMAPHORE", 8L, 3154L);
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                0L, collectionTime.AddMinutes(-30), TestServerId, TestServerName, "THREADPOOL", 1000L, 999999L);
 
             /* --- long-running queries: one 10-minute query + one in an excluded database --- */
             await InsertAsync(connection,
@@ -284,14 +336,31 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal("UPDATE Users SET Reputation = 1", deadlock.VictimSqlText);
             Assert.Equal("SPID 55 (victim) vs SPID 60", deadlock.ProcessSummary);
 
-            /* --- poison waits: fetch-then-threshold, exactly like Lite's loop --- */
-            var poison = await adapter.GetPoisonWaitDeltasAsync(TestServerKey, thresholdMs: 500, ct);
-            var worst = Assert.Single(poison);
-            Assert.Equal("THREADPOOL", worst.WaitType);
-            Assert.Equal(100000L, worst.DeltaMs);
-            Assert.Equal(50L, worst.DeltaTasks);
-            Assert.Equal(2000d, worst.AvgMsPerWait, precision: 3);
-            Assert.Empty(await adapter.GetPoisonWaitDeltasAsync(TestServerKey, thresholdMs: 5000, ct));
+            /* --- poison waits: the window sum per type, no threshold, worst first; the out-of-window row
+                   is excluded and the sub-bar RESOURCE_SEMAPHORE row comes back too (observed-and-quiet is
+                   an answer the engine needs) --- */
+            var poison = await adapter.GetPoisonWaitAccumulationAsync(TestServerKey, PoisonWaitEvaluator.WindowMinutes, ct);
+            Assert.Equal(2, poison.Count);
+            Assert.Equal("THREADPOOL", poison[0].WaitType);
+            Assert.Equal(600_083L, poison[0].AccumulatedWaitMs);
+            Assert.Equal(30_403L, poison[0].AccumulatedWaits);
+            Assert.Equal(4L, poison[0].ObservedIntervals);
+            /* PostgreSQL's timestamp is microsecond-precision and .NET's DateTime carries 100 ns ticks, so
+               the seeded instant round-trips truncated to the microsecond (CI: 15:39:48.9353066 stored as
+               .9353060). Compare at the store's precision; the point of the pin is that the NEWEST in-window
+               row's clock came back, not the out-of-window one's — asserted separately below. */
+            Assert.Equal(collectionTime.Ticks / 10, poison[0].NewestCollectionTime.Ticks / 10);
+            Assert.True(poison[0].NewestCollectionTime > collectionTime.AddMinutes(-2),
+                "the newest collection_time must be the in-window row's, not the -30 minute row's");
+            Assert.Equal("RESOURCE_SEMAPHORE", poison[1].WaitType);
+            Assert.Equal(3_154L, poison[1].AccumulatedWaitMs);
+            Assert.Equal(1L, poison[1].ObservedIntervals);
+            /* And the evaluator reads that window as the storm it is: Warning, where the retired shape saw
+               a 20 ms average on the biggest row and slept. */
+            var graded = PoisonWaitEvaluator.EvaluateSqlServer(poison);
+            var storm = Assert.Single(graded);
+            Assert.Equal("THREADPOOL", storm.WaitType);
+            Assert.Equal(AlertSeverityLevel.Warning, storm.Severity);
 
             /* --- long-running queries: threshold + excluded-database drop --- */
             var lrq = await adapter.GetLongRunningQueriesAsync(

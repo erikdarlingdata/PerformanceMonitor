@@ -354,11 +354,16 @@
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
-                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;" VerticalAlignment="Center"
+                    <!-- #3539 A4: the alert grades wait ACCUMULATED over a rolling ten-minute window against fixed,
+                         fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
+                         retired per-wait-average bar; it stays so saved settings round-trip, disabled and labelled so nobody
+                         tunes a number nothing reads. The preview line below the section states the live bars. -->
+                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window; legacy avg-ms bar (no longer used):" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center" IsEnabled="False"
+                             ToolTip="Retired. The Poison Wait alert no longer judges an average ms per wait; it fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL). Kept so existing settings round-trip."/>
                     <TextBlock Text="ms" VerticalAlignment="Center" Margin="2,0,0,0"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"

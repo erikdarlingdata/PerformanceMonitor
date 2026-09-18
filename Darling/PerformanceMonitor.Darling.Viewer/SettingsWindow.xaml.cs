@@ -1103,7 +1103,9 @@ public partial class SettingsWindow : Window
             && !string.Equals(AlertPgBlockingThresholdBox.Text, AlertBlockingThresholdBox.Text, StringComparison.Ordinal))
             parts.Add($"pg blocking >= {AlertPgBlockingThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
-            parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
+            /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1145,7 +1147,10 @@ public partial class SettingsWindow : Window
         AlertPgDeadlockThresholdBox.IsEnabled = enabled;
         AlertPgBlockingThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        AlertPoisonWaitThresholdBox.IsEnabled = enabled;
+        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
+           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
+           on toggle, or the operator is back to tuning a number the engine ignores. */
+        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         /* V20 long-running-query read-shape controls follow the master switch like the rest of the engine. */

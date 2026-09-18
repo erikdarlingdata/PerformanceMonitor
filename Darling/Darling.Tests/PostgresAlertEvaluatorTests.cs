@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
@@ -642,5 +643,173 @@ public class PostgresAlertEvaluatorTests
         Assert.Equal(
             PostgresAlertEvaluator.PoisonWaitSubject(row),
             PostgresAlertEvaluator.EvaluatePoisonWait(row)!.Subject);
+    }
+
+    /* ---------------- poison waits: the SQL Server port (#3539 A4) ---------------- */
+
+    private static PoisonWaitAccumulation SqlPoison(long accumulatedMs, string waitType = "THREADPOOL", long waits = 1)
+        => new(waitType, accumulatedMs, waits, 10, new DateTime(2026, 9, 18, 12, 0, 0));
+
+    /// <summary>
+    /// The constants are LITERALLY shared — one definition on <see cref="PoisonWaitEvaluator"/>, with the
+    /// PostgreSQL names as aliases of it in source, not merely three numbers that happen to agree today. The
+    /// value equality is the cheap half; the source pin is the load-bearing one, because two equal literals
+    /// are exactly the state that drifts (a future "tune the SQL Server bar" edit would leave the PostgreSQL
+    /// one behind, and one alert name under one mute key would mean two things again — the #3539 finding).
+    /// </summary>
+    [Fact]
+    public void PoisonWaitConstantsAreOneDefinition_SharedByBothEngines()
+    {
+        Assert.Equal(PoisonWaitEvaluator.WindowMinutes, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+        Assert.Equal(PoisonWaitEvaluator.WarningAvgWaiters, PostgresAlertEvaluator.PoisonWaitWarningAvgWaiters);
+        Assert.Equal(PoisonWaitEvaluator.CriticalAvgWaiters, PostgresAlertEvaluator.PoisonWaitCriticalAvgWaiters);
+
+        var source = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "PostgresAlertEvaluator.cs");
+        Assert.Contains("public const int PoisonWaitWindowMinutes = PoisonWaitEvaluator.WindowMinutes;", source, StringComparison.Ordinal);
+        Assert.Contains("public const double PoisonWaitWarningAvgWaiters = PoisonWaitEvaluator.WarningAvgWaiters;", source, StringComparison.Ordinal);
+        Assert.Contains("public const double PoisonWaitCriticalAvgWaiters = PoisonWaitEvaluator.CriticalAvgWaiters;", source, StringComparison.Ordinal);
+        /* The positive control for the pin below: the same Contains form does find a literal initializer
+           that IS in the file (the metric name), so its silence on a "= 1.0" for the poison bar is a real
+           absence rather than a matcher that never matches. */
+        Assert.Contains("public const string PoisonWaitMetric = \"Poison Wait\";", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PoisonWaitWarningAvgWaiters = 1.0", source, StringComparison.Ordinal);
+
+        /* And the figures themselves, as documented on the shared home: 10 minutes, one waiter, ten. */
+        Assert.Equal(10, PoisonWaitEvaluator.WindowMinutes);
+        Assert.Equal(600_000d, PoisonWaitEvaluator.WindowMs);
+        Assert.Equal(1.0, PoisonWaitEvaluator.WarningAvgWaiters);
+        Assert.Equal(10.0, PoisonWaitEvaluator.CriticalAvgWaiters);
+    }
+
+    /// <summary>
+    /// Both engines grade the same accumulated milliseconds to the same tier at every documented boundary —
+    /// the parity the shared constants promise, checked through both evaluators' own entry points rather
+    /// than through the constants alone.
+    /// </summary>
+    [Theory]
+    [InlineData(0, null)]
+    [InlineData(599_999, null)]
+    [InlineData(600_000, "Warning")]
+    [InlineData(5_999_999, "Warning")]
+    [InlineData(6_000_000, "Critical")]
+    public void PoisonWaitGradesIdenticallyOnBothEngines(long accumulatedMs, string? expected)
+    {
+        var pg = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(accumulatedMs));
+        var sql = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(accumulatedMs));
+        var shared = PoisonWaitEvaluator.Grade(accumulatedMs);
+
+        if (expected is null)
+        {
+            Assert.Null(pg);
+            Assert.Null(sql);
+            Assert.Null(shared);
+            return;
+        }
+
+        var tier = Enum.Parse<AlertSeverityLevel>(expected);
+        Assert.Equal(tier, pg!.Severity);
+        Assert.Equal(tier, sql!.Severity);
+        Assert.Equal(tier, shared);
+        /* Same numeric pair, too: accumulated ms against the breached bar in ms. */
+        Assert.Equal(pg.NumericCurrentValue, (double)sql.AccumulatedWaitMs);
+        Assert.Equal(pg.NumericThresholdValue, sql.NumericThresholdValue);
+    }
+
+    /// <summary>
+    /// The SQL Server mirror of <see cref="PoisonWaitFiresOnAccumulatedTimeNotPerWaitAverage"/>: 300,000
+    /// THREADPOOL waits of 2 ms each is one task continuously starved for the whole window and fires
+    /// Warning; the retired avg-ms-per-wait bar (500) read the same window as 2 ms. And the mirror of the
+    /// false page: one 600 ms wait — the shape the old bar paged CRITICAL on — is silent.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitFiresOnTheStorm_AndNotOnOneSlowWait()
+    {
+        var storm = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600_000, waits: 300_000));
+        Assert.NotNull(storm);
+        Assert.Equal(AlertSeverityLevel.Warning, storm!.Severity);
+        Assert.Equal(1.0, storm.AvgWaiters);
+        Assert.Equal("THREADPOOL (600s in 10m)", storm.CurrentValueClause);
+
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600, waits: 1)));
+    }
+
+    /// <summary>
+    /// The SQL Server fleet-quiet pin, the twin of <see cref="PoisonWaitStaysSilentOnTheWorstFleetBaselineObserved"/>:
+    /// on 43 servers over 4 days the worst ten-minute bucket anywhere held 5,795 ms of THREADPOOL (0.0097
+    /// avg waiters — ~100x under the bar), the largest single row was 703 tasks at 8.2 ms (5,779 ms), and
+    /// one server's daily compile burst sat at 3,154 ms over 8 tasks just under the OLD bar. None may fire.
+    /// </summary>
+    [Theory]
+    [InlineData(5_795, "THREADPOOL")]
+    [InlineData(5_779, "THREADPOOL")]
+    [InlineData(3_154, "RESOURCE_SEMAPHORE_QUERY_COMPILE")]
+    public void SqlServerPoisonWaitStaysSilentOnTheWorstFleetBucketObserved(long accumulatedMs, string waitType)
+    {
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(accumulatedMs, waitType)));
+    }
+
+    /// <summary>
+    /// A (0, 0) row — the delta calculator's "no delta is knowable here" marker, indistinguishable in
+    /// wait_stats from a genuinely idle interval — is not evidence of anything: it does not fire (nothing
+    /// accumulated) and it is not a finding of quiet either; the evaluator returns no finding for it and
+    /// says nothing about the window's health. Which of "observed" and "silent" applies is the engine's
+    /// call, made on whether rows came back at all (pinned in AlertEngineTests), never on a zero.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitTreatsAZeroRowAsNoEvidence()
+    {
+        Assert.Null(PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(0, waits: 0)));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer(new[] { SqlPoison(0, waits: 0), SqlPoison(0, "RESOURCE_SEMAPHORE", 0) }));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer((IReadOnlyList<PoisonWaitAccumulation>?)null));
+        Assert.Empty(PoisonWaitEvaluator.EvaluateSqlServer(Array.Empty<PoisonWaitAccumulation>()));
+    }
+
+    /// <summary>Worst-first: severity, then accumulated wait — so the engine's "worst" and mute key are stable.</summary>
+    [Fact]
+    public void SqlServerPoisonWaitFindingsAreOrderedWorstFirst()
+    {
+        var findings = PoisonWaitEvaluator.EvaluateSqlServer(new[]
+        {
+            SqlPoison(700_000, "THREADPOOL"),                          // Warning, more ms
+            SqlPoison(6_000_000, "RESOURCE_SEMAPHORE"),                // Critical
+            SqlPoison(650_000, "RESOURCE_SEMAPHORE_QUERY_COMPILE"),    // Warning, fewer ms
+            SqlPoison(100, "THREADPOOL"),                              // under the bar
+        });
+
+        Assert.Equal(new[] { "RESOURCE_SEMAPHORE", "THREADPOOL", "RESOURCE_SEMAPHORE_QUERY_COMPILE" },
+            findings.Select(f => f.WaitType).ToArray());
+        Assert.Equal(10.0, findings[0].BreachedAvgWaiters);
+        Assert.Equal(1.0, findings[1].BreachedAvgWaiters);
+    }
+
+    /// <summary>
+    /// The two engines' messages share one clause order — seconds accumulated, the window, the wait count,
+    /// the average stuck — with only the noun differing (task / backend), so a "Poison Wait" read alike from
+    /// either engine; and the SQL remedy names the fix for its type like the PostgreSQL one does.
+    /// </summary>
+    [Fact]
+    public void SqlServerPoisonWaitMessageMirrorsThePostgresShape()
+    {
+        var sql = PoisonWaitEvaluator.EvaluateSqlServer(SqlPoison(600_000, waits: 300_000))!;
+        var pg = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(600_000, waits: 300_000))!;
+
+        Assert.Equal(
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            sql.ShortMessage);
+        Assert.StartsWith("[IPC:BtreePage] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 backend(s) continuously stuck", pg.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal(
+            pg.ThresholdValue.Replace("backend(s)", "task(s)", StringComparison.Ordinal),
+            sql.ThresholdValue);
+    }
+
+    [Theory]
+    [InlineData("THREADPOOL", "worker thread")]
+    [InlineData("threadpool", "worker thread")]
+    [InlineData("RESOURCE_SEMAPHORE", "memory grants")]
+    [InlineData("RESOURCE_SEMAPHORE_QUERY_COMPILE", "compile memory")]
+    [InlineData("SOMETHING_ELSE", "active-query snapshots")]
+    public void SqlServerPoisonWaitRemedyNamesTheFixForItsType(string waitType, string fragment)
+    {
+        Assert.Contains(fragment, PoisonWaitEvaluator.SqlServerRemedyFor(waitType), StringComparison.Ordinal);
     }
 }

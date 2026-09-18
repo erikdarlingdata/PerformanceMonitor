@@ -450,8 +450,8 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `blockingWaitSecondsThreshold` | `0` | Total blocked wait, in seconds, summed across the latest blocking snapshot; `0` = off. A second gate beside the count one, because a count cannot tell one session blocked for an hour from one blocked for a second. Reports as its own "Blocking Wait Time" alert, and unlike the count gate it is level-triggered: it re-fires every cooldown while the wait stays above the threshold and clears when it drops below |
 | `deadlockEnabled` | `true` | |
 | `deadlockCountThreshold` | `1` | Deadlock count (rolling window) that trips the alert |
-| `poisonWaitEnabled` | `true` | THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE |
-| `poisonWaitThresholdMs` | `500` | Average ms per wait |
+| `poisonWaitEnabled` | `true` | THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE on SQL Server; IPC:BtreePage / IPC:BufferIo on Aurora PostgreSQL. **One switch, one alert name, one shape on both engines**: the alert fires when a poison wait type accumulates 600 s of wait inside a rolling ten-minute window — an average of one task (SQL Server) or backend (PostgreSQL) continuously stuck — as WARNING, and 6,000 s (ten stuck) as CRITICAL, judged per wait type. The bars are constants shared by both evaluators (`PoisonWaitEvaluator`), fleet-calibrated ~100× (SQL Server) and ~160× (PostgreSQL) above the worst healthy ten-minute bucket measured, and a mute rule on `Poison Wait` means the same thing whichever engine the server runs |
+| `poisonWaitThresholdMs` | `500` | **No longer consulted.** Formerly the SQL Server per-wait average bar; retired by the shared accumulation shape above. Still read, written and reported (`get_alert_settings`) so existing configuration files and control-plane rows round-trip |
 | `longRunningQueryEnabled` | `true` | |
 | `longRunningQueryThresholdMinutes` | `30` | |
 | `tempDbSpaceEnabled` | `true` | |

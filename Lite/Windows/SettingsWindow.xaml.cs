@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text.Json.Nodes;
@@ -17,6 +18,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Navigation;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
@@ -947,7 +949,9 @@ public partial class SettingsWindow : Window
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
-            parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
+            /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -981,7 +985,10 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        AlertPoisonWaitThresholdBox.IsEnabled = enabled;
+        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
+           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
+           on toggle, or the operator is back to tuning a number the engine ignores. */
+        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;

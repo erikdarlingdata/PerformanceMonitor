@@ -128,22 +128,27 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
 
-    /* The collection_time of the wait_stats row(s) last actually fired on. Read adapters answer
-       "what's the newest poison-wait row within the last 10 minutes", which is independent of
-       whether it is NEW since the previous ask — at fleet load the collector's delivered cadence
-       can lag the alert cooldown (PerformanceMonitor's own dogfooding on <monitor-host>
-       caught byte-identical duplicate alerts ~5-7 minutes apart), so the cooldown elapsing is not
-       proof a fresh observation exists. Poison wait is deliberately NOT level-triggered like CPU
-       (which resamples live every sweep): a delta is one collector cycle's computation, and
-       reading it twice is the same event surfacing twice, not two observations of a standing
-       condition. Gate re-fire on BOTH the cooldown AND a newer collection_time than last fired.
+    /* The collection_time of the newest wait_stats row inside the window last actually fired on. Read
+       adapters answer "how much poison wait accumulated over the last 10 minutes, and when was the
+       newest row" (#3539 A4 — before that, "what's the newest poison-wait row within the last 10
+       minutes"), which is independent of whether anything is NEW since the previous ask — at fleet
+       load the collector's delivered cadence can lag the alert cooldown (PerformanceMonitor's own
+       dogfooding on <monitor-host> caught byte-identical duplicate alerts ~5-7 minutes apart), so the
+       cooldown elapsing is not proof a fresh observation exists. Poison wait is deliberately NOT
+       level-triggered like CPU (which resamples live every sweep): the window sum changes only when
+       the collector lands a row, and re-reading it between collections is the same computation
+       surfacing twice, not two observations of a standing condition. Gate re-fire on BOTH the
+       cooldown AND a newer collection_time than last fired.
 
        #3282 note, so nobody reads the contrast above as "CPU needs no freshness guard": CPU has one
-       now too, and for a DIFFERENT reason. Here freshness stops a stale delta being re-reported;
-       there it makes the persistence gate count SAMPLES rather than sweeps. The delta-versus-level
-       distinction is unchanged, which is why poison wait is still not behind that gate — its breach
-       arm observes once per collector cycle while its clear arm observes every sweep, so one gate
-       over both would count breaches and clears in different units. */
+       now too, and for a DIFFERENT reason. Here freshness stops a stale window being re-reported;
+       there it makes the persistence gate count SAMPLES rather than sweeps. Poison wait is still not
+       behind that gate, and since #3539 for a better reason than the units mismatch: the rolling
+       window IS its persistence. Firing needs 600 s of wait to have accumulated inside ten minutes,
+       and clearing needs the window's sum to fall back under that bar, which takes up to a full
+       window as rows age out — so one quiet delta cannot clear it and one loud delta cannot fire it
+       without the volume to back it. The gate would be a second persistence rule over a measure that
+       already carries one (A5's gate rollout to other conditions is a separate #3539 item). */
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
@@ -1149,8 +1154,33 @@ public sealed class AlertEngine
         }
     }
 
-    /* ---------------- poison waits (Lite AlertEngine.cs:273-339) ---------------- */
+    /* ---------------- poison waits (Lite AlertEngine.cs:273-339; reshaped by #3539 A4) ---------------- */
 
+    /// <summary>
+    /// The SQL Server Poison Wait alert, since #3539 A4 the accumulation shape its PostgreSQL twin
+    /// (<c>DarlingWorker.EvaluatePgPoisonWaitAsync</c>) has fired on since #2711: the read sums every
+    /// collector delta inside <see cref="PoisonWaitEvaluator.WindowMinutes"/> per poison wait type, and
+    /// <see cref="PoisonWaitEvaluator.EvaluateSqlServer(IReadOnlyList{PoisonWaitAccumulation})"/> grades the
+    /// sum against the shared bars — Warning at one task continuously starved across the window, Critical at
+    /// ten. The retired shape judged ONE collector row's avg-ms-per-wait against
+    /// <see cref="IAlertEngineSettings.PoisonWaitThresholdMs"/>, presence-flat CRITICAL: a single 600 ms wait
+    /// paged and a storm of thousands of 8 ms THREADPOOL waits slept. The measured basis is on the evaluator.
+    ///
+    /// <para><b>One alert per server, as before</b>, not one per wait type like the PostgreSQL host: the
+    /// delivery shape (metric-level cooldown fallback, detail items with no incidents, mute keyed on the worst
+    /// wait type — Lite's documented limitation) is what every downstream reader of this alert already
+    /// understands, and the graded severity is the worst wait type's. Changing the per-server contract is a
+    /// separate decision from changing what the number means.</para>
+    ///
+    /// <para><b>The clear arm requires an observation.</b> A standing alert clears when the window holds at
+    /// least one poison-type collector row AND no type is over the bar — which, because the sum is rolling,
+    /// happens only once enough of the wait has aged out, up to a full window late (the PostgreSQL twin
+    /// accepts the same lateness). An EMPTY read — no wait_stats rows for any poison type in ten minutes — is
+    /// the collector not delivering, not the server going quiet: THREADPOOL has lifetime wait on any server
+    /// that has been up long enough to fire this alert, so its row is written every cycle. An absent
+    /// measurement holds the flag where it is (the #3282 rule for a CPU reading that stops arriving); the
+    /// retired shape announced "Cleared" on that same silence.</para>
+    /// </summary>
     private async Task CheckPoisonWaitsAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
@@ -1162,51 +1192,80 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
+            var accumulated = await _readAdapter.GetPoisonWaitAccumulationAsync(key, PoisonWaitEvaluator.WindowMinutes, ct);
             readClock.Restart();
 
-            if (triggered.Count > 0)
+            var findings = PoisonWaitEvaluator.EvaluateSqlServer(accumulated);
+
+            if (findings.Count > 0)
             {
                 _activePoisonWaitAlert[key] = true;                                 /* :282 */
 
-                /* The read adapter's own window can hand back the SAME wait_stats row(s) across
-                   multiple sweeps when the collector lags the cooldown — see the field's own
-                   doc comment. Only a collection_time newer than the one last fired on counts as
-                   a fresh observation; a cooldown-elapsed re-ask against an unrefreshed row must
-                   wait for the NEXT sweep rather than re-fire on data it already reported. */
-                var newestCollectionTime = triggered.Max(w => w.CollectionTime);
+                /* The read adapter's window can hand back the SAME newest row across multiple sweeps when
+                   the collector lags the cooldown — see the field's own doc comment. Only a collection_time
+                   newer than the one last fired on counts as a fresh observation; a cooldown-elapsed re-ask
+                   against an unrefreshed window must wait for the NEXT collector row rather than re-fire on
+                   a sum it already reported. Taken over the FIRING types only, as before: a quiet type's
+                   newer row is not a new observation of the type that is over the bar. */
+                var newestCollectionTime = findings.Max(f => f.NewestCollectionTime);
                 bool hasFreshCollection = !_lastPoisonWaitCollectionTime.TryGetValue(key, out var lastCollectionTime)
                     || newestCollectionTime > lastCollectionTime;
 
                 if (!suppressed && hasFreshCollection && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
                 {
-                    var worst = triggered[0];                                       /* :285 */
-                    var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)")); /* :286 */
+                    var worst = findings[0];                                        /* :285 — worst-first from the evaluator */
+                    var allWaitNames = string.Join(", ", findings.ConvertAll(f => f.CurrentValueClause)); /* :286 */
 
-                    /* :288-293 — mute keys on the worst (highest avg ms/wait) triggered wait type;
-                       same documented limitation as Lite. */
+                    /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
+                       firing wait type; same documented limitation as Lite. */
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
 
-                    var poisonContext = AlertContextBuilders.BuildPoisonWaitContext(triggered); /* :307 */
+                    /* One detail item per firing type, no incidents — the shape IncidentDeliveryFilter
+                       documents for this metric (metric-level cooldown fallback). The severity rides on the
+                       context's override as well as the outcome, because the channel builders read the
+                       context (the #1136 low-disk grading path) while Darling's deliverer folds the outcome's
+                       in only when the context has none (#2090); setting both makes the two agree by
+                       construction on both SKUs. */
+                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity };
+                    foreach (var finding in findings)
+                    {
+                        poisonContext.Details.Add(new AlertDetailItem
+                        {
+                            Heading = finding.WaitType,
+                            Fields = new()
+                            {
+                                ("Accumulated wait", string.Create(CultureInfo.InvariantCulture,
+                                    $"{finding.AccumulatedSeconds:N0} s over the last {PoisonWaitEvaluator.WindowMinutes} min")),
+                                ("Avg tasks stuck", string.Create(CultureInfo.InvariantCulture, $"{finding.AvgWaiters:N2}")),
+                                ("Waits completed", string.Create(CultureInfo.InvariantCulture, $"{finding.AccumulatedWaits:N0}")),
+                                ("Severity", finding.Severity == AlertSeverityLevel.Critical ? "CRITICAL" : "WARNING"),
+                                ("Remedy", PoisonWaitEvaluator.SqlServerRemedyFor(finding.WaitType)),
+                            }
+                        });
+                    }
                     var detailText = AlertContextBuilders.ContextToDetailText(poisonContext);   /* :308 */
 
-                    /* :310-320. ShortMessage = the toast body of :302. */
+                    /* :310-320. ShortMessage = the toast body of :302. Numerics are the worst type's
+                       accumulated milliseconds against the bar it crossed, also in milliseconds — the unit
+                       the history formatter already renders this metric in, and the PostgreSQL twin's
+                       exact numeric pair. */
                     await FireAsync(new AlertOutcome(
                         key, serverName, "Poison Wait",
                         allWaitNames,
-                        $"{_settings.PoisonWaitThresholdMs}ms avg",
+                        worst.ThresholdValue,
                         poisonContext, detailText,
-                        NumericCurrentValue: worst.AvgMsPerWait,
-                        NumericThresholdValue: _settings.PoisonWaitThresholdMs,
-                        Muted: isMuted, Severity: poisonContext?.SeverityOverride,
-                        ShortMessage: $"{worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait"), ct);
+                        NumericCurrentValue: worst.AccumulatedWaitMs,
+                        NumericThresholdValue: worst.NumericThresholdValue,
+                        Muted: isMuted, Severity: worst.Severity,
+                        ShortMessage: worst.ShortMessage), ct);
                     readClock.Restart();
                 }
             }
-            else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
+            else if (accumulated.Count > 0                                          /* observed AND quiet — see the doc comment */
+                && _activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
             {
                 _activePoisonWaitAlert[key] = false;                                /* :325 */
                 if (!suppressed)                                                    /* :326 */
@@ -1214,7 +1273,9 @@ public sealed class AlertEngine
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "Poison Wait",
                         "Poison Waits Cleared",                                     /* :329 */
-                        $"{serverName}: Poison wait avg below threshold"), ct);     /* :330 */
+                        string.Create(CultureInfo.InvariantCulture,
+                            $"{serverName}: Poison wait accumulated over the last {PoisonWaitEvaluator.WindowMinutes} minutes back below threshold")), ct); /* :330 */
+                    readClock.Restart();
                 }
             }
         }

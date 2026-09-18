@@ -3340,8 +3340,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult<CurrentBlockingWaitResult?>(null);
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>());
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<PoisonWaitDelta>());
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PoisonWaitAccumulation>());
         public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,

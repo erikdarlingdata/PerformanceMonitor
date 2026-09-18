@@ -569,6 +569,9 @@ public sealed class AlertsConfig
     [JsonPropertyName("poisonWaitEnabled")]
     public bool PoisonWaitEnabled { get; set; } = true;
 
+    /// <summary>Read and reported but no longer consulted by the alert engine since #3539 A4 — see
+    /// <see cref="IAlertEngineSettings.PoisonWaitThresholdMs"/>. Kept so an existing darling.json and the
+    /// store's control-plane row keep round-tripping.</summary>
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
 

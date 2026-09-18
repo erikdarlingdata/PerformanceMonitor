@@ -709,8 +709,11 @@ public class AlertContextBuildersTests
            PerformanceMonitor.Alerting — so the app's public API must now surface the SHARED types. */
         Assert.Equal("PerformanceMonitor.Alerting", typeof(FailedJobInfo).Namespace);
 
-        Assert.Equal(typeof(Task<List<PoisonWaitDelta>>),
-            typeof(LocalDataService).GetMethod("GetLatestPoisonWaitAvgsAsync")!.ReturnType);
+        /* #3539 A4: the alert's DuckDB read is the window accumulation; PoisonWaitDelta itself stays
+           shared for the deprecated Dashboard and BuildPoisonWaitContext. */
+        Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
+            typeof(LocalDataService).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
+        Assert.Equal("PerformanceMonitor.Alerting", typeof(PoisonWaitDelta).Namespace);
         Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
             typeof(LocalDataService).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
