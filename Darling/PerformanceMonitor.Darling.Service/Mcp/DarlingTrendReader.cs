@@ -488,6 +488,15 @@ internal static class DarlingTrendReader
     /// "quiet, widen the window" is honest (#1665); where it is true, the empty branch has to consider that
     /// the rows were DROPPED, not absent.</para>
     ///
+    /// <para>It is rollup EXISTENCE, deliberately, not the gate's armed state (<c>RetentionHoldReading.Armed</c>):
+    /// a rollup can exist while its raw purge is still held pending backfill, so this is an UPPER BOUND on
+    /// "can have been dropped" — never a claim that rows were. That is the right bound for its one consumer:
+    /// wherever raw's oldest row is MEASURED (<see cref="Coverage"/>), the measurement decides and this flag is
+    /// not consulted; it backstops only the unmeasured case, and it errs toward the horizon message (which
+    /// still names the measured facts it has and the remedy) rather than toward "quiet, widen" — the false
+    /// direction. Reading the gate's job state per call would cost a catalog round trip on every empty answer
+    /// to refine a fallback the measurement already makes rare.</para>
+    ///
     /// <para><see cref="ResolvedAtUtc"/> is the wall clock the age decision was measured against. It rides on
     /// the route so the tool that consumes it never names the clock itself: an <c>as_of</c>-anchored tool's
     /// only "now" is the anchor it resolved (AsOfWindowAnchorTests pins that as an absolute), and retention's
