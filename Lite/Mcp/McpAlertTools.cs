@@ -27,12 +27,15 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* Appended after as_of: MCP invokes by name, and a trailing optional is the one position no existing
+           positional C# caller can be re-bound by. Same convention as Darling's twin. */
+        [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")] bool include_dismissed = false)
     {
         try
         {
@@ -42,14 +45,34 @@ public sealed class McpAlertTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit, asOfUtc: windowEnd);
+            /* #3541 A3: over-fetch by one so truncation is OBSERVED rather than inferred from count == limit.
+               The cap was already the caller's here; what was missing was any way to tell a window of
+               exactly `limit` alerts from a busier one, and any statement that the dismissed rows had been
+               removed. Same shape as Darling's twin. */
+            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit + 1, asOfUtc: windowEnd, includeDismissed: include_dismissed);
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
 
-            if (rows.Count == 0)
+            /* The hidden filter, measured: how many rows in this window it removed. Zero is a real answer
+               (nothing was hidden). Not probed when the filter is off, because then it removed nothing by
+               construction. */
+            var dismissedExcludedCount = include_dismissed
+                ? 0L
+                : await dataService.CountDismissedAlertsAsync(hours_back, serverId: null, asOfUtc: windowEnd);
+
+            if (page.Count == 0)
             {
-                return McpHelpers.Status("empty", "No alerts found in the specified time range.");
+                /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
+                   "every alert here was acknowledged", and the one-sentence quiet-window answer would send
+                   the caller off widening a window whose contents they were never shown. */
+                return dismissedExcludedCount > 0
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No undismissed alerts found in the specified time range, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                    : McpHelpers.Status("empty", "No alerts found in the specified time range.");
             }
 
-            var alerts = rows.Select(r => new
+            var alerts = page.Select(r => new
             {
                 alert_time = r.AlertTime.ToString("o"),
                 server_id = r.ServerId,
@@ -61,13 +84,26 @@ public sealed class McpAlertTools
                 notification_type = r.NotificationType,
                 send_error = r.SendError,
                 muted = r.Muted,
+                /* Per row, so a page that mixes the two populations labels each one. Always false on the
+                   default read, which is a true statement about every row on it. */
+                dismissed = r.Dismissed,
                 detail_text = r.DetailText
             }).ToList();
 
             return JsonSerializer.Serialize(new
             {
                 hours_back,
-                total_alerts = alerts.Count,
+                /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
+                   window. What is published is what was measured: the page, whether the window held more,
+                   the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
+                   that shaped the population together with how much it removed. */
+                alerts_returned = page.Count,
+                truncated,
+                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
+                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                order = "alert_time_desc",
+                dismissed_excluded = !include_dismissed,
+                dismissed_excluded_count = dismissedExcludedCount,
                 alerts
             }, McpHelpers.JsonOptions);
         }

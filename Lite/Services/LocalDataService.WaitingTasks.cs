@@ -16,9 +16,15 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets recent waiting task snapshots for a server.
+    /// Gets recent waiting task snapshots for a server: the waiting tasks captured over the window, newest capture first then longest wait, capped at
+    /// <paramref name="limit"/> when one is given.
+    ///
+    /// <para>The cap is a PARAMETER (#3541 A3), null for the grid callers that read the whole window as they
+    /// always did. <c>get_waiting_tasks</c> read this UNBOUNDED and then took <c>limit</c> rows in C#, so a busy
+    /// window materialised every waiting-task row to return thirty, and the envelope stated no bound at all.
+    /// The tool now passes <c>limit + 1</c> and reads the extra row as truncation.</para>
     /// </summary>
-    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? limit = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -29,9 +35,11 @@ public partial class LocalDataService
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
 
         /* The window's upper edge is $3, so the optional database list starts at $4. Bounding both edges
-           (rather than only the lower one) is what lets an as_of anchor mean anything here. */
+           (rather than only the lower one) is what lets an as_of anchor mean anything here. The row cap, when
+           one is given, binds LAST so the database list keeps its ordinals whether or not a cap is present. */
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var limitClause = limit.HasValue ? $"\nLIMIT ${4 + dbValues.Count}" : string.Empty;
         command.CommandText = $@"
 SELECT
     collection_time,
@@ -46,13 +54,15 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3{dbClause}
 {exclude}
-ORDER BY collection_time DESC, wait_duration_ms DESC";
+ORDER BY collection_time DESC, wait_duration_ms DESC{limitClause}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (limit.HasValue)
+            command.Parameters.Add(new DuckDBParameter { Value = limit.Value });
 
         var items = new List<WaitingTaskRow>();
         using var reader = await command.ExecuteReaderAsync();

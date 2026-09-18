@@ -556,6 +556,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("SUM(delta_waiting_tasks)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the caller's ($4), not the 50 that sat under a limit the tool accepts up to
+           1,000 — the shape DarlingPgWaitReader already fixed for the PostgreSQL twin. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 50", sql, StringComparison.Ordinal);
     }
 
     [Fact]

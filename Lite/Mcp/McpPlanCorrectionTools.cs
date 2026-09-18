@@ -25,13 +25,13 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanCorrectionTools
 {
     [McpServerTool(Name = "get_plan_corrections"), Description(
-        "Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule; a recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
+        "Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
     public static async Task<string> GetPlanCorrections(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum recommendation rows. Default 50.")] int limit = 50,
+        [Description("Maximum recommendation rows to return, newest capture first. Default 50. This is what bounds the page - read truncated to know whether the window held more.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -46,7 +46,12 @@ public sealed class McpPlanCorrectionTools
             if (limitError != null) return limitError;
 
             var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId);
-            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal. The reader's LIMIT 200 over per-cycle re-captures gave every window the same ~16-hour
+               reach, and `total_recommendations` published that page as the window's count. */
+            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
@@ -57,7 +62,7 @@ public sealed class McpPlanCorrectionTools
                         "that or has no databases with Query Store on.");
             }
 
-            var recommendations = rows.Take(limit).Select(r => new
+            var recommendations = page.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 database_name = r.DatabaseName,
@@ -103,7 +108,14 @@ public sealed class McpPlanCorrectionTools
                     force_last_good_plan_reason = t.Reason,
                     as_of = t.CollectionTime.ToString("o"),
                 }),
-                total_recommendations = rows.Count,
+                /* #3541 A3: the page described as a page, on Darling's names. Newest-capture-first makes it a
+                   contiguous slice of the window's tail, so the oldest stamp IS the reach; null when the window
+                   held no recommendation rows and only the tuning snapshot answered. */
+                recommendations_returned = page.Count,
+                truncated,
+                oldest_returned_collection_time = page.Count == 0 ? null : page.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = page.Count == 0 ? null : page.Max(r => r.CollectionTime).ToString("o"),
+                order = "collection_time_desc",
                 recommendations,
             }, McpHelpers.JsonOptions);
         }

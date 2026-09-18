@@ -39,10 +39,13 @@ internal static class DarlingAlertReader
 {
     /* ─────────────────────────── alert history ─────────────────────────── */
 
+    /// <summary><paramref name="Dismissed"/> is the operator's Viewer acknowledgement (#3541 A3): a row the
+    /// operator hid from the Alert History grid. Always false on the default read, which excludes those rows;
+    /// carried so a read that INCLUDES them can label each one.</summary>
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed);
 
     private const string AlertHistorySelectColumns = @"
     alert_time,
@@ -55,42 +58,83 @@ internal static class DarlingAlertReader
     notification_type,
     send_error,
     muted,
-    detail_text";
+    detail_text,
+    dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
-    /// end, $3 server_id, $4 limit (naive UTC / naive UTC / int / int).
+    /// end, $3 server_id, $4 limit, $5 include-dismissed (naive UTC / naive UTC / int / int / bool).
     ///
     /// <para>The upper edge is bounded rather than open (#2495): the row cap is applied by the database, so
     /// trimming after the read would spend the whole LIMIT on rows newer than the anchor and hand back an
-    /// empty window that looks like a quiet one.</para></summary>
+    /// empty window that looks like a quiet one.</para>
+    ///
+    /// <para><b>The <c>dismissed = FALSE</c> filter is now a caller's choice rather than a hidden one (#3541
+    /// A3).</b> Dismissal is the Viewer operator's acknowledgement — "I have seen this row, hide it from the
+    /// grid" — and hiding it from the grid is the right default for a person at the grid. It is NOT a fact
+    /// about whether the alert fired, and an agent reconstructing an incident from <c>get_alert_history</c>
+    /// was handed a window with its acknowledged criticals silently removed, under a field that called the
+    /// remainder <c>total_alerts</c>. The default stays the grid's (so a caller who never sends the flag reads
+    /// what they always read), the payload now SAYS the filter applied and how many rows it removed, and
+    /// <c>$5 = TRUE</c> switches it off. Spelled <c>(dismissed = FALSE OR $5)</c> rather than as two more
+    /// consts so the pinned exclusion literal stays one string in one place.</para></summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   server_id = $3
-AND   dismissed = FALSE
+AND   (dismissed = FALSE OR $5)
 ORDER BY alert_time DESC
 LIMIT $4";
 
     /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
-    /// $1 window start, $2 window end, $3 limit (naive UTC / naive UTC / int).</summary>
+    /// $1 window start, $2 window end, $3 limit, $4 include-dismissed (naive UTC / naive UTC / int / bool).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
-AND   dismissed = FALSE
+AND   (dismissed = FALSE OR $4)
 ORDER BY alert_time DESC
 LIMIT $3";
+
+    /// <summary>How many rows in the window the default read's <c>dismissed = FALSE</c> filter removes, per
+    /// server. $1 window start, $2 window end, $3 server_id. The count is what turns "dismissed rows are
+    /// excluded" from a disclaimer into a measurement: zero means the filter hid nothing, and a caller can
+    /// decide whether the hidden rows matter before re-reading with them included.</summary>
+    public const string DismissedAlertCountSql = @"
+SELECT COUNT(*)
+FROM config_alert_log
+WHERE alert_time >= $1
+AND   alert_time <= $2
+AND   server_id = $3
+AND   dismissed = TRUE";
+
+    /// <summary>The fleet-wide twin of <see cref="DismissedAlertCountSql"/>. $1 window start, $2 window end.</summary>
+    public const string DismissedAlertCountAllServersSql = @"
+SELECT COUNT(*)
+FROM config_alert_log
+WHERE alert_time >= $1
+AND   alert_time <= $2
+AND   dismissed = TRUE";
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the fleet default); with one it scopes to that
-    /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>.
+    /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>. The grid's semantics,
+    /// kept for the callers that want the grid's answer (the triage endpoint); the MCP tool reads through
+    /// <see cref="GetAlertHistoryPageAsync"/> so it can also ask for the dismissed rows.
     /// </summary>
-    public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
+    public static Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default) =>
+        GetAlertHistoryPageAsync(postgres, sinceUtc, untilUtc, serverId, limit, includeDismissed: false, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAlertHistoryAsync"/> with the dismissed filter as a parameter. Callers detecting
+    /// truncation pass <c>limit + 1</c> and read the extra row as the signal.
+    /// </summary>
+    public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryPageAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, bool includeDismissed, CancellationToken cancellationToken = default)
     {
         var rows = new List<AlertHistoryReadRow>();
 
@@ -103,6 +147,9 @@ LIMIT $3";
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
         DarlingMcpReadParameters.AddInt(command, limit);
+        /* Typed bool so Npgsql binds a boolean rather than inferring from an object — the predicate is
+           `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -118,10 +165,29 @@ LIMIT $3";
                 reader.IsDBNull(7) ? "" : reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 !reader.IsDBNull(9) && reader.GetBoolean(9),
-                reader.IsDBNull(10) ? null : reader.GetString(10)));
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                !reader.IsDBNull(11) && reader.GetBoolean(11)));
         }
 
         return rows;
+    }
+
+    /// <summary>How many dismissed rows the window (and server scope) holds — the rows the default read hides.
+    /// See <see cref="DismissedAlertCountSql"/>.</summary>
+    public static async Task<long> CountDismissedAlertsAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(serverId.HasValue ? DismissedAlertCountSql : DismissedAlertCountAllServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
+        if (serverId.HasValue)
+        {
+            DarlingMcpReadParameters.AddInt(command, serverId.Value);
+        }
+
+        var count = await command.ExecuteScalarAsync(cancellationToken);
+        return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /* ─────────────────────────── alert settings ─────────────────────────── */

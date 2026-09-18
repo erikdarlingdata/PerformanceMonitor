@@ -65,10 +65,10 @@ internal static class McpInstructions
         ### Wait Statistics Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_wait_stats` | Top wait types aggregated over time period | `server_name`, `hours_back` (default 24), `limit` (default 20), `as_of` |
+        | `get_wait_stats` | Top wait types aggregated over time period, heaviest first; page bounded by `limit`, `truncated` says the window observed more | `server_name`, `hours_back` (default 24), `limit` (default 20), `as_of` |
         | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`) | `server_name`, `hours_back`, `as_of` |
         | `get_wait_trend` | Time-series for a specific wait type | `wait_type` (required), `server_name`, `hours_back`, `as_of` |
-        | `get_waiting_tasks` | Currently/recently waiting queries with details | `server_name`, `hours_back` (default 1), `limit`, `as_of` |
+        | `get_waiting_tasks` | Currently/recently waiting queries with details, newest capture first. Page bounded by `limit`; `truncated` and `oldest_returned_collection_time` say what it reached | `server_name`, `hours_back` (default 1), `limit`, `as_of` |
 
         ### CPU Tools
         | Tool | Purpose | Key Parameters |
@@ -103,11 +103,11 @@ internal static class McpInstructions
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_deadlocks` | Recent deadlock events with victim info | `server_name`, `hours_back`, `limit`, `as_of` |
-        | `get_deadlock_detail` | Full deadlock graph XML for deep analysis | `server_name`, `hours_back`, `limit`, `as_of` |
-        | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) | `server_name`, `hours_back`, `limit`, `as_of` |
-        | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit`, `as_of` |
-        | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_deadlocks` | Recent deadlock events with victim info, newest first. Page bounded by `limit`; `truncated` and `oldest_returned_deadlock_time` say what it reached | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_deadlock_detail` | Full deadlock graph XML for deep analysis, newest first; `limit` counts graphs, `truncated` says the window held more | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) + the always-on DMV fallback, newest first. The page is bounded by `limit`, not `hours_back`: read `truncated` and `oldest_returned_event_time` before treating the page as the window | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_blocked_process_xml` | Raw blocked process report XML, newest first; `limit` counts reports with XML, `truncated` says the window held more | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_long_query_completions` | The window's SLOWEST completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled). `truncated` says the window held more than `limit`; the page's time stamps bound the slowest runs, not the reach | `server_name`, `hours_back`, `limit`, `as_of` |
         | `get_blocking_trend` | Time-series of blocking event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
         | `get_deadlock_trend` | Time-series of deadlock event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
         | `get_lock_wait_trend` | Every LCK% wait type's wait milliseconds per SECOND at each collection — the aggregate lock-wait lane. The two trends above count incidents and `get_wait_trend` charts ONE named wait type; this is the whole lock family as a rate, which is what shows lock pressure rising when no single type dominates. An empty result distinguishes a genuinely quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`), which is NOT a report of a server without lock contention | `server_name`, `hours_back`, `as_of` |
@@ -149,7 +149,7 @@ internal static class McpInstructions
         ### Alert Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50), `as_of` |
+        | `get_alert_history` | Recent alert history: what fired, when, email status, newest first. EXCLUDES operator-dismissed alerts by default and says so (`dismissed_excluded`, `dismissed_excluded_count`); pass `include_dismissed` when reconstructing an incident. Page bounded by `limit`; `truncated` and `oldest_returned_alert_time` say what it reached | `hours_back` (default 24), `limit` (default 50), `as_of`, `include_dismissed` (default false) |
         | `get_alert_settings` | Every alert group's enable flag and thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, PVS, file growth, failed jobs, database state), plus cooldown, excluded databases, delivery mode, analysis cadence and SMTP configuration | none |
         | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged). An empty result distinguishes no rule ever written from rules that exist but have all lapsed, with the configured count in `hints` | `enabled_only` (default true) |
 

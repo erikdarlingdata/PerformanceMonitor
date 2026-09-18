@@ -75,13 +75,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAlertTools
 {
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them.")]
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* Appended after as_of for the reason get_collection_log's filters are: MCP invokes by name, the
+           /api/read dispatch passes as_of by name, and a trailing optional is the one position no existing
+           positional C# caller can be re-bound by. */
+        [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")] bool include_dismissed = false)
     {
         var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
@@ -103,11 +107,36 @@ public sealed class DarlingMcpAlertTools
         try
         {
             var since = windowEnd.AddHours(-hours_back);
-            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, windowEnd, serverId, limit);
-            if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No alerts found in the specified time range.");
 
-            var alerts = rows.Select(r => new
+            /* #3541 A3: over-fetch by one so truncation is OBSERVED rather than inferred from count == limit,
+               the pattern get_collection_log and get_query_heatmap use. The cap was already the caller's
+               here; what was missing was any way to tell a window of exactly `limit` alerts from a busier
+               one, and any statement that the dismissed rows had been removed. */
+            var rows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, serverId, limit + 1, include_dismissed);
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            /* The hidden filter, measured: how many rows in this window and scope it removed. Zero is a real
+               answer (nothing was hidden) and is what a caller who never sends include_dismissed most needs
+               to see beside a clean-looking page. Not probed when the filter is off, because then it removed
+               nothing by construction. */
+            var dismissedExcludedCount = include_dismissed
+                ? 0L
+                : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId);
+
+            if (page.Count == 0)
+            {
+                /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
+                   "every alert here was acknowledged", and the one-sentence quiet-window answer would send
+                   the caller off widening a window whose contents they were never shown. */
+                return dismissedExcludedCount > 0
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No undismissed alerts found in the specified time range, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                    : McpHelpers.Status("empty", "No alerts found in the specified time range.");
+            }
+
+            var alerts = page.Select(r => new
             {
                 alert_time = r.AlertTime.ToString("o"),
                 server_id = r.ServerId,
@@ -119,6 +148,9 @@ public sealed class DarlingMcpAlertTools
                 notification_type = r.NotificationType,
                 send_error = r.SendError,
                 muted = r.Muted,
+                /* Per row, so a page that mixes the two populations labels each one. Always false on the
+                   default read, which is a true statement about every row on it. */
+                dismissed = r.Dismissed,
                 detail_text = r.DetailText
             });
 
@@ -126,7 +158,17 @@ public sealed class DarlingMcpAlertTools
             {
                 server = scope,
                 hours_back,
-                total_alerts = rows.Count,
+                /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
+                   window. What is published is what was measured: the page, whether the window held more,
+                   the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
+                   that shaped the population together with how much it removed. */
+                alerts_returned = page.Count,
+                truncated,
+                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
+                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                order = "alert_time_desc",
+                dismissed_excluded = !include_dismissed,
+                dismissed_excluded_count = dismissedExcludedCount,
                 alerts
             }, McpHelpers.JsonOptions);
         }

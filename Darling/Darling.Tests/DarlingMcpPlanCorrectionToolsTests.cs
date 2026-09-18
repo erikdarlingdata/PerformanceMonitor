@@ -82,8 +82,11 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         SqlTextPin.AssertExpresses("collection_time <= $3", sql, "the window's end no longer bounds the read");
         SqlTextPin.AssertExpresses("ORDER BY collection_time DESC", sql, "the newest recommendations no longer come first");
 
-        /* Mirrors the Viewer grid read's bound. */
-        Assert.Contains("LIMIT 200", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the CALLER'S, bound as $4, not the Viewer grid's literal 200. The literal gave
+           every window the same ~16-hour reach over per-cycle re-captures and the tool published that page as
+           the window's count. */
+        SqlTextPin.AssertExpresses("LIMIT $4", sql, "the row cap is no longer the caller's limit");
+        Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
     }
 
     [Fact]

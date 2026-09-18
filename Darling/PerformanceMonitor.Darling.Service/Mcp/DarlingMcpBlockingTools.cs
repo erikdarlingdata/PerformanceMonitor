@@ -44,13 +44,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpBlockingTools
 {
-    [McpServerTool(Name = "get_blocking"), Description("Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback). Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
+    [McpServerTool(Name = "get_blocking"), Description("Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback), NEWEST FIRST. Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, events_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. With dedup_key the read scans the window for the fingerprint BEFORE limit applies (so a matching incident is never lost to the cap), up to a stated scan ceiling: rows_examined is how many rows were fingerprinted and scan_truncated says whether the window held more than the scan could reach. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
     public static async Task<string> GetBlocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 30.")] int limit = 30,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description("Maximum rows to return, newest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.")] string? dedup_key = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
@@ -64,15 +64,39 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
+
+            /*
+                #3541 A3: the cap is the CALLER'S, and truncation is OBSERVED rather than inferred.
+
+                The reader used to cap at 200 rows newest-first whatever `limit` said, and this tool then
+                took `limit` of those and published the 200 as `total_events`. Two lies in one payload: the
+                count was neither the window's total nor the page's, and a 24-hour request on a server
+                blocking steadily was answered from its newest few minutes with nothing saying so. Fetching
+                limit + 1 and reading the extra row as the signal is the pattern get_collection_log and
+                get_query_heatmap already use; comparing count to the cap cannot tell a window holding
+                exactly `limit` events from one holding more.
+
+                Under a dedup_key the fetch is the FINGERPRINT SCAN, not the page: #2159's promise is that
+                the filter runs over the window before `limit`, and the hidden 200-row cap was quietly
+                breaking it for every incident older than the newest 200 rows. The scan is bounded by a
+                STATED ceiling, over-fetched by one for the same reason, so the no-match answer can say the
+                scan ran out rather than implying the window was searched.
+            */
+            var fetch = filtering ? DarlingBlockingReader.FingerprintScanCeiling + 1 : limit + 1;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
                     ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.");
 
-            /* #2159: fingerprint the WHOLE window, then filter, then cap. Capping first would let `limit`
+            var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
+            if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
+
+            /* #2159: fingerprint the WHOLE scan, then filter, then cap. Capping first would let `limit`
                discard the very incident the key names — the caller asked for one specific incident, not for
-               the newest `limit` rows that happen to include it. */
+               the newest `limit` rows that happen to include it. Without a key the scan IS the page plus its
+               one sentinel row, so the keys computed here are the ones the page emits. */
             var examined = rows.Count;
             var keys = DarlingIncidentFingerprint.BlockingKeys(
                 resolved.FingerprintName,
@@ -80,19 +104,26 @@ public sealed class DarlingMcpBlockingTools
                     r.DatabaseName, r.ContentiousObject, r.BlockedSqlText, r.BlockingSqlText,
                     r.WaitTimeMs, r.LockMode)).ToList());
 
-            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
-                        "blocking events", dedup_key!, resolved.FingerprintName, examined));
+                        "blocking events", dedup_key!, resolved.FingerprintName, examined)
+                        + ScanCeilingClause(scanTruncated));
 
                 keys = kept.Select(r => wanted).Cast<string?>().ToList();
                 rows = kept;
             }
 
-            var result = rows.Take(limit).Select((r, i) => new
+            /* The page: `limit` rows of whatever survived, and the row past it is the truncation signal.
+               Under a key this is "more matching rows than limit"; without one it is "more rows in the
+               window than limit" — the same field, and both sentences are true of what it measures. */
+            var truncated = rows.Count > limit;
+            var page = rows.Take(limit).ToList();
+
+            var result = page.Select((r, i) => new
             {
                 event_time = r.EventTime?.ToString("o"),
                 source = r.Source,
@@ -136,9 +167,32 @@ public sealed class DarlingMcpBlockingTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
                 hours_back,
-                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
-                total_events = rows.Count,
+                dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
+                /*
+                    #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
+                    window's total nor the page's — under a name that promised the first. What is published
+                    now is what was measured: how many rows this page holds, whether the window held more,
+                    and the time span the page actually covers. Newest-first makes the page a contiguous
+                    slice of the window's tail, so oldest_returned_event_time IS the reach of this read —
+                    the #3287 figure, and the field a caller has to read before believing that a quiet page
+                    describes a quiet window. Under a dedup_key the page is the matching rows and the two
+                    stamps bound the INCIDENT rather than the reach; the scan fields below carry the reach.
+                */
+                events_returned = page.Count,
+                truncated,
+                /* Min/Max over the rows rather than rows[0] / rows[^1]: those coincide only under time
+                   ordering, and a dedup_key page is the matching rows rather than a contiguous slice.
+                   Enumerable.Min over DateTime? skips nulls and yields null for a page with no stamps. */
+                oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
+                newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
+                order = "event_time_desc",
+                /* The fingerprint scan, stated only when one ran: how many window rows were fingerprinted
+                   and whether the window held more than the scan could reach. Null rather than 0 without a
+                   key, because no scan was made — 0 would read as "a scan found nothing". */
+                rows_examined = filtering ? examined : (int?)null,
+                scan_truncated = filtering ? scanTruncated : (bool?)null,
                 events = result
             }, McpHelpers.JsonOptions);
         }
@@ -148,13 +202,25 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlocks"), Description("Gets recent deadlock events with victim process info. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML.")]
+    /// <summary>
+    /// The sentence appended to a no-match answer when the fingerprint scan hit
+    /// <see cref="DarlingBlockingReader.FingerprintScanCeiling"/>. Empty otherwise, so the shared
+    /// <see cref="DarlingIncidentFingerprint.NoMatchMessage"/> stays word-for-word what it was for a scan that
+    /// did cover the window — the three causes it names are the whole story in that case, and this one is the
+    /// fourth that only exists once the scan can run out.
+    /// </summary>
+    private static string ScanCeilingClause(bool scanTruncated) =>
+        scanTruncated
+            ? $" The window held MORE rows than the {DarlingBlockingReader.FingerprintScanCeiling}-row fingerprint scan could reach, so this is not proof the incident is absent from the window — anchor as_of at the alert time with a narrow hours_back and retry."
+            : string.Empty;
+
+    [McpServerTool(Name = "get_deadlocks"), Description("Gets recent deadlock events with victim process info, NEWEST FIRST. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: deadlocks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_deadlock_time / newest_returned_deadlock_time bound the page — under the newest-first ordering the oldest stamp IS how far back this read reached, so a truncated page says nothing about the earlier part of the window. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help, because the cap is on rows. With dedup_key the fingerprint scan runs over the window BEFORE limit, up to a stated ceiling (rows_examined / scan_truncated).")]
     public static async Task<string> GetDeadlocks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 20.")] int limit = 20,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description("Maximum rows to return, newest first. Default 20. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 20,
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.")] string? dedup_key = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
@@ -168,8 +234,14 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
+
+            /* #3541 A3: see get_blocking — the caller's limit + 1 as the page fetch, the stated scan ceiling
+               + 1 as the fingerprint fetch, and the extra row in either case as the observed signal. The
+               reader's own cap was 50 here, which a caller asking for 100 deadlocks never saw. */
+            var fetch = filtering ? DarlingBlockingReader.FingerprintScanCeiling + 1 : limit + 1;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
                     /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
@@ -179,24 +251,31 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
                     ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
-            /* #2159: see get_blocking — fingerprint the window, filter, then cap. */
+            var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
+            if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
+
+            /* #2159: see get_blocking — fingerprint the scan, filter, then cap. */
             var examined = rows.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
                 resolved.FingerprintName, rows.Select(r => r.DeadlockGraphXml));
 
-            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
-                        "deadlocks", dedup_key!, resolved.FingerprintName, examined));
+                        "deadlocks", dedup_key!, resolved.FingerprintName, examined)
+                        + ScanCeilingClause(scanTruncated));
 
                 keys = kept.Select(r => wanted).Cast<string?>().ToList();
                 rows = kept;
             }
 
-            var result = rows.Take(limit).Select((r, i) => new
+            var truncated = rows.Count > limit;
+            var page = rows.Take(limit).ToList();
+
+            var result = page.Select((r, i) => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
@@ -211,8 +290,18 @@ public sealed class DarlingMcpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
-                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
-                total_deadlocks = rows.Count,
+                dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
+                /* #3541 A3: the page described as a page — see get_blocking for why `total_deadlocks` went.
+                   The ORDER BY is deadlock_time, so the bounds are on that stamp rather than collection_time,
+                   and a deadlock whose stamp did not parse (null) is skipped by Min/Max rather than read as
+                   the epoch. */
+                deadlocks_returned = page.Count,
+                truncated,
+                oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
+                newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
+                order = "deadlock_time_desc",
+                rows_examined = filtering ? examined : (int?)null,
+                scan_truncated = filtering ? scanTruncated : (bool?)null,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -222,12 +311,12 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains.")]
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit.")]
     public static async Task<string> GetDeadlockDetail(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum deadlocks to return. Default 5.")] int limit = 5,
+        [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
@@ -242,13 +331,27 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+
+            var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
+
+            /*
+                #3541 A3: the graph predicate moved INTO the SQL (graphOnly), so the page fetch can be the
+                caller's limit + 1 over exactly the rows this tool can return. It used to filter
+                has_deadlock_xml in C# after a fixed 50-row fetch, so a caller asking for five graphs had
+                at most fifty rows to find them in, and a run of graph-less rows at the newest end read as
+                "no deadlock XML in the window" while older graphs sat behind the cap. Under a dedup_key the
+                fetch is the stated fingerprint scan ceiling + 1, as on get_deadlocks.
+            */
+            var fetch = filtering ? DarlingBlockingReader.FingerprintScanCeiling + 1 : limit + 1;
+            var candidates = await DarlingBlockingReader.GetRecentDeadlocksAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, graphOnly: true);
+            var scanTruncated = filtering && candidates.Count > DarlingBlockingReader.FingerprintScanCeiling;
+            if (scanTruncated) candidates = candidates.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
 
             /* #2159: the XML filter runs BEFORE the cap and before the fingerprint, because a row without a
                graph has no objects to fingerprint — it could never match a key, and including it would only
-               consume one of the `limit` slots the caller wanted spent on real graphs. */
-            var candidates = rows.Where(r => r.HasDeadlockXml).ToList();
+               consume one of the `limit` slots the caller wanted spent on real graphs. It is now the SQL's
+               predicate rather than a Where() here, for the reason above. */
             if (candidates.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
                     ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
@@ -257,18 +360,20 @@ public sealed class DarlingMcpBlockingTools
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
                 resolved.FingerprintName, candidates.Select(r => r.DeadlockGraphXml));
 
-            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = candidates.Where((_, i) => keys[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
-                        "deadlocks with a graph", dedup_key!, resolved.FingerprintName, examined));
+                        "deadlocks with a graph", dedup_key!, resolved.FingerprintName, examined)
+                        + ScanCeilingClause(scanTruncated));
 
                 keys = kept.Select(r => wanted).Cast<string?>().ToList();
                 candidates = kept;
             }
 
+            var truncated = candidates.Count > limit;
             var withXml = candidates.Take(limit).ToList();
 
             var result = withXml.Select((r, i) => new
@@ -284,7 +389,17 @@ public sealed class DarlingMcpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
-                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
+                dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
+                /* #3541 A3: the page bounds, on the same names as get_deadlocks. The page here is graphs, so
+                   truncated means "more deadlocks WITH a graph than limit", which is the sentence this tool's
+                   caller needs. */
+                deadlocks_returned = withXml.Count,
+                truncated,
+                oldest_returned_deadlock_time = withXml.Min(r => r.DeadlockTime)?.ToString("o"),
+                newest_returned_deadlock_time = withXml.Max(r => r.DeadlockTime)?.ToString("o"),
+                order = "deadlock_time_desc",
+                rows_examined = filtering ? examined : (int?)null,
+                scan_truncated = filtering ? scanTruncated : (bool?)null,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -294,12 +409,12 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events. Contains full detail about both the blocked and blocking sessions for deep analysis.")]
+    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocking does, and truncated means the window held more reports than limit.")]
     public static async Task<string> GetBlockedProcessXml(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum reports to return. Default 5.")] int limit = 5,
+        [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -313,9 +428,16 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
+
+            /* #3541 A3: same shape as get_deadlock_detail — the report-XML predicate is in the SQL, the XE
+               arm alone is read (the DMV fallback never carries a report), and the fetch is the caller's
+               limit + 1. It used to take the merged 200-row page and Where() it for XML in C#, so a caller
+               asking for five reports had at most the newest 200 merged rows to find them in, DMV rows
+               included, and nothing said so. */
+            var candidates = await DarlingBlockingReader.GetRecentBlockedProcessReportsWithXmlAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+            var truncated = candidates.Count > limit;
+            var withXml = candidates.Take(limit).ToList();
             if (withXml.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture whose
@@ -337,6 +459,13 @@ public sealed class DarlingMcpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #3541 A3: the page bounds, on get_blocking's names. truncated means "more reports WITH
+                   XML in the window than limit". */
+                reports_returned = withXml.Count,
+                truncated,
+                oldest_returned_event_time = withXml.Min(r => r.EventTime)?.ToString("o"),
+                newest_returned_event_time = withXml.Max(r => r.EventTime)?.ToString("o"),
+                order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);
         }
