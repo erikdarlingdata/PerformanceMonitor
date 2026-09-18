@@ -331,6 +331,27 @@ public class RelationshipGraph
         AddEdge("WRITELOG", "IO_WRITE_LATENCY_MS", "log_io",
             "Write latency elevated — disk confirms log I/O bottleneck",
             facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && facts["IO_WRITE_LATENCY_MS"].BaseSeverity > 0);
+
+        // #3538 A5: the two halves of commit latency on a synchronous availability group. A commit on the
+        // primary pays the local log flush (WRITELOG) AND the wait for the synchronous secondary to harden
+        // (HADR_SYNC_COMMIT), so each is the other's natural next question. Both edges gate on the
+        // destination having FIRED in its own right (BaseSeverity >= 0.5, the root entry point), not on
+        // mere presence: WRITELOG is in every window of an OLTP fleet, and an edge on presence would
+        // append it to every HADR story and consume it from its own.
+        //
+        // HADR_SYNC_COMMIT → WRITELOG: the replica wait is the root and the primary's own log flush is
+        // also slow — the commit path is slow end to end, and the local half is the one the operator can
+        // measure without leaving the primary.
+        AddEdge("HADR_SYNC_COMMIT", "WRITELOG", "log_io",
+            "Log-flush waits also elevated — the primary's own log write is part of the commit cost",
+            facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].BaseSeverity >= 0.5);
+
+        // WRITELOG → HADR_SYNC_COMMIT: a log-flush finding on a primary whose synchronous secondary is also
+        // making commits wait — the story should say so before its advice sends the operator to local
+        // storage, because the larger half of the commit may be the replica round trip.
+        AddEdge("WRITELOG", "HADR_SYNC_COMMIT", "log_io",
+            "Synchronous-commit waits also elevated — the replica round trip is part of the commit cost",
+            facts => HasFact(facts, "HADR_SYNC_COMMIT") && facts["HADR_SYNC_COMMIT"].BaseSeverity >= 0.5);
     }
 
     /* ── Latch Contention ── */

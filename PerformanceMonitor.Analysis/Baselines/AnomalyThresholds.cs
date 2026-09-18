@@ -71,7 +71,10 @@ public static class AnomalyThresholds
     /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
-    /// input; matches the FactScorer WaitProfileRatioFloor. CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    /// input; matches the FactScorer WaitProfileRatioFloor. Still uncalibrated as of the 2026-09 dogfood
+    /// measurement (#3538 A5), which read each wait TYPE's fraction of a 4-hour window and not the
+    /// all-types ms/sec peak-over-baseline ratio this cutoff gates; the read that would calibrate it is
+    /// that ratio's own distribution over the fleet, one more column on the same pass.
     /// </summary>
     public const double DefaultRatioThreshold = 4.0;
 
@@ -116,7 +119,8 @@ public static class AnomalyThresholds
     // all-types wait ms/sec (PEAK across collections, matching the z-detectors) is compared to the
     // WaitMsPerSec baseline. DefaultRatioThreshold and the FactScorer wait slope are on the HONEST
     // per-second scale now (the old 5×/20× was calibrated to a ~240×-inflated per-hour-vs-per-interval
-    // input) — a sensible starting point; CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+    // input) — a sensible starting point, still uncalibrated: see DefaultRatioThreshold for what the
+    // 2026-09 fleet pass measured instead and which read would calibrate these.
     public const double WaitProfileFallbackMsPerSec = 250.0;  // untrustworthy-baseline absolute bar
     public const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 

@@ -785,10 +785,12 @@ public class FactScorerTests
     }
 
     // ARM 2 — tempdb allocation / PFS-GAM-SGAM contention scored off the PAGELATCH_UP wait fact by
-    // ABSOLUTE wait_time_ms (server-wide wait_stats, the SAME data the source view reads), tripping at
-    // > 10000 ms -> MEDIUM (install/47:2515: pagelatch_up_ms > 10000 -> "MEDIUM - PAGELATCH_UP
-    // contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band. Value (fraction-of-period) only
-    // has to be > 0 to clear the wait guard; the absolute wait_time_ms is what scores.
+    // wait_time_ms PER OBSERVED HOUR (server-wide wait_stats, the SAME data the source view reads),
+    // tripping at > 10000 ms/hr -> MEDIUM (install/47:2411 sums the last hour; :2515: pagelatch_up_ms >
+    // 10000 -> "MEDIUM - PAGELATCH_UP contention"). Flat 0.5 — the view has no higher PAGELATCH_UP band.
+    // Value (fraction-of-period) only has to be > 0 to clear the wait guard; the hourly wait_time_ms is
+    // what scores. These fixtures carry no period_duration_ms, which the shared scorer reads as a one-hour
+    // window (#3538 A7), so 15,000 ms is 15 s/hr and 8,000 ms is 8 s/hr and the pins hold unchanged.
     [Fact]
     public void Score_PageLatchUp_Over10Sec_ScoresMedium()
     {
