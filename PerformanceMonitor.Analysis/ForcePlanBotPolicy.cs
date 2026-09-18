@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -201,6 +202,127 @@ public static class ForcePlanBotPolicy
     public const string ReasonServerDailyBudgetExhausted = "server_daily_budget_exhausted";
     public const string ReasonDryRun = "dry_run";
     public const string ReasonServerNotOptedIn = "server_not_opted_in";
+
+    /* The bot's OWN two blockers (#3654) — on the policy, not in FactRemediation's shared vocabulary,
+       because only an unattended actor needs them. The advisory surface can say "unknown" and hand
+       the decision to a human who will cross-reference; a bot has no one to hand it to. */
+
+    /// <summary>The store's forcing and automatic-plan-correction state for the target could not be
+    /// read, or was read and held nothing. For the bot that is a blocker, not a note: see
+    /// <see cref="Blockers"/>.</summary>
+    public const string ReasonStateUnavailable = "state_unavailable";
+
+    /// <summary>FORCE_LAST_GOOD_PLAN is ON for the target's database — the engine's own bot is the
+    /// forcer there, and this one stands down for the whole database. See <see cref="Blockers"/>.</summary>
+    public const string ReasonApcEnabledForDatabase = "apc_enabled_for_database";
+
+    /// <summary>
+    /// The bot's whole blocker list for one target (#3654): the shared gate's verdict, BOTH halves
+    /// (<see cref="FactRemediation.ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/> — the two
+    /// target-carried blockers and the five #3652 added from the store's forcing and automatic-plan-
+    /// correction state), then the two only an unattended actor needs. Pure: the caller reads the state
+    /// (<c>DarlingForcePlanTargetStateReader</c>, one batched statement per bot pass) and passes what it
+    /// got; every arm is pinnable without a store.
+    ///
+    /// <para><b>Why the bot reads the whole gate and not the one-argument overload.</b> #3652's live
+    /// cross-reference found five <c>eligible: true, blockers: []</c> targets that were five-for-five
+    /// contraindicated by facts the store already held — two mid-verification under APC on exactly the
+    /// proposed plan, one a known forcing failure, one withdrawn by the engine, one already resolved
+    /// through another plan. The advisory surface learned to read them; a bot that still consulted the
+    /// state-less overload would have judged all five unblocked and, with every gate open, forced them.
+    /// Same function, same evidence strings — what an agent reads in <c>structured_remediation</c> is what
+    /// the bot enforces (#2146), and the journal row carries the evidence so a <c>blocked</c> decision is
+    /// auditable against the snapshot it was made on.</para>
+    ///
+    /// <para><b><c>apc_enabled_for_database</c> — the engine is the forcer here.</b> When
+    /// <c>force_last_good_plan_actual_state</c> is ON for the target's database, automatic plan
+    /// correction forces regressed queries' last good plans on its own, verifies them, and reverts the
+    /// ones that do not pay. A second forcer on the same database is exactly the failure #3652
+    /// documented: a manual force on a plan APC is verifying converts <c>AUTO</c> to <c>MANUAL</c> and
+    /// deletes the engine's revert path, and a plan APC has not touched yet may be the one it is about to.
+    /// So the bot does not compete for the database at all — every target in it is blocked with this
+    /// name and the enablement snapshot as evidence, whatever the rest of the gate says. The advisory
+    /// surface, by contrast, only changes its VERB there (<c>apc_mode: on</c> plus guidance) and leaves
+    /// <c>force_sql</c> for the operator who has read it; a human can decide to intervene in an APC
+    /// database on purpose, and the bot must not. A database-level fact evaluated per target rather than
+    /// once per pass so the journal names it on every target it stopped and the cooldown dedups the
+    /// repeats, the same way the other blockers are recorded.</para>
+    ///
+    /// <para><b><c>state_unavailable</c> — unknown fails closed.</b> Two shapes, one blocker, evidence
+    /// distinguishing them. A null state (the read failed, or returned no row for this key) is the plain
+    /// case: the bot has no idea what the engine is doing. An EMPTY state (the read ran and observed
+    /// nothing inside <see cref="ForcePlanTargetState.Lookback"/>) is the subtler one: no
+    /// <c>query_store_stats</c> row for the plan is ordinary for a best plan that is not executing, and
+    /// no recommendation is ordinary for a query APC has not judged — but the enablement half comes from
+    /// a row <c>PlanCorrectionCollector</c> writes for EVERY database it enumerates, recommendation or not,
+    /// at the server's newest capture with no lookback bound. All four halves absent means the store
+    /// cannot see this database's FORCE_LAST_GOOD_PLAN state, so the arm above cannot be evaluated, and
+    /// an unattended forcer on a database whose APC enablement is unknown is the one place "unknown"
+    /// must mean "no". The advisory surface says <c>state_note: unknown</c> for both shapes and lets the
+    /// reader cross-reference (<c>get_plan_corrections</c>, <c>sys.query_store_plan</c>); the bot's
+    /// journal row says <c>state_unavailable</c> with the reason and forces nothing. The cost is a bot
+    /// that stays its hand on a target the store has not observed in a day — a best plan nobody has run
+    /// for 24 hours is thin evidence for an unattended force anyway.</para>
+    ///
+    /// <para>Order: the shared gate's blockers first (the names an agent already sees), then the bot's
+    /// own. A target can carry several — <c>apc_owns_it</c> and <c>apc_enabled_for_database</c> together
+    /// is the expected shape for a plan APC is verifying on an APC database — and the journal keeps all
+    /// of them; the decision is the same whichever fired first.</para>
+    /// </summary>
+    /// <param name="state">What the store knows about this target now, or null when the read failed or
+    /// returned nothing for it.</param>
+    /// <param name="stateUnavailableReason">The reader's stated reason when the whole read failed; quoted
+    /// into the <c>state_unavailable</c> evidence so the journal says WHY the bot could not see.</param>
+    public static IReadOnlyList<ForcePlanBlocker> Blockers(
+        ForcePlanTarget target,
+        ForcePlanTargetState? state,
+        string? stateUnavailableReason)
+    {
+        if (target is null)
+        {
+            throw new ArgumentNullException(nameof(target));
+        }
+
+        var blockers = new List<ForcePlanBlocker>(FactRemediation.ForcePlanBlockers(target, state));
+
+        if (state is { ApcIsOn: true })
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcEnabledForDatabase,
+                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)} — automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
+        }
+
+        if (state is null)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonStateUnavailable,
+                string.IsNullOrWhiteSpace(stateUnavailableReason)
+                    ? $"the forcing and automatic-plan-correction state read returned no row for plan {target.PlanId} of query {target.QueryId} in {target.Database}; an unattended force cannot proceed on an unknown engine state"
+                    : $"{stateUnavailableReason.Trim()} — an unattended force cannot proceed on an unknown engine state"));
+        }
+        else if (state.IsEmpty)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ReasonStateUnavailable,
+                $"the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last {ForcePlanTargetState.Lookback.TotalHours:0} hours: no query_store_stats row for plan {target.PlanId}, no forced sibling plan of query {target.QueryId}, no plan_correction recommendation, and no plan_correction capture for {target.Database} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown"));
+        }
+
+        return blockers;
+    }
+
+    /// <summary>The blocker names, in order, for <see cref="Evaluate"/>'s <c>policyBlockers</c> — and
+    /// the journal's <c>reasons</c> column. The evidence travels separately (<see cref="Evidence"/>) so
+    /// the names stay the comma-joinable consumer API they have always been.</summary>
+    public static IReadOnlyList<string> Names(IReadOnlyList<ForcePlanBlocker> blockers) =>
+        blockers is { Count: > 0 } ? blockers.Select(b => b.Name).ToList() : Array.Empty<string>();
+
+    /// <summary>The journal's <c>detail</c> for a blocked decision: one line per blocker,
+    /// <c>name: evidence</c>, so the row can be read against the snapshot it was judged on without a
+    /// second query. Null when there is nothing to quote.</summary>
+    public static string? Evidence(IReadOnlyList<ForcePlanBlocker> blockers) =>
+        blockers is { Count: > 0 }
+            ? string.Join("\n", blockers.Select(b => $"{b.Name}: {b.Evidence}"))
+            : null;
 
     public static ForcePlanBotDecision Evaluate(
         ForcePlanTarget target,

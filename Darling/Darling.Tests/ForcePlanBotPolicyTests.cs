@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Analysis;
 using Xunit;
 
@@ -196,6 +197,185 @@ public sealed class ForcePlanBotPolicyTests
 
         Assert.Equal(ForcePlanBotDecisionKind.Force, decision.Kind);
         Assert.Empty(decision.Reasons);
+    }
+
+    /* ---------------- the bot's whole blocker list (#3654) ---------------- */
+
+    private static readonly DateTime Observed = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Utc);
+
+    private static ForcePlanTargetState Clean(string? flgp = "OFF", DateTime? enablementAt = null) => new(
+        PlanIsForced: null, PlanForcingType: null, ForceFailureCount: null, LastForceFailureReason: null,
+        PlanObservedAtUtc: null,
+        OtherForcedPlanId: null, OtherForcedPlanForcingType: null, OtherForcedPlanObservedAtUtc: null,
+        ApcState: null, ApcStateReason: null, ApcRegressedPlanId: null, ApcLastGoodPlanId: null,
+        ApcLastGoodPlanForcingType: null, ApcLastGoodPlanIsForced: null, ApcLastGoodPlanForceFailureReason: null,
+        ApcExecuteActionInitiatedBy: null, ApcObservedAtUtc: null,
+        ForceLastGoodPlanActualState: flgp, EnablementObservedAtUtc: enablementAt ?? (flgp is null ? null : Observed));
+
+    [Fact]
+    public void Blockers_IsTheWholeSharedGate_PlusNothing_WhenTheStateIsCleanAndObserved()
+    {
+        /* The happy path: state read, FLGP OFF, nothing forced, no recommendation. The bot's list is
+           exactly the two-argument gate's (empty here) — no bot-only blocker fires on a clean read. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(), stateUnavailableReason: null);
+
+        Assert.Empty(blockers);
+        Assert.Empty(ForcePlanBotPolicy.Names(blockers));
+        Assert.Null(ForcePlanBotPolicy.Evidence(blockers));
+    }
+
+    [Fact]
+    public void Blockers_CarriesTheSharedGatesVerdict_Verbatim()
+    {
+        /* Same function, same names, same evidence strings as structured_remediation — the bot never
+           recomputes the gate (#2146). APC AUTO-forced on the target plan, plus the target's own PSP flag. */
+        var state = Clean() with
+        {
+            PlanIsForced = true, PlanForcingType = "AUTO", ForceFailureCount = 0, PlanObservedAtUtc = Observed,
+            ApcState = "Verifying", ApcLastGoodPlanId = 7, ApcObservedAtUtc = Observed,
+        };
+        var target = Target(psp: true);
+
+        var shared = FactRemediation.ForcePlanBlockers(target, state);
+        var bot = ForcePlanBotPolicy.Blockers(target, state, stateUnavailableReason: null);
+
+        Assert.Equal(shared, bot);
+        Assert.Equal(new[] { "parameter_sensitivity_cofired", "apc_owns_it" }, ForcePlanBotPolicy.Names(bot));
+    }
+
+    [Fact]
+    public void Blockers_FlgpOn_AddsTheStandDown_AfterTheSharedGate()
+    {
+        var state = Clean(flgp: "ON") with
+        {
+            PlanIsForced = true, PlanForcingType = "AUTO", PlanObservedAtUtc = Observed,
+        };
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null);
+
+        Assert.Equal(new[] { "apc_owns_it", ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, ForcePlanBotPolicy.Names(blockers));
+        var standDown = blockers[1];
+        Assert.Contains("force_last_good_plan_actual_state = ON for orders at 2026-09-18T12:00:00Z", standDown.Evidence, StringComparison.Ordinal);
+        Assert.Contains("second forcer", standDown.Evidence, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("ON")]
+    [InlineData("on")]
+    [InlineData("On")]
+    public void Blockers_FlgpOn_IsCaseInsensitive_OnTheStoredSpelling(string spelling)
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: spelling), stateUnavailableReason: null);
+
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, ForcePlanBotPolicy.Names(blockers));
+    }
+
+    [Theory]
+    [InlineData("OFF")]
+    [InlineData("off")]
+    public void Blockers_FlgpOff_FiresNothing(string spelling)
+    {
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: spelling), stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Blockers_NullState_IsUnavailable_QuotingTheReadersReason()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state: null, stateUnavailableReason: "the read failed (NpgsqlException: timeout)");
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.StartsWith("the read failed (NpgsqlException: timeout) — an unattended force cannot proceed", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_NullState_WithNoReason_IsUnavailable_NamingTheMissingKey()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state: null, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.Contains("returned no row for plan 7 of query 42 in orders", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_NullState_StillCarriesTheTargetHalf_First()
+    {
+        /* Unknown state does not erase what the target itself says: PSP is named, then the
+           unavailability. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(psp: true), state: null, stateUnavailableReason: "boom");
+
+        Assert.Equal(new[] { "parameter_sensitivity_cofired", ForcePlanBotPolicy.ReasonStateUnavailable }, ForcePlanBotPolicy.Names(blockers));
+    }
+
+    [Fact]
+    public void Blockers_EmptyState_IsUnavailable_BecauseTheEnablementHalfIsTheCollectorsEveryDatabaseRow()
+    {
+        var empty = Clean(flgp: null);
+        Assert.True(empty.IsEmpty);
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), empty, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
+        Assert.Contains("observed nothing for this target inside the last 24 hours", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("no plan_correction capture for orders at all", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_APlanNotObservedButADatabaseThatIs_IsNotUnavailable()
+    {
+        /* The ordinary shape for a best plan that is not executing: no query_store_stats row for it, no
+           recommendation — but the enablement row is there (OFF), so the store CAN see the database and
+           the bot proceeds. Null on a half means not observed, not unavailable. */
+        var state = Clean(flgp: "OFF");
+        Assert.False(state.IsEmpty);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Evidence_IsOneLinePerBlocker_NameColonEvidence()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(Target(psp: true), Clean(flgp: "ON"), stateUnavailableReason: null);
+
+        var detail = ForcePlanBotPolicy.Evidence(blockers);
+        Assert.NotNull(detail);
+        var lines = detail!.Split('\n');
+        Assert.Equal(2, lines.Length);
+        Assert.StartsWith("parameter_sensitivity_cofired: ", lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("apc_enabled_for_database: ", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheBotsOwnReasons_AreNotInTheSharedVocabulary()
+    {
+        /* They belong to the actor, not the advice: an agent reading structured_remediation must never
+           see state_unavailable or apc_enabled_for_database as a blocker, because for a reader neither
+           IS one. Pinned as strings because both are consumer API. */
+        Assert.Equal("state_unavailable", ForcePlanBotPolicy.ReasonStateUnavailable);
+        Assert.Equal("apc_enabled_for_database", ForcePlanBotPolicy.ReasonApcEnabledForDatabase);
+
+        var shared = typeof(ForcePlanBlockerNames).GetFields()
+            .Select(f => (string)f.GetValue(null)!)
+            .ToArray();
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonStateUnavailable, shared);
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcEnabledForDatabase, shared);
+    }
+
+    [Fact]
+    public void Evaluate_WithTheBotsBlockers_IsBlocked_EvenWithEveryGateOpen()
+    {
+        /* End to end through the decision table: the state names apc_enabled_for_database, and no
+           combination of gates turns that into WouldForce or Force. */
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: "ON"), stateUnavailableReason: null);
+
+        var decision = ForcePlanBotPolicy.Evaluate(
+            Target(), ForcePlanBotPolicy.Names(blockers), serverOptedIn: true, Enabled(dryRun: false),
+            ForcePlanBotHistory.Empty, Now);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, decision.Kind);
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonApcEnabledForDatabase }, decision.Reasons);
     }
 
     /* ---------------- settings hygiene ---------------- */

@@ -210,7 +210,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
 
         try
         {
-            return (await ReadAsync(postgres, serverId, targets, nowUtc ?? DateTime.UtcNow, cancellationToken), null);
+            return (await ReadAsync(postgres, serverId, targets, nowUtc ?? DateTime.UtcNow, cancellationToken: cancellationToken), null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -224,9 +224,15 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
 
     /// <summary>Runs the statement. Distinct targets only (a finding can carry one key twice across
     /// replicas, #1882).</summary>
+    /// <param name="commandTimeoutSeconds">The deadline regime of the CALLER, not of this file: the MCP
+    /// tools take <see cref="McpCommandDeadlines.ReadSeconds"/> (the default), and the force-plan bot
+    /// (#3654) passes its own <c>ServiceCommandDeadlines.PostAnalysisForcePlanSeconds</c>, because the same
+    /// statement issued from a post-analysis hook holding a sweep permit is bounded by the pass it rides on,
+    /// not by an agent's patience. A timeout there is not a fault the bot recovers from — it journals
+    /// <c>state_unavailable</c> and forces nothing.</param>
     public static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
-        CancellationToken cancellationToken = default)
+        int? commandTimeoutSeconds = null, CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer);
         var keys = targets.Select(ForcePlanTargetKey.Of).Distinct(ForcePlanTargetKey.Comparer).ToList();
@@ -236,7 +242,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
         }
 
         await using var command = postgres.CreateCommand(BuildSql(keys.Count));
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = commandTimeoutSeconds ?? McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - ForcePlanTargetState.Lookback, DateTimeKind.Unspecified));
         foreach (var key in keys)

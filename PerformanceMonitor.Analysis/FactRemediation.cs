@@ -947,8 +947,10 @@ public static class FactRemediation
     /// <c>plan_correction</c> (#1952). So the verdict now has two halves: this one, from the target, and
     /// <see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>, from a read-time
     /// <see cref="ForcePlanTargetState"/> — the pure function stays pure and pinnable, the caller reads the
-    /// state. This overload remains for the bot (<c>PlanForceBot</c>), which does not yet read the state
-    /// and must not auto-force until it does — see #3654.</para>
+    /// state. This overload remains as the target-carried half on its own (tests pin the two halves
+    /// agree on it); nothing that acts consults it — the bot (<c>PlanForceBot</c>) reads the state once
+    /// per pass and judges through <see cref="ForcePlanBotPolicy.Blockers"/>, the whole gate plus its
+    /// own two, since #3654.</para>
     /// <list type="bullet">
     /// <item><b>parameter_sensitivity_cofired</b> — the query's plan-cache history shows the PSP
     /// signature (#2140); forcing pins ONE shape for every parameter value, so the "best" plan may be
@@ -1140,8 +1142,9 @@ public static class FactRemediation
         string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The snapshot stamp every blocker's evidence ends with — ISO-8601 UTC, or a stated
-    /// absence, never an empty string that could read as "now".</summary>
-    private static string Stamp(DateTime? observedAtUtc) =>
+    /// absence, never an empty string that could read as "now". Internal so the bot's own blockers
+    /// (<see cref="ForcePlanBotPolicy.Blockers"/>, #3654) stamp their evidence the same way.</summary>
+    internal static string Stamp(DateTime? observedAtUtc) =>
         observedAtUtc is DateTime t
             ? DateTime.SpecifyKind(t, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
             : "(no snapshot time)";
