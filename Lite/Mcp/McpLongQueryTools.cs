@@ -44,7 +44,7 @@ public sealed class McpLongQueryTools
                 SKUs now serve, from a duration-ranked read with the caller's limit + 1 as the fetch and the
                 extra row as the observed truncation signal.
             */
-            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, windowEnd, limit + 1);
+            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")

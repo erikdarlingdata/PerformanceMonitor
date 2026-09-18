@@ -116,6 +116,10 @@ public sealed class RepoFileAdoptionTests
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
+        /* #3541 A3: its Lite-description anchor spans the line break between `Description(` and the
+           string on get_plan_corrections, and its tool-body slicing keys on attribute text either side of
+           one. */
+        "McpPageContractTests.cs",
         "NightlyVersionInjectionTests.cs",
         "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
