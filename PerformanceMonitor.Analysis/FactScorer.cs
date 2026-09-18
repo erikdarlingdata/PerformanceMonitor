@@ -10,6 +10,8 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// Layer 1: Base severity 0.0-1.0 from thresholds alone.
 /// Layer 2: Amplifiers multiply base up to 2.0 max using corroborating facts.
+/// Layer 3: Tuning-class keys (parallelism, high-DOP queries, the routine ANOMALY_* case) are capped at
+/// the WARNING ceiling unless an impact peer co-fired or, for an anomaly, its own deviation is extreme.
 ///
 /// Formula: severity = min(base * (1.0 + sum(amplifiers)), 2.0)
 /// </summary>
@@ -104,11 +106,26 @@ public class FactScorer
             || HasSignificantWait(factsByKey, "SOS_SCHEDULER_YIELD", 0.25)
             || HasSignificantWait(factsByKey, "RESOURCE_SEMAPHORE", 0.10);
 
+        // #3526: the SECOND escape, per-fact and for ANOMALY_* only — extremity. The impact-peer
+        // escape above is the right shape for CXPACKET (parallelism is only an outage when a thread/CPU/
+        // grant peer says so), but applied to every ANOMALY_* it made the baseline engine notification-
+        // inert at shipped settings: every anomaly ramp saturates its BASE at 1.0, the cap holds the FINAL
+        // at 1.49, and the notify floor is 1.5 — so a 20σ session spike beside a 15σ batch-request spike
+        // at 3am produced nothing that could page unless THREADPOOL/SOS/RESOURCE_SEMAPHORE happened to be
+        // in the picture too. The product's best per-server-calibrated statistics were structurally its
+        // quietest. An anomaly whose deviation is EXTREME against the cutoff it fired at (IsExtremeAnomaly:
+        // 3x its own fire threshold — 10.5σ on the 3.5σ robust path, 15σ on the 5.0σ heavy-tail path, 6σ
+        // classical; 3x the absolute bar on the never-blind fallback path) is released from the cap on its
+        // own evidence. Releasing the cap does NOT page by itself: base still maxes at 1.0, so the CRITICAL
+        // band is reached only through the anomaly co-fire amplifiers (AnomalyAmplifiers) — corroboration
+        // stays the house rule for >= 1.5, the escape merely stops the cap from discarding it. The
+        // impact-peer escape is unchanged and still releases everything; CXPACKET / CXCONSUMER /
+        // QUERY_HIGH_DOP have no extremity arm and stay capped however many anomalies co-fire beside them.
         if (!impactPeerCoFired)
         {
             foreach (var fact in facts)
             {
-                if (IsTuningClassKey(fact.Key))
+                if (IsTuningClassKey(fact.Key) && !IsExtremeAnomaly(fact))
                     fact.Severity = Math.Min(fact.Severity, TuningClassSeverityCeiling);
             }
         }
@@ -596,18 +613,111 @@ public class FactScorer
 
     // Layer-3 tuning-class severity ceiling (see ScoreAll). Parallelism/anomaly signals describe a tuning
     // opportunity, not an outage — their FINAL severity is capped here (bands are >= 1.5 CRITICAL) unless an
-    // impact peer co-fired. 1.49 keeps a capped fact in the WARNING band without touching SeverityBand.
+    // impact peer co-fired or (#3526, ANOMALY_* only) the anomaly's own deviation is extreme. 1.49 keeps a
+    // capped fact in the WARNING band without touching SeverityBand.
     private const double TuningClassSeverityCeiling = 1.49;
+
+    /* #3526: the extremity escape's multiple (see IsExtremeAnomaly). An anomaly leaves the tuning-class cap
+       when its deviation is this many times the cutoff it FIRED at. Every deviation ramp saturates its base
+       at 2x its anchor (ScoreAnomalyFact: 0.5 at the anchor, 1.0 at 2x), so 3x sits a full anchor PAST the
+       point where the ramp stopped distinguishing — "extreme" means "so far out the scorer ran out of
+       scale", not "the top of the ramp". The arithmetic per path, with the detectors' shipped cutoffs
+       (AnomalyThresholds): robust modified-z 3.5 → the escape opens at 10.5σ; heavy-tail modified-z 5.0
+       (waits, query duration) → 15σ; classical z 2.0 (rollup-bound metrics, pre-#1743 facts) → 6σ — the
+       #1743 fleet measurement read a busy tenant's REAL 2-3x evening surge at 1.4-2.0 classical sigmas,
+       so 6 classical sigmas against a stddev that history has already inflated is a genuinely rare
+       reading, not a busy evening. All three sit under the 25σ display cap (SigmaDisplayCap), so a fact
+       can actually carry them. The never-blind fallback path (baseline_low_quality) has no meaningful
+       sigma, so it escapes only at 3x its ABSOLUTE bar (fallback_exceedance >= 3): I/O latency 150 ms,
+       batch requests 15,000/s, sessions 1,500, query duration 15 s total elapsed — and CPU (bar 90%) and
+       memory total/target (bar 101%) can never reach 3x their bars, so a young store's CPU or memory
+       anomaly cannot escape on an untrustworthy baseline at all, which is correct: "we do not know your
+       normal yet" is not evidence of an outage. An operator who scales a metric's deviation threshold
+       scales its fire_threshold with it (ModifiedZThresholdFor), so the escape bar tracks the knob. */
+    private const double ExtremeAnomalyMultiple = 3.0;
 
     /// <summary>
     /// Tuning-class keys whose FINAL severity is capped at the WARNING ceiling (Layer 3) unless an
     /// impact peer co-fired: parallelism (CXPACKET/CXCONSUMER), excessive-DOP queries, and every
-    /// anomaly fact. Today only CXPACKET can exceed the ceiling on amplifiers (ANOMALY_* and
-    /// QUERY_HIGH_DOP already max at 1.0) — the rest is forward-safety as those ramps evolve.
+    /// anomaly fact. CXPACKET and (#3526) the corroborated ANOMALY_* families can exceed the ceiling
+    /// on amplifiers; an anomaly is released from the cap only when <see cref="IsExtremeAnomaly"/> holds.
+    /// QUERY_HIGH_DOP still maxes at 1.0 — its membership is forward-safety as that ramp evolves.
     /// </summary>
     private static bool IsTuningClassKey(string key) =>
         key is "CXPACKET" or "CXCONSUMER" or "QUERY_HIGH_DOP"
         || key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The deviation-scored anomaly families (the z-score / modified-z detectors: peak vs a per-server
+    /// hour-of-week baseline, graded off <c>deviation_sigma</c> against <c>fire_threshold</c>, or off
+    /// <c>fallback_exceedance</c> on the low-quality path). Shared by <see cref="ScoreAnomalyFact"/> and
+    /// <see cref="IsExtremeAnomaly"/> so the two cannot route a key differently.
+    /// </summary>
+    private static bool IsDeviationScoredAnomalyKey(string key) =>
+        key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #1743: the cutoff a deviation-scored anomaly actually FIRED at (carried by the detector as
+    /// <c>fire_threshold</c>): the knob-scaled classical threshold on the classical path, the knob-scaled
+    /// modified-z cutoff on the robust path, and the pre-#1743 default of 2.0 when the fact carries none.
+    /// The severity ramp anchors here and the extremity escape is a multiple of it.
+    /// </summary>
+    private static double FireAnchor(Fact fact)
+    {
+        var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
+        return anchor <= 0 ? 2.0 : anchor;
+    }
+
+    /// <summary>
+    /// #3526: whether an ANOMALY_* fact's deviation is extreme enough to leave the Layer-3 tuning-class
+    /// cap on its own evidence (see <see cref="ExtremeAnomalyMultiple"/> for the arithmetic). Routes
+    /// each family off the SAME metadata its severity ramp grades from, so a fact can never be extreme
+    /// on one statistic while scored on another:
+    /// <list type="bullet">
+    ///   <item>Deviation-scored families, trustworthy baseline: <c>deviation_sigma &gt;= 3 x fire_threshold</c>.</item>
+    ///   <item>Deviation-scored families, low-quality baseline: <c>fallback_exceedance &gt;= 3</c> — the
+    ///     stored sigma is the real (small, meaningless) z the detector refused to trust, so the escape
+    ///     must not read it either.</item>
+    ///   <item>ANOMALY_WAIT_PROFILE on the robust trigger: <c>modified_z &gt;= 3 x 5.0</c>; on the
+    ///     pre-#1743 / robust-less ratio trigger: <c>ratio &gt;= 3 x 4.0</c>. Never for <c>is_new</c> — a
+    ///     first-occurrence profile's sentinel ratio (NoBaselineRatio, 100) is a scoring device, not a
+    ///     measurement, and "no baseline" cannot be "extreme against baseline".</item>
+    /// </list>
+    /// The ratio/count/delta families — blocking and deadlock spikes, day-over-day object growth and
+    /// contention, the legacy per-type ANOMALY_WAIT_ facts — stay capped: none is graded in sigmas, so
+    /// "3x the fire threshold" has no calibrated meaning for them, and the blocking/deadlock classes
+    /// already reach CRITICAL through their never-capped impact keys (BLOCKING_EVENTS, BLOCKING_CHAIN,
+    /// DEADLOCKS) when the events are real.
+    /// </summary>
+    private static bool IsExtremeAnomaly(Fact fact)
+    {
+        if (!fact.Key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase)) return false;
+
+        if (IsDeviationScoredAnomalyKey(fact.Key))
+        {
+            if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
+                return fact.Metadata.GetValueOrDefault("fallback_exceedance") >= ExtremeAnomalyMultiple;
+
+            return fact.Metadata.GetValueOrDefault("deviation_sigma") >= ExtremeAnomalyMultiple * FireAnchor(fact);
+        }
+
+        if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
+        {
+            if (fact.Metadata.GetValueOrDefault("is_new") > 0) return false;
+            var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+            if (modifiedZ > 0)
+                return modifiedZ >= ExtremeAnomalyMultiple * Baselines.AnomalyThresholds.HeavyTailModifiedZThreshold;
+            return fact.Metadata.GetValueOrDefault("ratio") >= ExtremeAnomalyMultiple * WaitProfileRatioFloor;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Scores anomaly facts based on deviation from baseline.
@@ -616,13 +726,7 @@ public class FactScorer
     /// </summary>
     private static double ScoreAnomalyFact(Fact fact)
     {
-        if (fact.Key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase))
+        if (IsDeviationScoredAnomalyKey(fact.Key))
         {
             // Deviation-based scoring: 2σ = 0.5, 4σ = 1.0
             var deviation = fact.Metadata.GetValueOrDefault("deviation_sigma");
@@ -651,8 +755,7 @@ public class FactScorer
                shape for classical fires and for pre-#1743 facts (default 2.0), and the same
                proportional shape for robust fires at 3.5 or 5.0. Without the anchor, a family
                firing at 5σ scores saturated-flat 1.0 forever against a ramp built for 2σ fires. */
-            var anchor = fact.Metadata.GetValueOrDefault("fire_threshold", 2.0);
-            if (anchor <= 0) anchor = 2.0;
+            var anchor = FireAnchor(fact);
             if (deviation < anchor) return 0.0;
             var base_score = 0.5 + 0.5 * Math.Min((deviation - anchor) / anchor, 1.0);
             return base_score * confidence;
@@ -771,9 +874,251 @@ public class FactScorer
             "PLAN_REGRESSION" => PlanRegressionAmplifiers(),
             "DB_CONFIG" => DbConfigAmplifiers(),
             "DISK_SPACE" => DiskSpaceAmplifiers(),
+            _ when fact.Key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase) => AnomalyAmplifiers(fact.Key),
             _ => []
         };
     }
+
+    /// <summary>
+    /// #3526: the anomaly co-fire arm — corroboration for the baseline engine's findings, which had no
+    /// amplifiers at all and so could never leave their 1.0 base. Modelled on the impact-peer style of
+    /// the Layer-3 escape and the PAGEIOLATCH / IO-latency arms: a sibling anomaly family firing in the
+    /// same window (BaseSeverity &gt; 0 — the scorer zeroes anything under its cutoff, so &gt; 0 means
+    /// "fired against its own baseline") is a co-fire, and a MEASURED absolute fact confirming the same
+    /// pressure (SQL CPU &gt;= 80%, the I/O-latency fact at its concerning bar, grant waiters, the
+    /// buffer-pool / log waits at the bars their own arms use) is a co-fire.
+    ///
+    /// <para>Worked numbers — the arm's magnitudes are chosen so corroboration can carry an EXTREME anomaly
+    /// past the 1.5 notify floor and nothing can carry a routine one there:</para>
+    /// <list type="bullet">
+    ///   <item>Base at the fire threshold (0.5) with two co-fires: 0.5 x (1 + 0.3 + 0.3) = 0.8. With every
+    ///     arm lit (the load family's maximum is +1.2): 1.1. Never reaches 1.5, and the Layer-3 cap holds
+    ///     regardless because the anomaly is not extreme.</item>
+    ///   <item>Base saturated but ROUTINE (2x the anchor — 4σ classical, 7σ robust; 1.0) with three co-fires:
+    ///     1.0 x 1.9 = 1.9 → capped to 1.49. Still WARNING: saturation is not extremity, and the cap is
+    ///     exactly what keeps a busy evening from paging.</item>
+    ///   <item>Base EXTREME (&gt;= 3x the anchor; 1.0, the cap released) alone: 1.0. Below the cap it escaped
+    ///     — a lone 20σ reading with nothing else moving does not page, by design: the CRITICAL band is
+    ///     earned only with corroboration (the same rule every other base fact follows), and a solitary
+    ///     extreme reading is exactly the shape a collector hiccup or a variance-collapsed baseline pinned
+    ///     at the 25σ display cap produces.</item>
+    ///   <item>Base EXTREME with one +0.3 co-fire: 1.3, WARNING. With two: 1.6 → pages. The issue's own
+    ///     3am shape — a 20σ session spike (root, extreme) beside a 15σ batch-request anomaly (+0.3) and
+    ///     SQL CPU at 85% (+0.3) — scores 1.6 and reaches the operator for the first time at shipped
+    ///     settings. A +0.3 and a +0.2 land on 1.5 exactly: two independent corroborators is the bar.</item>
+    /// </list>
+    /// </summary>
+    private static List<AmplifierDefinition> AnomalyAmplifiers(string key)
+    {
+        if (key.StartsWith("ANOMALY_SESSION_SPIKE", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase))
+            return LoadAnomalyAmplifiers(key);
+
+        if (key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase))
+            return ReadLatencyAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase))
+            return WriteLatencyAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
+            return WaitProfileAnomalyAmplifiers();
+
+        if (key.StartsWith("ANOMALY_MEMORY_PRESSURE", StringComparison.OrdinalIgnoreCase))
+            return MemoryPressureAnomalyAmplifiers();
+
+        // Blocking/deadlock spikes and the object-stats anomalies have no arm: they are not released from
+        // the cap (IsExtremeAnomaly) and their impact lives in the never-capped BLOCKING_* / DEADLOCKS keys.
+        return [];
+    }
+
+    /// <summary>
+    /// A sibling anomaly family fired in the same window against its own baseline. The self-key is
+    /// skipped by the callers, so a family never corroborates itself.
+    /// </summary>
+    private static bool AnomalyCoFired(Dictionary<string, Fact> facts, string siblingKey) =>
+        facts.TryGetValue(siblingKey, out var sibling) && sibling.BaseSeverity > 0;
+
+    /// <summary>
+    /// The LOAD family — sessions, batch requests, CPU, query duration — corroborate one another (a real
+    /// surge moves more than one of them) and are confirmed by measured SQL CPU at the 80% bar the SOS
+    /// and compile-gateway arms already use. Each sibling is +0.3; the root's own key is omitted.
+    /// </summary>
+    private static List<AmplifierDefinition> LoadAnomalyAmplifiers(string selfKey)
+    {
+        var amplifiers = new List<AmplifierDefinition>();
+        void Sibling(string siblingKey, string description)
+        {
+            if (selfKey.StartsWith(siblingKey, StringComparison.OrdinalIgnoreCase)) return;
+            amplifiers.Add(new()
+            {
+                Description = description,
+                Boost = 0.3,
+                Predicate = facts => AnomalyCoFired(facts, siblingKey)
+            });
+        }
+
+        Sibling("ANOMALY_SESSION_SPIKE", "Session-count anomaly co-fired — the surge is visible in connections too");
+        Sibling("ANOMALY_BATCH_REQUESTS", "Batch-request anomaly co-fired — the surge is visible in throughput too");
+        Sibling("ANOMALY_CPU_SPIKE", "CPU anomaly co-fired — the surge is consuming CPU far above this server's norm");
+        Sibling("ANOMALY_QUERY_DURATION", "Query-duration anomaly co-fired — the surge is slowing queries");
+        amplifiers.Add(new()
+        {
+            Description = "SQL Server CPU >= 80% — the surge is consuming real CPU, not just moving a counter",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
+        });
+        return amplifiers;
+    }
+
+    /// <summary>
+    /// ANOMALY_READ_LATENCY: a per-server read-latency deviation confirmed by the absolute read-latency fact
+    /// at its concerning bar (20 ms — "bad in absolute terms, not only for you"), by the wait profile
+    /// shifting (queries are actually waiting on it), by write latency deviating alongside (a storage-side
+    /// event, not one hot file), and by PAGEIOLATCH at the IO_READ_LATENCY_MS arm's own 10% bar.
+    /// </summary>
+    private static List<AmplifierDefinition> ReadLatencyAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Read latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
+        },
+        new()
+        {
+            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow reads",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
+        },
+        new()
+        {
+            Description = "Write-latency anomaly co-fired — the storage path is slow in both directions",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
+        },
+        new()
+        {
+            Description = "PAGEIOLATCH waits elevated — buffer pool misses confirm the read pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
+                              || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_WRITE_LATENCY: the write-side twin — the absolute write-latency fact at its concerning bar
+    /// (10 ms), the wait profile shifting, read latency deviating alongside, and WRITELOG at the
+    /// IO_WRITE_LATENCY_MS arm's own 5% bar.
+    /// </summary>
+    private static List<AmplifierDefinition> WriteLatencyAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Write latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("IO_WRITE_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
+        },
+        new()
+        {
+            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow writes",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
+        },
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the storage path is slow in both directions",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        },
+        new()
+        {
+            Description = "WRITELOG waits elevated — transaction log I/O confirms the write pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "WRITELOG", 0.05)
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_WAIT_PROFILE: the all-types wait rate shifting against its baseline, corroborated by WHAT the
+    /// waiting is costing — I/O latency deviating (+0.3 each side), query duration deviating (+0.3: the
+    /// waits are landing on user queries), and the load family moving (+0.2 each: a surge is driving it).
+    /// </summary>
+    private static List<AmplifierDefinition> WaitProfileAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the wait shift is storage-bound",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        },
+        new()
+        {
+            Description = "Write-latency anomaly co-fired — the wait shift is log/storage-bound",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
+        },
+        new()
+        {
+            Description = "Query-duration anomaly co-fired — the waits are landing on user queries",
+            Boost = 0.3,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_QUERY_DURATION")
+        },
+        new()
+        {
+            Description = "CPU anomaly co-fired — a load surge is driving the wait shift",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_CPU_SPIKE")
+        },
+        new()
+        {
+            Description = "Session-count anomaly co-fired — a connection surge is driving the wait shift",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_SESSION_SPIKE")
+        }
+    ];
+
+    /// <summary>
+    /// ANOMALY_MEMORY_PRESSURE: total-over-target deviating against baseline, corroborated by the symptoms
+    /// real memory pressure produces — ring-buffer pressure notifications (the engine saying so itself),
+    /// grant waiters at the PAGEIOLATCH arm's bar, RESOURCE_SEMAPHORE in the wait stats, PAGEIOLATCH at
+    /// the 10% bar (buffer pool churn), and read latency deviating (the churn reaching storage).
+    /// </summary>
+    private static List<AmplifierDefinition> MemoryPressureAnomalyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Memory-pressure notifications present — the engine itself is reporting pressure",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("MEMORY_PRESSURE_EVENTS", out var mp) && mp.BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "Memory grant waiters present — grants competing for the same memory",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
+        },
+        new()
+        {
+            Description = "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
+            Boost = 0.2,
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && rs.BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "PAGEIOLATCH waits elevated — buffer pool churning under the pressure",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
+                              || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
+        },
+        new()
+        {
+            Description = "Read-latency anomaly co-fired — the churn is reaching storage",
+            Boost = 0.2,
+            Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
+        }
+    ];
 
     /// <summary>
     /// PARAMETER_SENSITIVITY: a single plan with wildly varying per-execution cost.
