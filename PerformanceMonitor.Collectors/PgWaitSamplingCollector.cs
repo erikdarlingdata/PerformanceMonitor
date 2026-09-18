@@ -232,7 +232,12 @@ WHERE a.pid <> pg_backend_pid()
         sb.Append(snapshot).Append(';');
         for (var i = 1; i < SamplerSnapshotsPerCycle; i++)
         {
-            sb.Append("\nSELECT pg_sleep(").Append(SamplerPeriodMs / 1000.0).Append(");")
+            /* InvariantCulture, like every number this file puts in SQL or state: StringBuilder.Append(double)
+               formats under the host's culture, and a half-second period on a comma-decimal host would emit
+               pg_sleep(0,5) - a review catch on #3645 before any period but 1.0 ever shipped. */
+            sb.Append("\nSELECT pg_sleep(")
+              .Append((SamplerPeriodMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture))
+              .Append(");")
               .Append("\nSELECT pg_stat_clear_snapshot();")
               .Append(snapshot).Append(';');
         }
