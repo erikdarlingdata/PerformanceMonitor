@@ -400,6 +400,35 @@ public sealed class ThemeColorOverrideTests
         }
     }
 
+    /// <summary>
+    /// Review note on #3606: <see cref="ThemeManager.StockPalette"/> caches by theme name, and the cache
+    /// used to outlive a swap of <see cref="ThemeManager.ThemeXamlTextProvider"/> — so a test that installed
+    /// its own theme text would have been handed the previous provider's palette, silently. Swapping the
+    /// provider now empties the cache.
+    /// </summary>
+    [Fact]
+    public void StockPalette_FollowsTheProvider_WhenTheProviderIsSwapped()
+    {
+        static string ThemeText(string accent) =>
+            "<ResourceDictionary xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\">" +
+            string.Concat(ThemeColorOverrides.ExposedKeys.Select(k => $"<Color x:Key=\"{k}\">{(k == "AccentColor" ? accent : "#101010")}</Color>")) +
+            "</ResourceDictionary>";
+
+        var previous = ThemeManager.ThemeXamlTextProvider;
+        try
+        {
+            ThemeManager.ThemeXamlTextProvider = _ => ThemeText("#111111");
+            Assert.Equal(Color.FromRgb(0x11, 0x11, 0x11), ThemeManager.StockPalette("Dark")["AccentColor"]);
+
+            ThemeManager.ThemeXamlTextProvider = _ => ThemeText("#222222");
+            Assert.Equal(Color.FromRgb(0x22, 0x22, 0x22), ThemeManager.StockPalette("Dark")["AccentColor"]);
+        }
+        finally
+        {
+            ThemeManager.ThemeXamlTextProvider = previous;
+        }
+    }
+
     /* ================================================================================================
        Save / Reset
        ================================================================================================ */

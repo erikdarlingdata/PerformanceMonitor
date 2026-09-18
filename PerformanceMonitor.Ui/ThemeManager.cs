@@ -78,8 +78,24 @@ namespace PerformanceMonitor.Ui
         /// embedded copy in the running app's assembly (<c>Themes/{Theme}Theme.xaml</c>, embedded by each
         /// app's project file). Replaceable so the loader can be exercised against a file on disk or a
         /// string, which is what the tests do; there is no other seam into the regeneration.
+        ///
+        /// <para>Swapping the provider empties <see cref="StockPalette"/>'s cache. The cache is keyed by theme
+        /// name and the palette it holds was read through whichever provider was current at the time, so a
+        /// test that installed its own text and then asked for the stock palette would otherwise get the
+        /// previous provider's answer back, silently (review note on #3606). In the app the provider is set
+        /// once and the clear never runs.</para>
         /// </summary>
-        public static Func<string, string?> ThemeXamlTextProvider { get; set; } = DefaultThemeXamlText;
+        public static Func<string, string?> ThemeXamlTextProvider
+        {
+            get => s_themeXamlTextProvider;
+            set
+            {
+                s_themeXamlTextProvider = value;
+                s_stockPalettes.Clear();
+            }
+        }
+
+        private static Func<string, string?> s_themeXamlTextProvider = DefaultThemeXamlText;
 
         /// <summary>The overrides currently loaded from <see cref="OverridesFilePath"/> — what the last Apply used.</summary>
         public static ThemeColorOverrideSet Overrides { get; private set; } = ThemeColorOverrideSet.Empty;
