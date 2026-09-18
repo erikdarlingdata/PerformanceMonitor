@@ -50,7 +50,17 @@ public sealed class DarlingMcpFleetTools
         "buffer_pool_mb and the whole threads block are null for " +
         "the same structural reason and no band is claimed for them — those metrics are SQL Server DMV " +
         "readings with no PostgreSQL equivalent collected; get_pg_buffer_usage, get_pg_kernel_stats and " +
-        "get_pg_session_states are the reads that answer the nearest PostgreSQL questions.")]
+        "get_pg_session_states are the reads that answer the nearest PostgreSQL questions. A PostgreSQL " +
+        "target's deadlock_count IS measured: it is the server's own pg_stat_database.deadlocks counter, " +
+        "differenced per database over the window (a statistics reset clamps to zero, never subtracts) and " +
+        "summed, banded through the same deadlock_warn_per_hour / deadlock_critical_per_hour tiers as SQL " +
+        "Server's graph count; deadlock_source reads PostgresTarget for it, which since #3539 means COUNTED " +
+        "from that counter (deadlock_coverage.postgres_servers is a sub-count of servers_read, not a gap), " +
+        "and get_pg_deadlocks has the parsed deadlock reports themselves. Its blocking_severity stays " +
+        "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +
+        "blocking band's count tiers were measured in engine-recorded reports per hour, so a sighting count " +
+        "through them would band on a denominator they were never measured against — the PostgreSQL " +
+        "Blocking alert speaks for that condition until a sampled-shape band is measured.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)

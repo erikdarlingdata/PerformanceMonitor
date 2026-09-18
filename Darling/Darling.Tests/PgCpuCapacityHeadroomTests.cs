@@ -72,6 +72,7 @@ public sealed class PgCpuCapacityHeadroomTests
             default,
             default,
             default,
+            default,
             Now.AddSeconds(-30),
             default,
             null,
@@ -181,6 +182,7 @@ public sealed class PgCpuCapacityHeadroomTests
         var card = DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(1, "sql-1", "sql-1", null, MonitoredEngineKind.SqlServer, false),
             new DarlingFleetReader.CpuRow(sqlCpu, otherCpu),
+            default,
             default,
             default,
             default,
@@ -519,7 +521,7 @@ public sealed class PgCpuCapacityHeadroomTests
         var sqlServer = DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(2, "sql-1", "sql-1", null, MonitoredEngineKind.SqlServer, false),
             new DarlingFleetReader.CpuRow(60.0, 30.0),
-            default, default, default, default, default, default,
+            default, default, default, default, default, default, default,
             Now.AddSeconds(-30), default, null, Now,
             TimeSpan.FromHours(1), DeadlockRateThresholds.Default);
 

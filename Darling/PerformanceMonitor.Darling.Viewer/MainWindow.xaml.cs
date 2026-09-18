@@ -1502,9 +1502,10 @@ public partial class MainWindow : Window
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
-                       reads have no engine column and need none. It is what tells the fleet deadlock total's
-                       coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
-                       extended-event capture and nothing else. */
+                       reads have no engine column and need none. It is what selects which deadlock-source
+                       collector's band the fleet deadlock total's coverage reads for this card (#3539):
+                       v_deadlocks holds the SQL Server extended-event capture, pg_database_stats the
+                       PostgreSQL counter, and the summary read carries both bands because it cannot pick. */
                     summary.IsPostgres = server.IsPostgres;
                     /* #3267: and the Aurora half of the same discriminator, for the CPU row. Both are
                        stamped from the one registry row, so a card cannot end up claiming Aurora-ness the

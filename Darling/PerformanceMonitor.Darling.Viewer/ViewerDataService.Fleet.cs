@@ -58,8 +58,13 @@ public sealed partial class ViewerDataService
     /// lines the two sources up per server, and each server contributes its XE count when it has any XE row
     /// this window else its DMV count (Lite's <c>COALESCE(NULLIF(xe,0), dmv)</c>, applied per server) — so
     /// an AWS RDS server with only DMV snapshots still counts and a server with XE reports is never
-    /// double-counted. <c>total_deadlocks</c> is a plain cross-server COUNT. $1 window start, $2 window end
-    /// (both naive UTC).
+    /// double-counted. <c>total_deadlocks</c> is the SQL Server graph COUNT plus the PostgreSQL counter
+    /// differences (#3539): the second branch is the SAME <c>LAG</c>-per-<c>(server_id, database_name)</c>
+    /// shape the per-server card read (<c>ServerSummaryPgDeadlockSql</c>) and the service's fleet reader
+    /// use — positive differences only, so a statistics reset drops its interval rather than subtracting a
+    /// lifetime — so the fleet total reconciles with the sum of the card counts on both engines. Never a
+    /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
+    /// $2 window end (both naive UTC).
     /// </summary>
     public const string FleetTotalsSql = @"
 SELECT
@@ -94,6 +99,17 @@ SELECT
         FROM v_deadlocks
         WHERE deadlock_time >= $1
         AND   deadlock_time <= $2
+    )
+    +
+    (
+        SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0)
+        FROM
+        (
+            SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+            FROM pg_database_stats
+            WHERE collection_time >= $1
+            AND   collection_time <= $2
+        ) AS sampled
     ) AS total_deadlocks";
 
     /// <summary>
@@ -308,8 +324,9 @@ public sealed class FleetRollup
     /// leading sentence of <see cref="DeadlockCoverageTooltip"/>.
     /// </summary>
     public const string DeadlockSourceNote =
-        "Deadlocks come from the SQL Server extended-event capture and nothing else, so a server this "
-        + "total does not cover contributes nothing to it whatever that server's deadlocks do.";
+        "Deadlocks come from each engine's own instrument - the SQL Server extended-event capture, and on "
+        + "PostgreSQL the server's deadlock counter differenced over the window - so a server whose "
+        + "collector is not running contributes nothing to this total whatever that server's deadlocks do.";
 
     /// <summary>
     /// The sentence that keeps the two figures from being read as one measurement — the desktop wording of
@@ -329,15 +346,18 @@ public sealed class FleetRollup
         + "counts only the last hour. The two windows differ deliberately, and this coverage figure "
         + "therefore makes no claim about what was read in the last hour.";
 
-    /// <summary>What to do about the PostgreSQL arm, appended after its count. Names no tab, because a
-    /// PostgreSQL target's deadlock grid is reached through that server's own tab rather than from here.
+    /// <summary>How the PostgreSQL arm was counted, appended after its count (#3539). Not an uncovered
+    /// cause — these servers ARE in the total — but a reader is owed the instrument: a counter difference
+    /// has no graph to show, and that target's own server tab is where the parsed deadlocks are. Names no
+    /// tab by name, because a PostgreSQL target's deadlock grid is reached through that server's own tab
+    /// rather than from here.
     ///
     /// <para>Every cause here is a VERB-FREE noun phrase, so one form reads correctly after both "1 server:"
     /// and "4 servers:" — an "N are ..." shape needs a second string the moment N is one, and the surface
     /// that forgets it prints "1 are PostgreSQL targets".</para></summary>
     public const string DeadlockPostgresCause =
-        "PostgreSQL targets, whose deadlocks this total cannot count at all - collected separately, and "
-        + "shown on that target's own server tab.";
+        "PostgreSQL targets, counted from the server's own deadlock counter rather than from captured "
+        + "deadlock graphs - the parsed deadlocks are on that target's own server tab.";
 
     /// <summary>What to do about the silent arm, appended after its count.</summary>
     public const string DeadlockCollectorSilentCause =
@@ -552,13 +572,15 @@ public sealed class FleetRollup
     /// registered fleet; a denominator that shrank to whatever loaded this cycle would report a smaller
     /// fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
     ///
-    /// <para><b>Only <see cref="FleetDeadlockSource.Read"/> counts as read</b> — every other arm, INCLUDING
-    /// an enum value a later build adds and this switch has never heard of, lands in the silent bucket. A
-    /// new source kind that inflated the read count would restore exactly the defect this exists to fix,
-    /// where one that lands in an uncovered bucket merely attributes a real gap imprecisely.</para>
+    /// <para><b>Only the arms <see cref="FleetDeadlockCoverage.IsCovered"/> names count as read</b> — every
+    /// other arm, INCLUDING an enum value a later build adds and this switch has never heard of, lands in
+    /// the silent bucket. A new source kind that inflated the read count would restore exactly the defect
+    /// this exists to fix, where one that lands in an uncovered bucket merely attributes a real gap
+    /// imprecisely. The PostgreSQL arm is covered AND tallied on its own (#3539): the sub-count names the
+    /// instrument, the read count names the coverage.</para>
     ///
-    /// <para>The four causes therefore need not sum to <paramref name="registeredTotal"/>: a registered
-    /// server with no summary this cycle is classified by none of them, and that shortfall is
+    /// <para>The three uncovered-or-read causes therefore need not sum to <paramref name="registeredTotal"/>:
+    /// a registered server with no summary this cycle is classified by none of them, and that shortfall is
     /// <see cref="UnknownCount"/> — stated in its own words by <see cref="UnknownStatusText"/> and by
     /// <see cref="DeadlockUnreportedCause"/>, rather than attributed to a cause it was not measured to
     /// have.</para>
@@ -574,9 +596,14 @@ public sealed class FleetRollup
 
         foreach (var s in summaries)
         {
+            if (FleetDeadlockCoverage.IsCovered(s.DeadlockSource))
+            {
+                read++;
+            }
+
             switch (s.DeadlockSource)
             {
-                case FleetDeadlockSource.Read: read++; break;
+                case FleetDeadlockSource.Read: break;
                 case FleetDeadlockSource.PostgresTarget: postgres++; break;
                 case FleetDeadlockSource.CollectorDenied: denied++; break;
                 default: silent++; break;

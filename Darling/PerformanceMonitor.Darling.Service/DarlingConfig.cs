@@ -699,10 +699,12 @@ public sealed class AlertsConfig
     /// retention and deadlock-band knobs above already follow. <c>DarlingAlertSettings</c> clamps it on
     /// read.</para>
     ///
-    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the V122 rung and
-    /// the default constant for why the SQL Server figure's justification does not travel to an engine with
-    /// no deadlock band. The <c>enabled</c> switch IS shared: <see cref="DeadlockEnabled"/> governs both
-    /// engines.</para></summary>
+    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the default
+    /// constant: the two engines count with different instruments (captured graphs vs deadlocks parsed
+    /// from the server log), and an operator tuning one should not silently move the other. The V122 rung's
+    /// second reason — that a PostgreSQL server had no deadlock band to agree with — ended with #3539, which
+    /// bands the PostgreSQL card's own counter difference through the shared tiers. The <c>enabled</c>
+    /// switch IS shared: <see cref="DeadlockEnabled"/> governs both engines.</para></summary>
     [JsonPropertyName("pgDeadlockCountThreshold")]
     public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
 

@@ -264,16 +264,84 @@ FULL OUTER JOIN
     /// <para><b>This view is the SQL Server extended-event capture and nothing else</b> (#3017).
     /// <c>v_deadlocks</c> is <c>SELECT * FROM deadlocks</c>, and <c>deadlocks</c> is written by exactly one
     /// collector — <c>DeadlocksCollector</c>, whose <c>TargetTable</c> it is. A PostgreSQL target's deadlocks
-    /// go to <c>pg_deadlocks</c> instead, there is no <c>v_pg_deadlocks</c>, and nothing joins the two, so
-    /// this count is structurally zero for a PostgreSQL server no matter how many deadlocks its clusters
-    /// have. Zero is also what a genuinely quiet SQL Server reports, which is why the total ships with
-    /// <see cref="FleetDeadlockCoverage"/> beside it: the reading that needs no action and the reading that
-    /// does not cover the fleet are otherwise the same character.</para></summary>
+    /// never reach it, so this count is structurally zero for a PostgreSQL server no matter how many
+    /// deadlocks its clusters have; <see cref="FleetPgDeadlockSql"/> is that engine's read (#3539), and
+    /// <see cref="BuildCard"/> takes one or the other by engine. Zero is also what a genuinely quiet SQL
+    /// Server reports, which is why the total ships with <see cref="FleetDeadlockCoverage"/> beside it: the
+    /// reading that needs no action and the reading whose collector is silent are otherwise the same
+    /// character.</para></summary>
     public const string FleetDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
 WHERE deadlock_time >= $1
 AND   deadlock_time <= $2
+GROUP BY server_id";
+
+    /// <summary>Deadlocks in the window per PostgreSQL server (#3539) — the same two columns as
+    /// <see cref="FleetDeadlockSql"/>, from the engine's own counter rather than a captured graph. $1 window
+    /// start, $2 window end (both naive UTC).
+    ///
+    /// <para><b>A counter DIFFERENCE, never a sum of the column.</b> <c>pg_database_stats.deadlocks</c> is
+    /// <c>pg_stat_database.deadlocks</c> stored raw: a lifetime counter per database, sampled every minute,
+    /// so the same 122 sits in every one of a day's 1,440 rows and <c>SUM(deadlocks)</c> over a window is a
+    /// number with no meaning (measured on one store: 8,006,912 across 50 servers with zero new deadlocks in
+    /// the window). What happened IN the window is each consecutive pair's difference, taken per
+    /// <c>(server_id, database_name)</c> series — the same <c>LAG</c> shape <c>DarlingPgDatabaseReader.PgDatabaseSql</c>
+    /// uses for <c>get_pg_database_stats</c>, and the two must agree on a server or the fleet card would
+    /// contradict the tool it sends a reader to.</para>
+    ///
+    /// <para><b>Clamped at zero across a reset.</b> <c>pg_stat_reset()</c> or a crash restart rewinds the
+    /// counter, and a plain difference goes negative there; <c>GREATEST(…, 0)</c> drops that interval
+    /// rather than subtracting a lifetime from the window. The interval's real deadlocks (those between the
+    /// reset and the next sample) survive as the next difference. The tool reports how many intervals
+    /// clamped; this card does not — a band is not the place for a reset count, and
+    /// <c>get_pg_database_stats</c> is one call away.</para>
+    ///
+    /// <para><b>Summed across databases</b> because the card is per SERVER and the SQL Server count it
+    /// sits beside is too: a deadlock graph names the databases involved, but <c>v_deadlocks</c> is counted
+    /// per <c>server_id</c>, and the band's tiers were measured per server-hour (#3368). The NULL-named
+    /// shared-relation row PostgreSQL emits is its own series under <c>PARTITION BY</c> (grouping
+    /// semantics), so it differences correctly and is summed in.</para>
+    ///
+    /// <para><b><c>last_seen</c> is the sample that first showed the increase</b> — the deadlock happened
+    /// somewhere in the preceding minute, which is the resolution a per-minute counter has. Bounded to the
+    /// window like the count, where the SQL Server "last seen" is the newest graph in the window too; the
+    /// unbounded "ever" the viewer's card shows for SQL Server has no cheap PostgreSQL twin (it would be a
+    /// scan of the whole counter series for its last step), and "last within the window" is what the
+    /// count-carrying chip actually renders.</para>
+    ///
+    /// <para><b><c>intervals</c> is how many differences were taken</b> — the count of consecutive-sample
+    /// pairs across every series in the window — and it is what makes the count a MEASUREMENT. A difference
+    /// needs two samples; a server with one row in the window, or none, has had no difference taken, and
+    /// its <c>cnt</c> of zero is the arithmetic of an empty set, not an observation that nothing deadlocked.
+    /// This is where the PostgreSQL arm parts from the SQL Server one on purpose: <c>COUNT(*)</c> over an
+    /// event table with no events IS an observation (the collector looked and found none), where
+    /// <c>LAG</c> over no samples is undefined. <see cref="BuildCard"/> bands only when this is positive,
+    /// which is also what keeps #3539 A6 intact — an online PostgreSQL target nothing has collected from
+    /// measures nothing and reads Warning, not "Healthy — 1 of 6 measured".</para>
+    ///
+    /// <para>Bounded on <c>collection_time</c>, the hypertable's partitioning column, so chunk exclusion
+    /// keeps the read to the window's chunk(s): on the one-minute cadence the default hour is ~60 rows per
+    /// database per server, and the fleet's whole hour is tens of thousands of rows behind the
+    /// <c>(server_id, collection_time)</c> index — the same order as <see cref="FleetBlockingSql"/>'s
+    /// two scans.</para></summary>
+    public const string FleetPgDeadlockSql = @"
+WITH sampled AS
+(
+    SELECT
+        server_id,
+        collection_time,
+        deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+    FROM pg_database_stats
+    WHERE collection_time >= $1
+    AND   collection_time <= $2
+)
+SELECT
+    server_id,
+    CAST(coalesce(SUM(GREATEST(raw_delta, 0)), 0) AS bigint) AS cnt,
+    MAX(collection_time) FILTER (WHERE raw_delta > 0) AS last_seen,
+    CAST(count(raw_delta) AS bigint) AS intervals
+FROM sampled
 GROUP BY server_id";
 
     /// <summary>The deadlock health band's two tiers from the singleton settings row (#3368, V120).
@@ -399,6 +467,7 @@ GROUP BY server_id, collector_name";
         var threads = await ReadThreadsAsync(postgres, cancellationToken);
         var blocking = await ReadBlockingAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var deadlocks = await ReadDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
+        var pgDeadlocks = await ReadPgDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
@@ -422,6 +491,10 @@ GROUP BY server_id, collector_name";
             threads.TryGetValue(server.ServerId, out var t);
             blocking.TryGetValue(server.ServerId, out var b);
             deadlocks.TryGetValue(server.ServerId, out var deadlock);
+            /* A miss leaves default(PgDeadlockRow) - zero count, no last-seen, ZERO intervals - which for
+               a PostgreSQL target is "no difference was taken" (unmeasured, not quiet), and for a SQL
+               Server is a row BuildCard never looks at. */
+            pgDeadlocks.TryGetValue(server.ServerId, out var pgDeadlock);
             /* Not `lastCollection.TryGetValue(..., out var lastColl)` — that leaves lastColl as
                default(DateTime) (0001-01-01) on a miss, and default(DateTime) is NOT null, so it
                does not hit ClassifyFreshness's NeverCollected branch: it falls through to the
@@ -436,7 +509,7 @@ GROUP BY server_id, collector_name";
             tags.TryGetValue(server.ServerId, out var serverTags);
 
             cards.Add(BuildCard(
-                server, c, pg, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now,
+                server, c, pg, m, mp, t, b, deadlock, pgDeadlock, lastColl, collectors, serverTags, now,
                 windowEndUtc - windowStartUtc, deadlockTiers));
         }
 
@@ -453,6 +526,13 @@ GROUP BY server_id, collector_name";
     /// metric passes <c>default</c> for its row, which is why those types never have to be NAMED in a test
     /// — they are internal only because CS0051 requires every parameter type of an internal method to be
     /// at least as accessible as it.</para></summary>
+    /// <param name="deadlock">The SQL Server extended-event count for the window (<see cref="FleetDeadlockSql"/>);
+    /// structurally zero for a PostgreSQL target and ignored for one.</param>
+    /// <param name="pgDeadlock">The PostgreSQL counter-difference count for the window
+    /// (<see cref="FleetPgDeadlockSql"/>, #3539), with how many differences it was summed from;
+    /// structurally empty for a SQL Server and ignored for one. Two parameters rather than one pre-merged
+    /// row so this method — the step that decides what a card CLAIMS — is where the engine picks, and a
+    /// test can hand a card BOTH rows and assert which one it believed.</param>
     internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
@@ -462,6 +542,7 @@ GROUP BY server_id, collector_name";
         ThreadsRow threads,
         BlockingRow blocking,
         DeadlockRow deadlock,
+        PgDeadlockRow pgDeadlock,
         DateTime? lastCollection,
         CollectorCounts collectors,
         List<FleetTag>? tags,
@@ -469,7 +550,6 @@ GROUP BY server_id, collector_name";
         TimeSpan deadlockWindow,
         DeadlockRateThresholds deadlockTiers)
     {
-        var deadlockCount = deadlock.Count;
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
            snapshot — both count and worst-wait come from whichever source wins. */
@@ -483,6 +563,20 @@ GROUP BY server_id, collector_name";
            derived from a SQL Server SERVERPROPERTY, which a PostgreSQL target does not have. Read up here
            rather than beside ClassifyPlatform because the CPU source classification needs it. */
         var (isPostgres, isAurora) = ClassifyEngineKind(server.EngineKind);
+
+        /* The engine's OWN deadlock reading (#3539): the extended-event graph count for a SQL Server, the
+           pg_stat_database counter difference for a PostgreSQL target. Chosen by engine rather than summed,
+           because the other engine's row is a structural zero and a sum would hide which instrument
+           answered; the card says which through deadlock_source. The collector band travels with the
+           count for the same reason - coverage asks about the collector that produced THIS number. */
+        var deadlockCount = isPostgres ? pgDeadlock.Count : deadlock.Count;
+        var deadlockLastSeen = isPostgres ? pgDeadlock.LastSeen : deadlock.LastSeen;
+        var deadlockCollectorBand = isPostgres ? collectors.PgDeadlockBand : collectors.DeadlockBand;
+        /* Whether the count is a MEASUREMENT. On SQL Server it always is: COUNT(*) over the graph table is
+           an observation even at zero (#3272's engine-not-collector rule). On PostgreSQL the count is a
+           counter DIFFERENCE, and a difference of fewer than two samples is not zero deadlocks, it is no
+           reading - see FleetPgDeadlockSql's intervals paragraph. */
+        var deadlockMeasured = !isPostgres || pgDeadlock.Intervals > 0;
 
         /* One expression for "total non-idle host CPU, from whichever collector has it" (#3267), shared with
            the viewer's card so the two cannot drift on the fallback. cpuPercent stays the SQL-Server-process
@@ -501,15 +595,24 @@ GROUP BY server_id, collector_name";
         var hasMemoryPressure = pressure.WaiterCount > 0 || pressure.TimeoutCount > 0 || pressure.ForcedCount > 0;
         var maxBlockedSeconds = maxBlockingWaitMs / 1000.0;
 
-        /* The three DMV-sourced readings, with "not measured" expressed as null for an engine that has no
+        /* The two DMV-sourced readings, with "not measured" expressed as null for an engine that has no
            row in the views behind them (#3272). The reads above produced zeros for such a target, and a
            zero here argued Healthy — a green dot for a metric nothing measured. The published COUNTS are
-           left exactly as they are: #3017's deadlock_source and the fleet coverage block explain a total
-           built out of those zeros, and nulling them would make the total's own denominator unreadable.
-           It is the BAND that stops claiming health. */
+           left exactly as they are: the fleet coverage block explains a total built out of those zeros, and
+           nulling them would make the total's own denominator unreadable. It is the BAND that stops
+           claiming health.
+
+           Deadlocks left this set in #3539: both engines now have a source behind the reading (the graph
+           capture or the server counter). The SQL Server arm keeps the engine-not-collector rule
+           ServerMetricSources states - a silent deadlocks collector reads zero and bands Healthy, with
+           deadlock_source and the coverage block disclosing the gap. The PostgreSQL arm is gated on the
+           instrument instead: its count is a difference, and a window with fewer than two samples per
+           series has had no difference taken, so the band reads Unknown there rather than a Healthy
+           computed from an empty set. That is also what keeps #3539 A6's card - an online PostgreSQL
+           target nothing has collected from - measuring nothing. */
         var memoryPressureForBand = ServerMetricSources.DmvSourced(hasMemoryPressure, isPostgres);
         var blockingForBand = ServerMetricSources.DmvSourced(blockingCount, isPostgres);
-        var deadlocksForBand = ServerMetricSources.DmvSourced(deadlockCount, isPostgres);
+        int? deadlocksForBand = deadlockMeasured ? deadlockCount : null;
 
         var metrics = new ServerHealthMetrics
         {
@@ -609,13 +712,12 @@ GROUP BY server_id, collector_name";
             BlockingWindow = deadlockWindow,
             BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow),
             DeadlockCount = deadlockCount,
-            DeadlockLastSeen = deadlock.LastSeen,
-            /* deadlocksForBand, not the raw count, for the same reason DeadlockSeverity below takes it: on a
-               PostgreSQL target there is no deadlock reading at all and the raw count is a STRUCTURAL zero,
-               so a rate derived from it publishes 0.0/hr - a measurement nobody took - while the severity on
-               the same card correctly reads Unknown. The card chip and the viewer detail line both render
-               this field on nothing but non-null, so the disclosure has to live here. #3017 fixed exactly
-               this confusion for the count and the band; the rate must not reintroduce it. */
+            DeadlockLastSeen = deadlockLastSeen,
+            DeadlockMeasured = deadlockMeasured,
+            /* Through deadlocksForBand rather than the raw int so the rate and the severity below are
+               derived from ONE value: the chip and the viewer detail line render this on non-null alone,
+               and a rate published for a count the band did not see is the #3017 confusion one field
+               over. Null exactly when the PostgreSQL arm took no difference (#3539). */
             DeadlockRatePerHour = deadlocksForBand.HasValue
                 ? ServerHealthClassifier.DeadlockRatePerHour(deadlocksForBand.Value, deadlockWindow)
                 : null,
@@ -623,7 +725,7 @@ GROUP BY server_id, collector_name";
             DeadlockRateThresholds = deadlockTiers,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
-            DeadlockCollectorBand = collectors.DeadlockBand,
+            DeadlockCollectorBand = deadlockCollectorBand,
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
             AvailableThreads = availableThreads,
@@ -679,13 +781,20 @@ GROUP BY server_id, collector_name";
 
             /* #3017's denominator, reduced from the CARDS for the same reason the totals above are: the
                coverage figure and the total it qualifies then reconcile by construction rather than by two
-               queries agreeing. Only Read is counted as read — every other arm, INCLUDING an enum value a
-               later build adds and this switch has never heard of, lands in the silent bucket. A new source
-               kind that inflated the read count would restore exactly the defect this exists to fix, where
-               one that lands in an uncovered bucket merely attributes a real gap imprecisely. */
+               queries agreeing. Only the arms FleetDeadlockCoverage.IsCovered names count as read — every
+               other arm, INCLUDING an enum value a later build adds and this switch has never heard of,
+               lands in the silent bucket. A new source kind that inflated the read count would restore
+               exactly the defect this exists to fix, where one that lands in an uncovered bucket merely
+               attributes a real gap imprecisely. The PostgreSQL arm is covered AND tallied on its own
+               (#3539): the sub-count names the instrument, the read count names the coverage. */
+            if (FleetDeadlockCoverage.IsCovered(card.DeadlockSource))
+            {
+                deadlockSourcesRead++;
+            }
+
             switch (card.DeadlockSource)
             {
-                case FleetDeadlockSource.Read: deadlockSourcesRead++; break;
+                case FleetDeadlockSource.Read: break;
                 case FleetDeadlockSource.PostgresTarget: deadlockPostgresTargets++; break;
                 case FleetDeadlockSource.CollectorDenied: deadlockCollectorsDenied++; break;
                 default: deadlockCollectorsSilent++; break;
@@ -1108,6 +1217,33 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
+    /// <summary>The PostgreSQL twin of <see cref="ReadDeadlocksAsync"/> (#3539) — same carrier, same window,
+    /// the engine's own counter behind it. Read for the whole fleet in one pass like every other per-metric
+    /// read here; a SQL Server has no row in <c>pg_database_stats</c> and simply does not appear.</summary>
+    private static async Task<Dictionary<int, PgDeadlockRow>> ReadPgDeadlocksAsync(
+        NpgsqlDataSource postgres, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var map = new Dictionary<int, PgDeadlockRow>();
+        await using var command = postgres.CreateCommand(FleetPgDeadlockSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* The SUM comes back as bigint; the card's count is an int like the SQL Server arm's. A window
+               whose clamped deadlock differences overflow int is not a reading this card can render either
+               way, so saturate rather than wrap - a wrapped count could band a catastrophe Healthy. */
+            var count = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+            map[reader.GetInt32(0)] = new PgDeadlockRow(
+                (int)Math.Min(count, int.MaxValue),
+                reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)));
+        }
+
+        return map;
+    }
+
     private static async Task<Dictionary<int, DateTime>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, DateTime>();
@@ -1160,14 +1296,18 @@ GROUP BY server_id, collector_name";
                 existing.Failing + (status == "FAILING" ? 1 : 0),
                 /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
                 existing.Total + 1,
-                /* #3017: the ONE collector whose band the deadlock total's coverage turns on, kept
-                   alongside the Healthy/Failing tallies because it comes out of the same aggregate — no
-                   extra round trip, which is what keeps this reader's fan-out bounded. Named from the
+                /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
+                   kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
+                   no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
                    collector rather than as a literal so a rename cannot leave this silently matching
-                   nothing and reporting every server uncovered. */
+                   nothing and reporting every server uncovered. Both engines' bands are kept on every
+                   server because this aggregate does not know the engine; BuildCard picks. */
                 string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
                     ? status
-                    : existing.DeadlockBand);
+                    : existing.DeadlockBand,
+                string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
+                    ? status
+                    : existing.PgDeadlockBand);
         }
 
         return counts;
@@ -1196,16 +1336,25 @@ GROUP BY server_id, collector_name";
     internal readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
     internal readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
     internal readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
+    /// <summary>The PostgreSQL deadlock reading (#3539): the summed counter differences, the sample that
+    /// showed the newest step, and <paramref name="Intervals"/> — how many differences the sum was taken
+    /// over. Its <c>default</c> is zero intervals, which <see cref="BuildCard"/> reads as unmeasured: a
+    /// PostgreSQL target that fell out of the read (no rows in the window) must band Unknown, and a
+    /// struct whose default meant "measured zero" would make that the quiet outcome of a miss.</summary>
+    internal readonly record struct PgDeadlockRow(int Count, DateTime? LastSeen, long Intervals);
     /// <param name="DeadlockBand">The <c>deadlocks</c> collector's own 7-day band for this server, or null
     /// when that collector left no row in the health window at all (#3017). Null and
     /// <see cref="CollectorHealthClassifier.NeverRun"/> mean the same thing to a reader and take the same
     /// action, but they arrive differently: null is the absent GROUP, NEVER_RUN would be a present group with
     /// no runs in it.</param>
+    /// <param name="PgDeadlockBand">The <c>pg_database_stats</c> collector's band, same terms (#3539) — the
+    /// deadlock-source collector on a PostgreSQL target, where <paramref name="DeadlockBand"/> is always
+    /// null because that engine has no <c>deadlocks</c> collector.</param>
     /// <param name="Total">Every collector banded for this server in the health window, on any band (#3539
     /// A8d) — the denominator <see cref="ServerHealthClassifier.CollectorSeverity"/> grades the failing count
     /// against. Healthy + Failing is NOT it: STALE, WARNING, STOPPED, NO_PERMISSIONS and EXTENSION_MISSING rows
     /// are all banded collectors that are neither.</param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, string? DeadlockBand = null);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, string? DeadlockBand = null, string? PgDeadlockBand = null);
 }
 
 /// <summary>
@@ -1388,8 +1537,26 @@ public sealed class FleetServerCard
     [JsonIgnore]
     public TimeSpan BlockingWindow { get; init; }
 
+    /// <summary>Deadlocks in the card's window, from the engine's own instrument: captured deadlock graphs
+    /// on SQL Server, the <c>pg_stat_database.deadlocks</c> counter differenced per database and summed on
+    /// PostgreSQL (#3539). <see cref="DeadlockSource"/> says which, and whether the collector behind it was
+    /// actually running.</summary>
     [JsonPropertyName("deadlock_count")] public int DeadlockCount { get; init; }
+
+    /// <summary>The newest deadlock in the window — the graph's own timestamp on SQL Server; on PostgreSQL
+    /// the sample that first showed the counter step, so "within the preceding minute".</summary>
     [JsonPropertyName("deadlock_last_seen")] public DateTime? DeadlockLastSeen { get; init; }
+
+    /// <summary>Whether <see cref="DeadlockCount"/> is a measurement this card banded on (#3539) — always
+    /// on SQL Server (a graph count is an observation even at zero), and on PostgreSQL only when at least
+    /// one counter difference was taken in the window (a difference of fewer than two samples is no
+    /// reading). Carried, not serialized: <c>deadlock_rate_per_hour</c> is null and
+    /// <c>deadlock_severity</c> is Unknown exactly when this is false on a rateable window, so the wire
+    /// already says it; this is for <see cref="ToHealthMetrics"/>, which must hand the re-band the same
+    /// null the card banded on. Defaults to false so a card built by a path that did not decide reads
+    /// unmeasured — the direction that cannot claim health.</summary>
+    [JsonIgnore]
+    public bool DeadlockMeasured { get; init; }
     /// <summary>Deadlocks per HOUR over the card's window — the figure <c>deadlock_severity</c> banded on
     /// (#3368), or null when the window was too short to normalise. Published beside the raw count because a
     /// card that bands on a number it does not show leaves a reader unable to tell which tier was
@@ -1411,11 +1578,11 @@ public sealed class FleetServerCard
     [JsonIgnore]
     public DeadlockRateThresholds DeadlockRateThresholds { get; init; }
 
-    /// <summary>This server's <c>deadlocks</c> collector band over the trailing seven days of collection
-    /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. Null when that
+    /// <summary>This server's deadlock-source collector band over the trailing seven days of collection
+    /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. The collector is
+    /// <c>deadlocks</c> on SQL Server and <c>pg_database_stats</c> on PostgreSQL (#3539). Null when that
     /// collector left no row in the health window, which is itself the answer rather than the absence of
-    /// one: nothing was read for this server. A PostgreSQL target has no <c>deadlocks</c> collector at all,
-    /// so it is null there too and <see cref="DeadlockSource"/> answers on the engine instead.</summary>
+    /// one: nothing was read for this server.</summary>
     [JsonPropertyName("deadlock_collector_band")] public string? DeadlockCollectorBand { get; init; }
 
     /// <summary>Whether <see cref="DeadlockCount"/> read a deadlock source for this server, and when it did
@@ -1488,7 +1655,10 @@ public sealed class FleetServerCard
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
         /* #3539 A3: the count's denominator, for the same reason the deadlock window travels below. */
         BlockingWindow = BlockingWindow,
-        DeadlockCount = ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres),
+        /* The engine's own instrument's count since #3539, handed to the re-band exactly as the card
+           banded it: measured on every SQL Server card, and on a PostgreSQL card only when a difference
+           was taken - see DeadlockMeasured. */
+        DeadlockCount = DeadlockMeasured ? DeadlockCount : null,
         /* #3368: the three travel together for the reason the CPU trio above does. Without the window the
            re-band would have no denominator and the worst-first score would rank every deadlocking server
            at Warning; without the tiers it would rank them against the shipped pair while the card's own

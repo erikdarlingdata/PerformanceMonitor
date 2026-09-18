@@ -171,16 +171,17 @@ public static class PostgresAlertEvaluator
     /// product opinion this change is revising.</para>
     ///
     /// <para><b>Its own knob rather than SQL Server's <c>deadlocks.count_threshold</c>.</b> The two
-    /// engines' counts are tuned against different evidence and, decisively, against different
-    /// SURFACES: the reason to move the SQL Server figure is agreement with
-    /// <c>health_bands.deadlock_warn_per_hour</c>, and a PostgreSQL server has no deadlock band to agree
-    /// with — <c>DarlingFleetReader.FleetDeadlockSql</c> reads <c>v_deadlocks</c>, which is
-    /// structurally zero for a PostgreSQL server, and <c>ServerMetricSources.DmvSourced</c> nulls the
-    /// reading before it reaches the band. Reusing the key would import a number whose whole
-    /// justification is agreement with a surface the importing engine does not have. The <c>enabled</c>
-    /// switch IS shared, matching <see cref="PoisonWaitMetric"/>'s own split: whether the condition is
-    /// worth alerting on at all is one preference, and the volume at which it is worth a page is
-    /// not.</para>
+    /// engines' counts are tuned against different evidence: SQL Server's is captured deadlock GRAPHS, this
+    /// one is distinct deadlocks parsed from the server log, and an operator tuning one should not silently
+    /// move the other (#3444). When V122 shipped this column there was a second reason — a PostgreSQL server
+    /// had no deadlock BAND to agree with, because the fleet card read <c>v_deadlocks</c> and nulled the
+    /// structural zero — and that reason is gone: since #3539 the PostgreSQL card bands its own
+    /// <c>pg_stat_database.deadlocks</c> counter difference through the SAME
+    /// <c>health_bands.deadlock_warn_per_hour</c> tiers. So the #3444 move (raise the fire gate to meet the
+    /// band's Warning bar, so a page and an amber dot describe the same server) is now available on this
+    /// knob too; the knob stays separate so making it is a choice. The <c>enabled</c> switch IS shared,
+    /// matching <see cref="PoisonWaitMetric"/>'s own split: whether the condition is worth alerting on at
+    /// all is one preference, and the volume at which it is worth a page is not.</para>
     /// </summary>
     public const int DeadlockCountThresholdDefault = 1;
 

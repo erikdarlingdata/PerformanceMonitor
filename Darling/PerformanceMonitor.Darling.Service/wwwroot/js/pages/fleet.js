@@ -451,10 +451,14 @@ function groupControl() {
 /*
  * #3017: the deadlock total's denominator, as a VISIBLE sub-line rather than a tooltip.
  *
- * total_deadlocks comes out of v_deadlocks, which is the SQL Server extended-event capture and nothing else,
- * so it is structurally zero on a PostgreSQL fleet — permanently, whatever those clusters do. Zero is also
- * exactly what a genuinely quiet SQL Server fleet reports, and the tile could not tell an operator which one
- * they were looking at. The API answers that (deadlock_coverage), and this renders it.
+ * total_deadlocks is each engine's own instrument summed across the fleet — the SQL Server extended-event
+ * capture, and since #3539 the PostgreSQL server counter differenced over the window — so a server whose
+ * deadlock-source collector is silent or denied contributes a structural zero. Zero is also exactly what a
+ * genuinely quiet fleet reports, and the tile could not tell an operator which one they were looking at.
+ * The API answers that (deadlock_coverage), and this renders it; the note on the tile's title names how many
+ * of the read servers were counted the counter way (postgres_servers), which is a sub-count of servers_read.
+ * (Before #3539 a PostgreSQL target was structurally uncounted and this sub-line read "N of M" on any mixed
+ * fleet; a PostgreSQL fleet whose pg_database_stats collectors run now reads "all".)
  *
  * ALWAYS shown when the API reports coverage, including at full coverage, for two reasons. A line that
  * appeared only on partial coverage would make its ABSENCE the load-bearing signal, which an operator has to
