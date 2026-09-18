@@ -317,4 +317,73 @@ public class FileGrowthAlertTests
         Assert.Equal($"39.1 GB in 60 min (40000 {AlertContextBuilders.FileGrowthRiseUnit})", growth.Item2);
         Assert.Equal("MB/hr", AlertContextBuilders.FileGrowthRiseUnit);
     }
+    /* ---------------- #3636: the rise gate's split-out helpers, and the observation stamp both reads carry ---------------- */
+
+    /// <summary>
+    /// The two gates as the engine's #3636 guard asks them: <see cref="AlertContextBuilders.BreachesRiseGate"/>
+    /// and <see cref="AlertContextBuilders.BreachesLevelGate"/> are what <see cref="AlertContextBuilders.GetBreachedFiles"/>
+    /// applies, so the guard (rise-only files are held to the observation stamp; level files are always news)
+    /// cannot classify a file differently from the breach list that put it on the card. Held on the three shapes
+    /// the alert distinguishes: rise-only, level-only, both.
+    /// </summary>
+    [Fact]
+    public void TheGateHelpers_AgreeWithTheBreachList_OnRiseOnlyLevelOnlyAndBoth()
+    {
+        var riseOnly = File(sizeMb: 90_000, growthMb: 40_000, volumeTotalMb: 4_000_000);
+        var levelOnly = File(sizeMb: 400_000, growthMb: 0, volumeTotalMb: 500_000);
+        var both = File(sizeMb: 400_000, growthMb: 40_000, volumeTotalMb: 500_000);
+        var neither = File(sizeMb: 50_000, growthMb: 100, volumeTotalMb: 500_000);
+
+        Assert.True(AlertContextBuilders.BreachesRiseGate(riseOnly, riseMbPerHour: 10_240, lookbackMinutes: 60));
+        Assert.False(AlertContextBuilders.BreachesLevelGate(riseOnly, volumePercent: 60));
+
+        Assert.False(AlertContextBuilders.BreachesRiseGate(levelOnly, riseMbPerHour: 10_240, lookbackMinutes: 60));
+        Assert.True(AlertContextBuilders.BreachesLevelGate(levelOnly, volumePercent: 60));
+
+        Assert.True(AlertContextBuilders.BreachesRiseGate(both, riseMbPerHour: 10_240, lookbackMinutes: 60));
+        Assert.True(AlertContextBuilders.BreachesLevelGate(both, volumePercent: 60));
+
+        /* Zero disables each helper exactly as it disables the gate in the breach list. */
+        Assert.False(AlertContextBuilders.BreachesRiseGate(riseOnly, riseMbPerHour: 0, lookbackMinutes: 60));
+        Assert.False(AlertContextBuilders.BreachesLevelGate(levelOnly, volumePercent: 0));
+
+        /* And the rise helper is the A8c bar, not the raw knob: 40 GB in a 5-minute window is held to 853 MB. */
+        Assert.True(AlertContextBuilders.BreachesRiseGate(File(growthMb: 1_024, windowMinutes: 5, volumeTotalMb: 4_000_000), riseMbPerHour: 10_240, lookbackMinutes: 5));
+
+        foreach (var f in new[] { riseOnly, levelOnly, both, neither })
+        {
+            var inList = AlertContextBuilders.GetBreachedFiles(new List<DatabaseFileGrowthInfo> { f }, riseMbPerHour: 10_240, volumePercent: 60, lookbackMinutes: 60).Count == 1;
+            var byHelpers = AlertContextBuilders.BreachesRiseGate(f, 10_240, 60) || AlertContextBuilders.BreachesLevelGate(f, 60);
+            Assert.Equal(byHelpers, inList);
+        }
+    }
+
+    /// <summary>
+    /// #3636: both SKUs' file-growth reads project the newest sample's <c>collection_time</c> as
+    /// <c>observed_at</c>, LAST, so the fourteen ordinals both readers already bind do not move. The two texts
+    /// are not equal (DuckDB has no <c>DISTINCT ON</c>, so Lite's is a <c>ROW_NUMBER()</c> rewrite — the
+    /// FileGrowthAlertStoreTests pin holds that shape), so this pins the one clause #3636 added to each, read
+    /// from source on the Darling side through <see cref="Lite.Tests.ParitySource"/>.
+    /// </summary>
+    [Fact]
+    public void BothSkusFileGrowthReads_CarryTheObservationStamp_Last()
+    {
+        var lite = PerformanceMonitorLite.Services.LocalDataService.DatabaseFileGrowthSql.ReplaceLineEndings("\n");
+        Assert.EndsWith(
+            "c.max_size_mb,\n    c.collection_time AS observed_at\nFROM windowed c",
+            lite[..(lite.IndexOf("FROM windowed c", StringComparison.Ordinal) + "FROM windowed c".Length)],
+            StringComparison.Ordinal);
+
+        var darling = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/DarlingAlertReadAdapter.cs");
+        var darlingSql = darling[(darling.IndexOf("public const string DatabaseFileGrowthSql = @\"", StringComparison.Ordinal) + "public const string DatabaseFileGrowthSql = @\"".Length)..];
+        darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)].ReplaceLineEndings("\n");
+        Assert.EndsWith(
+            "c.max_size_mb,\n    c.collection_time AS observed_at\nFROM current_files c",
+            darlingSql[..(darlingSql.IndexOf("FROM current_files c", StringComparison.Ordinal) + "FROM current_files c".Length)],
+            StringComparison.Ordinal);
+
+        /* The same window bound on both — the stamp is the newest row INSIDE the lookback, not the newest ever. */
+        Assert.Contains("collection_time >= $2", lite, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", darlingSql, StringComparison.Ordinal);
+    }
 }

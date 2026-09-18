@@ -390,17 +390,28 @@ public static class AlertContextBuilders
     {
         if (files is null || files.Count == 0) return new List<DatabaseFileGrowthInfo>();
 
-        var riseBarMb = FileGrowthRiseBarMb(riseMbPerHour, lookbackMinutes);
         var breached = files
-            .Where(f =>
-                (riseMbPerHour > 0 && f.GrowthMb >= riseBarMb)
-                || (volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent))
+            .Where(f => BreachesRiseGate(f, riseMbPerHour, lookbackMinutes) || BreachesLevelGate(f, volumePercent))
             .OrderByDescending(f => f.VolumePercent)
             .ThenByDescending(f => f.GrowthMb)
             .ToList();
 
         return breached;
     }
+
+    /// <summary>The RISE gate on its own: grew at least <see cref="FileGrowthRiseBarMb"/> — the MB-per-hour
+    /// threshold scaled to the configured window (#3539 A8c) — inside the lookback window. Zero disables it.
+    /// Split out of <see cref="GetBreachedFiles"/> at #3636 because the engine's once-per-observation guard
+    /// applies to THIS gate only, and it has to ask the same question the breach list asked rather than a
+    /// re-typed copy of it.</summary>
+    public static bool BreachesRiseGate(DatabaseFileGrowthInfo f, int riseMbPerHour, int lookbackMinutes) =>
+        riseMbPerHour > 0 && f.GrowthMb >= FileGrowthRiseBarMb(riseMbPerHour, lookbackMinutes);
+
+    /// <summary>The LEVEL gate on its own: the file is at least <paramref name="volumePercent"/> of its volume.
+    /// Zero disables it; a file with no volume stats (Azure SQL DB) is never level-gated. A standing level that
+    /// re-fires on the cooldown by design — the #3636 guard never consults it.</summary>
+    public static bool BreachesLevelGate(DatabaseFileGrowthInfo f, int volumePercent) =>
+        volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent;
 
     /// <summary>#2349: the alert card. Renders the top few by the same order <see cref="GetBreachedFiles"/>
     /// produced, and names the fields an operator needs to act without opening the Viewer — including

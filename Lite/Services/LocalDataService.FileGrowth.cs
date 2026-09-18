@@ -25,15 +25,20 @@ namespace PerformanceMonitorLite.Services;
 /// <para>DuckDB has no <c>DISTINCT ON</c>, so the same selection is expressed with <c>ROW_NUMBER()</c>
 /// partitioned by the file key — the idiom the rest of Lite's store SQL already uses where Postgres would use
 /// <c>DISTINCT ON</c>.</para>
+///
+/// <para>The newest sample's <c>collection_time</c> rides along as <c>observed_at</c>, the last column (#3636):
+/// the growth is a fact about two collections that reads identically on every alert pass until the next one
+/// lands — hourly, for this collector, against a 5-minute cooldown — and the engine needs the observation's
+/// identity to fire the rise gate once per collection rather than up to twelve times. Appended so the fourteen
+/// ordinals already bound do not move; Darling's twin carries the same column at the same position, and the
+/// Lite.Tests pin holds both texts to it. #3579's <c>observed_at</c> on the forced-plan read is the same
+/// column for the same reason.</para>
 /// </summary>
 public partial class LocalDataService
 {
-    public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(int serverId, int lookbackMinutes)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        command.CommandText = @"
+    /// <summary>The file-growth read's text, exposed like <see cref="ForcePlanFailuresSql"/> so the tests can
+    /// pin its shape against Darling's twin without a DuckDB round trip. $1 server_id, $2 window start.</summary>
+    public const string DatabaseFileGrowthSql = @"
 WITH windowed AS (
     SELECT
         database_name, file_name, physical_name, file_type_desc, collection_time,
@@ -59,7 +64,8 @@ SELECT
     c.auto_growth_mb,
     COALESCE(c.is_percent_growth, false) AS is_percent_growth,
     c.growth_pct,
-    c.max_size_mb
+    c.max_size_mb,
+    c.collection_time AS observed_at
 FROM windowed c
 LEFT JOIN windowed b
   ON  b.database_name = c.database_name
@@ -68,6 +74,13 @@ LEFT JOIN windowed b
 WHERE c.rn_new = 1
 AND   c.total_size_mb IS NOT NULL
 ORDER BY c.database_name, c.file_name";
+
+    public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(int serverId, int lookbackMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = DatabaseFileGrowthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter
@@ -95,6 +108,9 @@ ORDER BY c.database_name, c.file_name";
                 IsPercentGrowth = !reader.IsDBNull(11) && Convert.ToBoolean(reader.GetValue(11)),
                 GrowthPct = reader.IsDBNull(12) ? null : ToDouble(reader.GetValue(12)),
                 MaxSizeMb = reader.IsDBNull(13) ? null : ToDouble(reader.GetValue(13)),
+                /* #3636: a naive-UTC TIMESTAMP read back Kind-Unspecified, stamped Utc because that is what it
+                   is. The engine compares one file's stamps only with each other. */
+                ObservedAtUtc = reader.IsDBNull(14) ? null : DateTime.SpecifyKind(reader.GetDateTime(14), DateTimeKind.Utc),
             });
         }
 
