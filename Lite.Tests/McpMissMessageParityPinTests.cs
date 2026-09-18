@@ -108,6 +108,12 @@ public sealed class McpMissMessageParityPinTests
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
         "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
 
+        /* compare_analysis's verdict reading (#3538 A3). The band RULES live once, in the shared
+           ComparisonBanding, and cannot drift; what lives twice is the sentence each tool body puts on the
+           payload about what a verdict is, and the description that promises it. */
+        "Each row is banded by how far its VALUE moved on this server's own scale (band_source says which rule; band_rules states them), not by the severity formula's slope. One window against one window cannot show that a change caused anything: a same-hour-yesterday comparison at N=1 vs N=1 is a difference, not an experiment. Count families, not rows, to count causes.",
+        "What \\\"worse\\\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat.",
+
         /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
            window) no other read has. */
         "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",

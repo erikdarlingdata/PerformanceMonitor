@@ -162,6 +162,27 @@ public sealed class AnalysisCoverageLivePostgresTests
                 Assert.True(root.GetProperty("comparison").GetProperty("coverage").GetProperty("partial").GetBoolean());
                 Assert.DoesNotContain(root.GetProperty("facts").EnumerateArray(),
                     f => f.GetProperty("key").GetString() == WindowCoverage.FactKey);
+
+                /* #3538 A3 composes with the caveat: every verdict row and family carries coverage_caveat,
+                   the storm is a comparison-only row banded by presence (worse: 0.25 saturates CXPACKET's
+                   ladder), the rules are stated, and the summary counts families beside rows. */
+                Assert.True(root.GetProperty("summary").GetProperty("coverage_caveat").GetBoolean());
+                Assert.All(root.GetProperty("facts").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
+                Assert.All(root.GetProperty("families").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
+                var cxRow = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
+                Assert.Equal("comparison_only", cxRow.GetProperty("presence").GetString());
+                Assert.Equal("presence", cxRow.GetProperty("band_source").GetString());
+                Assert.Equal("worse", cxRow.GetProperty("status").GetString());
+                Assert.Equal("parallelism", cxRow.GetProperty("family").GetString());
+                /* BLOCKING_EVENTS at 10/hr (base 0.5) is the other comparison-only key that registers; the
+                   two are two families (parallelism, lock_contention), so families_worse counts causes. */
+                var blockingRow = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "BLOCKING_EVENTS");
+                Assert.Equal("worse", blockingRow.GetProperty("status").GetString());
+                Assert.Equal("lock_contention", blockingRow.GetProperty("family").GetString());
+                Assert.True(root.GetProperty("summary").GetProperty("new_issues").GetInt32() >= 2);
+                Assert.True(root.GetProperty("summary").GetProperty("families_worse").GetInt32() >= 2);
+                Assert.Contains("N=1 vs N=1", root.GetProperty("reading").GetString()!, StringComparison.Ordinal);
+                Assert.Contains("robust-sigma", root.GetProperty("band_rules").GetProperty("baseline").GetString()!, StringComparison.Ordinal);
             }
 
             /* ── zero coverage: a 2h window anchored inside the dead stretch composes with the #3524

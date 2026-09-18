@@ -110,6 +110,41 @@ public sealed class DarlingMcpToolsTests
         Assert.Contains("`muted_unmatched`", row, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3538 A3: <c>compare_analysis</c>'s description promises the verdict shape the payload now carries —
+    /// value-banded rows with <c>band_source</c> / <c>delta_sigma</c>, the rules in <c>band_rules</c>,
+    /// physical-cause <c>families</c>, <c>plan_cache_churn</c>, <c>coverage_caveat</c> — and says what "worse" does
+    /// NOT mean (one window against one window is not an experiment). Same words as Lite (its twin pin is
+    /// <c>CompareAnalysisDispersionTests</c>; the shared sentences are in <c>McpMissMessageParityPinTests</c>), and
+    /// the instruction table row agrees. The banding arithmetic is pinned on the shared
+    /// <c>ComparisonBanding</c> in Lite.Tests; this is what a caller reads before trusting a verdict.
+    /// </summary>
+    [Fact]
+    public void CompareAnalysis_Description_SaysWhatWorseMeans_AndWhatItDoesNot()
+    {
+        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "compare_analysis");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        foreach (var token in new[] { "delta_sigma", "band_source", "band_rules", "families", "plan_cache_churn", "coverage_caveat", "N=1 vs N=1", "cannot show that a change CAUSED anything" })
+        {
+            Assert.Contains(token, description, StringComparison.Ordinal);
+        }
+
+        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `compare_analysis` |", StringComparison.Ordinal));
+        foreach (var token in new[] { "`band_source`", "`families`", "`plan_cache_churn`", "N=1 vs N=1" })
+        {
+            Assert.Contains(token, row, StringComparison.Ordinal);
+        }
+
+        /* The tool's ComparePeriodsAsync seam returns the dispersion the banding needs — a 5-tuple whose
+           last item is the per-metric BaselineBucket map. Pinned so a twin that forgot the item would fail
+           here rather than silently band everything by the absolute rule. */
+        var compare = typeof(DarlingAnalysisService).GetMethod(nameof(DarlingAnalysisService.ComparePeriodsAsync))!;
+        var tuple = compare.ReturnType.GetGenericArguments()[0];
+        Assert.Contains(typeof(IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.BaselineBucket>), tuple.GetGenericArguments());
+    }
+
     /* ---------------- ungated: config + hosting pins ---------------- */
 
     [Fact]

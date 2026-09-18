@@ -296,6 +296,14 @@ public sealed class AnalysisCoverageTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.InRange(cx!.Value.GetProperty("baseline_value").GetDouble(), 0.06, 0.065);
         Assert.InRange(cx.Value.GetProperty("comparison_value").GetDouble(), 0.24, 0.26);
 
+        /* #3538 A3 composes with this: the fourfold value move IS banded worse (75% of the larger side, and
+           the key saturates its ladder), and the row carries coverage_caveat: true so that verdict cannot
+           be read without the sentence above — it is the collector's quarter, not the server's storm. */
+        Assert.Equal("worse", cx.Value.GetProperty("status").GetString());
+        Assert.True(cx.Value.GetProperty("coverage_caveat").GetBoolean());
+        Assert.True(root.GetProperty("summary").GetProperty("coverage_caveat").GetBoolean());
+        Assert.All(root.GetProperty("families").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
+
         /* The COLLECTION_GAP fact is reported through the coverage blocks, not as a compared key. */
         Assert.DoesNotContain(WindowCoverage.FactKey, result, StringComparison.Ordinal);
     }
@@ -314,6 +322,8 @@ public sealed class AnalysisCoverageTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Equal(JsonValueKind.Null, root.GetProperty("caveat").ValueKind);
         Assert.InRange(root.GetProperty("baseline").GetProperty("coverage").GetProperty("observed_fraction").GetDouble(), 0.99, 1.0);
         Assert.InRange(root.GetProperty("comparison").GetProperty("coverage").GetProperty("observed_fraction").GetDouble(), 0.99, 1.0);
+        Assert.False(root.GetProperty("summary").GetProperty("coverage_caveat").GetBoolean());
+        Assert.All(root.GetProperty("facts").EnumerateArray(), f => Assert.False(f.GetProperty("coverage_caveat").GetBoolean()));
     }
 
     /* ── WindowCoverage arithmetic, no store ── */

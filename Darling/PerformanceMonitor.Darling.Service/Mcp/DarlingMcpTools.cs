@@ -329,7 +329,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "compare_analysis"), Description("Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, before vs after a change, or yesterday vs today. Returns facts from both periods side-by-side with severity deltas. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons.")]
+    [McpServerTool(Name = "compare_analysis"), Description("Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (CPU %, read latency, connections) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons.")]
     public static async Task<string> CompareAnalysis(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -359,7 +359,7 @@ public sealed class DarlingMcpTools
             var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
             var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
-            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage) = await analysisService.ComparePeriodsAsync(
+            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd);
@@ -370,41 +370,35 @@ public sealed class DarlingMcpTools
                and pad fact rows with a key no advice speaks to. */
             var baselineServerFacts = baselineFacts.Where(f => f.Source != WindowCoverage.FactSource).ToList();
             var comparisonServerFacts = comparisonFacts.Where(f => f.Source != WindowCoverage.FactSource).ToList();
-            var baselineByKey = baselineServerFacts.ToFactLookup();
-            var comparisonByKey = comparisonServerFacts.ToFactLookup();
-            var allKeys = baselineByKey.Keys.Union(comparisonByKey.Keys).ToHashSet();
 
-            var comparisons = allKeys
-                .Select(key =>
-                {
-                    var baseline = baselineByKey.GetValueOrDefault(key);
-                    var comparison = comparisonByKey.GetValueOrDefault(key);
-                    var severityDelta = (comparison?.Severity ?? 0) - (baseline?.Severity ?? 0);
+            /*
+                #3538 A3: the coverage caveat is COMPOSED into the verdicts, not restated. The prose below
+                says which side was partly collected; every verdict row and family row carries
+                coverage_caveat: true when either side was, so a reader of one row cannot take "worse" at
+                face value without being told the side it rests on speaks for a fraction of its window.
+            */
+            var baselinePartial = baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved);
+            var comparisonPartial = comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved);
 
-                    return new
-                    {
-                        key,
-                        source = baseline?.Source ?? comparison?.Source ?? "unknown",
-                        baseline_value = baseline != null ? Math.Round(baseline.Value, 6) : (double?)null,
-                        comparison_value = comparison != null ? Math.Round(comparison.Value, 6) : (double?)null,
-                        baseline_severity = baseline != null ? Math.Round(baseline.Severity, 4) : (double?)null,
-                        comparison_severity = comparison != null ? Math.Round(comparison.Severity, 4) : (double?)null,
-                        severity_delta = Math.Round(severityDelta, 4),
-                        status = severityDelta > 0.1 ? "worse" : severityDelta < -0.1 ? "better" : "stable"
-                    };
-                })
-                .OrderByDescending(c => Math.Abs(c.severity_delta))
-                .ToList();
+            /*
+                Every verdict — sigma-banded where a per-server baseline exists, ladder-banded where it
+                does not, plan-cache churn kept out of the issue counters, one family row per physical
+                cause — is decided in the shared ComparisonBanding, so this SKU and its twin cannot band
+                the same two windows differently. The tool only serializes.
+            */
+            var comparison = ComparisonBanding.Compare(
+                baselineServerFacts, comparisonServerFacts, dispersion,
+                coverageCaveat: baselinePartial || comparisonPartial);
 
-            if (comparisons.Count == 0)
+            if (comparison.IsEmpty)
             {
                 /*
                     Neither window produced a single fact, and the old payload said that with all-zero
                     counters and facts: [] -- which reads as "nothing changed" when it actually means
                     "there was nothing to compare". Those are opposite conclusions about the same server.
-                    No probe is needed to tell them apart: comparisons is the UNION of both windows' keys,
-                    so zero entries is exactly "both fact sets were empty" and the fact_counts already in
-                    hand are the whole answer.
+                    No probe is needed to tell them apart: the comparison is over the UNION of both windows'
+                    keys, so an empty one is exactly "both fact sets were empty" and the fact_counts already
+                    in hand are the whole answer.
                 */
                 return McpHelpers.Status(
                     "unavailable",
@@ -451,10 +445,10 @@ public sealed class DarlingMcpTools
                         : null;
 
             var coverageCaveats = new List<string>(2);
-            if (baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved))
-                coverageCaveats.Add($"The BASELINE window was only partly collected: {baselineCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
-            if (comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved))
-                coverageCaveats.Add($"The COMPARISON window was only partly collected: {comparisonCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
+            if (baselinePartial)
+                coverageCaveats.Add($"The BASELINE window was only partly collected: {baselineCoverage!.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
+            if (comparisonPartial)
+                coverageCaveats.Add($"The COMPARISON window was only partly collected: {comparisonCoverage!.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
             if (coverageCaveats.Count > 0)
                 coverageCaveats.Add("A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.");
 
@@ -468,6 +462,10 @@ public sealed class DarlingMcpTools
                 /* Null when both windows produced facts at full coverage — the ordinary case, where
                    nothing needs saying. */
                 caveat,
+                /* #3538 A3: what a verdict can and cannot carry, stated on every payload because the tool's
+                   description is not in front of the reader when the numbers are. */
+                reading = "Each row is banded by how far its VALUE moved on this server's own scale (band_source says which rule; band_rules states them), not by the severity formula's slope. One window against one window cannot show that a change caused anything: a same-hour-yesterday comparison at N=1 vs N=1 is a difference, not an experiment. Count families, not rows, to count causes.",
+                band_rules = ComparisonBanding.BandRulesPayload,
                 baseline = new
                 {
                     start = baselineStart.ToString("o"),
@@ -482,15 +480,10 @@ public sealed class DarlingMcpTools
                     fact_count = comparisonServerFacts.Count,
                     coverage = comparisonCoverage?.ToPayload()
                 },
-                summary = new
-                {
-                    worse = comparisons.Count(c => c.status == "worse"),
-                    better = comparisons.Count(c => c.status == "better"),
-                    stable = comparisons.Count(c => c.status == "stable"),
-                    new_issues = comparisons.Count(c => c.baseline_severity == null && c.comparison_severity > 0),
-                    resolved_issues = comparisons.Count(c => c.baseline_severity > 0 && c.comparison_severity == null)
-                },
-                facts = comparisons
+                summary = comparison.SummaryPayload(),
+                families = comparison.Families.Select(f => f.ToPayload()).ToList(),
+                plan_cache_churn = comparison.Churn.ToPayload(),
+                facts = comparison.Rows.Select(r => r.ToPayload()).ToList()
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
