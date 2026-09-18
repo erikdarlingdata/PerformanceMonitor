@@ -55,6 +55,15 @@ public class AnalysisService
     /// </summary>
     public string? InsufficientDataMessage { get; private set; }
 
+    /// <summary>
+    /// Set after AnalyzeAsync when the server PASSED the data-span gate but the analysis window itself
+    /// produced zero facts (#3524). Null otherwise. The gate measures TOTAL history, so a server whose
+    /// collection died still sails through it and lands on an empty window — which is a dead collector
+    /// or an unreachable target, not a healthy server. Callers must not render an empty findings list
+    /// as an all-clear while this is set; nothing was measured.
+    /// </summary>
+    public string? WindowEmptyMessage { get; private set; }
+
     /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
     /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
     /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
@@ -123,6 +132,7 @@ public class AnalysisService
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
+        WindowEmptyMessage = null;
 
         try
         {
@@ -167,6 +177,21 @@ public class AnalysisService
 
             if (facts.Count == 0)
             {
+                /* #3524: the span gate above passed on LIFETIME history, so an empty WINDOW here means
+                   collection stopped producing rows for it — not that the server is healthy. Say so,
+                   instead of returning a bare [] that reads exactly like "analyzed and found nothing". */
+                WindowEmptyMessage =
+                    $"No facts were collected in the analysis window " +
+                    $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC) " +
+                    $"even though this server has {dataSpanHours:F1} hours of total collected history. " +
+                    "Collection appears to have stopped or broken for this window, so nothing was measured " +
+                    "— this is NOT an all-clear.";
+
+                AppLogger.Warn("AnalysisService",
+                    $"No facts in the analysis window for {context.ServerName} " +
+                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                    $"despite {dataSpanHours:F1}h of total history — collection may be down");
+
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }

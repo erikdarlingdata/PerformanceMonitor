@@ -134,6 +134,15 @@ public sealed class DarlingAnalysisService
     public string? InsufficientDataMessage { get; private set; }
 
     /// <summary>
+    /// Set after AnalyzeAsync when the server PASSED the data-span gate but the analysis window itself
+    /// produced zero facts (#3524). Null otherwise. The gate measures TOTAL history, so a server whose
+    /// collection died still sails through it and lands on an empty window — which is a dead collector
+    /// or an unreachable target, not a healthy server. Callers must not render an empty findings list
+    /// as an all-clear while this is set; nothing was measured.
+    /// </summary>
+    public string? WindowEmptyMessage { get; private set; }
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -216,6 +225,7 @@ public sealed class DarlingAnalysisService
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
+        WindowEmptyMessage = null;
         EndedEarlyAs = null;
 
         try
@@ -257,6 +267,21 @@ public sealed class DarlingAnalysisService
 
             if (facts.Count == 0)
             {
+                /* #3524: the span gate above passed on LIFETIME history, so an empty WINDOW here means
+                   collection stopped producing rows for it — not that the server is healthy. Say so,
+                   instead of returning a bare [] that reads exactly like "analyzed and found nothing". */
+                WindowEmptyMessage =
+                    $"No facts were collected in the analysis window " +
+                    $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC) " +
+                    $"even though this server has {dataSpanHours:F1} hours of total collected history. " +
+                    "Collection appears to have stopped or broken for this window, so nothing was measured " +
+                    "— this is NOT an all-clear.";
+
+                _logger?.LogWarning(
+                    "[DarlingAnalysisService] No facts in the analysis window for {Server} ({Start} to {End}) " +
+                    "despite {Span:F1}h of total history — collection may be down",
+                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours);
+
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
