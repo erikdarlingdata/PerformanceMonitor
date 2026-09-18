@@ -706,7 +706,8 @@ internal static class DarlingDataReader
     /// <summary>
     /// Top query-stats groups over the window — a focused projection of the viewer's <c>TopQueriesSql</c>
     /// (the columns Lite's get_top_queries_by_cpu returns): group by (database, query_hash), sum the
-    /// deltas + carry min/max spreads, rank by summed <c>delta_elapsed_time</c> descending, over-fetch by
+    /// deltas + carry min/max spreads, rank by summed <c>delta_worker_time</c> (CPU — the tool's promise;
+    /// #3523, the viewer's duration grid keeps its elapsed ranking) descending, over-fetch by
     /// 5 to drop WAITFOR shells via the latest-text LATERAL, cap at top. Summed bigints CAST back to bigint
     /// for the typed reader. The aggregate reads the base <c>query_stats</c> table (it projects no text);
     /// the text LATERAL reads <c>v_query_stats</c>, which resolves the #1767 payload dimension — the plan
@@ -753,7 +754,7 @@ internal static class DarlingDataReader
                NULL and keep collapsing into one group per hash exactly as before. */
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
+            ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
         SELECT
@@ -795,7 +796,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_cpu_us DESC
         LIMIT $4
         """;
 
@@ -864,7 +865,7 @@ internal static class DarlingDataReader
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
+            ORDER BY SUM(delta_worker_time) DESC
             LIMIT $4 + 5
         )
         SELECT
@@ -907,7 +908,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_cpu_us DESC
         LIMIT $4
         """;
 
@@ -960,7 +961,7 @@ internal static class DarlingDataReader
     /// Top procedure-stats groups over the window — a focused projection of the viewer's
     /// <c>TopProceduresSql</c> (the columns Lite's get_top_procedures_by_cpu returns): group by
     /// (database, schema, object, type), sum the deltas + carry min/max spreads, rank by summed
-    /// <c>delta_elapsed_time</c> descending, cap at top. Reads the base <c>procedure_stats</c> table
+    /// <c>delta_worker_time</c> (CPU — the tool's promise; #3523) descending, cap at top. Reads the base <c>procedure_stats</c> table
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top.
     /// </summary>
     public const string TopProceduresSql = """
@@ -989,7 +990,7 @@ internal static class DarlingDataReader
         AND   ($5::text IS NULL OR database_name = $5)
         GROUP BY database_name, schema_name, object_name, object_type
         HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-        ORDER BY SUM(delta_elapsed_time) DESC
+        ORDER BY SUM(delta_worker_time) DESC
         LIMIT $4
         """;
 
