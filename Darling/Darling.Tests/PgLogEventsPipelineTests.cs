@@ -782,6 +782,7 @@ public sealed class PgLogEventsLivePostgresTests
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -829,10 +830,14 @@ public sealed class PgLogEventsLivePostgresTests
 
             JsonAssert.Contains("\"status\": \"error\"", await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "nonsense", null, 100));
             JsonAssert.Contains("\"status\": \"error\"", await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, "SEVERE", 100));
+            bodySucceeded = true;
         }
         finally
         {
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
+            /* #1902: teardown on its own connection through LiveStoreCleanup, never on the body's — a body
+               that died mid-statement leaves that connection unusable, and the cleanup would die with it. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId));
         }
     }
 
@@ -861,6 +866,7 @@ public sealed class PgLogEventsLivePostgresTests
         await DarlingMcpTestData.ExecAsync(storeConnection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
         await using var postgres = NpgsqlDataSource.Create(store!);
 
+        var bodySucceeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
@@ -899,10 +905,12 @@ public sealed class PgLogEventsLivePostgresTests
             JsonAssert.Contains("\"family\": \"lock_wait\"", read);
             JsonAssert.Contains("\"truncated\": false", read);
             System.Console.WriteLine("rig counts per family: " + string.Join(", ", counts.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + "=" + k.Value)));
+            bodySucceeded = true;
         }
         finally
         {
-            await DarlingMcpTestData.ExecAsync(storeConnection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
+            await LiveStoreCleanup.RunAsync(store!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId));
         }
     }
 
