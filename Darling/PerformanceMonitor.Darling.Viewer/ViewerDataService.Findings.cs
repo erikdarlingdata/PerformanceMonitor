@@ -65,7 +65,20 @@ public sealed class ViewerFindingRow
 /// <c>null</c> when no pass has run for the server yet (no row), which the tab treats as "not
 /// insufficient" — an explicit marker is required to show the collecting state.
 /// </summary>
-public sealed record AnalysisStateMarker(bool InsufficientData, string? Message, DateTime AnalysisTimeUtc);
+public sealed record AnalysisStateMarker(bool InsufficientData, string? Message, DateTime AnalysisTimeUtc)
+{
+    /// <summary>
+    /// True when the marker records a WINDOW-EMPTY pass (#3524/#3551): the pass cleared the 24h
+    /// data-span gate (<see cref="InsufficientData"/> false) but the analysis window itself collected
+    /// zero facts — a dead collector or an unreachable target, not a healthy server. Encoded as
+    /// false-with-a-message, a shape only the worker's window-empty arm writes (a completed pass on
+    /// enough data writes false + null; the two gate misses write true + message), so no schema change
+    /// was needed and a pre-#3551 marker can never satisfy it. The Recommendations tab renders the
+    /// "collection appears broken" notice instead of the all-clear for a zero-finding read while this
+    /// is set.
+    /// </summary>
+    public bool WindowEmpty => !InsufficientData && !string.IsNullOrEmpty(Message);
+}
 
 public sealed partial class ViewerDataService
 {

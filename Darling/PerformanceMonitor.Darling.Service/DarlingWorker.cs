@@ -5767,17 +5767,28 @@ LIMIT 1";
                 }
             }
 
-            /* Persist the pass's insufficient-data determination (V19 marker) so the Viewer's
-               Recommendations tab shows "still collecting" instead of a false all-clear on a young
-               deployment: true + the engine's message when the pass hit the 24h data-span gate, cleared
-               (false) when a real pass completed on enough data. Failure-isolated like the other
-               observability writes. Only the two REAL terminal states write it — a Skipped/TimedOut/Error
-               pass (handled above / in the catch) leaves the last known marker untouched. */
+            /* Persist the pass's data-state determination (V19 marker) so the Viewer's Recommendations
+               tab shows a reason instead of a false all-clear on a zero-finding read: true + the
+               engine's message when the pass hit the 24h data-span gate ("still collecting"); false +
+               the engine's message when the pass cleared the gate but the window itself collected zero
+               facts (#3524/#3551 — a dead-collector shape, "collection appears broken"; false-with-a-
+               message is a shape only this arm writes, so the viewer distinguishes it without a schema
+               change); cleared (false + null) when a real pass completed on measured facts, which is
+               how both miss markers self-heal. Failure-isolated like the other observability writes.
+               Only the REAL terminal states write it — a Skipped/TimedOut/Error pass (handled above /
+               in the catch) leaves the last known marker untouched. */
             if (analysisService.InsufficientDataMessage is string insufficient)
             {
                 await DarlingObservability.WriteAnalysisStateAsync(
                     _postgres!, serverId, insufficientData: true, insufficient, _logger, stoppingToken);
                 return new AnalysisPassResult(AnalysisPassStatus.InsufficientData, 0, insufficient);
+            }
+
+            if (analysisService.WindowEmptyMessage is string windowEmpty)
+            {
+                await DarlingObservability.WriteAnalysisStateAsync(
+                    _postgres!, serverId, insufficientData: false, windowEmpty, _logger, stoppingToken);
+                return new AnalysisPassResult(AnalysisPassStatus.Ran, 0, windowEmpty);
             }
 
             await DarlingObservability.WriteAnalysisStateAsync(

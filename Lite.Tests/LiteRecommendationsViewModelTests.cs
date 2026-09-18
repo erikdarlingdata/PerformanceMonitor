@@ -59,6 +59,37 @@ public class LiteRecommendationsViewModelTests
     }
 
     [Fact]
+    public void WindowEmpty_UsesEngineMessage_AndPointsAtCollectionHealth()
+    {
+        // #3524/#3551: zero facts in the window is a dead-collector shape — a distinct state carrying
+        // the engine's message plus the in-app pointer, never the all-clear.
+        var vm = LiteRecommendationsViewModel.WindowEmpty("No facts were collected in the analysis window.");
+        Assert.Equal(LiteRecommendationsState.WindowEmpty, vm.State);
+        Assert.Empty(vm.Sections);
+        Assert.StartsWith("No facts were collected in the analysis window.", vm.WindowEmptyMessage);
+        Assert.EndsWith(LiteRecommendationsViewModel.WindowEmptyCollectionHealthPointer, vm.WindowEmptyMessage);
+        Assert.Equal(string.Empty, vm.InsufficientDataMessage);
+    }
+
+    [Fact]
+    public void WindowEmpty_BlankMessage_FallsBackToDefault_StillWithThePointer()
+    {
+        var vm = LiteRecommendationsViewModel.WindowEmpty("   ");
+        Assert.StartsWith(LiteRecommendationsViewModel.DefaultWindowEmptyMessage, vm.WindowEmptyMessage);
+        Assert.EndsWith(LiteRecommendationsViewModel.WindowEmptyCollectionHealthPointer, vm.WindowEmptyMessage);
+    }
+
+    [Fact]
+    public void WindowEmptyMessage_IsEmptyOutsideTheWindowEmptyState()
+    {
+        // The genuine all-clear (facts measured, zero findings) keeps its state and carries no
+        // window-empty prose — the distinction #3551 exists for.
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()).WindowEmptyMessage);
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.InsufficientData("x").WindowEmptyMessage);
+        Assert.Equal(string.Empty, LiteRecommendationsViewModel.Loading().WindowEmptyMessage);
+    }
+
+    [Fact]
     public void FromItems_Empty_IsEmptyState()
     {
         var vm = LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>());

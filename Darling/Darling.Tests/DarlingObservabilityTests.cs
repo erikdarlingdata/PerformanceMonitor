@@ -14,6 +14,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -996,6 +997,55 @@ public sealed class DarlingObservabilityTests
             count.Parameters.AddWithValue(TestServerId);
             Assert.Equal(1L, await count.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         }
+
+        await DeleteTestRowsAsync(connection);
+    }
+
+    /// <summary>
+    /// #3551: the marker's window-empty encoding round-trips through the REAL viewer read and then
+    /// self-heals. A window-empty pass persists (false, message) — the shape nothing else writes —
+    /// and <see cref="AnalysisStateMarker.WindowEmpty"/> must read it as window-empty, not
+    /// insufficient; the next facts-bearing pass writes (false, null) over the same row, and the
+    /// viewer read must no longer say window-empty, so a recovered server sheds the notice on its
+    /// next pass without any extra clearing mechanism.
+    /// </summary>
+    [Fact]
+    public async Task WriteAnalysisState_WindowEmptyThenFactsBearingPass_SelfHealsThroughTheViewerRead_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the window-empty marker test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteTestRowsAsync(connection);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        /* A window-empty pass (the worker's #3551 arm): insufficient_data = false WITH the engine's
+           message. */
+        await DarlingObservability.WriteAnalysisStateAsync(
+            postgres, TestServerId, insufficientData: false, "No facts were collected in the analysis window.",
+            null, TestContext.Current.CancellationToken);
+
+        var windowEmptyMarker = await viewer.GetAnalysisStateAsync(TestServerId);
+        Assert.NotNull(windowEmptyMarker);
+        Assert.True(windowEmptyMarker!.WindowEmpty);
+        Assert.False(windowEmptyMarker.InsufficientData);
+        Assert.Equal("No facts were collected in the analysis window.", windowEmptyMarker.Message);
+
+        /* The next facts-bearing pass (false, null) upserts the SAME row — the window-empty marker
+           self-heals rather than sticking to a recovered server. */
+        await DarlingObservability.WriteAnalysisStateAsync(
+            postgres, TestServerId, insufficientData: false, null, null, TestContext.Current.CancellationToken);
+
+        var healedMarker = await viewer.GetAnalysisStateAsync(TestServerId);
+        Assert.NotNull(healedMarker);
+        Assert.False(healedMarker!.WindowEmpty);
+        Assert.False(healedMarker.InsufficientData);
+        Assert.Null(healedMarker.Message);
 
         await DeleteTestRowsAsync(connection);
     }

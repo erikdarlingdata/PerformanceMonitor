@@ -159,6 +159,11 @@
             <TextBlock x:Name="InsufficientDataMessage" Style="{StaticResource LiteEmptyStateMessage}"
                        MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"/>
 
+            <!-- Window-empty: the analysis window collected nothing (a dead-collector shape,
+                 #3524/#3551) — a distinct notice, never the all-clear. Text is set from the view-model. -->
+            <TextBlock x:Name="WindowEmptyMessage" Style="{StaticResource LiteEmptyStateMessage}"
+                       MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"/>
+
             <!-- Loading spinner. -->
             <controls:LoadingOverlay x:Name="LoadingOverlay"/>
         </Grid>

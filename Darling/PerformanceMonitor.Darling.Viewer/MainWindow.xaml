@@ -1329,6 +1329,14 @@
                                        MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"
                                        Visibility="Collapsed"/>
 
+                            <!-- Window-empty: the analysis window collected nothing (a dead-collector
+                                 shape, #3524/#3551 — the marker's false-with-a-message encoding) — a
+                                 distinct notice, never the all-clear. Text is set from the view-model. -->
+                            <TextBlock x:Name="RecommendationsWindowEmptyText"
+                                       Style="{StaticResource EmptyHint}"
+                                       MaxWidth="520" TextWrapping="Wrap" TextAlignment="Center"
+                                       Visibility="Collapsed"/>
+
                             <TextBlock x:Name="RecommendationsLoadingText"
                                        Style="{StaticResource EmptyHint}"
                                        Text="Loading recommendations…"/>

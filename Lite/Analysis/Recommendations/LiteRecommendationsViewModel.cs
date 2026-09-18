@@ -29,6 +29,13 @@ public enum LiteRecommendationsState
     /// </summary>
     InsufficientData,
 
+    /// <summary>
+    /// The analysis window itself collected zero facts even though the engine's lifetime data-span
+    /// gate passed (<c>AnalysisService.WindowEmptyMessage</c>, #3524/#3551) — a dead collector or an
+    /// unreachable target, not a healthy server, so a distinct notice is shown, never the all-clear.
+    /// </summary>
+    WindowEmpty,
+
     /// <summary>The read completed and produced zero recommendations — the all-clear.</summary>
     Empty,
 
@@ -217,17 +224,26 @@ public sealed class LiteRecommendationsViewModel
     /// </summary>
     public string InsufficientDataMessage { get; }
 
+    /// <summary>
+    /// The window-empty message to show in the <see cref="LiteRecommendationsState.WindowEmpty"/>
+    /// state (the engine's own message, or a default, always suffixed with the Collection Health
+    /// pointer). Empty in every other state.
+    /// </summary>
+    public string WindowEmptyMessage { get; }
+
     /// <summary>Total card count across all sections.</summary>
     public int TotalCount => Sections.Sum(s => s.Count);
 
     private LiteRecommendationsViewModel(
         IReadOnlyList<LiteRecommendationSectionViewModel> sections,
         LiteRecommendationsState state,
-        string insufficientDataMessage)
+        string insufficientDataMessage,
+        string windowEmptyMessage = "")
     {
         Sections = sections;
         State = state;
         InsufficientDataMessage = insufficientDataMessage;
+        WindowEmptyMessage = windowEmptyMessage;
     }
 
     /// <summary>The default insufficient-data prose when the engine supplied none.</summary>
@@ -248,6 +264,32 @@ public sealed class LiteRecommendationsViewModel
             Array.Empty<LiteRecommendationSectionViewModel>(),
             LiteRecommendationsState.InsufficientData,
             string.IsNullOrWhiteSpace(engineMessage) ? DefaultInsufficientDataMessage : engineMessage!);
+
+    /// <summary>The default window-empty prose when the engine supplied no message.</summary>
+    public const string DefaultWindowEmptyMessage =
+        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+
+    /// <summary>
+    /// Appended to every window-empty message so the operator lands on the surface that diagnoses a
+    /// dead collector — the viewer's rendering of the same pointer the MCP <c>analyze_server</c> tool
+    /// appends (<c>get_collection_health</c> there, the in-app tab here).
+    /// </summary>
+    public const string WindowEmptyCollectionHealthPointer =
+        "Check the Collection Health tab to see when collectors last succeeded.";
+
+    /// <summary>
+    /// Builds the window-empty-state view-model (#3524/#3551) from the engine's
+    /// <c>AnalysisService.WindowEmptyMessage</c> (or the default when it is null/blank), suffixed with
+    /// the Collection Health pointer. Rendered instead of the all-clear when the analysis window
+    /// collected zero facts on a server whose lifetime span gate passed — a dead-collector shape.
+    /// </summary>
+    public static LiteRecommendationsViewModel WindowEmpty(string? engineMessage) =>
+        new(
+            Array.Empty<LiteRecommendationSectionViewModel>(),
+            LiteRecommendationsState.WindowEmpty,
+            string.Empty,
+            (string.IsNullOrWhiteSpace(engineMessage) ? DefaultWindowEmptyMessage : engineMessage!) +
+            " " + WindowEmptyCollectionHealthPointer);
 
     /// <summary>
     /// Builds a loaded/empty view-model from the reader's flat, already-sorted list. Groups by
