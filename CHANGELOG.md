@@ -23,6 +23,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Fixed
 
+- **Each generated store TLS root certificate carries a unique per-generation name** ([#3557]) - Windows caches every root a viewer's TLS stack ever sees into the user's intermediate-CA store, one per certificate rotation; with all rotations sharing one name, that cache eventually breaks certificate chain building outright on long-running viewer machines. Distinct names per rotation mean the pile can never form.
 - **The by-CPU tools now actually rank by CPU** ([#3523]) - get_top_queries_by_cpu and get_top_procedures_by_cpu ordered by summed elapsed time in both SKUs, so on a wait-bound server the real CPU consumers could be missing from the page entirely - and attributed_cpu_ratio read as "hidden CPU" when it actually meant "wrong sort key". Every ranking site now orders by worker time, including the over-fetch cut that could drop a CPU-heavy query before the final sort ever saw it. The viewer's Duration grids keep their elapsed ranking, which is what they promise.
 - **analyze_server no longer answers "all metrics are within normal ranges" when the analysis window collected nothing** ([#3524]) - The analysis gate passes on lifetime history, so a server whose collection died still reached the all-clear path with an empty window. Both SKUs' analysis services now flag the zero-facts window and analyze_server returns the "unavailable" envelope pointing at get_collection_health; the genuine all-clear (facts collected, zero findings) is unchanged.
 - **The Performance Calendar, daily summary, and fleet sweep band deadlocks as a measured per-hour rate, not any-deadlock-is-Critical** ([#3525]) - The shared daily classifier routed the Deadlocks signal through the Overview card's store-backed rate tiers (#3368, V120) with each surface's real window as the denominator, so one deadlock no longer paints a calendar day red, sweep verdicts stop scaling with the cadence knob, sub-hour spans fall to Warning instead of a multiplied rate, and the day tooltip/reasons report the rate beside the count. The still-forming day clamps its window to the elapsed portion, so an active storm bands on its true in-progress rate instead of diluting against hours that have not happened yet.
@@ -1272,6 +1273,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3556]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3556
 [#3561]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3561
 [#3563]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3563
+[#3557]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3557
 [#3514]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3514
 [#3477]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3477
 [#3495]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3495
