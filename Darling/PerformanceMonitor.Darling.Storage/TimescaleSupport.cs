@@ -5635,6 +5635,122 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     }
 
     /// <summary>
+    /// How long <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// waits before it RE-READS a job whose <c>-infinity</c> arm tripped, and requires the trip to persist
+    /// (#3575). Only taken when that arm trips; a pass with nothing to confirm costs nothing.
+    ///
+    /// <para><b>Why a confirm-read exists at all.</b> The <c>-infinity</c> arm already carried a running
+    /// guard (<c>nextStartIsNegativeInfinity &amp;&amp; !isRunning</c>) and a false page came through it
+    /// anyway, on a production store, with the alert's stamp 53 ms inside a 63 ms scheduled run that
+    /// succeeded. The guard's two inputs are read from INDEPENDENT sources inside TimescaleDB's own view,
+    /// and the 2.28.1 definition (<c>pg_get_viewdef('timescaledb_information.job_stats')</c>, read live)
+    /// says so exactly: <c>job_status</c> is <c>CASE WHEN pgs.state = 'active' THEN 'Running' WHEN
+    /// j.scheduled = false THEN 'Paused' ELSE 'Scheduled' END</c> over a <c>LEFT JOIN pg_stat_activity pgs
+    /// ON pgs.application_name = j.application_name</c>, while <c>next_start</c> is
+    /// <c>_timescaledb_internal.bgw_job_stat.next_start</c>. The scheduler's <c>mark_start</c> writes
+    /// <c>next_start = -infinity</c> (and <c>last_finish = -infinity</c>) in its OWN transaction and commits
+    /// it BEFORE the worker process is even registered; the worker then has to start, initialise its
+    /// connection, run one catalog transaction, report its <c>application_name</c> and finally call
+    /// <c>pgstat_report_activity(STATE_RUNNING)</c> before the join can say <c>Running</c>. Every read that
+    /// lands in that START EDGE sees <c>-infinity</c> AND <c>Scheduled</c>, which is this predicate's
+    /// dead-job arm. There is an END EDGE too, with a different cause: the catalog row is read under the
+    /// statement's MVCC snapshot while <c>pg_stat_activity</c> is read live from shared memory, so one SELECT
+    /// can pair a pre-<c>mark_end</c> row (<c>-infinity</c>) with a post-exit activity view (no backend, so
+    /// <c>Scheduled</c>). Both edges were captured on a PG18 + TimescaleDB 2.28.1 rig by polling
+    /// <see cref="StuckCompressionJobsSql"/> in a tight loop across a 10-second-cadence policy: every run
+    /// showed ~3 ms of <c>-infinity + Scheduled</c> before the first <c>Running</c> sample and one more such
+    /// sample after the last, in a run ~7.5 ms long end to end. On a Windows store — where the production
+    /// page came from — backend process creation is far slower than a Linux fork, so the start edge is a
+    /// larger share of a run that is itself only tens of milliseconds when there is nothing to compress.</para>
+    ///
+    /// <para><b>Why a confirm-read and not a same-source running signal.</b> The stat row DOES carry its own
+    /// mid-run marker — <c>mark_start</c> sets <c>last_finish = -infinity</c>, which the view surfaces as
+    /// <c>last_run_status IS NULL</c> and <c>last_run_duration IS NULL</c> (the duration is
+    /// <c>CASE WHEN js.last_finish &gt; js.last_start</c> in every <c>sql/views.sql</c> from 2.14 through
+    /// 2.28.1, so it reads NULL mid-run and never negative; the belief that it "goes negative" is not borne
+    /// out by any version checked) — and deriving "running" from it would make both inputs one row. It was
+    /// rejected because that marker is IDENTICAL for a run whose worker died
+    /// before <c>mark_end</c> ever ran, which is precisely the state this arm exists to catch: reproduced on
+    /// the rig by SIGKILLing a job's worker, after which the row read <c>-infinity + Scheduled +
+    /// last_run_status NULL</c> for the whole five-minute crash backoff. A same-source guard would have read
+    /// that as "running" and stayed silent on the one state it is for. Re-reading after a delay makes no such
+    /// assumption: an edge is over in milliseconds, a dead row is still dead seconds later.</para>
+    ///
+    /// <para><b>Why five seconds.</b> The transient it has to outlast is bounded by the run's own edges: the
+    /// start edge is one process start plus one catalog transaction (~3 ms measured on Linux; tens of
+    /// milliseconds is the realistic Windows figure, and a pathological second is still covered five times
+    /// over), and a short run bounds the whole exposure at its own duration (40–100 ms is what a production
+    /// store's hourly no-op compressions measure). Against what it costs, five seconds is 1/720 of the hourly
+    /// cadence and 1/4,320 of the six-hour <see cref="StuckRunningBound"/> floor, so a genuinely dead job is
+    /// detected on the same hourly pass it always was, five seconds later. And it is far below the shortest
+    /// PERSISTENT <c>-infinity</c> state there is: TimescaleDB's crash backoff holds the row at
+    /// <c>-infinity</c> for at least <c>MIN_WAIT_AFTER_CRASH_MS</c> (five minutes) before the scheduler
+    /// re-runs a crashed job, so a real crash cannot slip between the two reads. The check is AWAITED on the
+    /// worker's serial sweep loop (#2327's concern), so the delay is bounded, cancellable, and paid only on
+    /// the rare pass where the arm tripped at all.</para>
+    /// </summary>
+    public static readonly TimeSpan StuckCompressionConfirmDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The compression-job health check's wall-clock phase (#3575): how many seconds past a minute boundary
+    /// the hourly check is pinned to. <see cref="NextCompressionCheckUtc"/> applies it.
+    ///
+    /// <para><b>Why the check needs a phase at all, stated against how the two schedules are really
+    /// anchored — which is not how the postmortem first described them.</b> Every compression policy this
+    /// product owns runs on a FIXED schedule whose <c>initial_start</c> is <c>date_trunc('hour', now()) +
+    /// 1 hour + &lt;phase minutes&gt;</c> (<see cref="AddCompressionPolicySql(string)"/>, #3035), so its runs
+    /// begin at <c>:MM:00.000</c> of the wall clock for the 24 minutes of <see cref="CompressionPhaseMinutes"/>
+    /// — three jobs to a minute, every hour, on every store. The health check, by contrast, was anchored to
+    /// nothing in the wall clock: its first sample was the first sweep pass after service start and each
+    /// later one was scheduled as <c>UtcNow + 1 hour</c> at the moment of the previous fire, which lands on
+    /// the first 15-second sweep pass at or after that instant. So its second-of-the-hour SLIPPED forward by
+    /// the loop's latency every hour — a few seconds to fifteen — and swept across every minute boundary in
+    /// the band in turn, roughly one boundary every twelve hours. The service behind the production page
+    /// started at <c>:46:13</c>; seven hourly slips later its sample sat 53 ms past <c>:47:00</c>, the minute
+    /// <c>file_io_stats</c> compresses on. The schedules were therefore NOT aligned by construction — a
+    /// service-start anchor drifts, a wall-clock anchor does not — and the collision was the ~1-in-a-hundred
+    /// draw a drifting sample takes each time it crosses a boundary: the crossing is certain, the landing
+    /// inside a ~60 ms window is chance. That is still a false page every month or two per store, forever,
+    /// which is what "structural" correctly meant.</para>
+    ///
+    /// <para><b>Why thirty seconds and not an offset from the service start.</b> Any offset from a DRIFTING
+    /// anchor drifts with it, so "+N minutes from start" would cross the same boundaries N minutes later.
+    /// The only offset that holds is one measured from the jobs' own grid, and the grid step is one minute
+    /// with every job at <c>:00</c> of its minute — so half a step, <c>:30</c>, is the point furthest from
+    /// every job's start instant in both directions: 30 s from the previous boundary and 30 s from the next,
+    /// against edges measured in milliseconds and runs measured in tens of milliseconds when there is nothing
+    /// to compress. (A run that IS compressing a chunk lasts minutes and straddles <c>:30</c>, but a job that
+    /// long reports <c>Running</c>, which the <c>-infinity</c> arm already yields to.) Pinning to the wall
+    /// clock rather than the previous fire is what stops the drift: <see cref="NextCompressionCheckUtc"/>
+    /// floors the hourly due time to its minute and adds this phase, so a fire at <c>:47:3x</c> schedules
+    /// the next at exactly <c>:47:30</c>. A fire that lands LATE in its minute (a slow sweep pass) snaps the
+    /// next due back to <c>:30</c> of that same minute, a few seconds short of a full hour; one that lands in
+    /// the NEXT minute moves the check one whole minute later. Either way the sample is at <c>:30</c>, and
+    /// nothing the loop does can walk it toward <c>:00</c>.</para>
+    ///
+    /// <para>The first check after a restart is deliberately NOT phased — it runs on the first sweep pass,
+    /// because a restart is when an operator is reading the log and wants the store's job health now — so
+    /// that single sample keeps the pre-#3575 odds (24 minutes × ~0.1 s of edge in 3,600 s, under 0.1 %),
+    /// and <see cref="StuckCompressionConfirmDelay"/> covers it the same way it covers every other sample.
+    /// The phase is the hardening; the confirm-read is the fix.</para>
+    /// </summary>
+    public const int CompressionCheckPhaseSeconds = 30;
+
+    /// <summary>
+    /// When the compression-job health check should next run (#3575): one <paramref name="interval"/> after
+    /// <paramref name="nowUtc"/>, snapped to <see cref="CompressionCheckPhaseSeconds"/> past that minute so no
+    /// steady-state sample is ever taken on the <c>:MM:00</c> instant the compression policies fire on.
+    /// Pure, so it pins. The snap moves the due time by at most 30 s either way, so the cadence stays
+    /// hourly to within the loop's own latency; what it never does is land on <c>:00</c>.
+    /// </summary>
+    public static DateTime NextCompressionCheckUtc(DateTime nowUtc, TimeSpan interval)
+    {
+        var due = nowUtc + interval;
+        var minute = new DateTime(due.Ticks - (due.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc);
+        return minute.AddSeconds(CompressionCheckPhaseSeconds);
+    }
+
+    /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
     /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — the scheduler
@@ -5645,6 +5761,8 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
+    /// <see cref="ClassifyCompressionJob"/> is the same decision naming WHICH arm fired, for the caller that
+    /// has to treat the two arms differently.
     ///
     /// <para><b><c>-infinity</c> is ALSO the engine's mid-run marker</b>, measured live on TimescaleDB
     /// 2.x (pg17): from the moment the scheduler picks up a due job until its run completes,
@@ -5655,6 +5773,17 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// the CI flake was the live test catching its own re-arm-triggered run). A running job is therefore
     /// left to the second arm, whose elapsed bound is what actually distinguishes a hung run from a
     /// healthy one.</para>
+    ///
+    /// <para><b>And the running guard is itself a non-atomic read (#3575).</b> <c>job_status</c> comes from
+    /// <c>pg_stat_activity</c> and <c>next_start</c> from <c>bgw_job_stat</c>; the scheduler commits
+    /// <c>-infinity</c> before the worker exists, and the worker is gone before its <c>mark_end</c> is
+    /// visible to a snapshot taken a moment earlier, so at both edges of every run the view reads
+    /// <c>-infinity</c> AND <c>Scheduled</c> — this arm, on a healthy job, for a few milliseconds an hour.
+    /// A production store paged on exactly that: the alert stamp sat 53 ms inside a 63 ms run that
+    /// succeeded. This predicate stays pure and single-shot on purpose; the caller closes the race by
+    /// re-reading after <see cref="StuckCompressionConfirmDelay"/> and requiring the <c>-infinity</c> arm
+    /// to persist (<see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>),
+    /// and the worker keeps its samples off the jobs' run instant (<see cref="NextCompressionCheckUtc"/>).</para>
     ///
     /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
     /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
@@ -5669,13 +5798,30 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
+        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, out reason)
+            != StuckCompressionJobArm.None;
+
+    /// <summary>
+    /// <see cref="IsCompressionJobStuck"/> with the arm named (#3575): the confirm-read applies ONLY to
+    /// <see cref="StuckCompressionJobArm.NextStartNegativeInfinity"/>, because that is the arm whose inputs
+    /// race; <see cref="StuckCompressionJobArm.RunningPastBound"/> is judged on six hours of elapsed time and
+    /// a second read five seconds later could not change it. Same decision, same reason text — this is the
+    /// implementation and the boolean is its projection, so the two cannot drift.
+    /// </summary>
+    public static StuckCompressionJobArm ClassifyCompressionJob(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        out string reason)
     {
         var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
 
         if (nextStartIsNegativeInfinity && !isRunning)
         {
             reason = "next_start is -infinity — the scheduler will never run it again";
-            return true;
+            return StuckCompressionJobArm.NextStartNegativeInfinity;
         }
 
         if (isRunning
@@ -5690,12 +5836,12 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     CultureInfo.InvariantCulture,
                     "stuck in the Running state for {0:F0} minutes (over the {1:F0}-minute bound) — the run hung and never finished",
                     elapsed.TotalMinutes, bound.TotalMinutes);
-                return true;
+                return StuckCompressionJobArm.RunningPastBound;
             }
         }
 
         reason = "";
-        return false;
+        return StuckCompressionJobArm.None;
     }
 
     /// <summary>
@@ -5716,6 +5862,16 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// while <c>last_run_started_at</c> is <c>bgw_job_stat.last_start</c>. A job's FIRST run therefore reads
     /// <c>Running</c> while its start time is still the sentinel, and that window flagged a perfectly healthy
     /// job as stuck — which the self-heal then "fixed" by re-arming a job that was running fine.</para>
+    ///
+    /// <para><b>The same two sources are why one execution of this statement cannot be trusted alone on the
+    /// <c>-infinity</c> arm (#3575).</b> <c>next_start_neg_infinity</c> is the stat row under the statement's
+    /// snapshot; <c>job_status</c> is <c>pg_stat_activity</c> read live. At the start of every run the row
+    /// already says <c>-infinity</c> while no backend yet says <c>Running</c>, and at the end the backend can
+    /// be gone while the snapshot still holds the pre-<c>mark_end</c> row. No rewrite of this SELECT closes
+    /// that — the skew is between a catalog snapshot and live shared memory inside TimescaleDB's own view —
+    /// which is why <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// executes it TWICE, <see cref="StuckCompressionConfirmDelay"/> apart, when that arm trips. The text is
+    /// unchanged from #1760; what changed is how many times it is asked.</para>
     /// </summary>
     public const string StuckCompressionJobsSql = @"
 SELECT
@@ -5739,8 +5895,32 @@ WHERE j.proc_name LIKE '%compression%'
     /// every other job type are untouched. Failure-isolated: a store hiccup, or the views being absent (a
     /// plain-PostgreSQL store — the caller also gates on the extension), yields an empty list and a Debug line,
     /// never a throw.
+    ///
+    /// <para><b>The <c>-infinity</c> arm is CONFIRMED before it is reported (#3575).</b> When, and only when,
+    /// the first read flags a job on that arm, this waits <see cref="StuckCompressionConfirmDelay"/>, runs
+    /// <see cref="StuckCompressionJobsSql"/> once more, and reports the job only if the same arm trips
+    /// again. A run-instant edge — the view pairing the scheduler's already-committed <c>-infinity</c> with a
+    /// worker that is not yet, or no longer, visible as <c>Running</c> — is over in milliseconds and clears;
+    /// a row the scheduler has genuinely abandoned, or a crashed run sitting out its five-minute backoff,
+    /// reads the same on both passes and is reported with the latency it always had plus five seconds. One
+    /// confirm per pass, not per job: the delay is taken once however many jobs tripped. The
+    /// <see cref="StuckCompressionJobArm.RunningPastBound"/> arm is reported from the first read as before —
+    /// a six-hour elapsed bound has nothing to gain from a second look five seconds later.</para>
+    ///
+    /// <para><b>A confirm read that FAILS confirms nothing.</b> Its <c>-infinity</c> trips are dropped for
+    /// this pass, with a Warning naming the jobs and the consequence, rather than reported on the strength of
+    /// the one read this issue proved insufficient: compression is a slow archival tier where a dead job
+    /// takes hours to matter, so deferring a real detection to the next hourly pass costs little, while a
+    /// false page on the family that reports the store's own health is the very thing being fixed. The
+    /// stuck-Running results from the first read are still returned. Like the first read's own catch, this
+    /// swallow is logged but not counted by the #3013 read-failure surface — that census covers the worker's
+    /// catch blocks, and both reads sit one level below it.</para>
+    ///
+    /// <para>The gated live test polls this method until a job it just re-armed reads healthy, and the
+    /// confirm only makes that settle sooner: the mid-run marker it used to have to wait out is now judged
+    /// twice and cleared inside one call instead of surfacing as a flagged poll.</para>
     /// </summary>
-    public static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
+    public static Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
         NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -5748,39 +5928,206 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var stuck = new List<StuckCompressionJob>();
+        return ReadStuckCompressionJobsAsync(
+            ct => ReadCompressionJobStatRowsAsync(connection, ct),
+            Task.Delay,
+            nowUtc,
+            logger,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The seam <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// is built on, with the two things a test needs to control injected: the read (so a transient edge and
+    /// a persistent dead row can each be scripted as a pair of result sets, and a failing confirm as a throw)
+    /// and the delay (so the pin can assert it is taken exactly when the <c>-infinity</c> arm tripped and
+    /// never otherwise, without sleeping). Internal rather than private for that reason alone; production
+    /// reaches it only through the connection overload.
+    /// </summary>
+    internal static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
+        Func<CancellationToken, Task<IReadOnlyList<CompressionJobStatRow>>> readRows,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        DateTime nowUtc,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        if (readRows is null)
+        {
+            throw new ArgumentNullException(nameof(readRows));
+        }
+
+        if (delay is null)
+        {
+            throw new ArgumentNullException(nameof(delay));
+        }
+
         try
         {
-            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
-
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            var first = ClassifyStuckCompressionJobs(await readRows(cancellationToken), nowUtc);
+            if (!first.Any(f => f.Arm == StuckCompressionJobArm.NextStartNegativeInfinity))
             {
-                long jobId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
-                bool negInfinity = !reader.IsDBNull(1) && reader.GetBoolean(1);
-                string? jobStatus = reader.IsDBNull(2) ? null : reader.GetString(2);
-                DateTime? lastRunStartedAt = reader.IsDBNull(3)
-                    ? null
-                    : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc);
-                TimeSpan? scheduleInterval = reader.IsDBNull(4)
-                    ? null
-                    : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture));
-                string? hypertable = reader.IsDBNull(5) ? null : reader.GetString(5);
-
-                if (IsCompressionJobStuck(negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, nowUtc, out var reason))
-                {
-                    stuck.Add(new StuckCompressionJob(jobId, hypertable, reason));
-                }
+                /* Nothing on the racing arm: no delay, no second read. The common hourly pass costs exactly
+                   what it did before #3575. */
+                return first.Select(f => f.ToJob()).ToList();
             }
+
+            await delay(StuckCompressionConfirmDelay, cancellationToken);
+
+            IReadOnlyList<CompressionJobStatRow>? confirm;
+            try
+            {
+                confirm = await readRows(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The views were readable seconds ago, so this is a store hiccup on the one read that decides
+                   whether to page — say so at Warning, name what is deferred, and judge it next hour. */
+                confirm = null;
+                logger?.LogWarning(
+                    "Compression-job health check: {Count} job(s) read next_start = -infinity while not Running, but the confirm read {Delay:F0} s later failed — not judged this pass, re-checked next hour (#3575): {Message}",
+                    first.Count(f => f.Arm == StuckCompressionJobArm.NextStartNegativeInfinity),
+                    StuckCompressionConfirmDelay.TotalSeconds,
+                    ex.Message);
+            }
+
+            return ConfirmStuckCompressionJobs(first, confirm, nowUtc, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* The views are absent (a plain-PG store or the extension was removed) or the store hiccuped —
                no signal this check. The caller already gates on the extension; this is belt-and-suspenders. */
             logger?.LogDebug("Compression-job health check: could not read job stats: {Message}", ex.Message);
+            return Array.Empty<StuckCompressionJob>();
+        }
+    }
+
+    /// <summary>
+    /// The pure merge of a first pass with its confirm pass (#3575), separated so the decision table pins
+    /// without a clock or a store:
+    /// <list type="bullet">
+    /// <item><see cref="StuckCompressionJobArm.RunningPastBound"/> from the first pass — reported, untouched by
+    /// the confirm.</item>
+    /// <item><see cref="StuckCompressionJobArm.NextStartNegativeInfinity"/> from the first pass, and the SAME arm
+    /// on the confirm pass — reported, carrying the confirm pass's reason (the two are identical today; the
+    /// later read is the one that stood).</item>
+    /// <item>That arm on the first pass but not on the confirm — the run-instant edge; cleared, and logged at
+    /// Information because a person reading the log after this alert family fires deserves to find the near
+    /// miss, and it is rare enough (a few a year per store) never to be noise.</item>
+    /// <item><paramref name="confirm"/> null (the confirm read failed) — every <c>-infinity</c> trip is
+    /// dropped; the caller has already logged why.</item>
+    /// </list>
+    /// A job that appears on the confirm pass but not the first is not reported either: the confirm exists to
+    /// ratify the first pass, not to widen it, and a job that only just went <c>-infinity</c> gets its own
+    /// two reads next hour.
+    /// </summary>
+    internal static IReadOnlyList<StuckCompressionJob> ConfirmStuckCompressionJobs(
+        IReadOnlyList<ClassifiedCompressionJob> first,
+        IReadOnlyList<CompressionJobStatRow>? confirm,
+        DateTime nowUtc,
+        ILogger? logger)
+    {
+        if (first is null)
+        {
+            throw new ArgumentNullException(nameof(first));
         }
 
-        return stuck;
+        var result = new List<StuckCompressionJob>(first.Count);
+        var confirmed = confirm is null
+            ? null
+            : ClassifyStuckCompressionJobs(confirm, nowUtc)
+                .Where(c => c.Arm == StuckCompressionJobArm.NextStartNegativeInfinity)
+                .ToDictionary(c => c.Row.JobId);
+
+        foreach (var flagged in first)
+        {
+            switch (flagged.Arm)
+            {
+                case StuckCompressionJobArm.RunningPastBound:
+                    result.Add(flagged.ToJob());
+                    break;
+
+                case StuckCompressionJobArm.NextStartNegativeInfinity:
+                    if (confirmed is null)
+                    {
+                        break;
+                    }
+
+                    if (confirmed.TryGetValue(flagged.Row.JobId, out var still))
+                    {
+                        result.Add(still.ToJob());
+                    }
+                    else
+                    {
+                        logger?.LogInformation(
+                            "Compression-job health check: job {JobId}{Hypertable} read next_start = -infinity while not Running, and {Delay:F0} s later it was scheduled normally — the run-instant edge of TimescaleDB's job_stats view, not a stuck job; nothing re-armed, nothing alerted (#3575)",
+                            flagged.Row.JobId,
+                            string.IsNullOrEmpty(flagged.Row.HypertableName) ? "" : " on " + flagged.Row.HypertableName,
+                            StuckCompressionConfirmDelay.TotalSeconds);
+                    }
+
+                    break;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// One pass of the pure predicate over a result set: every row it flags, with the arm that fired. Rows
+    /// the predicate clears are not returned.
+    /// </summary>
+    internal static List<ClassifiedCompressionJob> ClassifyStuckCompressionJobs(
+        IReadOnlyList<CompressionJobStatRow> rows, DateTime nowUtc)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        var flagged = new List<ClassifiedCompressionJob>();
+        foreach (var row in rows)
+        {
+            var arm = ClassifyCompressionJob(
+                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, out var reason);
+            if (arm != StuckCompressionJobArm.None)
+            {
+                flagged.Add(new ClassifiedCompressionJob(row, arm, reason));
+            }
+        }
+
+        return flagged;
+    }
+
+    /// <summary>
+    /// One execution of <see cref="StuckCompressionJobsSql"/>, mapped row for row and NOT failure-isolated:
+    /// the isolation belongs to the caller, which has to tell a failed FIRST read (no signal, Debug) from a
+    /// failed CONFIRM read (a deferred judgement, Warning). Both <c>-infinity</c> tests already ran in SQL;
+    /// the #1760 sentinel arrives here as a NULL.
+    /// </summary>
+    private static async Task<IReadOnlyList<CompressionJobStatRow>> ReadCompressionJobStatRowsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var rows = new List<CompressionJobStatRow>();
+        using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            long jobId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+            bool negInfinity = !reader.IsDBNull(1) && reader.GetBoolean(1);
+            string? jobStatus = reader.IsDBNull(2) ? null : reader.GetString(2);
+            DateTime? lastRunStartedAt = reader.IsDBNull(3)
+                ? null
+                : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc);
+            TimeSpan? scheduleInterval = reader.IsDBNull(4)
+                ? null
+                : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture));
+            string? hypertable = reader.IsDBNull(5) ? null : reader.GetString(5);
+
+            rows.Add(new CompressionJobStatRow(jobId, negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, hypertable));
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -6646,6 +6993,51 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// WHICH arm of <see cref="TimescaleSupport.IsCompressionJobStuck"/> fired (#3575), from
+/// <see cref="TimescaleSupport.ClassifyCompressionJob"/>. Exists because the two arms need different
+/// treatment downstream: <see cref="NextStartNegativeInfinity"/> is judged on two inputs that TimescaleDB's
+/// view reads from independent sources and is therefore CONFIRMED by a second read before it is reported;
+/// <see cref="RunningPastBound"/> is judged on hours of elapsed time and is reported from the first read.
+/// </summary>
+public enum StuckCompressionJobArm
+{
+    /// <summary>Healthy — neither arm fired.</summary>
+    None,
+
+    /// <summary><c>next_start = -infinity</c> while the job is not reporting <c>Running</c>: the dead-job arm,
+    /// and the one that races the run instant.</summary>
+    NextStartNegativeInfinity,
+
+    /// <summary><c>Running</c> since before <see cref="TimescaleSupport.StuckRunningBound"/>: the hung-run
+    /// arm.</summary>
+    RunningPastBound,
+}
+
+/// <summary>
+/// One row of <see cref="TimescaleSupport.StuckCompressionJobsSql"/> as the predicate consumes it (#3575):
+/// the two <c>-infinity</c> tests already applied in SQL, the #1760 sentinel already NULLIFed. Internal because
+/// it is the seam the confirm-read pins through, not a product surface; the product's result type is
+/// <see cref="StuckCompressionJob"/>.
+/// </summary>
+internal sealed record CompressionJobStatRow(
+    long JobId,
+    bool NextStartIsNegativeInfinity,
+    string? JobStatus,
+    DateTime? LastRunStartedAtUtc,
+    TimeSpan? ScheduleInterval,
+    string? HypertableName);
+
+/// <summary>
+/// A <see cref="CompressionJobStatRow"/> the predicate flagged, with the arm that fired and its reason —
+/// the unit <see cref="TimescaleSupport.ConfirmStuckCompressionJobs"/> merges two passes of (#3575).
+/// </summary>
+internal sealed record ClassifiedCompressionJob(CompressionJobStatRow Row, StuckCompressionJobArm Arm, string Reason)
+{
+    /// <summary>The product-facing shape of this flag.</summary>
+    public StuckCompressionJob ToJob() => new(Row.JobId, Row.HypertableName, Reason);
+}
 
 /// <summary>
 /// One background job's cadence reading (#2136): the last SUCCESSFUL run's duration against the job's own

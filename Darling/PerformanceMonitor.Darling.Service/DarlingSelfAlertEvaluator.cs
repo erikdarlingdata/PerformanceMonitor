@@ -3872,6 +3872,22 @@ internal sealed class DarlingSelfAlertEvaluator
     /// resolution row is written (the sibling conditions' edge shape). Gated on the master alerts switch.
     /// Re-arm happens at most ONCE per job per check (only on the first-detection transition). Internal so it
     /// pins directly with a recording deliverer, a controllable clock, and a fake re-arm delegate.
+    ///
+    /// <para><b>What this machine trusts, and what it cost when the trust was misplaced (#3575).</b> This takes
+    /// <paramref name="stuckJobs"/> as settled fact: first sight re-arms and pages Critical, absence an hour
+    /// later posts Recovered. So one false row in the list is not one false message but three — the page, the
+    /// idempotent re-arm it narrates, and the recovery of a job that was never unwell — on the alert family
+    /// that reports the store's own health. A production store produced exactly that set from a healthy job:
+    /// the detector's <c>-infinity</c> arm already guarded on <c>job_status</c>, but TimescaleDB's
+    /// <c>job_stats</c> view assembles that status from <c>pg_stat_activity</c> and <c>next_start</c> from the
+    /// job-stat row, and for a few milliseconds at either edge of every run the two disagree in exactly the
+    /// dead-job shape; the check's sample landed 53 ms into a 63 ms run that succeeded. The fix is upstream
+    /// of here and deliberately so: <c>TimescaleSupport.ReadStuckCompressionJobsAsync</c> now confirms a
+    /// <c>-infinity</c> trip with a second read five seconds later before a job reaches this list, and the
+    /// worker pins its samples to <c>:30</c> past the minute, off the policies' <c>:MM:00</c> run instants.
+    /// This method keeps its single-sample semantics — first sight IS first sight — because the input is now
+    /// worth that trust, and adding hysteresis here instead would have bought the same protection for an
+    /// hour of detection latency on a genuinely dead job.</para>
     /// </summary>
     internal async Task ApplyCompressionJobsStuckAsync(
         IReadOnlyList<StuckCompressionJob> stuckJobs,
