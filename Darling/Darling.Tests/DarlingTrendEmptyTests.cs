@@ -96,8 +96,10 @@ public sealed class DarlingTrendEmptyTests
                 Assert.True(root.GetProperty("trend").GetArrayLength() > 0);
             }
 
-            /* #3529: total_granted_mb is an explicit null with the envelope naming the real source —
-               never the literal 0.0 an agent read as "granted was 0 all window". */
+            /* #3529, now the #3548 join's UNCOVERED arm (no memory_grant_stats rows seeded near these
+               points): total_granted_mb stays an explicit null with the envelope naming the real source —
+               never the literal 0.0 an agent read as "granted was 0 all window". The covered arms live in
+               DarlingMemoryTrendGrantJoinTests. */
             var memoryRoot = JsonDocument.Parse(memoryPayload).RootElement;
             Assert.Contains("get_memory_grants", memoryRoot.GetProperty("granted_note").GetString(), StringComparison.Ordinal);
             foreach (var point in memoryRoot.GetProperty("trend").EnumerateArray())
