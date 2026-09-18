@@ -1120,12 +1120,38 @@ public sealed class DarlingSelfAlertTests
 
     private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>A SERVED certificate (the host's lifetime verdict was Usable): NotBefore a year back, the
+    /// given NotAfter. The expiry arms care only about NotAfter.</summary>
     private static DarlingSelfAlertEvaluator.WebTlsCertReport Cert(
         DateTime notAfterUtc, string subject = "CN=Darling Web", string thumbprint = "ABC123DEF456") =>
-        new(Configured: true, NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero), Subject: subject, Thumbprint: thumbprint);
+        new(
+            Configured: true,
+            NotBeforeUtc: new DateTimeOffset(CertClock.AddDays(-365), TimeSpan.Zero),
+            NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero),
+            Subject: subject,
+            Thumbprint: thumbprint,
+            RefusedNotYetValid: false);
+
+    /// <summary>A certificate the host REFUSED at load because its window had not opened (#3517): the host's
+    /// verdict rides the flag; NotAfter is far out, which is exactly what made it read as healthy before.</summary>
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport NotYetValidCert(
+        DateTime notBeforeUtc, string thumbprint = "FUTURE0123") =>
+        new(
+            Configured: true,
+            NotBeforeUtc: new DateTimeOffset(notBeforeUtc, TimeSpan.Zero),
+            NotAfterUtc: new DateTimeOffset(notBeforeUtc.AddDays(365), TimeSpan.Zero),
+            Subject: "CN=Darling Web (rotation)",
+            Thumbprint: thumbprint,
+            RefusedNotYetValid: true);
 
     private static readonly DarlingSelfAlertEvaluator.WebTlsCertReport NoWebTlsCert =
-        new(Configured: false, NotAfterUtc: default, Subject: string.Empty, Thumbprint: string.Empty);
+        new(
+            Configured: false,
+            NotBeforeUtc: default,
+            NotAfterUtc: default,
+            Subject: string.Empty,
+            Thumbprint: string.Empty,
+            RefusedNotYetValid: false);
 
     private static double WebTlsWarnDays => DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays;
 
@@ -1262,14 +1288,25 @@ public sealed class DarlingSelfAlertTests
     {
         var none = DarlingWorker.BuildWebTlsCertReport(null);
         Assert.False(none.Configured);
+        Assert.False(none.RefusedNotYetValid);
 
+        var fromUtc = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
         var whenUtc = new DateTimeOffset(2027, 1, 2, 3, 4, 5, TimeSpan.Zero);
-        var snap = new WebTlsCertificateState.Snapshot(whenUtc, "CN=x", "THUMB");
+        var snap = new WebTlsCertificateState.Snapshot(fromUtc, whenUtc, "CN=x", "THUMB", RefusedNotYetValid: false);
         var report = DarlingWorker.BuildWebTlsCertReport(snap);
         Assert.True(report.Configured);
+        Assert.Equal(fromUtc, report.NotBeforeUtc);
         Assert.Equal(whenUtc, report.NotAfterUtc);
         Assert.Equal("CN=x", report.Subject);
         Assert.Equal("THUMB", report.Thumbprint);
+        Assert.False(report.RefusedNotYetValid);
+
+        /* #3517: the host's not-yet-valid verdict crosses the seam untouched — the builder neither drops it nor
+           re-derives it from the dates (here NotBefore is in the past relative to nothing; the flag is the
+           host's word and that is what the evaluator fires on). */
+        var refused = DarlingWorker.BuildWebTlsCertReport(
+            new WebTlsCertificateState.Snapshot(fromUtc, whenUtc, "CN=x", "THUMB", RefusedNotYetValid: true));
+        Assert.True(refused.RefusedNotYetValid);
     }
 
     /// <summary><c>WebTlsCertificateState</c> is the host→worker seam: Publish sets, Clear (the #3514 follow-up)
@@ -1280,11 +1317,156 @@ public sealed class DarlingSelfAlertTests
         var state = new WebTlsCertificateState();
         Assert.Null(state.Read());
 
-        state.Publish(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero), "CN=x", "THUMB");
+        state.Publish(
+            new DateTimeOffset(2029, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            "CN=x", "THUMB", refusedNotYetValid: false);
         Assert.NotNull(state.Read());
 
         state.Clear();
         Assert.Null(state.Read());
+    }
+
+    /* ---------------- web dashboard TLS certificate not yet valid (#3517) ---------------- */
+
+    /// <summary>
+    /// The #3517 gap: a certificate the host refused at load for a future <c>NotBefore</c> has a far-out
+    /// <c>NotAfter</c>, so on the expiry test alone it was the healthiest certificate imaginable while the LAN
+    /// dashboard sat loopback-only. The host's carried verdict fires the SAME family — same fleet key, same
+    /// metric, so an operator's mute rule for it still applies — at Critical, and the text says what happened
+    /// (not yet valid, until when, loopback-only), why (clock, or a future-dated certificate) and what to do
+    /// (fix it, then restart — the host will not re-decide on its own).
+    /// </summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_FiresCritical_UnderTheExpiryFamilyKey_NamingTheCauseAndTheRestart()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, fired.MetricName);   // the family, not a new metric
+        Assert.Equal("webtlscert", fired.ServerKey);                                          // the family's fleet key
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);                            // as unreachable as expired
+        Assert.Contains("NOT YET VALID", fired.ShortMessage);
+        Assert.Contains("loopback-only", fired.ShortMessage);
+        Assert.DoesNotContain("EXPIRED", fired.ShortMessage);
+        Assert.Contains($"{CertClock.AddDays(3):u}", fired.DetailText);   // until when
+        Assert.Contains("LOOPBACK-ONLY", fired.DetailText);               // what happened
+        Assert.Contains("clock", fired.DetailText);                       // why (likely)
+        Assert.Contains("future rotation", fired.DetailText);             // why (the other one)
+        Assert.Contains("restart the service", fired.DetailText);         // what to do
+        Assert.Contains("FUTURE0123", fired.DetailText);                  // ties to the host's own log line
+        Assert.Equal(0d, fired.NumericCurrentValue);   // state-only, like every firing of this family
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The verdict is the host's, not the clock's: once <c>NotBefore</c> has passed the host is STILL
+    /// loopback-only (it decided at load and does not revisit), so the alert must keep standing rather than
+    /// resolve on the date — and its text switches to the fact that now matters, that a restart is needed.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_WindowOpensLater_StillFires_SaysTheHostDecidedAtLoad()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+        var notBefore = CertClock.AddHours(2);
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(notBefore), Ct);   // fires on entry
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The window opened and the daily refire has elapsed; the host has NOT restarted, so the snapshot it
+           published at load is unchanged and still says refused. */
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(1);
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(notBefore), Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.History.Records);   // no false resolution on the date
+        var restated = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Critical, restated.Severity);
+        Assert.Contains("after the service started", restated.DetailText);
+        Assert.Contains("until it is restarted", restated.DetailText);
+    }
+
+    /// <summary>A served certificate (the host's verdict was Usable) with a future-looking but past-relative
+    /// NotBefore and a far-out NotAfter is healthy — the arm keys off the carried verdict alone, so a Usable
+    /// verdict with any NotBefore raises nothing. The #3514 silence contract, restated over the new field.</summary>
+    [Fact]
+    public async Task WebTlsCert_ServedAndFarOut_StaysSilent_WhateverNotBeforeSays()
+    {
+        var h = new Harness { Now = CertClock };
+
+        /* NotBefore AHEAD of the clock but the host said Usable (it is the host's clock that decides, and the
+           evaluator must not second-guess it from the date). */
+        var servedDespiteDate = NotYetValidCert(CertClock.AddDays(3)) with { RefusedNotYetValid = false };
+        await h.Build().ApplyWebTlsCertificateAsync(servedDespiteDate, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The transition the issue asked for: not-yet-valid → the host stops serving (Clear() on stop,
+    /// or the operator fixes the clock/certificate and the restart's stop half runs first) → the family's ONE
+    /// resolution, under the same metric pairing the triage endpoint and the history already know.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ThenNoLongerServing_ResolvesUnderTheFamilyPairing()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // host Clear()ed the snapshot
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+
+        /* Once resolved, a fresh usable publish (the restart's start half, same process — a dashboard toggle)
+           is healthy and writes nothing more. */
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(400)), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.History.Records);
+    }
+
+    /// <summary>The back-to-back rebind: Stop and Start ran inside one supervisor tick, so the sweep never saw
+    /// the null and goes straight from the refused snapshot to a served one. That is the Configured=true
+    /// resolution arm, and its line has to be true of THIS transition too — "being served", not only "outside
+    /// the expiry window".</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ThenServedDirectly_ResolvesWithALineTrueOfBothArms()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(400)), Ct);   // re-published usable, no null in between
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+        Assert.Contains("being served", resolution.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>Expired outranks not-yet-valid when a refused-at-start certificate is then outlived by the
+    /// process: a clock fix cannot cure an expired certificate, so that is the fact to lead with.</summary>
+    [Fact]
+    public async Task WebTlsCert_RefusedNotYetValid_ButNowAlsoExpired_ReadsAsExpired()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        /* NotBefore 400 days back, NotAfter 35 days back — a certificate that was not yet valid when this
+           (very long-lived) process started and has since expired outright. */
+        var refusedThenLapsed = NotYetValidCert(CertClock.AddDays(-400));   // NotAfter = NotBefore + 365 = 35 days ago
+        await e.ApplyWebTlsCertificateAsync(refusedThenLapsed, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EXPIRED", fired.ShortMessage);
+        Assert.DoesNotContain("NOT YET VALID", fired.ShortMessage);
     }
 
     [Fact]

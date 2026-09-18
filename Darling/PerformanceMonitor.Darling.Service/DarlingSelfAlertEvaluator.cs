@@ -3395,8 +3395,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// platform-neutral copy of the loaded certificate's facts so the alert path never touches an X.509 type.
     /// <paramref name="Configured"/> is false when there is no LAN TLS certificate to watch (loopback-only, no
     /// <c>tls</c> block, or an unusable one); the other fields are meaningful only when it is true.
+    /// <paramref name="RefusedNotYetValid"/> is the host's own load-time verdict (#3517): it judged
+    /// <paramref name="NotBeforeUtc"/> still ahead of the clock, refused the certificate, and bound loopback-only
+    /// — a decision it does not revisit until its next start, which is why it travels as a flag and is never
+    /// re-derived here from the date.
     /// </summary>
-    internal sealed record WebTlsCertReport(bool Configured, DateTimeOffset NotAfterUtc, string Subject, string Thumbprint);
+    internal sealed record WebTlsCertReport(
+        bool Configured,
+        DateTimeOffset NotBeforeUtc,
+        DateTimeOffset NotAfterUtc,
+        string Subject,
+        string Thumbprint,
+        bool RefusedNotYetValid);
 
     /// <summary>
     /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
@@ -3440,10 +3450,24 @@ internal sealed class DarlingSelfAlertEvaluator
     /// certificate fails every TLS handshake, so the LAN dashboard is already unreachable and binds
     /// loopback-only on the next restart.</para>
     ///
+    /// <para><b>The not-yet-valid arm (#3517).</b> A certificate whose <c>NotBefore</c> was still ahead when
+    /// the host loaded it — a skewed clock, or a certificate minted for a future rotation — is refused by the
+    /// host and the dashboard is loopback-only from the start. Its <c>NotAfter</c> is far out, so on the
+    /// expiry test alone it read as the healthiest certificate in the fleet and the degrade raised nothing
+    /// but a startup log line. This arm fires the SAME family at CRITICAL — the dashboard is exactly as
+    /// unreachable as it is when expired — under the same key and metric, so an operator's mute rule and the
+    /// deliverer's dedup treat it as the one condition it is: "the configured certificate is not being
+    /// served". It fires on the host's carried verdict, NOT on <c>NotBefore</c> against the clock, because
+    /// the host does not re-decide when the date passes: it stays loopback-only until it is restarted, and a
+    /// date-derived arm would have resolved the alert about a dashboard that was still down.</para>
+    ///
     /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
     /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
-    /// window) or TLS is no longer configured. Gated on the master alerts switch. Internal so it pins directly
-    /// with a recording deliverer and a controllable clock.</para>
+    /// window) or TLS is no longer configured — the not-yet-valid arm shares that resolution: the host
+    /// re-publishes a usable verdict on its next successful start (a fresh evaluator, so no resolution row is
+    /// written, the #3514 in-place-renewal finding), or clears the snapshot when the dashboard is stopped
+    /// (the <c>Configured=false</c> arm, which does resolve). Gated on the master alerts switch. Internal so it
+    /// pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
     internal async Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
     {
@@ -3454,22 +3478,30 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
 
-        /* Healthy is either "no certificate to watch" or "more than the warning window still to run". The
-           subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the DateTimeOffset(...)
-           Kind guard on a test-injected clock. */
+        /* The host's verdict, not the clock's: see the method summary. Meaningful only when configured. */
+        var refusedNotYetValid = report.Configured && report.RefusedNotYetValid;
+
+        /* Healthy is either "no certificate to watch" or "being served, with more than the warning window
+           still to run". The subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the
+           DateTimeOffset(...) Kind guard on a test-injected clock. */
         var healthy =
             !report.Configured
-            || report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow;
+            || (!refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
 
         if (healthy)
         {
             if (_activeWebTlsCert.TryRemove(WebTlsCertKey, out var was) && was)
             {
                 _lastWebTlsCertAlert.TryRemove(WebTlsCertKey, out _);
+                /* The configured-and-healthy line names BOTH facts the family alerts on — served, and outside
+                   the window — because the active alert it clears may have been either arm (#3517): a
+                   dashboard toggled off and on within one supervisor tick re-publishes a now-usable
+                   certificate before the sweep ever sees the null, so this is the line a cured
+                   not-yet-valid refusal resolves with too. */
                 await RecordResolutionAsync(new AlertResolution(
                     StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric,
                     report.Configured
-                        ? "The web dashboard's TLS certificate is no longer within the expiry window"
+                        ? "The web dashboard's TLS certificate is being served and is outside the expiry window"
                         : "The web dashboard is no longer serving a TLS certificate to watch"), cancellationToken);
             }
 
@@ -3490,28 +3522,63 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastWebTlsCertAlert[WebTlsCertKey] = now;
 
         var expired = report.NotAfterUtc.UtcDateTime <= now;
-        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired);
+        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired, refusedNotYetValid);
 
         await FireAsync(
             StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
             currentValue: currentValue,
-            thresholdValue: $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
+            thresholdValue: refusedNotYetValid && !expired
+                ? "valid at service start"
+                : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
             detail: detail,
-            severity: expired ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            /* Critical for BOTH refusals: expired and not-yet-valid leave the LAN dashboard equally unreachable. */
+            severity: expired || refusedNotYetValid ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
     }
 
-    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate expiry alert. The
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate alert. The
     /// subject and thumbprint match the web host's own startup log line, so an operator can tie the alert to
-    /// the certificate it named. Pure but for the caller's clock; pinned by tests.</summary>
+    /// the certificate it named. Pure but for the caller's clock; pinned by tests.
+    ///
+    /// <para>Expired outranks not-yet-valid when both hold (a refused-at-start certificate the process then
+    /// outlived): fixing the clock cannot bring an expired certificate back, so that is the fact to lead
+    /// with; the not-yet-valid text below is for the case a clock fix or the right certificate plus a restart
+    /// actually cures.</para></summary>
     private static (string ShortMessage, string Detail, string CurrentValue) RenderWebTlsCert(
-        WebTlsCertReport report, DateTime now, bool expired)
+        WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid)
     {
         var notAfter = report.NotAfterUtc.UtcDateTime;
         var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
+
+        if (refusedNotYetValid && !expired)
+        {
+            var notBefore = report.NotBeforeUtc.UtcDateTime;
+            var currentValue = $"not valid until {notBefore:u}; not being served";
+            var shortMessage =
+                $"web dashboard TLS certificate NOT YET VALID (valid from {notBefore:u}) — LAN dashboard is loopback-only";
+
+            /* Two tenses, because the operator reads this on the alert channel at some later hour: while the
+               window is still ahead, the clock is the likely culprit and the date is what to check it
+               against; once the window has opened, the only thing still wrong is that this process decided
+               before it did — and it will not re-decide without a restart, which is the one fact that would
+               otherwise surprise them. */
+            var clockLine = now < notBefore
+                ? $"The window opens {notBefore:u}: if that is in the past by any wall clock you trust, this host's clock "
+                  + "is behind; if it is genuinely ahead, the certificate installed is one issued for a future rotation."
+                : $"The window opened {notBefore:u}, after the service started — the host judged the certificate once, at load, "
+                  + "and stays loopback-only on that verdict until it is restarted.";
+            var detail =
+                $"The web dashboard's configured TLS certificate was not yet valid when the service started (not valid "
+                + $"until {notBefore:u}), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
+                + $"unreachable from the network, and it will not fall back to plain HTTP. {clockLine} Correct the system "
+                + "clock or install the currently-valid certificate, then restart the service so the host loads it "
+                + $"again. {certRef}";
+            return (shortMessage, detail, currentValue);
+        }
 
         if (expired)
         {

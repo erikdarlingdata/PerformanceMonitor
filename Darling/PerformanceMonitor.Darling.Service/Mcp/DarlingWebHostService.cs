@@ -507,15 +507,6 @@ public sealed class DarlingWebHostService : BackgroundService
                             var loaded = DarlingWebTls.Load(network.Tls!, plan.Shape);
                             var certificate = loaded.Leaf;
 
-                            /* #3514: publish the served certificate's expiry to the worker's alert sweep BEFORE
-                               the lifetime gate below, so an already-expired certificate the host is about to
-                               refuse still reaches the operator as a Critical self-alert, not only a log line.
-                               NotAfter is a LOCAL time (see the lifetime check below) — normalize to UTC. */
-                            _certState.Publish(
-                                new DateTimeOffset(certificate.NotAfter.ToUniversalTime()),
-                                certificate.Subject,
-                                certificate.Thumbprint);
-
                             if (plan.Warning is not null)
                             {
                                 _logger.LogWarning("Web dashboard TLS: {Warning}", plan.Warning);
@@ -529,16 +520,32 @@ public sealed class DarlingWebHostService : BackgroundService
                                LOCAL DateTimes, and while the implicit DateTime->DateTimeOffset conversion does
                                carry the local offset and would compare correctly, it reads as a UTC value to
                                everyone who follows. Convert where the trap is, not where it detonates. */
-                            var refusal = DarlingWebTls.LifetimeRefusal(
-                                certificate.NotBefore.ToUniversalTime(),
-                                certificate.NotAfter.ToUniversalTime(),
-                                DateTimeOffset.UtcNow);
-                            if (refusal is not null)
+                            var notBeforeUtc = new DateTimeOffset(certificate.NotBefore.ToUniversalTime());
+                            var notAfterUtc = new DateTimeOffset(certificate.NotAfter.ToUniversalTime());
+                            var lifetime = DarlingWebTls.CheckLifetime(notBeforeUtc, notAfterUtc, DateTimeOffset.UtcNow);
+
+                            /* #3514: publish the served certificate's facts to the worker's alert sweep BEFORE
+                               acting on the lifetime verdict, so a certificate the host is about to refuse still
+                               reaches the operator as a Critical self-alert, not only a log line. An expired one
+                               needs nothing but its NotAfter — the worker reads the lapse off the clock, as it
+                               must for a certificate that lapses mid-run. A NOT-YET-VALID one (#3517) needs the
+                               VERDICT carried: this host decided once, here, and stays loopback-only on that
+                               decision until its next start, whatever the clock does afterwards. A worker left
+                               to re-derive it from NotBefore would call the dashboard healthy the moment the
+                               date passed — while it is still unreachable. */
+                            _certState.Publish(
+                                notBeforeUtc,
+                                notAfterUtc,
+                                certificate.Subject,
+                                certificate.Thumbprint,
+                                refusedNotYetValid: lifetime.Status == DarlingWebTls.LifetimeStatus.NotYetValid);
+
+                            if (lifetime.Refusal is not null)
                             {
                                 loaded.Dispose();
                                 _logger.LogCritical(
                                     "Web dashboard TLS certificate cannot be used ({Refusal}) — refusing to expose; binding loopback-only.",
-                                    refusal);
+                                    lifetime.Refusal);
                                 networkMode = false;
                                 break;
                             }

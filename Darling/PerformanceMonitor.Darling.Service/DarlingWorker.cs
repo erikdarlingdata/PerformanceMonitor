@@ -1219,18 +1219,21 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Maps the web host's published TLS-certificate snapshot to the report the evaluator consumes (#3514):
     /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
-    /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its expiry and
-    /// identity through. Pure + static so the null-to-unconfigured seam pins in a unit test rather than only
-    /// through the sweep loop — the <see cref="BuildStoreUpgradeReport"/> precedent, and the seam the #3514
-    /// review flagged as previously tested only from the sides.
+    /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its validity window,
+    /// identity and the host's not-yet-valid verdict (#3517) through unchanged — the verdict is the host's to
+    /// make and this mapping must not re-derive or drop it. Pure + static so the null-to-unconfigured seam
+    /// pins in a unit test rather than only through the sweep loop — the <see cref="BuildStoreUpgradeReport"/>
+    /// precedent, and the seam the #3514 review flagged as previously tested only from the sides.
     /// </summary>
     internal static DarlingSelfAlertEvaluator.WebTlsCertReport BuildWebTlsCertReport(
         WebTlsCertificateState.Snapshot? snapshot)
         => new(
             Configured: snapshot is not null,
+            NotBeforeUtc: snapshot?.NotBeforeUtc ?? default,
             NotAfterUtc: snapshot?.NotAfterUtc ?? default,
             Subject: snapshot?.Subject ?? string.Empty,
-            Thumbprint: snapshot?.Thumbprint ?? string.Empty);
+            Thumbprint: snapshot?.Thumbprint ?? string.Empty,
+            RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false);
 
     /// <summary>
     /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
@@ -2170,7 +2173,9 @@ public sealed class DarlingWorker : BackgroundService
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
                once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
                run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
-               on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed. A null
+               on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed — and Critical
+               at once when the snapshot carries the host's not-yet-valid refusal (#3517: the dashboard is
+               loopback-only from the start, and the host does not re-decide when the date passes). A null
                snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
                failure-isolated so a throw never stops the fleet loop. */
             if (_selfAlerts is not null && DateTime.UtcNow >= _nextWebTlsCheckUtc)

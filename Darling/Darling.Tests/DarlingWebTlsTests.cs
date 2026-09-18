@@ -136,6 +136,34 @@ public sealed class DarlingWebTlsTests
         Assert.NotNull(DarlingWebTls.LifetimeRefusal(Now.AddDays(-10), Now, Now));
     }
 
+    /// <summary>#3517: the gate's KIND is what the web host carries to the worker's self-alert (the host
+    /// decides once at load and stays loopback-only on it), so the three verdicts pin by kind as well as by
+    /// line, and the refusal string is non-null exactly when the kind is not Usable.</summary>
+    [Fact]
+    public void CheckLifetime_ThreeKinds_RefusalPresentExactlyWhenNotUsable()
+    {
+        var usable = DarlingWebTls.CheckLifetime(Now.AddDays(-10), Now.AddDays(200), Now);
+        Assert.Equal(DarlingWebTls.LifetimeStatus.Usable, usable.Status);
+        Assert.Null(usable.Refusal);
+
+        var expired = DarlingWebTls.CheckLifetime(Now.AddDays(-400), Now.AddDays(-1), Now);
+        Assert.Equal(DarlingWebTls.LifetimeStatus.Expired, expired.Status);
+        Assert.Contains("expired", expired.Refusal, StringComparison.Ordinal);
+
+        var early = DarlingWebTls.CheckLifetime(Now.AddDays(5), Now.AddDays(400), Now);
+        Assert.Equal(DarlingWebTls.LifetimeStatus.NotYetValid, early.Status);
+        Assert.Contains("not valid until", early.Refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckLifetime_WindowBothUnopenedAndClosed_ReadsAsExpired()
+    {
+        /* Expired is checked first, so a nonsense window (NotBefore past NotAfter, both behind or both ahead
+           in the wrong order) reads as the fact a restart cannot fix. */
+        var nonsense = DarlingWebTls.CheckLifetime(Now.AddDays(10), Now.AddDays(-10), Now);
+        Assert.Equal(DarlingWebTls.LifetimeStatus.Expired, nonsense.Status);
+    }
+
     /* ---- PURE: the advance expiry warning ---- */
 
     [Fact]
