@@ -195,7 +195,7 @@ public sealed class McpMissMessageParityPinTests
            "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
         ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
         "), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
-        " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot; nothing to widen towards.",
+        " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
         "No system_health events of ANY type have EVER been captured for ",
         ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
 

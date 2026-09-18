@@ -592,7 +592,7 @@ public sealed class McpHealthParserTools
         {
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot; nothing to widen towards.",
+                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0);
         }
 
