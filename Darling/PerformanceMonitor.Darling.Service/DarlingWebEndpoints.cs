@@ -1916,6 +1916,7 @@ public static class DarlingWebEndpoints
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_plans"] = R(CatData, "Captured PostgreSQL execution plans, grouped by shape. Plans are redacted at collection.", PServer(), PHours(24), PLimit(10), PText("query_id"), PAsOf()),
             ["get_pg_plan_capture_readiness"] = R(CatData, "Whether a PostgreSQL target can capture execution plans at all, facet by facet, with the remedy for each step that is not in place. Read this when a plan or target-log read is empty.", PServer(), PHours(24), PLimit(25), PAsOf()),
+            ["get_pg_logging_audit"] = R(CatData, "Whether a PostgreSQL target's logging settings (log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections) are producing the lines they could, per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in the hosting flavour's syntax. Judged from the newest stored pg_server_config snapshot, not the live server; plan capture's own settings are listed and pointed at get_pg_plan_capture_readiness.", PServer()),
             ["get_pg_wraparound_risk"] = R(CatData, "PostgreSQL XID/MultiXact freeze headroom per database.", PServer(), PHours(24), PAsOf()),
             ["get_pg_xmin_horizon"] = R(CatData, "What is holding back the PostgreSQL xmin horizon, by cause.", PServer(), PHours(24), PAsOf()),
             ["get_pg_replication_slots"] = R(CatData, "PostgreSQL replication slot health, including whether retained WAL is still growing.", PServer(), PHours(24), PAsOf()),
@@ -2615,6 +2616,7 @@ public static class DarlingWebEndpoints
                cannot parse exactly rather than silently matching nothing. */
             ["get_pg_plans"] = (c, pg, an) => DarlingMcpPgPlanTools.GetPgPlans(pg, Server(c), Hours(c, 24), Rows(c, "limit", 10), Str(c, "query_id"), AsOf(c)),
             ["get_pg_plan_capture_readiness"] = (c, pg, an) => DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
+            ["get_pg_logging_audit"] = (c, pg, an) => DarlingMcpPgLoggingAuditTools.GetPgLoggingAudit(pg, Server(c)),
             ["get_pg_wraparound_risk"] = (c, pg, an) => DarlingMcpPgWraparoundTools.GetPgWraparoundRisk(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_xmin_horizon"] = (c, pg, an) => DarlingMcpPgXminTools.GetPgXminHorizon(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_replication_slots"] = (c, pg, an) => DarlingMcpPgSlotTools.GetPgReplicationSlots(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),

@@ -408,7 +408,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 33 `get_pg_*` tools in all, registered by the same service:
+them; 34 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|
@@ -417,6 +417,7 @@ them; 33 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_top_queries` | top query shapes by total time, wherever `pg_stat_statements` is installed; Aurora adds the storage-vs-cache I/O split and per-statement peak memory |
 | `get_pg_plans` | captured execution plans from `auto_explain`, grouped by plan shape, literals redacted before storage |
 | `get_pg_plan_capture_readiness` | whether the target can capture plans at all, facet by facet in causal order, with the remedy for each unmet step |
+| `get_pg_logging_audit` | whether the target's logging settings (`log_lock_waits`, `log_temp_files`, `log_autovacuum_min_duration`, `log_checkpoints`, `log_connections`/`log_disconnections`, `log_min_duration_statement`) are producing the lines they could — per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in your hosting flavour's syntax; judged from the stored `pg_server_config` snapshot, so it answers once `pg_server_config` has its first snapshot (step 7: 60 min) |
 | `get_pg_wraparound_risk` | XID and MultiXact freeze headroom — how close to a write outage |
 | `get_pg_xmin_horizon` | *why* vacuum is reclaiming nothing, attributed to the specific holder |
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
@@ -685,7 +686,11 @@ sends a new operator away from the thing that would have answered their first we
 - **Plan capture** shipped: `pg_plan_capture` — #2566 self-hosted via the server log, #2538/#2692 on
   Aurora/RDS via the log API — with `pg_plan_capture_readiness` naming any missing precondition. The
   grants are step 1's log-reader and IAM subsections, the cadence trap is in step 7, and `get_pg_plans` /
-  `get_pg_plan_capture_readiness` are in step 8's table.
+  `get_pg_plan_capture_readiness` are in step 8's table. Its sibling `get_pg_logging_audit` (#3607) applies
+  the same facet-and-remedy shape to the rest of the logging surface — lock waits, temp files, autovacuum
+  runs, checkpoints, connection churn, slow statements — so the two together are the onboarding answer to
+  "is this target telling us everything it could"; read both before concluding anything from an empty
+  target-side log.
 - **Blocking chains** shipped: `pg_blocking` (step 7 — a sample, not an event log), `get_pg_blocking`
   (step 8) and the `Blocking Detected` alert with its own count knob (step 9). The
   [blocking design note](postgres-blocking-design-note.md) records what building it changed.

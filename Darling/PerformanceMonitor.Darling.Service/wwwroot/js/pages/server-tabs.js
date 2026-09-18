@@ -1612,6 +1612,21 @@ export const POSTGRES_TABS = [
         ctx.label + ", the newest reading of each facet in it; in CAUSAL order rather than alphabetically - fix them top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
         "No readiness state collected. Unlike the grids around it an empty panel here is never the healthy answer - the collector writes one row per facet on every run whatever it finds - so this means it has not run for this server, or the window is shorter than its hourly cadence."
       ),
+      /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
+         other half of the same onboarding question - is this target telling us everything it could. Judged
+         from the newest stored pg_server_config snapshot rather than collected, so it takes no window; the
+         read reports the snapshot time as captured_at. Every setting is shown whatever its
+         verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
+         cannot show that a target IS instrumented. */
+      table(
+        "Logging Settings Audit",
+        "get_pg_logging_audit",
+        { server },
+        "facets",
+        PG_LOGGING_AUDIT_COLUMNS,
+        "newest configuration snapshot; verdict describes the LINES each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
+        "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last hour has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+      ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
          only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
@@ -3459,6 +3474,23 @@ const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
   { key: "observed", label: "Observed", mono: true },
   { key: "detail", label: "Consequence and Remedy" },
   { key: "last_observed", label: "Last Seen", format: "time", small: true },
+];
+
+/* Verdict beside the setting, then the value, then the prose columns widest and last - the same reading
+   order as the readiness grid above it: scan down setting and verdict to find the row that is off, then
+   read across for what it unlocks, what it costs, and what to type. remedy is the column the panel exists
+   for and is worded for the server's hosting flavour by the read, not by this file. */
+const PG_LOGGING_AUDIT_COLUMNS = [
+  { key: "setting", label: "Setting", mono: true },
+  { key: "verdict", label: "Verdict" },
+  { key: "value", label: "Value", mono: true },
+  { key: "unit", label: "Unit", small: true },
+  { key: "source", label: "Source", small: true },
+  { key: "change_needs", label: "Change needs", small: true },
+  { key: "unlocks", label: "Unlocks", wrap: true },
+  { key: "recommended", label: "Recommended", wrap: true },
+  { key: "cost_note", label: "Cost", wrap: true },
+  { key: "remedy", label: "Remedy", wrap: true },
 ];
 
 const PG_TOP_QUERY_COLUMNS = [

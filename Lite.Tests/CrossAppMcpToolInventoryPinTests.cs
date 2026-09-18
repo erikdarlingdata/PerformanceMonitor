@@ -102,6 +102,19 @@ public sealed class CrossAppMcpToolInventoryPinTests
            is the closest thing conceptually and it is not close - it is a database-scoped feature with its
            own health read (get_query_store_health) rather than a set of preload-only server GUCs. */
         "get_pg_plan_capture_readiness",
+
+        /* get_pg_logging_audit (#3607) - readiness's facet-and-remedy shape over the rest of the logging
+           surface (log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
+           log_connections / log_disconnections, log_min_duration_statement), judged from the stored
+           pg_server_config snapshot. Same architectural reason as the entry above: the settings are
+           PostgreSQL GUCs and the snapshot is a PostgreSQL collector's table Lite never creates.
+
+           The near-twin worth naming is get_server_config on the SQL Server side, and it is not one: that
+           is a LISTING of sp_configure values, this is a JUDGMENT of seven logging GUCs against what each
+           unlocks. SQL Server's closest concept - whether the error log and default trace capture a class
+           of event - has no per-setting audit here either, so there is no Lite twin for this to be missing
+           from. */
+        "get_pg_logging_audit",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
