@@ -97,7 +97,7 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// list missed, not a member of this regime. <c>ReadStoreSizeBytesAsync</c> runs on the disk-check
     /// cadence. <c>RunTestHypotheticalIndexAsync</c> / <c>RunExecuteActualPlanAsync</c> and
     /// <c>DarlingCommandExecutor</c> are the command plane, with a 5-minute claim lease and no heartbeat.
-    /// <c>DarlingDeltaCalculator</c>'s four seeds and <c>StoreConfigProvider</c>'s seven seeding sites run
+    /// <c>DarlingDeltaCalculator</c>'s seeds (ten since #3540 A4) and <c>StoreConfigProvider</c>'s seven seeding sites run
     /// ONCE at startup. <c>StoreConfigProvider.ReadConfigVersionAsync</c> is the 15 s reload beacon and is
     /// the closest call of all — it runs on the sweep's own tick — but it runs on the SERIAL loop thread
     /// ahead of every launch, so its blast radius is the whole fleet and its floor is a single-row lookup

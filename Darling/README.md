@@ -1025,7 +1025,7 @@ The viewer is read-only over collected data, but it does perform a small set of 
 
 The service is built to restart cleanly, any time:
 
-- **Delta continuity** — delta-based collectors (wait stats, file I/O, perfmon, memory grants) re-seed their baselines from the store at startup, so the first cycle after a restart produces real deltas instead of zeroes.
+- **Delta continuity** — every delta-based collector (wait stats, file I/O, perfmon, memory grants, latch and spinlock stats, procedure stats, and the PostgreSQL wait and statement stats) re-seeds its baselines from the store at startup — the latest row per key inside a 15-minute window — along with the per-collector pass window the recompiled-plan credit reads, so the first cycle after a restart produces real deltas instead of zeroes. The one exception is stated rather than hidden: `query_stats` keys its deltas on statement offsets the store does not persist, so only its pass window is restored and plans older than the restart gap baseline on the first cycle.
 - **Alert no-re-fire** — edge-trigger watermarks and the failed-job watermark persist in `config_edge_trigger_watermarks`, and per-alert cooldowns re-seed from `config_alert_log`, so a restart does not replay alerts you already received.
 - **Idempotent store setup** — migrations are versioned and skip what is already applied; TimescaleDB conversion and compression policies re-converge as no-ops.
 - **Per-connect snapshots** — the on-connect config snapshot collectors run once per (re)connect, mirroring Lite's server-open behavior.

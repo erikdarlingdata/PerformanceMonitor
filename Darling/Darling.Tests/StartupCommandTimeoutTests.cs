@@ -125,6 +125,14 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingDeltaCalculator.cs", "SeedFileIoStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedPerfmonStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedMemoryGrantStatsAsync", 1, 0, 0, 0),
+        /* #3540 A4: the six families the restart seed gained, one bounded read each, same regime — run once,
+           awaited, ahead of the collection loop. */
+        ("DarlingDeltaCalculator.cs", "SeedLatchStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedSpinlockStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedProcedureStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedQueryStatsPassesAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedPgWaitStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedPgStatementStatsAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "WarnAboutFileOnlyServersAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "ReadRegisteredServersForComparisonAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "CountAsync", 1, 0, 0, 0),
@@ -158,7 +166,7 @@ public sealed class StartupCommandTimeoutTests
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedBootstrapSites = 26;
+    private const int ExpectedBootstrapSites = 32;
 
     private const int ExpectedConnectProbeSites = 2;
 

@@ -18,7 +18,21 @@ namespace PerformanceMonitor.Collectors;
 /// SKUs run (extracted verbatim from Lite's DeltaCalculator, which now derives from this), so the
 /// baseline / counter-reset / gap-policy semantics can never drift between portable Lite and the
 /// Darling service. Hosts that survive restarts by re-seeding baselines from their own store call
-/// the protected <see cref="Seed"/> (Lite: DuckDB; Darling: Postgres).
+/// the protected <see cref="Seed"/> for every key and <see cref="SeedPass"/> for every delta group
+/// (Lite: DuckDB; Darling: Postgres).
+///
+/// <para><b>The restart contract (#3540 A4).</b> A host seeds EVERY family in
+/// <see cref="DeltaFamilyCollectors"/> that it monitors, keys and pass window both, not the four it
+/// happened to seed first. Before #3540 the two seeders covered wait_stats, file_io_stats, perfmon_stats
+/// and memory_grant_stats; latch_stats, spinlock_stats, query_stats, procedure_stats and the PostgreSQL
+/// pair took the first-sighting path after every restart or deploy, so each fabricated one full interval
+/// of quiet per restart — and the pass window was never seeded at all, which left the #2235 series-age
+/// rescue inert on exactly the cycle it exists for. The one family a host cannot key-seed is named where
+/// it is not seeded rather than left to be discovered: query_stats keys its deltas on
+/// <c>sql_handle:statement_start_offset:statement_end_offset:plan_handle</c> and the store persists
+/// neither offset, so no store row can reproduce the key; its PASS WINDOW is seeded (which is what the
+/// series-age rescue reads), and the offsets are a rung. Lite.Tests' <c>DeltaFamilySeedingCensusTests</c>
+/// enumerates the family against both hosts' seeders so an eleventh family cannot ship unseeded.</para>
 /// </summary>
 public class CollectorDeltaCalculator : ICollectorDeltaCalculator
 {
@@ -334,5 +348,106 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         var serverCache = _cache.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>());
         var collectorCache = serverCache.GetOrAdd(collectorName, _ => new ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>());
         collectorCache[key] = (value, timestamp);
+    }
+
+    /// <summary>
+    /// Seeds the (server, delta group) pass window — when this group was last looked at, and optionally the
+    /// look before that — the restart-survival hook for the #2235 series-age rescue.
+    ///
+    /// <para><b>Why a second hook.</b> <see cref="Seed"/> restores per-KEY baselines, and the rescue does not
+    /// read those: it asks <see cref="PreviousPass"/> for the pass BEFORE the current one, and until #3540 no
+    /// host ever wrote that window from the store, so the first post-restart pass always saw
+    /// <c>previousPass == null</c> and baselined every new key without credit. That is the exact cycle the
+    /// rescue was written for — a service restart is when the most plans have recompiled since we last
+    /// looked — and it was the one cycle the rescue could never fire on.</para>
+    ///
+    /// <para><b>What to pass.</b> <paramref name="current"/> is the LATEST collection_time the store holds for
+    /// the server in the seed window — the last time this process's predecessor looked. On the first
+    /// post-restart pass <see cref="PreviousPass"/> sees a new collection time, rolls <c>current</c> into the
+    /// Previous slot and measures the gap against it, so the seeded Current alone is what makes the rescue
+    /// fire. <paramref name="previous"/> is accepted for completeness — a seeder whose read happens to return
+    /// more than one collection time per server can pass the second-latest — but it is read only if the
+    /// first post-restart pass carried a collection time EQUAL to the last pre-restart one, which a restart
+    /// makes impossible; hosts whose seed read returns one collection time per server pass null and lose
+    /// nothing. Seeding this from the family table rather than <c>collection_log</c> is deliberate: the
+    /// family row's collection_time is the value the delta calls were made with, the log row's is the run's
+    /// start clock, and a run that failed at the target logs a row while having made no delta call.</para>
+    ///
+    /// <para>Keyed by the delta GROUP name (<c>query_stats_worker</c>, <c>wait_stats_time</c>, …), the same
+    /// name the collector's <c>CalculateDelta*</c> call passes as <c>collectorName</c>, because that is how
+    /// <see cref="_passes"/> is keyed — a seeder must seed every group of a family, not the family name.</para>
+    /// </summary>
+    protected void SeedPass(int serverId, string collectorName, DateTime current, DateTime? previous = null)
+    {
+        var byCollector = _passes.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, (DateTime, DateTime?)>());
+        byCollector[collectorName] = (current, previous);
+    }
+
+    /// <summary>
+    /// <see cref="SeedPass"/> for every delta group of one family, from the collection times a seed read
+    /// observed. The pass window is derived from the SAME rows the key seed streams — no second read per
+    /// family — which is why the tracker is fed row by row rather than queried.
+    /// </summary>
+    protected void SeedPasses(SeedPassTracker passes, params string[] groups)
+    {
+        foreach (var (serverId, latest, before) in passes.Servers)
+        {
+            foreach (var group in groups)
+            {
+                SeedPass(serverId, group, latest, before);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Per server, the latest and second-latest DISTINCT collection times a seed read has streamed past so
+    /// far. A latest-collection-per-server read (the wait_stats shape) observes one time per server and
+    /// yields <c>Before = null</c>; a latest-row-per-key read (the procedure_stats shape) can observe several
+    /// and yields the two most recent. Either is enough for <see cref="SeedPass"/> — see its remarks on why
+    /// Current alone arms the rescue.
+    /// </summary>
+    protected sealed class SeedPassTracker
+    {
+        private readonly Dictionary<int, (DateTime Latest, DateTime? Before)> _byServer = new();
+
+        /// <summary>Records one row's collection time. A null time (a row that never recorded one) is
+        /// ignored rather than treated as "now", because a pass window built from a guess is exactly the
+        /// fabricated evidence the rescue's gap bound exists to refuse.</summary>
+        public void Observe(int serverId, DateTime? collectionTime)
+        {
+            if (!collectionTime.HasValue)
+            {
+                return;
+            }
+
+            var t = collectionTime.Value;
+            if (!_byServer.TryGetValue(serverId, out var window))
+            {
+                _byServer[serverId] = (t, null);
+            }
+            else if (t > window.Latest)
+            {
+                _byServer[serverId] = (t, window.Latest);
+            }
+            else if (t < window.Latest && (!window.Before.HasValue || t > window.Before.Value))
+            {
+                _byServer[serverId] = (window.Latest, t);
+            }
+        }
+
+        /// <summary>Every server observed, with its window.</summary>
+        public IEnumerable<(int ServerId, DateTime Latest, DateTime? Before)> Servers
+        {
+            get
+            {
+                foreach (var entry in _byServer)
+                {
+                    yield return (entry.Key, entry.Value.Latest, entry.Value.Before);
+                }
+            }
+        }
+
+        /// <summary>How many servers have been observed — for the seeders' debug line.</summary>
+        public int Count => _byServer.Count;
     }
 }
