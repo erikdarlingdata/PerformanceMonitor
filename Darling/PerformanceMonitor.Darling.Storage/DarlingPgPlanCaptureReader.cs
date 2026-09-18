@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -67,14 +68,26 @@ public static class DarlingPgPlanCaptureReader
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
+        /* The optional queryid pin, IN the SQL rather than filtered client-side over a page (#3533): the
+           ranking is by total duration, so a cheap-but-wanted query sits arbitrarily far below the top and
+           no page size makes it reachable — filtering a fetched page turned "ranked low" into "was never
+           captured". NULL leaves the read as the top-duration page. */
+        AND   ($4::bigint IS NULL OR query_id = $4)
         GROUP BY query_id, plan_hash
         ORDER BY sum(duration_ms) DESC
-        LIMIT $4
+        LIMIT $5
         """;
 
+    public static Task<List<PgPlanCaptureRow>> GetPgPlanCaptureAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        GetPgPlanCaptureAsync(postgres, serverId, startUtc, endUtc, limit, queryId: null, cancellationToken);
+
+    /// <param name="queryId">Pins the read to one statement's plans, server-side, over the whole window.
+    /// Null returns the top page by total duration instead.</param>
     public static async Task<List<PgPlanCaptureRow>> GetPgPlanCaptureAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
-        CancellationToken cancellationToken = default)
+        long? queryId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -85,6 +98,13 @@ public static class DarlingPgPlanCaptureReader
         /* SpecifyKind(Unspecified) at the BIND, the convention every PostgreSQL read here follows. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        /* Typed explicitly rather than through AddWithValue: DBNull carries no type for Npgsql to infer,
+           so an untyped null fails at bind time — the same reason the trend reader's TextOrNull exists. */
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Bigint,
+            Value = (object?)queryId ?? DBNull.Value,
+        });
         command.Parameters.AddWithValue(limit);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

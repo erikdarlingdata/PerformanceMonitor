@@ -120,7 +120,10 @@ public static class DarlingPgIoReader
         FROM differenced
         GROUP BY backend_type, object_type, context
         /* Anything that moved, ordered by the work that actually costs time. A combination with no
-           activity in the window is not a finding and would crowd out the ones that are. */
+           activity in the window is not a finding and would crowd out the ones that are. The read-count
+           key is NOT a cosmetic tiebreak: track_io_timing is off by DEFAULT, so on a stock server every
+           time sum here is zero and the count is the entire ordering — the tool reports which key decided
+           (#3536), and dropping the second key would make the untracked case effectively unordered. */
         HAVING coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0)
              + coalesce(SUM(d_extends), 0) + coalesce(SUM(d_hits), 0) > 0
         ORDER BY coalesce(SUM(d_read_time_ms), 0) DESC, coalesce(SUM(d_reads), 0) DESC

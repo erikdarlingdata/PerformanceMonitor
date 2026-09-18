@@ -8,8 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -126,6 +132,62 @@ public class DarlingMcpPgPlanToolsTests
 
         Assert.Equal(JsonValueKind.String, plan.ValueKind);
         Assert.Equal("{not valid json", plan.GetString());
+    }
+
+    /* ── the queryid filter and the empty answers (#3533) ── */
+
+    /// <summary>
+    /// The queryid filter runs IN the SQL, over every capture in the window. It used to be applied in C#
+    /// over a fetched top-duration page, which made any plan ranked below the page unfindable — the ranking
+    /// is by total duration, so a cheap-but-asked-about statement sits arbitrarily far down and no page
+    /// size reaches it. NULL must leave the read as the top page, which is what the OR arm is.
+    /// </summary>
+    [Fact]
+    public void TheQueryIdFilter_RunsInTheStore_NotOverAFetchedPage()
+    {
+        var sql = DarlingPgPlanCaptureReader.PgPlanCaptureSql;
+
+        Assert.Contains("($4::bigint IS NULL OR query_id = $4)", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The queryid miss says what was actually searched — the whole window, not a page — and names what a
+    /// miss can mean: the statement never ran (get_pg_top_queries confirms), it never crossed the capture
+    /// threshold, or capture was not working when it ran (get_pg_plan_capture_readiness has the facets).
+    /// The text this replaced declared the query "not the query to look at" over a fetched page the plan
+    /// could legitimately sit below, which is the confident wrong verdict #3533 exists to remove.
+    /// </summary>
+    [Fact]
+    public void TheQueryIdMiss_SaysTheWholeWindowWasSearched_AndWhatAMissCanMean()
+    {
+        var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(BigQueryId, 24);
+
+        Assert.Contains("not a top-N page", text, StringComparison.Ordinal);
+        Assert.Contains("the last 24 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("get_pg_top_queries", text, StringComparison.Ordinal);
+        Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
+        Assert.Contains("get_pg_plan_capture_readiness", text, StringComparison.Ordinal);
+        Assert.Contains("plan_content_retention_days", text, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("not the query to look at", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The unfiltered miss is a statement about EVERY statement — the read has no filter, so zero rows
+    /// means the window is genuinely empty, and the message must not borrow the per-query verdict.
+    /// </summary>
+    [Fact]
+    public void TheUnfilteredMiss_IsAboutEveryStatement_AndNamesBothCauses()
+    {
+        var text = DarlingMcpPgPlanTools.NoPlanCapturedMessage(null, 48);
+
+        Assert.Contains("every statement", text, StringComparison.Ordinal);
+        Assert.Contains("the last 48 hour(s)", text, StringComparison.Ordinal);
+        Assert.Contains("auto_explain.log_min_duration", text, StringComparison.Ordinal);
+        Assert.Contains("plan_content_retention_days", text, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("not the query to look at", text, StringComparison.Ordinal);
     }
 
     /* ── get_pg_plan_capture_readiness (#3070) ── */
@@ -262,5 +324,127 @@ public class DarlingMcpPgPlanToolsTests
         Assert.True(root.GetProperty("truncated").GetBoolean());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("unsatisfied_facets").ValueKind);
         Assert.Contains("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) proof of #3533's mechanism, with the fixture the bug requires: a plan ranked
+/// BELOW the page the old path fetched. The old code pulled the top <c>limit * 10</c> shapes by total
+/// duration and filtered them in C#, so with <c>limit</c> 2 a plan ranked 21st was unreachable at any
+/// window size — and the miss was then reported as "capture is working, this plan was never captured".
+/// The predicate now runs in the store, so the same call must return the plan; and a queryid that was
+/// genuinely never captured must get the honest whole-window miss rather than the old verdict.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DarlingMcpPgPlanQueryIdLiveTests
+{
+    private const string ServerName = "darling-pg-plans-queryid-e2e";
+    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+
+    /// <summary>Past 2^53 and negative, the way real pg_stat_statements ids look (#2548).</summary>
+    private const long WantedQueryId = -8126435036642491494;
+
+    /// <summary>Never seeded, so the filtered read over it must miss honestly.</summary>
+    private const long AbsentQueryId = -7000000000000000001;
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task AQueryIdRankedBelowTheTopPage_IsFound_AndAGenuineMissIsReportedHonestly()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_pg_plans queryid test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE servers SET engine_kind = $2 WHERE server_id = $1",
+                ServerId, MonitoredEngineKind.Postgres);
+
+            var seen = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-30);
+
+            /* 20 expensive shapes — exactly the limit * 10 page the OLD path fetched for limit 2 — and the
+               wanted plan 21st, cheaper than all of them. Ranked by total duration it sits one row below
+               everything the old path could ever see. */
+            for (var i = 0; i < 20; i++)
+            {
+                await SeedCaptureAsync(connection, ct, seen, queryId: 9_100_000_000_000_000_001 + i,
+                    planHash: $"EXPENSIVE{i:D2}", durationMs: 10_000 - (i * 100),
+                    planJson: """{"Plan":{"Node Type":"Hash Join"}}""");
+            }
+
+            await SeedCaptureAsync(connection, ct, seen, WantedQueryId,
+                planHash: "WANTED", durationMs: 1.5,
+                planJson: """{"Plan":{"Node Type":"Index Scan","Relation Name":"orders"}}""");
+
+            /* The premise, demonstrated rather than assumed: the top page at this limit does not contain
+               the wanted plan. If this ever fails the fixture has stopped modeling the bug. */
+            var topPage = JsonDocument.Parse(
+                await DarlingMcpPgPlanTools.GetPgPlans(postgres, ServerName, 24, 2)).RootElement;
+            var pageIds = topPage.GetProperty("plans").EnumerateArray()
+                .Select(p => p.GetProperty("queryid").GetString())
+                .ToArray();
+            Assert.Equal(2, pageIds.Length);
+            Assert.DoesNotContain(WantedQueryId.ToString(CultureInfo.InvariantCulture), pageIds);
+
+            /* The fix: the same limit, pinned to the queryid, finds the plan the old path could not. */
+            var found = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlans(
+                postgres, ServerName, 24, 2, WantedQueryId.ToString(CultureInfo.InvariantCulture))).RootElement;
+
+            var plan = Assert.Single(found.GetProperty("plans").EnumerateArray().ToArray());
+            Assert.Equal(WantedQueryId.ToString(CultureInfo.InvariantCulture),
+                plan.GetProperty("queryid").GetString());
+            Assert.Equal("WANTED", plan.GetProperty("plan_hash").GetString());
+            Assert.Equal("Index Scan",
+                plan.GetProperty("plan").GetProperty("Plan").GetProperty("Node Type").GetString());
+
+            /* A queryid that was never captured now misses HONESTLY: the whole window was searched, and
+               the answer says what a miss can mean instead of declaring the query healthy. */
+            var miss = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlans(
+                postgres, ServerName, 24, 2, AbsentQueryId.ToString(CultureInfo.InvariantCulture))).RootElement;
+
+            Assert.Equal("empty", miss.GetProperty("status").GetString());
+            var message = miss.GetProperty("message").GetString()!;
+            Assert.Contains("not a top-N page", message, StringComparison.Ordinal);
+            Assert.Contains("get_pg_plan_capture_readiness", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("not the query to look at", message, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task SeedCaptureAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
+        long queryId, string planHash, double durationMs, string planJson) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_plan_capture
+    (collection_id, collection_time, server_id, server_name, query_id, plan_hash, duration_ms,
+     node_count, top_node_type, plan_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 3, 'Seeded', $8)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
+            queryId, planHash, durationMs, planJson);
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_plan_capture WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_plan_capture_readiness WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }
 }
