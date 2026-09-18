@@ -499,7 +499,9 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// used to refuse it. Two statements rather than a nullable parameter so the all-servers form is a plain
     /// equality on <c>idx_analysis_findings_hash</c>. Matches the Darling twin's PgFindingStore.</para>
     ///
-    /// <para>Takes the caller's token through the lock wait and every store call: the MCP passes none, but the
+    /// <para>A READ under the read lock, like the other read-backs: the only exclusion it needs is against
+    /// maintenance (CHECKPOINT, archive DELETEs, compaction), which takes the exclusive lock — see the class note
+    /// (#2455). Takes the caller's token through the lock wait and every store call: the MCP passes none, but the
     /// method is written the way every tokened read here is so the pass-token census needs no exemption for it.</para>
     /// </summary>
     public async Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default)
