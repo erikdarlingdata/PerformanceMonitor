@@ -102,7 +102,9 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
         }
 
         Assert.Equal(4, CountOf(rung, "ADD COLUMN IF NOT EXISTS"));
-        Assert.Equal(4, CountOf(rung, "CREATE OR REPLACE VIEW"));
+        /* Counted on the statement prefix, not the bare phrase — the rung's own SQL comment names
+           CREATE OR REPLACE VIEW in prose. */
+        Assert.Equal(4, CountOf(rung, "CREATE OR REPLACE VIEW collect.v_"));
 
         /* Nullable, no default, no backfill, no CHECK, no GRANT, and no touch of the wait_stats_baseline
            continuous aggregate — that change is the documented follow-up (a new aggregate under a new name,
