@@ -2461,11 +2461,15 @@ WITH NO DATA";
     /// could be broader, and would have to say so rather than inherit this one's scope. No SHIPPED read
     /// takes a DURATION from <c>job_history</c> (every product duration surface uses <c>job_stats</c>,
     /// deliberately — see <see cref="CompressionActivitySql"/>); the one shipped read that touches the view
-    /// at all is <c>DarlingStoreMetricsReader.JobHistoryEvidenceSql</c> (#3574), a bounded row COUNT that
-    /// proves the instrument is writing and evaluates the view's ownership filter for its own connection —
-    /// because <c>job_history</c> shows rows only to members of the job's owner or the database owner, a
-    /// census like this one must be read as such a role, and a zero read as any other role is the filter
-    /// and not the table. So the gap is in what an investigation can ask, not in what the product reports.
+    /// at all is <c>StoreSelfMetrics.JobHistoryEvidenceSql</c> (#3574; the MCP reader's
+    /// <c>DarlingStoreMetricsReader.JobHistoryEvidenceSql</c> is an alias of that string), a bounded row
+    /// COUNT that proves the instrument is writing and evaluates the view's ownership filter for its own
+    /// connection. It has two callers since #3582: the MCP reader runs it as the connection asking, and the
+    /// hourly self-metrics sweep runs it as the job OWNER's role and persists the count as an
+    /// <c>object_kind = 'job_history'</c> row — because <c>job_history</c> shows rows only to members of the
+    /// job's owner or the database owner, a census like this one must be read as such a role, and a zero read
+    /// as any other role is the filter and not the table. So the gap is in what an investigation can ask, not
+    /// in what the product reports.
     /// Read at <c>2026-09-08 01:37Z</c>, so the
     /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
     /// does not have. Each side of the boundary, since a bound is only as good as what it excludes: <b>304
@@ -2943,7 +2947,7 @@ WITH NO DATA";
         }
 
         logger.LogWarning(
-            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as a PREFIX MAXIMUM: the largest run its regime had been recorded to make when it was read, which is no bound on the job, so a later run of the same regime joins that population and can exceed it. This run did, which makes the constant stale rather than wrong (#3188): it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as a PREFIX MAXIMUM: the largest run its regime had been recorded to make when it was read, which is no bound on the job, so a later run of the same regime joins that population and can exceed it. This run did, which makes the constant stale rather than wrong (#3188): it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and with it off only FAILED runs are written (a failure is logged regardless of the GUC; a success needs it) — so a store provisioned before that GUC gained its own conf marker shows this job's successes there only once it heals, and a result holding no successful runs is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
             view, observedSeconds, observedSeconds - recordedCeilingSeconds, constantName,
             recordedCeilingSeconds);
     }
@@ -7345,7 +7349,7 @@ AND   js.last_run_status = 'Success'";
 
             case RefreshSlotHeadroom.ApproachingSlot:
                 logger.LogWarning(
-                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and with it off only FAILED runs are written (a failure is logged regardless of the GUC; a success needs it) — so a store provisioned before that GUC gained its own conf marker shows this job's successes there only once it heals, and a result holding no successful runs is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
                     reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
                     reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
                 break;
