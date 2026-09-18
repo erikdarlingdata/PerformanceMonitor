@@ -1834,13 +1834,19 @@ internal sealed class DarlingSelfAlertEvaluator
     /// evaluate half's pre-check and the apply half's own check cost one store read between them and not
     /// two — the first seeds, the second finds memory populated.</para>
     ///
-    /// <para><b>The stamp store is asked only when memory is EMPTY</b>: a fresh process, or a process that
-    /// has never seen a delivery succeed (every attempt so far reported failed, so nothing was ever
-    /// stamped). A stamp, inside the interval or not, is cached; inside gates, outside lets the document
-    /// proceed to its reads. Cached even when outside, so a subsequent failed delivery leaves memory
-    /// pointing at the last REAL delivery rather than at nothing — either reads as "deliver", but the
-    /// record then says when the last copy actually landed. No stamp caches nothing, so the next tick asks
-    /// again — which is the retry the install night's recovery case needs.</para>
+    /// <para><b>The stamp store is asked ONCE per document per process — on the first tick, when memory is
+    /// empty</b> — and whatever it answers is cached, including "nothing": a stamp inside the interval
+    /// gates; a stamp outside it lets the document proceed to its reads and stays cached, so a subsequent
+    /// failed delivery leaves memory pointing at the last REAL delivery rather than at nothing; no row, or
+    /// a read that failed, caches <see cref="NoDeliveryKnown"/>, which reads as "deliver" from then on.
+    /// Caching the empty answer is exact under the single-writer fact above — a store that had no row for
+    /// this process's first tick cannot gain one except through this process, which would populate memory
+    /// directly — and it is what keeps the cost model honest in the fault case as well as the happy one: the
+    /// evaluate half's pre-check asks, and the apply half's own check, seconds later on the same tick,
+    /// finds memory populated whether the store answered, was empty, or threw. Re-asking on a fault would
+    /// log the same failure twice and count it twice in the #3013 census on every tick the fault persisted,
+    /// for one logical failure. The retry the install night's recovery case needs is unaffected: a document
+    /// that has never delivered reads "deliver" from memory on every tick until a delivery lands.</para>
     ///
     /// <para><b>A stamp read that fails falls OPEN to memory, warns, and is counted.</b> Fail-open toward
     /// delivering is the direction every store-fault posture in this evaluator already takes for its
@@ -1851,7 +1857,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// path. Failing CLOSED (skip when the stamp cannot be read) would let a store hiccup silence a daily
     /// document, the worse failure. Counted into #3013's census because it is a store read the alert pass
     /// performed, failed and swallowed, and the census exists so that population is not invisible; the
-    /// warning beside it names the document that could not ask.</para>
+    /// warning beside it names the document that could not ask. Counted ONCE per process, per the
+    /// paragraph above — the census measures faults the pass met, and this pass meets this one once.</para>
     ///
     /// <para>No store configured (<see cref="_deliveryStamps"/> null) is the pre-#3580 gate exactly: memory
     /// only.</para>
@@ -1862,7 +1869,7 @@ internal sealed class DarlingSelfAlertEvaluator
     {
         if (lastDelivered.TryGetValue(memoryKey, out var known))
         {
-            return now - known < interval;
+            return known != NoDeliveryKnown && now - known < interval;
         }
 
         if (_deliveryStamps is null)
@@ -1884,22 +1891,37 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* One read name for both documents, because the #3013 census keys a counted site on a LITERAL
                name with its own clock and this is one site serving two callers; the log line beside it
-               names the document, so the actionable half is not lost — it is a line away. */
+               names the document, so the actionable half is not lost — it is a line away. The sentinel
+               is what makes this warning and this count fire once per process rather than once per check:
+               the apply half's own gate, seconds from now, finds memory populated and does not re-ask. */
             _logger?.LogWarning(ex,
-                "{Document} delivery stamp could not be read after {ElapsedMs} ms; gating on process memory for this tick, which re-announces once per restart until the store answers",
+                "{Document} delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-announces once per restart until the store answers",
                 documentName, stampClock.ElapsedMilliseconds);
             _readFailures?.RecordReadFailure(null, "daily-document delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+            lastDelivered[memoryKey] = NoDeliveryKnown;
             return false;
         }
 
         if (stamped is not DateTime deliveredAt)
         {
+            lastDelivered[memoryKey] = NoDeliveryKnown;
             return false;
         }
 
         lastDelivered[memoryKey] = deliveredAt;
         return now - deliveredAt < interval;
     }
+
+    /// <summary>
+    /// What <see cref="DocumentDeliveredInsideIntervalAsync"/> caches when the store was asked and had no
+    /// answer — no row, or a read that threw — so the store is asked once per document per process and
+    /// never re-asked on the same tick by the apply half (#3580). Reads as "deliver": the gate compares it
+    /// by identity before the interval arithmetic, so it can never be mistaken for a real stamp, and the
+    /// first delivery that lands replaces it with a real one. <see cref="DateTime.MinValue"/> rather than a
+    /// nullable value because the dictionaries are the pre-#3580 shape and every sibling gate in this file
+    /// keys on presence; a value that means "asked, nothing known" keeps presence meaning "asked".
+    /// </summary>
+    private static readonly DateTime NoDeliveryKnown = DateTime.MinValue;
 
     /// <summary>
     /// Records that a daily document was DELIVERED at <paramref name="now"/> — into process memory and,

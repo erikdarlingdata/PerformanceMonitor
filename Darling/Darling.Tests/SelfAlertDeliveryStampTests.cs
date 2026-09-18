@@ -308,19 +308,23 @@ public class SelfAlertDeliveryStampTests
         Assert.Contains("delivery failed", first.Log.Joined, StringComparison.Ordinal);
         Assert.Contains("Slack: 500", first.Log.Joined, StringComparison.Ordinal);
 
-        /* Same process, next hourly tick: retried, still failing, still no stamp. */
+        /* Same process, next hourly tick: retried, still failing, still no stamp — and the store is not
+           asked again: "no row" was cached on the first tick, and a store this process alone writes cannot
+           have gained a row since. */
         first.Now = first.Now.AddHours(1);
         await doc.ApplyAsync(e1, first.Now);
         Assert.Equal(2, first.Outcomes.Count);
         Assert.Empty(store.Stamps);
+        Assert.Equal(1, store.Reads);
 
-        /* The restart, channel repaired: a fresh process retries and lands, and NOW the stamp exists. */
+        /* The restart, channel repaired: a fresh process asks once, retries and lands, and NOW the stamp exists. */
         deliverer.Webhook = AlertChannelOutcome.Delivered;
         var second = new Harness(store, deliverer) { Now = first.Now.AddHours(1) };
         var e2 = second.Build();
         await doc.ApplyAsync(e2, second.Now);
         Assert.Equal(3, deliverer.Outcomes.Count);
         Assert.Equal(second.Now, store.Stamps[doc.StampKey]);
+        Assert.Equal(2, store.Reads);
 
         /* And from there, quiet — in this process and in the next. */
         second.Now = second.Now.AddHours(1);
@@ -328,6 +332,7 @@ public class SelfAlertDeliveryStampTests
         var third = new Harness(store, deliverer) { Now = second.Now.AddHours(1) };
         await doc.ApplyAsync(third.Build(), third.Now);
         Assert.Equal(3, deliverer.Outcomes.Count);
+        Assert.Equal(3, store.Reads);
     }
 
     /* ---------------- the stamp's age is the whole test ---------------- */
@@ -393,6 +398,50 @@ public class SelfAlertDeliveryStampTests
         await doc.ApplyAsync(e, h.Now);
         Assert.Single(h.Outcomes);
         Assert.Equal(1, h.ReadFailures.ReadInstance().ReadFailures);
+        Assert.Equal(1, store.Reads);
+    }
+
+    /// <summary>
+    /// The fault is met ONCE per process, not once per gate consult. The evaluate half's pre-check and the
+    /// apply half's own check both run on one tick, seconds apart; a gate that re-asked the store after a
+    /// fault would log the same failure twice and count it twice in #3013's census on every tick the fault
+    /// persisted. Staged with a delivery that ALSO fails, so nothing but the cached "asked, nothing known"
+    /// sentinel can be what stops the second consult from reaching the store — a successful delivery would
+    /// have populated memory on its own and hidden the difference.
+    /// </summary>
+    [Theory]
+    [InlineData(Digest)]
+    [InlineData(Rollup)]
+    public async Task AStampReadFault_IsMetOnce_PerProcess_EvenWhenNothingLands(string document)
+    {
+        var doc = For(document);
+        var store = new MemoryStampStore { ThrowOnRead = true, ThrowOnWrite = true };
+        var deliverer = new ReportingDeliverer { Webhook = AlertChannelOutcome.Failed };
+        var h = new Harness(store, deliverer);
+        var e = h.Build();
+
+        /* Two consults on "one tick" (the evaluate half, then the apply half): one store read, one
+           warning, one count — and the document is attempted both times, because nothing is known to have
+           been delivered and the memory gate is open. */
+        await doc.ApplyAsync(e, h.Now);
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(2, deliverer.Outcomes.Count);
+        Assert.Equal(1, store.Reads);
+        Assert.Equal(1, h.ReadFailures.ReadInstance().ReadFailures);
+        Assert.Equal(1, Regex.Matches(h.Log.Joined, "delivery stamp could not be read").Count);
+
+        /* The next hour: still nothing landed, still one read on record — the retry runs from memory. */
+        h.Now = h.Now.AddHours(1);
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(3, deliverer.Outcomes.Count);
+        Assert.Equal(1, store.Reads);
+        Assert.Equal(1, h.ReadFailures.ReadInstance().ReadFailures);
+
+        /* A fresh process meets the fault once more — per process is the unit. */
+        var next = new Harness(store, deliverer) { Now = h.Now.AddHours(1) };
+        await doc.ApplyAsync(next.Build(), next.Now);
+        Assert.Equal(2, store.Reads);
+        Assert.Equal(1, next.ReadFailures.ReadInstance().ReadFailures);
     }
 
     /// <summary>A stamp WRITE that throws leaves the document delivered and the process gated — memory is
