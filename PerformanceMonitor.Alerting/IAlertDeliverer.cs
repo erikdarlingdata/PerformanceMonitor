@@ -108,16 +108,15 @@ public interface IAlertDeliverer
     /// nothing else on the engine's side does; so the report rides a separate method that the two askers
     /// call and every other caller ignores.</para>
     ///
-    /// <para><b>The default reports nothing.</b> A deliverer that has not been taught to report delivers
-    /// exactly as before and returns <c>null</c>, which the askers treat the way every fire before #3580
-    /// was treated: as delivered. That keeps Lite's deliverer and every test fake compiling and behaving
-    /// unchanged, and it means <c>null</c> is "unreported", never "failed" — a deliverer that KNOWS a send
-    /// failed reports <see cref="AlertDelivery.ChannelFailed"/>, which is the one disposition the askers
-    /// withhold their delivered-today stamp on.</para>
+    /// <para><b>Required, not defaulted — CONTRIBUTING's Two-Store Parity rule, which names this interface.</b>
+    /// A default body here would have compiled, and would have left Lite's deliverer and fourteen test fakes
+    /// quietly inheriting an answer nobody wrote down. So every implementer states its answer: Darling's
+    /// deliverer reports the disposition its history row was written with; Lite's, whose send seam returns
+    /// no disposition and which hosts neither daily document, returns <c>null</c> by hand and says why; each
+    /// fake does the same. <c>null</c> means "unreported", never "failed" — the askers treat it the way every
+    /// fire before #3580 was treated, as delivered — and a deliverer that KNOWS a send failed reports
+    /// <see cref="AlertDelivery.ChannelFailed"/>, the one disposition the askers withhold their
+    /// delivered-today stamp on.</para>
     /// </summary>
-    async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
-    {
-        await DeliverAsync(outcome, cancellationToken);
-        return null;
-    }
+    Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default);
 }

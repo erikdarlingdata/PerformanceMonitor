@@ -177,6 +177,23 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     }
 
     /// <summary>
+    /// <see cref="DeliverAsync"/>, reporting nothing (#3580). Lite hosts neither of the two daily documents
+    /// the report exists for, and its send seam (<see cref="SendAlert"/> over
+    /// <c>EmailAlertService.TrySendAlertEmailAsync</c>) returns no disposition — the fan-out result stays
+    /// inside the email service, which writes the history row itself — so there is nothing truthful to
+    /// report without rewiring that seam, which no Lite caller needs. Written by hand rather than
+    /// inherited, because the interface declares the member REQUIRED (CONTRIBUTING, Two-Store Parity: a
+    /// defaulted member leaves the implementer you forgot quietly doing nothing). <c>null</c> is
+    /// "unreported", never "failed"; if Lite ever grows a document-class self-alert, this is the seam to
+    /// teach, and the Darling deliverer is the shape.
+    /// </summary>
+    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    {
+        await DeliverAsync(outcome, cancellationToken);
+        return null;
+    }
+
+    /// <summary>
     /// The old loop's toast icon table: Error for the two data-corruption-adjacent conditions
     /// (deadlocks, poison waits), Warning for everything else.
     /// </summary>
