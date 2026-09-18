@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -134,6 +135,13 @@ public class ScheduleManager
             if (schedule == null)
             {
                 throw new InvalidOperationException($"Collector '{collectorName}' not found");
+            }
+
+            /* Refuse before mutating anything, so a bad frequency can't leave a half-applied update. */
+            if (frequencyMinutes.HasValue
+                && FrequencyError(collectorName, frequencyMinutes.Value) is string frequencyError)
+            {
+                throw new InvalidOperationException(frequencyError);
             }
 
             if (enabled.HasValue)
@@ -295,6 +303,14 @@ public class ScheduleManager
     {
         lock (_lock)
         {
+            foreach (var schedule in schedules)
+            {
+                if (FrequencyError(schedule.Name, schedule.FrequencyMinutes) is string frequencyError)
+                {
+                    throw new InvalidOperationException(frequencyError);
+                }
+            }
+
             _serverOverrides[serverId] = new ServerScheduleOverride { Collectors = schedules };
             SaveSchedules();
 
@@ -421,6 +437,7 @@ public class ScheduleManager
             }
 
             MergeNewDefaults();
+            SanitizeDeltaFrequencies();
         }
         catch (Exception ex)
         {
@@ -436,6 +453,7 @@ public class ScheduleManager
                     if (TryLoadV2(bakJson))
                     {
                         _logger?.LogInformation("Restored schedules from backup file");
+                        SanitizeDeltaFrequencies();
                         return;
                     }
 
@@ -443,6 +461,7 @@ public class ScheduleManager
                     _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
                     _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
                     _logger?.LogInformation("Restored v1 schedules from backup file");
+                    SanitizeDeltaFrequencies();
                     return;
                 }
                 catch { /* backup also corrupt, fall through to defaults */ }
@@ -531,6 +550,63 @@ public class ScheduleManager
     // ──────────────────────────────────────────────────────────────────
     //  Helpers
     // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Why a frequency can't be honored for this collector, or null when it can (#3532). Negative is
+    /// nonsense on any collector (0 = on-load only), and a delta-family collector past
+    /// <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/> would exceed the shared delta gap
+    /// policy every cycle and record permanent zeros. The editor shows this message before saving; the
+    /// write APIs throw it as a backstop.
+    /// </summary>
+    internal static string? FrequencyError(string collectorName, int frequencyMinutes)
+    {
+        if (frequencyMinutes < 0)
+        {
+            return $"'{collectorName}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
+        }
+
+        return CollectorDeltaCalculator.DeltaFrequencyError(collectorName, frequencyMinutes);
+    }
+
+    /// <summary>
+    /// Clamps any loaded delta-family frequency above the gap-policy cap back to the cap (#3532) — the
+    /// write APIs refuse such a cadence, but a hand-edited or pre-fix collection_schedule.json can still
+    /// carry one, and honoring it would fabricate permanent quiet (every cycle past the gap policy
+    /// re-baselines and stores a zero delta). Load-time has no user to bounce the value back to, so it
+    /// clamps and logs instead of refusing. Saves when anything changed.
+    /// </summary>
+    private void SanitizeDeltaFrequencies()
+    {
+        var changed = false;
+
+        var lists = new List<List<CollectorSchedule>> { _defaultSchedule };
+        foreach (var over in _serverOverrides.Values)
+        {
+            lists.Add(over.Collectors);
+        }
+
+        foreach (var list in lists)
+        {
+            foreach (var schedule in list)
+            {
+                if (schedule.FrequencyMinutes > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes
+                    && CollectorDeltaCalculator.IsDeltaFamily(schedule.Name))
+                {
+                    _logger?.LogWarning(
+                        "Collector '{Name}' was scheduled every {Bad}m, above the {Max}m cap for delta collectors — past the {Policy}s delta gap policy every reading would be discarded and recorded as zero. Clamped to {Max}m.",
+                        schedule.Name, schedule.FrequencyMinutes, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes,
+                        CollectorDeltaCalculator.DefaultMaxGapSeconds, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes);
+                    schedule.FrequencyMinutes = CollectorDeltaCalculator.MaxDeltaFrequencyMinutes;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            SaveSchedules();
+        }
+    }
 
     /// <summary>
     /// Detects which preset matches a list of collector schedules, or "Custom". This is the single

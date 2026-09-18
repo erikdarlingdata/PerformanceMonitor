@@ -1518,7 +1518,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9)";
 
     /// <summary>
     /// Seeds perfmon_stats with the collected rate counters (batch requests, compilations,
-    /// recompilations); all use delta_cntr_value.
+    /// recompilations). Parameters are PER-SECOND rates; the rows carry the per-interval delta
+    /// (rate x the 60s interval) plus sample_interval_seconds = 60, so the fact collector's
+    /// delta / interval division (#3527) reproduces the parameter exactly.
     /// </summary>
     internal async Task SeedPerfmonAsync(long batchReqSec = 500,
         long compilationsSec = 50, long recompilationsSec = 5)
@@ -1529,9 +1531,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9)";
 
         var counters = new (string name, long cntrValue, long deltaValue)[]
         {
-            ("Batch Requests/sec", batchReqSec * 60, batchReqSec), // cntr = cumulative, delta = rate
-            ("SQL Compilations/sec", compilationsSec * 60, compilationsSec),
-            ("SQL Re-Compilations/sec", recompilationsSec * 60, recompilationsSec)
+            ("Batch Requests/sec", batchReqSec * 120, batchReqSec * 60), // cntr = cumulative, delta = rate x 60s interval
+            ("SQL Compilations/sec", compilationsSec * 120, compilationsSec * 60),
+            ("SQL Re-Compilations/sec", recompilationsSec * 120, recompilationsSec * 60)
         };
 
         foreach (var (name, cntr, delta) in counters)
@@ -1554,6 +1556,36 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 60)";
 
             await cmd.ExecuteNonQueryAsync();
         }
+    }
+
+    /// <summary>
+    /// Seeds one raw perfmon_stats row with explicit delta and interval — for pinning the #3527
+    /// delta / sample_interval_seconds division and the interval-0 (unknowable delta) skip.
+    /// </summary>
+    internal async Task SeedPerfmonRawAsync(string counterName, long deltaValue, int sampleIntervalSeconds,
+        DateTime? collectionTime = null)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO perfmon_stats
+    (collection_id, collection_time, server_id, server_name,
+     object_name, counter_name, cntr_value, delta_cntr_value, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
+
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime ?? TestPeriodEnd });
+        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "SQLServer:SQL Statistics" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = counterName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = deltaValue * 2 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = deltaValue });
+        cmd.Parameters.Add(new DuckDBParameter { Value = sampleIntervalSeconds });
+
+        await cmd.ExecuteNonQueryAsync();
     }
 
     /// <summary>

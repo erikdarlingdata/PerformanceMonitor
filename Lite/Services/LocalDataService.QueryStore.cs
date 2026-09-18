@@ -146,9 +146,14 @@ ORDER BY bucket";
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                /* Ordinal 4 (total_reads) is the LOGICAL-reads aggregate — TotalReads and TotalLogicalReads
+                   are deliberate aliases of it, same as the query-stats slicer. Physical reads ride
+                   separately at ordinal 6; this reader shipped without that mapping, so the physical
+                   column was computed and then dropped on the floor (#3530). */
                 TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
             });
         }
@@ -569,7 +574,7 @@ FULL OUTER JOIN baseline_period b
     /// One point on the Query Store slicer overlay: the interval's per-interval totals, placed at the hour
     /// the work RAN.
     /// </summary>
-    public sealed record QueryStoreItemTimelinePoint(DateTime PointTime, double CpuMs, double ElapsedMs, double Reads);
+    public sealed record QueryStoreItemTimelinePoint(DateTime PointTime, double CpuMs, double ElapsedMs, double Reads, double PhysicalReads);
 
     /// <summary>
     /// The selected Query Store row's execution timeline, for the grid→slicer overlay (#683).
@@ -618,6 +623,7 @@ WITH deduped AS
         avg_cpu_time_us,
         avg_duration_us,
         avg_logical_io_reads,
+        avg_physical_io_reads,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -646,7 +652,8 @@ SELECT
     point_time,
     COALESCE(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS cpu_ms,
     COALESCE(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count, 0) / 1000.0 AS elapsed_ms,
-    COALESCE(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS reads
+    COALESCE(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS reads,
+    COALESCE(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count, 0) AS physical_reads
 FROM deduped
 WHERE rn = 1
 -- Ordered on the axis the points are PLOTTED on: a series whose x-values are not monotonic draws as a
@@ -668,7 +675,8 @@ ORDER BY point_time";
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))));
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))));
         }
         return points;
     }

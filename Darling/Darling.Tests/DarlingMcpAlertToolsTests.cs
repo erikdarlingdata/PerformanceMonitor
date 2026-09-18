@@ -748,7 +748,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #3466 (V124): inside the write bound [15, 1440], deliberately NOT the shipped 60 — a sample
            equal to the default would let a payload that dropped the column and fell back to the default
            still match — and enabled deliberately FALSE against the shipped TRUE for the same reason. */
-        FleetSweepEnabled: false, FleetSweepIntervalMinutes: 240);
+        FleetSweepEnabled: false, FleetSweepIntervalMinutes: 240,
+        /* #3528 (V126): inside the write bound (>= 0), deliberately NOT the shipped 50 — a sample equal
+           to the default would let a payload that dropped the column and fell back to the default still
+           match. */
+        SelfDiskFreeWarnGb: 75);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

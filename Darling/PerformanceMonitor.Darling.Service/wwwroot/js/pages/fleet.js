@@ -545,9 +545,17 @@ function rollup(d) {
 
 function serverCard(c) {
   const cls = bandClass(c.band);
+  /* #3528: the band's fold skips Unknown, so a card can read Healthy off one measured metric of six —
+     say so instead of rendering an unqualified green. The counts are the server's own (R1: read the
+     pre-computed field, never re-derive); an awaiting card keeps its plain status, which already says
+     nothing has been measured yet. */
+  const coverage =
+    c.metric_count > 0 && c.measured_metric_count < c.metric_count
+      ? " · " + c.measured_metric_count + " of " + c.metric_count + " measured"
+      : "";
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
-    : el("div", { class: "status-line", text: c.status + " · last collect " + localClock(c.last_collection) });
+    : el("div", { class: "status-line", text: c.status + " · last collect " + localClock(c.last_collection) + coverage });
 
   return el(
     "div",

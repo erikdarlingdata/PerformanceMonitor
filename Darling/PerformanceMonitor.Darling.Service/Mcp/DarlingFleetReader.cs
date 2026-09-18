@@ -547,6 +547,10 @@ GROUP BY server_id, collector_name";
 
         var overall = ServerHealthClassifier.OverallMetricSeverity(metrics);
         var band = ServerHealthClassifier.ClassifyBand(isOnline, awaitingFirstCollection, collectionStale, overall);
+        /* #3528: the fold above skips Unknown, so an online server with five of six metrics structurally
+           Unknown still bands Healthy. The counts ride the card so every consumer of the band label can
+           qualify it ("Healthy — 1 of 6 measured") instead of rendering an unqualified green. */
+        var (measuredMetrics, totalMetrics) = ServerHealthClassifier.MeasuredMetricCounts(metrics);
 
         /* Per-server platform (design D4): the reliable signal the composer's measure auto-greying matches a
            measure's appliesTo against — see ClassifyPlatform for the edition mapping and why AWS RDS / msdb are
@@ -618,6 +622,8 @@ GROUP BY server_id, collector_name";
             FailedCollectorCount = collectors.Failing,
             CollectorSeverity = ServerHealthClassifier.CollectorSeverity(collectors.Failing),
             OverallMetricSeverity = overall,
+            MeasuredMetricCount = measuredMetrics,
+            MetricCount = totalMetrics,
         };
     }
 
@@ -1388,6 +1394,18 @@ public sealed class FleetServerCard
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     [JsonPropertyName("overall_metric_severity")] public HealthSeverity OverallMetricSeverity { get; init; }
+
+    /// <summary>How many of the card's per-metric severities carried a real reading when it banded (#3528)
+    /// — the band's fold skips Unknown, so a card can read Healthy off one measured metric of six. When
+    /// this is below <see cref="MetricCount"/>, the band label deserves the qualifier ("Healthy — 1 of 6
+    /// measured"); the web fleet page renders exactly that. Purely descriptive: it feeds neither the band
+    /// nor the worst-first score, so rank-neutrality of Unknown is unchanged.</summary>
+    [JsonPropertyName("measured_metric_count")] public int MeasuredMetricCount { get; init; }
+
+    /// <summary>The denominator for <see cref="MeasuredMetricCount"/> — how many per-metric severities the
+    /// card carries at all. Published rather than assumed at six so a consumer never hardcodes a figure the
+    /// next metric row changes.</summary>
+    [JsonPropertyName("metric_count")] public int MetricCount { get; init; }
 
     /// <summary>The card's raw per-metric inputs, for re-scoring in the rollup (not serialized).</summary>
     [JsonIgnore]

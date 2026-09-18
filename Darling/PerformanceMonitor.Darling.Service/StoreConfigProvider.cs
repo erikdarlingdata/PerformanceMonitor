@@ -992,11 +992,12 @@ INSERT INTO config_alert_settings (
     retention_hold_warn_ratio, retention_hold_critical_ratio,
     deadlock_warn_per_hour, deadlock_critical_per_hour,
     pg_deadlock_count_threshold, pg_blocking_count_threshold,
-    fleet_sweep_enabled, fleet_sweep_interval_minutes)
+    fleet_sweep_enabled, fleet_sweep_interval_minutes,
+    self_disk_free_warn_gb)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67)
+        $64, $65, $66, $67, $68)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1088,6 +1089,10 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            holds is what get_alert_settings reports back. */
         command.Parameters.AddWithValue(a.FleetSweepEnabled);
         command.Parameters.AddWithValue(a.FleetSweepIntervalMinutes);
+        /* #3528, bound in the same order the V126 column was appended. Seeded RAW like every sibling:
+           the floor-at-0 lives on DarlingAlertSettings, so what the store holds is what
+           get_alert_settings reports back. */
+        command.Parameters.AddWithValue(a.SelfDiskFreeWarnGb);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1361,7 +1366,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        retention_hold_warn_ratio, retention_hold_critical_ratio,
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
-       fleet_sweep_enabled, fleet_sweep_interval_minutes
+       fleet_sweep_enabled, fleet_sweep_interval_minutes,
+       self_disk_free_warn_gb
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1486,6 +1492,12 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                default on every worker start. */
             FleetSweepEnabled = reader.GetBoolean(64),
             FleetSweepIntervalMinutes = reader.GetInt32(65),
+
+            /* #3528 store-disk-warn GB floor appended (V126) at ordinal 66. Same reachability rule as
+               every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the floor to the
+               shipped default on every worker start. */
+            SelfDiskFreeWarnGb = reader.GetInt32(66),
         };
         var analysis = new AnalysisConfig
         {
@@ -1733,10 +1745,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
-           negative frequency or a retention < 1 (0 would invert the purge cutoff and wipe the table)
-           is treated as "no override" and falls through to the next level. Defense in depth with the
-           V17 CHECK constraints and the DarlingRetention sink clamp. */
-        var frequency = ValidFrequency(perServer?.FrequencyMinutes) ?? ValidFrequency(fleet?.FrequencyMinutes) ?? def.FrequencyMinutes;
+           negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
+           delta-family cadence past the gap-policy cap (#3532 — every cycle would exceed
+           CollectorDeltaCalculator.DefaultMaxGapSeconds, re-baseline, and store a zero delta forever) is
+           treated as "no override" and falls through to the next level. Defense in depth with the
+           V17 CHECK constraints, the viewer editor's ValidateSchedule, and the DarlingRetention sink clamp. */
+        var frequency = ValidFrequency(collectorName, perServer?.FrequencyMinutes) ?? ValidFrequency(collectorName, fleet?.FrequencyMinutes) ?? def.FrequencyMinutes;
         var retention = ValidRetention(perServer?.RetentionDays) ?? ValidRetention(fleet?.RetentionDays) ?? def.RetentionDays;
         /* No override row falls back to the collector's shared default enabled state — true for nearly
            every collector, but false for an opt-in one like long_query_completions (#1496). Falling back
@@ -1831,9 +1845,16 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
     private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
 
-    /// <summary>A frequency override is honored only when &gt;= 0 (0 = on-load-only); negative degrades to
-    /// "no override" so a bad value can't make a collector run every sweep.</summary>
-    private static int? ValidFrequency(int? minutes) => minutes is int v && v >= 0 ? v : null;
+    /// <summary>A frequency override is honored only when &gt;= 0 (0 = on-load-only) and, for a
+    /// delta-family collector, no slower than <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/>
+    /// (#3532 — a cadence past the delta gap policy fabricates permanent zeros); a bad value degrades to
+    /// "no override" so it can't make a collector run every sweep or stop measuring.</summary>
+    private static int? ValidFrequency(string collectorName, int? minutes) =>
+        minutes is int v
+            && v >= 0
+            && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
+        ? v
+        : null;
 
     /* ---------------- helpers ---------------- */
 

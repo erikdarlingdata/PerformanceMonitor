@@ -41,8 +41,9 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── result records ─────────────────────────── */
 
     /// <summary>One memory-trend point: the four MB metrics per collection (Lite's <c>MemoryTrendPoint</c>
-    /// minus its always-0 <c>TotalGrantedMb</c> overlay field, which the tool carries as a Lite parity
-    /// placeholder — see <see cref="DarlingMcpTrendTools.GetMemoryTrend"/>).</summary>
+    /// minus its <c>TotalGrantedMb</c> overlay field, which the memory_stats source never fills — the tool
+    /// publishes it as an explicit null with a note naming get_memory_grants (#3529) — see
+    /// <see cref="DarlingMcpTrendTools.GetMemoryTrend"/>).</summary>
     public sealed record MemoryTrendPoint(
         DateTime CollectionTime, double TotalServerMemoryMb, double TargetServerMemoryMb,
         double BufferPoolMb, double PlanCacheMb);

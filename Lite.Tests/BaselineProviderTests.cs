@@ -286,8 +286,34 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         _provider.ClearCache();
         var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.BatchRequests, AnalysisTime);
 
-        // The restart drop (0) should be excluded, so mean should be near 5000, not pulled toward 0
-        Assert.True(baseline.Mean > 4000, $"Mean {baseline.Mean} should not be poisoned by restart drop");
+        // #3527: the baseline is per-second now — deltas of ~5000 over 10s intervals are ~500/sec.
+        // The restart drop (0) should be excluded, so the mean should sit near 500, not pulled toward 0.
+        Assert.True(baseline.Mean > 400, $"Mean {baseline.Mean} should not be poisoned by restart drop");
+        Assert.InRange(baseline.Mean, 400, 600);
+    }
+
+    [Fact]
+    public async Task GetBaseline_BatchRequests_IsPerSecond_AndSkipsIntervalZeroRows()
+    {
+        // #3527 fixture: deltas of 6000 over measured 60s intervals are 100 requests/sec — the
+        // baseline population must be that division, in the same unit as the detector's window read.
+        // Interspersed interval-0 rows (unknowable delta) must not enter the population at all:
+        // read as raw deltas they would inflate the mean; read as 0 they would drag it down.
+        for (int d = 1; d <= 4; d++)
+        {
+            var day = AnalysisTime.AddDays(-7 * d);
+            for (int i = 0; i < 5; i++)
+                await SeedPerfmonAsync(day.AddMinutes(i * 10), "Batch Requests/sec", 6000, intervalSeconds: 60);
+
+            // One unknowable-delta row per day, wedged between the usable samples.
+            await SeedPerfmonAsync(day.AddMinutes(55), "Batch Requests/sec", 0, intervalSeconds: 0);
+        }
+
+        _provider.ClearCache();
+        var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.BatchRequests, AnalysisTime);
+
+        Assert.Equal(20, baseline.SampleCount); // 5 usable rows x 4 days; interval-0 rows contribute nothing
+        Assert.Equal(100.0, baseline.Mean, 3);
     }
 
     // ── Wait stats: per-collection aggregation ──
@@ -442,7 +468,10 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue)
+    /// <summary>Seeds one perfmon row. deltaValue is the PER-INTERVAL delta; the baseline divides it by
+    /// intervalSeconds (#3527), so at the default 10s interval the per-second value is deltaValue / 10.
+    /// intervalSeconds = 0 plants the unknowable-delta marker the baseline must skip.</summary>
+    private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue, int intervalSeconds = 10)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -450,12 +479,13 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         cmd.CommandText = @"INSERT INTO perfmon_stats
             (collection_id, collection_time, server_id, server_name,
              object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds)
-            VALUES ($1, $2, $3, 'TestServer', 'SQLServer:SQL Statistics', $4, '', $5, $5, 10)";
+            VALUES ($1, $2, $3, 'TestServer', 'SQLServer:SQL Statistics', $4, '', $5, $5, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = time });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = counterName });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaValue });
+        cmd.Parameters.Add(new DuckDBParameter { Value = intervalSeconds });
         await cmd.ExecuteNonQueryAsync();
     }
 

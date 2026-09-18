@@ -197,6 +197,44 @@ public sealed class StoreConfigProviderTests
         Assert.Equal(1, eff.RetentionDays);
     }
 
+    /// <summary>
+    /// #3532: a delta-family cadence past <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/>
+    /// would exceed the shared delta gap policy every cycle — the collector re-baselines each run and
+    /// stores (0, 0) forever, fabricating permanent quiet. The viewer's editor refuses to write such a
+    /// row, but a hand-written or pre-fix row can still exist, so the resolver treats it as "no override"
+    /// and falls through to the next level, exactly like a negative frequency.
+    /// </summary>
+    [Fact]
+    public void Resolve_RejectsADeltaFamilyCadencePastTheGapPolicyCap_FallingThrough()
+    {
+        var def = CollectorScheduleDefaults.All["wait_stats"];
+        var cap = CollectorDeltaCalculator.MaxDeltaFrequencyMinutes;
+
+        /* A poisoned fleet row falls all the way through to the code default. */
+        var fleetBad = new[] { new ScheduleOverride(null, "wait_stats", cap + 60, null, true) };
+        Assert.Equal(def.FrequencyMinutes, StoreConfigProvider.ResolveSchedule("wait_stats", 1, fleetBad).FrequencyMinutes);
+
+        /* A poisoned per-server row falls through to a VALID fleet row, per-column. */
+        var layered = new[]
+        {
+            new ScheduleOverride(null, "wait_stats", 15, null, true),
+            new ScheduleOverride(1, "wait_stats", cap + 1, null, true),
+        };
+        Assert.Equal(15, StoreConfigProvider.ResolveSchedule("wait_stats", 1, layered).FrequencyMinutes);
+
+        /* The cap itself is honored, the PostgreSQL delta family is covered, and a snapshot collector
+           keeps its long cadence — the bound is per-collector-kind, not blanket. */
+        var atCap = new[] { new ScheduleOverride(null, "wait_stats", cap, null, true) };
+        Assert.Equal(cap, StoreConfigProvider.ResolveSchedule("wait_stats", 1, atCap).FrequencyMinutes);
+
+        var pgBad = new[] { new ScheduleOverride(null, "pg_wait_stats", cap + 60, null, true) };
+        Assert.Equal(CollectorScheduleDefaults.All["pg_wait_stats"].FrequencyMinutes,
+            StoreConfigProvider.ResolveSchedule("pg_wait_stats", 1, pgBad).FrequencyMinutes);
+
+        var snapshot = new[] { new ScheduleOverride(null, "database_size_stats", cap + 60, null, true) };
+        Assert.Equal(cap + 60, StoreConfigProvider.ResolveSchedule("database_size_stats", 1, snapshot).FrequencyMinutes);
+    }
+
     /* ---------------- live (DARLING_TEST_PG): the V17 bump trigger, rolled back ---------------- */
 
     [Fact]

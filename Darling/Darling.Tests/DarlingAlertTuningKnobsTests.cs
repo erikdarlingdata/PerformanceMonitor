@@ -38,8 +38,10 @@ public sealed class DarlingAlertTuningKnobsTests
         var config = new DarlingConfig();
         var settings = new DarlingAlertSettings(config);
 
-        /* Defaults mirror the V55 DDL — the compile-time constants these knobs replaced. */
+        /* Defaults mirror the V55 DDL — the compile-time constants these knobs replaced — and the V126
+           GB floor mirrors its own shipped constant (#3528). */
         Assert.Equal(10, settings.SelfDiskFreeWarnPercent);
+        Assert.Equal(50, settings.SelfDiskFreeWarnGb);
         Assert.Equal(30, settings.CollectionStaleMinutes);
         Assert.Equal(10, settings.CollectionFailureThreshold);
         Assert.Equal(3, settings.DiskCriticalFreePercent);
@@ -51,6 +53,7 @@ public sealed class DarlingAlertTuningKnobsTests
            0 failure threshold on the fast path would fire on any single failure, and the analysis
            cooldown keeps the shared engine's documented [30, 10080]. */
         config.Alerts.SelfDiskFreeWarnPercent = 150;
+        config.Alerts.SelfDiskFreeWarnGb = -1;
         config.Alerts.CollectionStaleMinutes = 0;
         config.Alerts.CollectionFailureThreshold = 0;
         config.Alerts.DiskCriticalFreePercent = -5;
@@ -58,6 +61,8 @@ public sealed class DarlingAlertTuningKnobsTests
         config.Alerts.AnalysisNotifyCooldownMinutes = 99999;
 
         Assert.Equal(100, settings.SelfDiskFreeWarnPercent);
+        /* #3528: floored at 0 like the sibling GB knobs — 0 is meaningful (it removes the floor). */
+        Assert.Equal(0, settings.SelfDiskFreeWarnGb);
         Assert.Equal(5, settings.CollectionStaleMinutes);
         Assert.Equal(1, settings.CollectionFailureThreshold);
         Assert.Equal(0, settings.DiskCriticalFreePercent);

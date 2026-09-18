@@ -648,7 +648,28 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+    }
+
+    /* #3523: every by-CPU read RANKED by summed elapsed time — on a wait-bound server the real CPU
+       consumers could be absent from the page entirely, and attributed_cpu_ratio then read as "hidden
+       CPU" when it meant "wrong sort key". Both the ranking cut (the CTE's ORDER BY ... LIMIT) and the
+       post-WAITFOR-trim final ordering must key on CPU; the viewer's Duration grids keep their elapsed
+       ranking by design and are pinned separately in ViewerQueriesTests. */
+    [Theory]
+    [InlineData(nameof(DarlingDataReader.TopQueriesSql))]
+    [InlineData(nameof(DarlingDataReader.TopQueriesByHostObjectSql))]
+    [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
+    public void ByCpuReads_RankByWorkerTime_NeverElapsed(string sqlName)
+    {
+        var sql = SqlByName(sqlName);
+        Assert.Contains("ORDER BY SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("total_elapsed_us DESC", sql, StringComparison.Ordinal);
+        if (sqlName != nameof(DarlingDataReader.TopProceduresSql))
+        {
+            Assert.Contains("ORDER BY r.total_cpu_us DESC", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -727,6 +748,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.TempDbTrendSql))]
     [InlineData(nameof(DarlingDataReader.LatestPerfmonStatsSql))]
     [InlineData(nameof(DarlingDataReader.TopQueriesSql))]
+    [InlineData(nameof(DarlingDataReader.TopQueriesByHostObjectSql))]
     [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
     [InlineData(nameof(DarlingDataReader.QueryStoreTopSql))]
     [InlineData(nameof(DarlingDataReader.ServerListSql))]
@@ -757,6 +779,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         nameof(DarlingDataReader.TempDbTrendSql) => DarlingDataReader.TempDbTrendSql,
         nameof(DarlingDataReader.LatestPerfmonStatsSql) => DarlingDataReader.LatestPerfmonStatsSql,
         nameof(DarlingDataReader.TopQueriesSql) => DarlingDataReader.TopQueriesSql,
+        nameof(DarlingDataReader.TopQueriesByHostObjectSql) => DarlingDataReader.TopQueriesByHostObjectSql,
         nameof(DarlingDataReader.TopProceduresSql) => DarlingDataReader.TopProceduresSql,
         nameof(DarlingDataReader.QueryStoreTopSql) => DarlingDataReader.QueryStoreTopSql,
         nameof(DarlingDataReader.ServerListSql) => DarlingDataReader.ServerListSql,

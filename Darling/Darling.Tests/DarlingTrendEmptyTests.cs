@@ -83,9 +83,10 @@ public sealed class DarlingTrendEmptyTests
             await SeedFileIoAsync(connection, ct, recent);
             await SeedQueryAsync(connection, ct, recent);
 
+            var memoryPayload = await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4);
             foreach (var payload in new[]
                      {
-                         await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4),
+                         memoryPayload,
                          await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 4),
                          await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, 4),
                      })
@@ -93,6 +94,15 @@ public sealed class DarlingTrendEmptyTests
                 var root = JsonDocument.Parse(payload).RootElement;
                 Assert.False(root.TryGetProperty("status", out _));
                 Assert.True(root.GetProperty("trend").GetArrayLength() > 0);
+            }
+
+            /* #3529: total_granted_mb is an explicit null with the envelope naming the real source —
+               never the literal 0.0 an agent read as "granted was 0 all window". */
+            var memoryRoot = JsonDocument.Parse(memoryPayload).RootElement;
+            Assert.Contains("get_memory_grants", memoryRoot.GetProperty("granted_note").GetString(), StringComparison.Ordinal);
+            foreach (var point in memoryRoot.GetProperty("trend").EnumerateArray())
+            {
+                Assert.Equal(JsonValueKind.Null, point.GetProperty("total_granted_mb").ValueKind);
             }
 
             bodySucceeded = true;

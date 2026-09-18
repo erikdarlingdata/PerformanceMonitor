@@ -101,6 +101,18 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.False(McpParams("get_query_trend").Single(x => x.Name == "database_name").Optional);
     }
 
+    /// <summary>#3529: the description promised granted memory while the payload shipped a literal 0.
+    /// It now points at get_memory_grants, the tool that actually serves the grants series.</summary>
+    [Fact]
+    public void MemoryTrend_Description_PointsAtTheGrantsTool_AndDoesNotPromiseGrantedMemory()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_memory_trend");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("and granted memory", description, StringComparison.Ordinal);
+        Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void MemoryTrendSql_WindowedBothSides_CastsNumericToDouble()
     {

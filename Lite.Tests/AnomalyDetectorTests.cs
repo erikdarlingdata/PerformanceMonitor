@@ -100,10 +100,10 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     [Fact]
     public async Task DetectBatchRequestAnomalies_Spike_DetectsAnomaly()
     {
-        // Baseline: normal batch requests (~5000)
+        // Baseline: normal batch requests (delta ~5000 per 10s interval = ~500/sec)
         await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
 
-        // Analysis window: spike to 15000
+        // Analysis window: spike to delta 15000 per 10s interval = 1500/sec
         for (int i = 0; i < 16; i++)
             await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 15000);
 
@@ -139,11 +139,51 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     [Fact]
     public async Task DetectBatchRequestAnomalies_LowVolumeSpike_NoAnomaly()
     {
-        // Low-throughput server: a 6x relative spike but the peak stays at 300/sec
-        // — below the 500/sec BatchRequestFloor — must NOT be flagged.
-        await SeedBaselinePerfmon("Batch Requests/sec", 50, variance: 5);
+        // Low-throughput server: a 6x relative spike but the peak stays at 300/sec (delta 3000 over
+        // a 10s interval) — below the 500/sec BatchRequestFloor — must NOT be flagged. The RAW
+        // per-interval delta (3000) is past the floor: only the per-second division (#3527) keeps
+        // this quiet, so this test also pins that the floor compares requests/sec, not the delta.
+        await SeedBaselinePerfmon("Batch Requests/sec", 500, variance: 50);
         for (int i = 0; i < 16; i++)
-            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 300);
+            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 3000);
+
+        await SeedBaselineCpu(10, variance: 2);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_BATCH_REQUESTS");
+    }
+
+    [Fact]
+    public async Task DetectBatchRequestAnomalies_WindowValuesArePerSecond()
+    {
+        // #3527 fixture through the detector: window delta 15000 over a 10s interval = 1500/sec.
+        // The emitted Value and peak/avg metadata must be the per-second numbers, in the same unit
+        // as the baseline (delta ~5000 / 10s = ~500/sec) — not the raw per-interval deltas.
+        await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
+        for (int i = 0; i < 16; i++)
+            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 15000);
+
+        await SeedBaselineCpu(10, variance: 2);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var fact = anomalies.First(f => f.Key == "ANOMALY_BATCH_REQUESTS");
+        Assert.Equal(1500.0, fact.Value);
+        Assert.Equal(1500.0, fact.Metadata["peak_batch_requests"]);
+        Assert.Equal(1500.0, fact.Metadata["avg_batch_requests"]);
+        Assert.InRange(fact.Metadata["baseline_mean"], 450, 550);
+    }
+
+    [Fact]
+    public async Task DetectBatchRequestAnomalies_IntervalZeroRowsAreSkipped_NotReadAsRates()
+    {
+        // #3527: interval-0 rows carry NO knowable delta. A window holding only interval-0 rows —
+        // however wild their deltas — has zero usable samples, so the detector stays silent instead
+        // of reading the raw deltas as a spike (or the rows as rate 0).
+        await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
+        for (int i = 0; i < 16; i++)
+            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 999_999, intervalSeconds: 0);
 
         await SeedBaselineCpu(10, variance: 2);
 
@@ -600,7 +640,10 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue)
+    /// <summary>Seeds one perfmon row. deltaValue is the PER-INTERVAL delta; the detector divides it by
+    /// intervalSeconds (#3527), so at the default 10s interval the per-second rate is deltaValue / 10.
+    /// intervalSeconds = 0 plants the unknowable-delta marker the reads must skip.</summary>
+    private async Task SeedPerfmonAsync(DateTime time, string counterName, long deltaValue, int intervalSeconds = 10)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -608,12 +651,13 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         cmd.CommandText = @"INSERT INTO perfmon_stats
             (collection_id, collection_time, server_id, server_name,
              object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds)
-            VALUES ($1, $2, $3, 'TestServer', 'SQLServer:SQL Statistics', $4, '', $5, $5, 10)";
+            VALUES ($1, $2, $3, 'TestServer', 'SQLServer:SQL Statistics', $4, '', $5, $5, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = time });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = counterName });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaValue });
+        cmd.Parameters.Add(new DuckDBParameter { Value = intervalSeconds });
         await cmd.ExecuteNonQueryAsync();
     }
 

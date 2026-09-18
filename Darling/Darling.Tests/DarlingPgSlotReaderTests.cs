@@ -88,6 +88,7 @@ public class DarlingPgSlotReaderTests
     {
         Assert.Equal(expected, DarlingMcpPgSlotTools.Classify(walStatus, isActive: true, retainedWalGrowing: false));
         Assert.Equal(expected, DarlingMcpPgSlotTools.Classify(walStatus, isActive: false, retainedWalGrowing: true));
+        Assert.Equal(expected, DarlingMcpPgSlotTools.Classify(walStatus, isActive: false, retainedWalGrowing: null));
     }
 
     /// <summary>
@@ -138,6 +139,92 @@ public class DarlingPgSlotReaderTests
     }
 
     /// <summary>
+    /// Unknown growth — the collector's -1 sentinel, or a one-sample window — is its own verdict, never
+    /// the flat one. "Flat" is a measured claim, and it is the exact claim that separates a consumer
+    /// between polls from a volume filling; a sentinel spelled as measured zero read every unmeasurable
+    /// slot as stable (#3535).
+    /// </summary>
+    [Fact]
+    public void UnknownGrowthIsItsOwnVerdictNeverFlat()
+    {
+        /* The orphan-candidate shape with its discriminator unmeasured: a warning that says so, not
+           the measured-flat warning and not a fabricated critical. */
+        Assert.Equal(
+            "warning_retaining_wal_growth_unknown",
+            DarlingMcpPgSlotTools.Classify("extended", isActive: false, retainedWalGrowing: null));
+
+        Assert.Equal(
+            "info_inactive_growth_unknown",
+            DarlingMcpPgSlotTools.Classify("reserved", isActive: false, retainedWalGrowing: null));
+        Assert.Equal(
+            "info_inactive_growth_unknown",
+            DarlingMcpPgSlotTools.Classify(null, isActive: false, retainedWalGrowing: null));
+
+        /* Where measured growth would not escalate anyway, unknown growth manufactures nothing: an
+           active consumer stays ok, and an active extended slot stays the plain retaining warning. */
+        Assert.Equal("ok", DarlingMcpPgSlotTools.Classify("reserved", isActive: true, retainedWalGrowing: null));
+        Assert.Equal(
+            "warning_retaining_wal",
+            DarlingMcpPgSlotTools.Classify("extended", isActive: true, retainedWalGrowing: null));
+    }
+
+    /// <summary>
+    /// worst_slot is picked by severity rank with size only as the tiebreak, so the ladder itself is
+    /// pinned: strictly descending, criticals above warnings above infos above ok, and a label Rank does
+    /// not know sorts with ok rather than above anything it does.
+    /// </summary>
+    [Fact]
+    public void RankOrdersEverySeverityWorstFirst()
+    {
+        var ladder = new[]
+        {
+            "critical_slot_lost",
+            "critical_wal_already_removed",
+            "critical_orphan_filling_disk",
+            "warning_inactive_and_growing",
+            "warning_retaining_wal_growth_unknown",
+            "warning_retaining_wal",
+            "info_inactive_growth_unknown",
+            "info_inactive",
+            "ok",
+        };
+
+        for (var i = 1; i < ladder.Length; i++)
+        {
+            Assert.True(
+                DarlingMcpPgSlotTools.Rank(ladder[i - 1]) > DarlingMcpPgSlotTools.Rank(ladder[i]),
+                $"'{ladder[i - 1]}' must outrank '{ladder[i]}'");
+        }
+
+        Assert.Equal(0, DarlingMcpPgSlotTools.Rank("ok"));
+        Assert.Equal(0, DarlingMcpPgSlotTools.Rank("a_label_rank_does_not_know"));
+    }
+
+    /// <summary>
+    /// Every non-ok label Classify can emit holds a rung above ok, so a future Classify arm that skips
+    /// Rank cannot ship a severity that silently never headlines.
+    /// </summary>
+    [Fact]
+    public void EveryClassifiableSeverityHasARung()
+    {
+        var emittable = new[]
+        {
+            DarlingMcpPgSlotTools.Classify("lost", false, false),
+            DarlingMcpPgSlotTools.Classify("unreserved", false, false),
+            DarlingMcpPgSlotTools.Classify("extended", false, true),
+            DarlingMcpPgSlotTools.Classify("extended", false, null),
+            DarlingMcpPgSlotTools.Classify("extended", true, false),
+            DarlingMcpPgSlotTools.Classify("reserved", false, true),
+            DarlingMcpPgSlotTools.Classify("reserved", false, null),
+            DarlingMcpPgSlotTools.Classify("reserved", false, false),
+        };
+
+        Assert.All(emittable, severity => Assert.True(
+            DarlingMcpPgSlotTools.Rank(severity) > 0,
+            $"'{severity}' ranks 0 — it ties with ok and can never be picked as worst_slot"));
+    }
+
+    /// <summary>
     /// wal_status is NULL on a slot with no restart_lsn yet, and on Aurora it can be absent entirely.
     /// That must fall through to the activity/growth branches rather than throwing or reading as healthy
     /// when the slot is inactive and growing.
@@ -161,8 +248,10 @@ public class DarlingPgSlotReaderTests
             DarlingMcpPgSlotTools.Classify("lost", false, false),
             DarlingMcpPgSlotTools.Classify("unreserved", false, false),
             DarlingMcpPgSlotTools.Classify("extended", false, true),
+            DarlingMcpPgSlotTools.Classify("extended", false, null),
             DarlingMcpPgSlotTools.Classify("extended", true, false),
             DarlingMcpPgSlotTools.Classify("reserved", false, true),
+            DarlingMcpPgSlotTools.Classify("reserved", false, null),
             DarlingMcpPgSlotTools.Classify("reserved", false, false),
             DarlingMcpPgSlotTools.Classify("reserved", true, false),
         };

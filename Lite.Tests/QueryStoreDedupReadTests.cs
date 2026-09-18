@@ -94,7 +94,9 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long avgReads,
         string queryHash,
         long? intervalId = null,
-        DateTime? intervalStart = null)
+        DateTime? intervalStart = null,
+        long avgWrites = 0,
+        long avgPhysicalReads = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -124,8 +126,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgDurationUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgReads });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgWrites });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgPhysicalReads });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"0xPLAN{planId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = false });
         cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
@@ -193,6 +195,39 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(TrueBucketCpuMs, bucket.TotalCpu, precision: 6);
         Assert.Equal(TrueBucketDurationMs, bucket.TotalElapsed, precision: 6);
         Assert.Equal(TrueBucketReads, bucket.TotalReads, precision: 6);
+    }
+
+    /// <summary>
+    /// #3530: the slicer's reader mapped BOTH read fields to ordinal 4 and never read ordinal 6, so the
+    /// SELECT's total_physical_reads was computed and dropped on the floor. The seed's three I/O columns
+    /// carry values no other column can reproduce — equal fixture values are exactly how the slip stayed
+    /// invisible, so distinct-per-column is the point of this test, not a nicety.
+    /// </summary>
+    [Fact]
+    public async Task SlicerBucket_MapsWritesAndPhysicalReads_ToTheirOwnColumns()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 7, planId: 77, FirstExecA,
+            executionCount: 10, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 11, queryHash: "0xIOMAP",
+            intervalId: 9301, intervalStart: BucketStart, avgWrites: 3, avgPhysicalReads: 5);
+
+        var service = new LocalDataService(_duckDb);
+        var bucket = Assert.Single(await service.GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
+
+        /* 10 executions x the averages: logical 110, writes 30, physical 50 — all pairwise distinct.
+           TotalReads and TotalLogicalReads are deliberate aliases of the LOGICAL aggregate (ordinal 4),
+           the same shape the query-stats slicer maps; physical rides its own column at ordinal 6. */
+        Assert.Equal(110.0, bucket.TotalReads, precision: 6);
+        Assert.Equal(110.0, bucket.TotalLogicalReads, precision: 6);
+        Assert.Equal(30.0, bucket.TotalWrites, precision: 6);
+        Assert.Equal(50.0, bucket.TotalPhysicalReads, precision: 6);
+
+        /* #3547's data half: the slicer OVERLAY reads the same rows through the timeline, whose SELECT
+           carried no physical column at all — so a physical-sorted chart had nothing honest to draw.
+           Same distinct values, so a logical/physical swap on either side goes red here. (The overlay's
+           metric->field switch itself is WPF code-behind, untestable here like its sibling arms.) */
+        var point = Assert.Single(await service.GetQueryStoreItemTimelineAsync(ServerId, Db, queryId: 7, planId: 77, hoursBack: 24));
+        Assert.Equal(110.0, point.Reads, precision: 6);
+        Assert.Equal(50.0, point.PhysicalReads, precision: 6);
     }
 
     [Fact]
