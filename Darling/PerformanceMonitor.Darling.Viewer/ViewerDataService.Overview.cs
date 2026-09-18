@@ -988,6 +988,21 @@ public sealed class ServerSummaryItem
     /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
 
+    /// <summary>
+    /// How many of the card's per-metric severities carried a real reading when it banded (#3528), through
+    /// the SAME shared fold the service's fleet card publishes as <c>measured_metric_count</c> — the fold
+    /// behind <see cref="OverallMetricSeverity"/> SKIPS Unknown, so a card can read Healthy off one
+    /// measured metric of six, and this count is what lets the band label say so ("Healthy — 1 of 6
+    /// measured") instead of rendering an unqualified green. Purely descriptive: it feeds neither the band
+    /// nor the worst-first score.
+    /// </summary>
+    public int MeasuredMetricCount => ServerHealthClassifier.MeasuredMetricCounts(ToHealthMetrics()).Measured;
+
+    /// <summary>The denominator for <see cref="MeasuredMetricCount"/> — from the shared classifier rather
+    /// than a hardcoded six, so a new metric row moves both counts at once (the service's
+    /// <c>metric_count</c>).</summary>
+    public int MetricCount => ServerHealthClassifier.MeasuredMetricCounts(ToHealthMetrics()).Total;
+
     /// <summary>The card's raw per-metric inputs, for the shared classifier (banding + fleet score).</summary>
     public ServerHealthMetrics ToHealthMetrics() => new()
     {

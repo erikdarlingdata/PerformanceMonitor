@@ -425,7 +425,10 @@
                     <TextBlock Text="Monitor self-alerts: store volume under" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertSelfDiskWarnPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                    <TextBlock Text="% free; collection quiet" VerticalAlignment="Center" Margin="2,0,0,0"
+                    <TextBlock Text="% free and under" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertSelfDiskWarnGbBox" Width="45" Text="50" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="GB (0 GB = percent alone); collection quiet" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertCollectionStaleMinutesBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min or" VerticalAlignment="Center" Margin="2,0,0,0"

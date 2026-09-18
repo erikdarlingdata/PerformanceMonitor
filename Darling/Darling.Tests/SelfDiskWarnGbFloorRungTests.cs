@@ -10,6 +10,7 @@ using System;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -168,18 +169,18 @@ public sealed class SelfDiskWarnGbFloorRungTests
     /* ---- every settings-row surface handles the column ------------------------------------------------ */
 
     /// <summary>
-    /// EVERY wired surface that reads or writes the settings row names the column — and the ONE surface
-    /// deliberately not wired yet is pinned to its abstinence. The wired lists drive ordinals or parameter
-    /// positions, so a column added to one and not the others re-maps reads and writes at once.
+    /// EVERY surface that reads or writes the settings row names the column — the viewer INCLUDED. The
+    /// wired lists drive ordinals or parameter positions, so a column added to one and not the others
+    /// re-maps reads and writes at once.
     ///
-    /// <para><b>The viewer's select/upsert is the pinned abstinence</b>, unlike every earlier knob rung:
-    /// this knob lands backend-first (store plane + the two MCP tools), and the Settings window's box
-    /// follows in the viewer pass. The viewer's explicit column lists mean its select and save are
-    /// untouched by the new column — nothing throws, and a viewer Save cannot null the floor out. When the
-    /// viewer pass wires the box, this assertion is where that decision flips.</para>
+    /// <para><b>The viewer's select/upsert was this rung's pinned abstinence</b>, unlike every earlier knob
+    /// rung: the knob landed backend-first (store plane + the two MCP tools), and this assertion pinned
+    /// <c>DoesNotContain</c> until the viewer pass (#3563) wired the Settings window's box — the flip that
+    /// paragraph promised. What the abstinence protected still holds now that it is wired: the viewer's
+    /// explicit column lists mean a Save writes the floor rather than nulling it out.</para>
     /// </summary>
     [Fact]
-    public void EveryWiredSettingsRowSurfaceNamesTheColumn_AndTheViewerAbstains()
+    public void EverySettingsRowSurfaceNamesTheColumn_TheViewerIncluded()
     {
         var service = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs");
@@ -200,10 +201,84 @@ public sealed class SelfDiskWarnGbFloorRungTests
             "case \"disk_free_warn_gb\": AddInt(\"self_disk_free_warn_gb\", n, \"self_alerts.disk_free_warn_gb\", 0, int.MaxValue); break;",
             tools, StringComparison.Ordinal);
 
-        /* The deliberate abstinence: the viewer's settings surface does not name the column yet. */
+        /* The viewer pass (#3563): the viewer's select reads the column, its upsert WRITES it (or Save
+           silently drops whatever the box held), and its reader maps the appended ordinal. */
         var viewerSettings = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.AlertSettings.cs");
-        Assert.DoesNotContain(FloorColumn, viewerSettings, StringComparison.Ordinal);
+        Assert.Contains(FloorColumn, ViewerDataService.AlertSettingsSelectSql, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{FloorColumn} = EXCLUDED.{FloorColumn}", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
+        Assert.Contains("SelfDiskFreeWarnGb = reader.GetInt32(66)", viewerSettings, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The Settings window's box (#3563): prefilled from the row, saved through the same bound the MCP
+    /// writer accepts and the read-side clamp keeps (<c>&gt;= 0</c> — 0 removes the floor), following the
+    /// alerts master switch like every #2107 sibling, and Restore Defaults writes the shipped constant.
+    ///
+    /// <para><b>The viewer restates the shipped default as a literal</b> — in the row initializer and the
+    /// Restore Defaults button — because <c>DarlingSelfAlertEvaluator</c> lives on the Service assembly the
+    /// viewer does not reference (its percent sibling's "10" has the same shape). Both literals are pinned
+    /// equal to the constant here, the same equality the rung SQL's own default carries, so a moved shipped
+    /// default cannot leave the window handing out a floor no other surface reports.</para>
+    /// </summary>
+    [Fact]
+    public void TheSettingsWindowBox_PrefillsSavesGatesAndRestores_AtTheSharedBoundAndDefault()
+    {
+        var window = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
+        var xaml = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml");
+
+        /* The box exists, one knob over from its percent sibling. */
+        Assert.Contains("x:Name=\"AlertSelfDiskWarnGbBox\"", xaml, StringComparison.Ordinal);
+
+        /* Prefill, save gate (the [0, int.MaxValue) bound's floor), and the master-switch follow. */
+        Assert.Contains("AlertSelfDiskWarnGbBox.Text = r.SelfDiskFreeWarnGb.ToString(", window, StringComparison.Ordinal);
+        Assert.Contains(
+            "if (int.TryParse(AlertSelfDiskWarnGbBox.Text, out var selfDiskGb) && selfDiskGb >= 0)",
+            window, StringComparison.Ordinal);
+        Assert.Contains("row.SelfDiskFreeWarnGb = selfDiskGb;", window, StringComparison.Ordinal);
+        Assert.Contains("AlertSelfDiskWarnGbBox.IsEnabled = enabled;", window, StringComparison.Ordinal);
+
+        /* Restore Defaults writes the shipped figure, and the viewer row seeds it — both as literals
+           pinned equal to the constant. */
+        var shipped = ((int)DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb).ToString(CultureInfo.InvariantCulture);
+        Assert.Contains($"AlertSelfDiskWarnGbBox.Text = \"{shipped}\";", window, StringComparison.Ordinal);
+        Assert.Equal((int)DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb, AlertSettingsRow.Defaults().SelfDiskFreeWarnGb);
+        Assert.Equal((int)DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb, new AlertsConfig().SelfDiskFreeWarnGb);
+    }
+
+    /// <summary>
+    /// The viewer row round-trips through the bind at the APPENDED ordinal — the four-parallel-sequences
+    /// trap (the column list, the upsert's $N placeholders, the bind order, and the reader ordinals),
+    /// held for the one sequence no SQL text pin can see: the bind. The V124 rung's shape, one knob on.
+    /// </summary>
+    [Fact]
+    public void TheViewerRow_RoundTripsThroughTheBind_AtTheAppendedOrdinal()
+    {
+        var bind = typeof(ViewerDataService)
+            .GetMethod("BindAlertSettings", BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        var row = AlertSettingsRow.Defaults();
+        /* Deliberately NOT the shipped 50 — a bind that dropped the column and fell back to the default
+           would otherwise still present the right value at the position. 75 is the MCP round-trip test's
+           sample, for the same reason. */
+        row.SelfDiskFreeWarnGb = 75;
+
+        using var command = new NpgsqlCommand();
+        bind.Invoke(null, new object[] { command, row });
+
+        /* The bind supplies exactly as many parameters as the upsert's highest placeholder. */
+        var highestPlaceholder = System.Text.RegularExpressions.Regex
+            .Matches(ViewerDataService.AlertSettingsUpsertSql, @"\$(\d+)")
+            .Select(m => int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture))
+            .Max();
+        Assert.Equal(command.Parameters.Count, highestPlaceholder);
+
+        /* The new column rides at the END — appended, the rule every knob rung on this table follows,
+           so every earlier ordinal keeps its column. */
+        Assert.Equal(75, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^1]).TypedValue);
     }
 
     /* ---- the seam reaches the gate -------------------------------------------------------------------- */
@@ -212,7 +287,7 @@ public sealed class SelfDiskWarnGbFloorRungTests
     /// The settings adapter defaults to the shipped constant and clamps a hand-edited store value at the
     /// 0 floor — the raw-in/clamped-out split every knob on this table uses, with 0 IN range because it
     /// removes the floor (the <c>pvs_floor_gb</c> reading) rather than being nonsense. The write bound in
-    /// <see cref="EveryWiredSettingsRowSurfaceNamesTheColumn_AndTheViewerAbstains"/> is the same
+    /// <see cref="EverySettingsRowSurfaceNamesTheColumn_TheViewerIncluded"/> is the same
     /// <c>[0, int.MaxValue]</c>, so no accepted value is one this clamp rewrites.
     /// </summary>
     [Fact]
