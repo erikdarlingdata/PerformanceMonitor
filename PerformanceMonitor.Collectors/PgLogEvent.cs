@@ -15,11 +15,17 @@ namespace PerformanceMonitor.Collectors;
 /// family parser from a <see cref="PgLogEntry"/>, and only through <see cref="From"/>, which is where every
 /// text column meets <see cref="PgLogTextRedactor"/> — a parser cannot construct an unredacted row.
 ///
-/// <para><b>Generic by design.</b> The columns are the ones EVERY family has — when, who, how bad, what it
-/// said — plus a statement fingerprint and an identity hash. A family with structure of its own (a spill's
-/// byte count, an autovacuum run's page counts) is a sibling TABLE fed by a sibling parser off the same
-/// assembled entries (#3602, #3603); this row is the event log those sit beside, and the family column is
-/// what lets a reader ask "everything that happened at 03:07" across all of them.</para>
+/// <para><b>Generic first, structured where a family has structure.</b> The leading columns are the ones
+/// EVERY family has — when, who, how bad, what it said — plus a statement fingerprint and an identity
+/// hash. #3601 planned a family's own numbers (a spill's byte count, an autovacuum run's page counts) as a
+/// sibling TABLE fed by a sibling parser; #3602 / #3603 landed them instead as NULLABLE COLUMNS on this one
+/// row (<see cref="PgLogEventMetrics"/>, V130), and the reason is the reader's question rather than the
+/// schema's tidiness: "everything that happened at 03:07" and "what did the 03:07 spill cost" are one
+/// query over one table with one identity, one dedupe and one retention, where a sibling table would have
+/// been a second cursor's worth of overlap to reconcile and a join on a hash for every page. The family
+/// column still says which of these columns can be non-null: <c>bytes</c> for a spill, the relation and
+/// the run figures for an autovacuum, nothing for the rest. A nullable no-default column on a compressed
+/// hypertable is catalog-only in PostgreSQL and TimescaleDB, so the widening cost the store nothing.</para>
 /// </summary>
 /// <param name="OccurredAtUtc">When PostgreSQL wrote the line. Kind is Utc.</param>
 /// <param name="Family">One of <see cref="PgLogFamilies.All"/>.</param>
@@ -37,6 +43,8 @@ namespace PerformanceMonitor.Collectors;
 /// draft parsing it and dropping it while a doc comment claimed it was stored.</param>
 /// <param name="StatementFingerprint">Hash of the REDACTED statement, or null where the entry had none.</param>
 /// <param name="RawLineHash">Identity across sightings. See <see cref="PgLogTextRedactor.RawLineHash"/>.</param>
+/// <param name="Metrics">The family's lifted numbers (#3602 spill bytes, #3603 autovacuum run figures), or
+/// <see cref="PgLogEventMetrics.None"/> for a family with none. Every member nullable; the store columns are.</param>
 public readonly record struct PgLogEvent(
     DateTime OccurredAtUtc,
     string Family,
@@ -50,7 +58,8 @@ public readonly record struct PgLogEvent(
     string? Detail,
     string? Context,
     string? StatementFingerprint,
-    string RawLineHash)
+    string RawLineHash,
+    PgLogEventMetrics Metrics)
 {
     /// <summary><see cref="PgLogEntry.RankOf"/> over <see cref="Severity"/>: seriousness order, not <c>log_min_messages</c>'.</summary>
     public int SeverityRank => PgLogEntry.RankOf(Severity);
@@ -65,12 +74,18 @@ public readonly record struct PgLogEvent(
     /// <param name="databaseName">Overrides the prefix's, where the message named one (connection lines).</param>
     /// <param name="userName">Overrides the prefix's, where the message named one.</param>
     /// <param name="applicationName">From the message, where it named one.</param>
+    /// <param name="metrics">The family's lifted numbers, where it has any (#3602, #3603). Numbers need no
+    /// redaction; <see cref="PgLogEventMetrics.RelationName"/> is an identifier PostgreSQL wrote after the
+    /// noun <c>table</c>, the shape the redactor's own allowlist keeps whole in <c>message</c> — the same
+    /// standing <paramref name="databaseName"/> and <paramref name="userName"/> have. Nothing a user typed
+    /// can reach a metrics member: every source clause is engine prose with engine numbers.</param>
     public static PgLogEvent From(
         in PgLogEntry entry,
         string family,
         string? databaseName = null,
         string? userName = null,
-        string? applicationName = null)
+        string? applicationName = null,
+        PgLogEventMetrics metrics = default)
     {
         var redactedStatement = PgLogTextRedactor.RedactStatement(entry.Statement);
 
@@ -91,6 +106,66 @@ public readonly record struct PgLogEvent(
                never evidence, and nothing here claims otherwise. */
             Context: PgLogTextRedactor.RedactMessage(entry.Context),
             StatementFingerprint: PgLogTextRedactor.Fingerprint(redactedStatement),
-            RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText));
+            RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText),
+            Metrics: metrics);
     }
+}
+
+/// <summary>
+/// The numbers a family parser lifts out of its line (#3602, #3603) — the V130 columns of
+/// <c>collect.pg_log_events</c>, every one nullable, every one null for a family that has none.
+///
+/// <para><b>Two families populate it, disjointly.</b> A <c>temp_file</c> event carries <see cref="Bytes"/>
+/// and nothing else: <c>log_temp_files</c> writes one line per file with its size, and the statement that
+/// spilled is already fingerprinted on the generic row, so (fingerprint, bytes, time) is the per-execution
+/// attribution the issue asked for. An <c>autovacuum</c> event carries <see cref="RelationName"/>,
+/// <see cref="IsAnalyze"/>, <see cref="DurationMs"/> and whichever of the page / tuple / buffer / WAL
+/// figures the line had — an autoanalyze line has no pages or tuples clause, and an autovacuum line before
+/// PostgreSQL 18 has no WAL <i>buffers full</i> term (not stored; the four members here are the ones every
+/// version from 16 writes). A null member on an autovacuum row therefore means "this line did not carry
+/// the clause", never zero; the parsers do not fabricate a figure a version did not print.</para>
+///
+/// <para><b>What is deliberately NOT lifted.</b> <c>avg read rate</c> / <c>avg write rate</c> — derived
+/// figures (bytes over elapsed) a reader can recompute from what IS stored (misses, dirtied, duration) and
+/// that PostgreSQL itself prints as <c>0.000</c> for any run under a second; the CPU user/system split,
+/// which is a detail of the worker rather than of the table; the per-index lines, which are one row per
+/// index and belong to an index table if anything ever wants them; the <c>removable cutoff</c> and
+/// <c>relfrozenxid</c> lines, which <c>pg_wraparound_stats</c> already samples from the catalog. Everything
+/// lifted here is what a per-table cost history needs and no more.</para>
+/// </summary>
+/// <param name="RelationName"><c>schema.table</c> for an autovacuum / autoanalyze run — the database part
+/// of PostgreSQL's <c>"db.schema.table"</c> goes to the row's <c>database_name</c>. Null for a spill: the
+/// path in a <c>log_temp_files</c> line names a pgsql_tmp file, not a relation.</param>
+/// <param name="Bytes">The spilled file's size in bytes (<c>size N</c>). Null on every other family.</param>
+/// <param name="DurationMs">The run's wall-clock time, from <c>elapsed: N.NN s</c> — centisecond precision is
+/// all PostgreSQL prints, stored as whole milliseconds.</param>
+/// <param name="PagesRemoved"><c>pages: N removed</c> — heap pages truncated off the end of the relation.</param>
+/// <param name="PagesRemaining"><c>pages: …, N remain</c> — the relation's size in pages after the run.</param>
+/// <param name="TuplesRemoved"><c>tuples: N removed</c> — dead tuples actually reclaimed.</param>
+/// <param name="TuplesRemaining"><c>tuples: …, N remain</c> — live tuples the run estimated it left.</param>
+/// <param name="BufferHits"><c>buffer usage: N hits</c>.</param>
+/// <param name="BufferMisses"><c>buffer usage: …, N misses</c> on 16 and 17; PostgreSQL 18 renamed the term
+/// <c>reads</c> and this member reads either — one column, because it is one quantity.</param>
+/// <param name="BufferDirtied"><c>buffer usage: …, N dirtied</c>.</param>
+/// <param name="WalRecords"><c>WAL usage: N records</c>.</param>
+/// <param name="WalBytes"><c>WAL usage: …, N bytes</c>.</param>
+/// <param name="IsAnalyze">False for <c>automatic vacuum of table</c> (including the aggressive and
+/// to-prevent-wraparound variants), true for <c>automatic analyze of table</c>. Null on every other family.</param>
+public readonly record struct PgLogEventMetrics(
+    string? RelationName = null,
+    long? Bytes = null,
+    long? DurationMs = null,
+    long? PagesRemoved = null,
+    long? PagesRemaining = null,
+    long? TuplesRemoved = null,
+    long? TuplesRemaining = null,
+    long? BufferHits = null,
+    long? BufferMisses = null,
+    long? BufferDirtied = null,
+    long? WalRecords = null,
+    long? WalBytes = null,
+    bool? IsAnalyze = null)
+{
+    /// <summary>Every member null — the value of every family without numbers of its own.</summary>
+    public static PgLogEventMetrics None => default;
 }

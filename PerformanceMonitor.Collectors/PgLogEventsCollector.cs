@@ -16,7 +16,8 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>
 /// Classified PostgreSQL server-log events, read out of the log on the self-hosted route (#3601): errors,
-/// connections, lock waits, and the recognised-only families, into <c>collect.pg_log_events</c>.
+/// connections, lock waits, temp-file spills with their bytes (#3602), autovacuum runs with their cost
+/// (#3603), and the recognised-only checkpoint family, into <c>collect.pg_log_events</c>.
 ///
 /// <para><b>The gap this closes.</b> The log is the engine's primary event record and Darling read exactly
 /// two shapes out of it. A burst of <c>FATAL</c> connection failures, a statement cancelled by its client,
@@ -112,6 +113,28 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
         /* Identity across sightings — this route re-reads the tail every cycle, so the reads dedupe on it
            as the deadlock reads do on deadlock_hash. */
         new CollectorColumn("raw_line_hash", CollectorColumnType.Varchar),
+        /* V130 (#3602, #3603): the family-specific numbers, appended AFTER the identity column so the V129
+           column order is undisturbed and the ALTER an upgraded store ran lands them in the same positions
+           the generator gives a fresh one. All nullable; which can be non-null is the family's business —
+           see PgLogEventMetrics. */
+        /* schema.table of an autovacuum / autoanalyze run; null for a spill (a pgsql_tmp path is not a relation). */
+        new CollectorColumn("relation_name", CollectorColumnType.Varchar),
+        /* The spilled file's size, from `size N`. */
+        new CollectorColumn("bytes", CollectorColumnType.BigInt),
+        /* `elapsed: N.NN s` as whole milliseconds. */
+        new CollectorColumn("duration_ms", CollectorColumnType.BigInt),
+        new CollectorColumn("pages_removed", CollectorColumnType.BigInt),
+        new CollectorColumn("pages_remaining", CollectorColumnType.BigInt),
+        new CollectorColumn("tuples_removed", CollectorColumnType.BigInt),
+        new CollectorColumn("tuples_remaining", CollectorColumnType.BigInt),
+        new CollectorColumn("buffer_hits", CollectorColumnType.BigInt),
+        /* `misses` on 16/17, `reads` on 18 — one quantity. */
+        new CollectorColumn("buffer_misses", CollectorColumnType.BigInt),
+        new CollectorColumn("buffer_dirtied", CollectorColumnType.BigInt),
+        new CollectorColumn("wal_records", CollectorColumnType.BigInt),
+        new CollectorColumn("wal_bytes", CollectorColumnType.BigInt),
+        /* false = automatic vacuum (incl. aggressive / wraparound), true = automatic analyze, null = not this family. */
+        new CollectorColumn("is_analyze", CollectorColumnType.Boolean),
     };
 
     public override async ValueTask<List<PgLogEvent>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -153,6 +176,19 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
             .Value(row.Detail)
             .Value(row.Context)
             .Value(row.StatementFingerprint)
-            .Value(row.RawLineHash);
+            .Value(row.RawLineHash)
+            .Value(row.Metrics.RelationName)
+            .Value(row.Metrics.Bytes)
+            .Value(row.Metrics.DurationMs)
+            .Value(row.Metrics.PagesRemoved)
+            .Value(row.Metrics.PagesRemaining)
+            .Value(row.Metrics.TuplesRemoved)
+            .Value(row.Metrics.TuplesRemaining)
+            .Value(row.Metrics.BufferHits)
+            .Value(row.Metrics.BufferMisses)
+            .Value(row.Metrics.BufferDirtied)
+            .Value(row.Metrics.WalRecords)
+            .Value(row.Metrics.WalBytes)
+            .Value(row.Metrics.IsAnalyze);
     }
 }

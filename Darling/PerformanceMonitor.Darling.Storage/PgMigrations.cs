@@ -209,6 +209,7 @@ public static class PgMigrations
             + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(129, "pg-log-events", V129Sql),
+        new Migration(130, "pg-log-event-metrics", V130Sql),
     };
 
     /// <summary>
@@ -895,6 +896,15 @@ DROP VIEW IF EXISTS collect.v_query_stats;";
     /// collector's rung to be exactly what the generator emits, and the generator emits one index, so a
     /// second one in this rung would give the upgraded store an index the fresh store never gets. All
     /// value columns nullable, matching the generated schema this must be identical to.</para>
+    ///
+    /// <para><b>The thirteen columns after <c>raw_line_hash</c> are V130's (#3602, #3603), and they are here
+    /// for the V101 rule.</b> A store's tables come from one of two texts: a fresh store builds every table
+    /// from the generated schema at V1 (this CREATE then no-ops, <c>IF NOT EXISTS</c>), while a store that
+    /// climbed through V129 before V130 existed has the seventeen-column table this text built at the time.
+    /// <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's output column for column, and
+    /// the generator emits the collector's CURRENT columns — so this text carries them for the fresh
+    /// population, and V130's ALTER carries them for the existing one. Neither is redundant; dropping
+    /// either leaves one population permanently without the columns.</para>
     /// </summary>
     private const string V129Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_log_events (
@@ -914,11 +924,87 @@ CREATE TABLE IF NOT EXISTS collect.pg_log_events (
     detail text,
     context text,
     statement_fingerprint text,
-    raw_line_hash text
+    raw_line_hash text,
+    relation_name text,
+    bytes bigint,
+    duration_ms bigint,
+    pages_removed bigint,
+    pages_remaining bigint,
+    tuples_removed bigint,
+    tuples_remaining bigint,
+    buffer_hits bigint,
+    buffer_misses bigint,
+    buffer_dirtied bigint,
+    wal_records bigint,
+    wal_bytes bigint,
+    is_analyze boolean
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_log_events_time
     ON collect.pg_log_events(server_id, collection_time);";
+
+    /// <summary>
+    /// V130 — the family-specific NUMBERS on <c>collect.pg_log_events</c> (#3602, #3603): a spill's bytes,
+    /// and an autovacuum run's relation, duration, pages, tuples, buffers and WAL. V129 stored those two
+    /// families as recognised-only events — the line's prose, redacted, and nothing lifted — and this rung
+    /// is where the prose becomes columns a reader can sum, rank and alert on.
+    ///
+    /// <para><b>Columns on the event row, not sibling tables — the shape #3601 planned and this rung
+    /// declined, deliberately.</b> A <c>pg_temp_files</c> and a <c>pg_autovacuum_runs</c> table would each
+    /// have needed its own identity column and its own dedupe of the same overlapping tail, its own
+    /// retention, its own hypertable and compression policy, its own CI worker slot, and a join on
+    /// <c>raw_line_hash</c> for every read that wanted the event beside its numbers. Thirteen nullable
+    /// columns cost none of that: the row already has the identity, the dedupe, the fingerprint and the
+    /// retention, and "everything at 03:07" and "what did the 03:07 spill cost" are one query. The
+    /// <c>family</c> column says which columns can be non-null — <c>bytes</c> on <c>temp_file</c>, the rest
+    /// on <c>autovacuum</c>, nothing on the others — so a reader is never guessing what a NULL means on a
+    /// row whose family cannot carry the figure. What this trades away is per-family retention (a spill
+    /// history longer than thirty days would want its own table) and per-family indexing; both are the
+    /// separate rungs V129's doc already reserves.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector
+    /// table (V80, V81, V101, V114, V121, V127, V128). The rows stored under V129 were recognised-only and
+    /// never had the figures lifted; NULL is the honest value for them, and re-parsing thirty days of
+    /// redacted <c>message</c> text to fill them in would be re-deriving from a copy what the log itself
+    /// still holds for the collector to re-read. A nullable no-default ADD COLUMN is a catalog-only change
+    /// in PostgreSQL and TimescaleDB accepts it on a compressed hypertable (V127 and V128 verified the same
+    /// shape live on 2.28.1 against tables with continuous aggregates attached; this table has none), so
+    /// this stays instant however loud the target has been. Compression segments by <c>server_id</c> as
+    /// before; the new columns compress as ordinary members.</para>
+    ///
+    /// <para><b>Every column is <c>bigint</c> except the two that are not, and the types are the
+    /// collector's.</b> Bytes, pages, tuples, buffers and WAL figures are all counts PostgreSQL prints as
+    /// 64-bit integers; <c>duration_ms</c> is whole milliseconds from a centisecond figure. <c>relation_name</c>
+    /// is <c>text</c>, <c>schema.table</c>, the key <c>get_pg_autovacuum_health</c> joins on; <c>is_analyze</c>
+    /// is <c>boolean</c>, false for a vacuum and true for an analyze, NULL for a row of any other family.
+    /// <c>PgSchemaGeneratorTests</c> renders V129 from <c>PayloadColumns</c> and requires it to match column
+    /// for column, so a type here that differs from the collector's declaration is a build failure.</para>
+    ///
+    /// <para><b>The columns are added in TWO places and both are required</b> — the V101 rule. V129's CREATE
+    /// carries them for the fresh population (walked from the generator at V1, and never re-run on a store
+    /// that has the table); this ALTER carries them for the store that built the seventeen-column table
+    /// first. <c>ADD COLUMN IF NOT EXISTS</c> is a no-op on the fresh store that already has them.</para>
+    ///
+    /// <para>No view refresh: <c>collect.pg_log_events</c> has no <c>v_</c> passthrough. No index: the reads
+    /// still enter through <c>idx_pg_log_events_time</c> and filter within the window; a
+    /// <c>(server_id, relation_name, collection_time)</c> index for the per-table run history is the same
+    /// separate rung as the family index, when a long window on a loud target asks for it.</para>
+    /// </summary>
+    private const string V130Sql = @"
+ALTER TABLE collect.pg_log_events
+    ADD COLUMN IF NOT EXISTS relation_name text,
+    ADD COLUMN IF NOT EXISTS bytes bigint,
+    ADD COLUMN IF NOT EXISTS duration_ms bigint,
+    ADD COLUMN IF NOT EXISTS pages_removed bigint,
+    ADD COLUMN IF NOT EXISTS pages_remaining bigint,
+    ADD COLUMN IF NOT EXISTS tuples_removed bigint,
+    ADD COLUMN IF NOT EXISTS tuples_remaining bigint,
+    ADD COLUMN IF NOT EXISTS buffer_hits bigint,
+    ADD COLUMN IF NOT EXISTS buffer_misses bigint,
+    ADD COLUMN IF NOT EXISTS buffer_dirtied bigint,
+    ADD COLUMN IF NOT EXISTS wal_records bigint,
+    ADD COLUMN IF NOT EXISTS wal_bytes bigint,
+    ADD COLUMN IF NOT EXISTS is_analyze boolean;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

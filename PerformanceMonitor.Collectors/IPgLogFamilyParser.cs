@@ -20,9 +20,10 @@ namespace PerformanceMonitor.Collectors;
 /// prefix already read, the zone already checked, the companion lines already attached — and returns a
 /// <see cref="PgLogEvent"/> through <see cref="PgLogEvent.From"/>, which redacts. It does not know which
 /// transport the entry came from, does not touch a cursor, and cannot store unredacted text. #3602
-/// (<c>log_temp_files</c>) and #3603 (<c>log_autovacuum_min_duration</c>) each add ONE class implementing
-/// this and one line in <see cref="PgLogEventClassifier.DefaultParsers"/>; their structured tables are
-/// sibling collectors fed off the same entries, not a change to this seam.</para>
+/// (<c>log_temp_files</c>) and #3603 (<c>log_autovacuum_min_duration</c>) each added ONE class implementing
+/// this and one line in <see cref="PgLogEventClassifier.DefaultParsers"/>, exactly as planned; the
+/// structure they lift rides the same row as nullable columns (<see cref="PgLogEventMetrics"/>, V130)
+/// rather than sibling tables — the seam did not change for them.</para>
 ///
 /// <para><b>Order matters and the classifier owns it.</b> Parsers are consulted in registration order and
 /// the first to accept an entry wins. The error family goes first, on severity, so a <c>FATAL</c>
@@ -48,15 +49,15 @@ public interface IPgLogFamilyParser
 /// takes, the read's <c>family</c> filter validates against, and the census of which are PARSED and which
 /// are RECOGNISED-ONLY tonight.
 ///
-/// <para><b>Three parsed, three recognised, one reserved.</b> <see cref="Error"/>, <see cref="Connection"/>
-/// and <see cref="LockWait"/> ship with parsers — three implementers of the seam, so the seam is proven
-/// before a sibling adds a fourth. <see cref="TempFile"/>, <see cref="Autovacuum"/> and
-/// <see cref="Checkpoint"/> are REGISTERED families the classifier recognises by message shape and stores
-/// as generic events under their own family name (severity, message, detail — nothing lifted out), so a
-/// reader filtering on <c>family = temp_file</c> gets the lines TODAY, and #3602 / #3603 add the
-/// structured tables and parsers as pure additions: nothing here has to change for them to land, and
-/// nothing in the store has to be relabelled. <see cref="Other"/> is reserved for an entry a parser
-/// accepts without naming a family; no parser tonight does, so it is a vocabulary word rather than a row.</para>
+/// <para><b>Five parsed, one recognised, one reserved.</b> <see cref="Error"/>, <see cref="Connection"/>
+/// and <see cref="LockWait"/> shipped with parsers in #3601 — three implementers of the seam, so the seam
+/// was proven before a sibling added a fourth. <see cref="TempFile"/> (#3602) and <see cref="Autovacuum"/>
+/// (#3603) were REGISTERED families the classifier recognised by message shape and stored as generic events
+/// until their parsers landed; they now lift their numbers into the V130 columns, and the rows stored while
+/// they were recognised-only keep their family value with those columns null — nothing was relabelled.
+/// <see cref="Checkpoint"/> is still recognised-only: stored under its own name, nothing lifted, its
+/// structure a family for a later issue on the same seam. <see cref="Other"/> is reserved for an entry a
+/// parser accepts without naming a family; no parser does, so it is a vocabulary word rather than a row.</para>
 ///
 /// <para><b>What is NOT a family, deliberately.</b> An unrecognised LOG / INFO / NOTICE line — "database
 /// system is ready", a checkpoint's siblings, the thousand shapes a server writes at default settings —
@@ -75,10 +76,10 @@ public static class PgLogFamilies
     /// <summary><c>log_lock_waits</c>: "process N still waiting for ..." and the "acquired ... after" that ends it.</summary>
     public const string LockWait = "lock_wait";
 
-    /// <summary><c>log_temp_files</c>: recognised, stored generic; #3602 adds the structured parser and table.</summary>
+    /// <summary><c>log_temp_files</c>: one event per spilled file, <c>bytes</c> lifted, the statement fingerprinted (#3602).</summary>
     public const string TempFile = "temp_file";
 
-    /// <summary><c>log_autovacuum_min_duration</c>: recognised, stored generic; #3603 adds the structured parser and table.</summary>
+    /// <summary><c>log_autovacuum_min_duration</c>: one event per completed run — relation, duration, pages, tuples, buffers, WAL (#3603).</summary>
     public const string Autovacuum = "autovacuum";
 
     /// <summary><c>log_checkpoints</c>: recognised, stored generic.</summary>
@@ -93,11 +94,11 @@ public static class PgLogFamilies
         Error, Connection, LockWait, TempFile, Autovacuum, Checkpoint, Other,
     };
 
-    /// <summary>The families with a structured parser tonight — the seam's three proving implementers.</summary>
-    public static IReadOnlyList<string> Parsed { get; } = new[] { Error, Connection, LockWait };
+    /// <summary>The families with a structured parser — #3601's three, then #3602's and #3603's.</summary>
+    public static IReadOnlyList<string> Parsed { get; } = new[] { Error, Connection, LockWait, TempFile, Autovacuum };
 
-    /// <summary>The families recognised by message shape and stored generic, awaiting their sibling issue.</summary>
-    public static IReadOnlyList<string> RecognisedOnly { get; } = new[] { TempFile, Autovacuum, Checkpoint };
+    /// <summary>The families recognised by message shape and stored generic, awaiting an issue of their own.</summary>
+    public static IReadOnlyList<string> RecognisedOnly { get; } = new[] { Checkpoint };
 
     /// <summary>
     /// Whether a caller-supplied family name is one a reader can ask for. Ordinal, lower-case: the column
