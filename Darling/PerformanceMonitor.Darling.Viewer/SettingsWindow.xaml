@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         Title="Settings"
         Height="750" Width="750"
         MinHeight="500" MinWidth="600"
@@ -254,6 +255,13 @@
                         <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>
                     </ComboBox>
                 </StackPanel>
+                <!-- #3577: the operator's own colors for the theme the combo shows - the same shared panel
+                     Lite hosts (PerformanceMonitor.Ui.ThemeColorsPanel), reading and writing the viewer's
+                     own theme-overrides.json beside viewer-settings.json. Viewer-LOCAL: this preference
+                     never goes to the store or the control plane. Collapsed by default, as in Lite. -->
+                <Expander Header="Colors" IsExpanded="False" Margin="0,10,0,0">
+                    <ui:ThemeColorsPanel Margin="0,8,0,0"/>
+                </Expander>
             </StackPanel>
         </Border>
 

@@ -472,12 +472,24 @@ public partial class App : Application
         PerformanceMonitor.Ui.UiTimeContext.ConvertForDisplay =
             t => Services.ServerTimeHelper.ConvertForDisplay(t, Services.ServerTimeHelper.CurrentDisplayMode);
 
+        /* #3577: the operator's per-theme color overrides live beside settings.json, in the same per-user
+           config directory, and are read by ThemeManager on every Apply — so the path and the log hooks
+           go in BEFORE the first Apply, or the first paint is the stock palette and the second is theirs.
+           AppLogger buffers until Initialize (a few statements below), so a warning about a broken file
+           still lands in the log. The watcher that re-applies an outside edit starts after the logger. */
+        ThemeManager.OverridesFilePath = Path.Combine(ConfigDirectory, ThemeColorOverrides.FileName);
+        ThemeManager.LogWarning = message => AppLogger.Warn("Theme", message);
+        ThemeManager.LogInfo = message => AppLogger.Info("Theme", message);
+
         // Apply saved color theme before the main window is shown
         ThemeManager.Apply(ColorTheme);
 
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
+
+        // #3577: re-apply the current theme when theme-overrides.json is edited outside the app.
+        ThemeManager.WatchOverridesFile();
 
         // Resolve shared (machine-wide) config directory AFTER logger init so migration/ACL events are logged
         SharedConfigDirectory = ResolveSharedConfigDirectory(ConfigDirectory);

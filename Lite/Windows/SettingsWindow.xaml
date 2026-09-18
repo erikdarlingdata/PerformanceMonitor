@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitorLite.Windows.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         Title="Settings"
         Height="750" Width="750"
         MinHeight="500" MinWidth="600"
@@ -152,6 +153,16 @@
                         <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>
                     </ComboBox>
                 </StackPanel>
+                <!-- #3577: the operator's own colors for the theme the combo shows. The shared panel
+                     (PerformanceMonitor.Ui.ThemeColorsPanel, one copy for Lite and the Darling viewer)
+                     follows the combo's live preview through ThemeManager.ThemeChanged, so it always edits
+                     the theme on screen. Collapsed by default: it is twelve rows, and most visits to this
+                     window are for something else. Its Apply writes theme-overrides.json and re-applies at
+                     once, independent of this window's Save - the theme combo is the setting this window
+                     saves; the colors are a file the panel owns. -->
+                <Expander Header="Colors" IsExpanded="False" Margin="0,10,0,0">
+                    <ui:ThemeColorsPanel Margin="0,8,0,0"/>
+                </Expander>
             </StackPanel>
         </Border>
 

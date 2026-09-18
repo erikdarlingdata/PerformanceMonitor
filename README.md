@@ -250,7 +250,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations, column-level filtering on all grids |
 | **Recommendations** | Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 
-Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
+Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see [Themes and colors](Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ---
 
