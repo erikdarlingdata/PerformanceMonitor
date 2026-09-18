@@ -62,6 +62,12 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
+        => (await ReadDailySummaryRangeAsync(serverId, fromDate, toDate, cancellationToken)).Rows;
+
+    /// <summary>The range read plus the horizon its rows were judged against, so the single-day path can
+    /// judge an ABSENT day without reading the horizon a second time (review note on #3661).</summary>
+    private async Task<(List<DailySummaryRow> Rows, DateTime RetentionHorizon)> ReadDailySummaryRangeAsync(
+        int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var tier = RetentionTierRouter.Resolve(
@@ -96,7 +102,7 @@ public sealed partial class ViewerDataService
             results.Add(ReadDailySummaryRow(reader, banding, horizon));
         }
 
-        return results;
+        return (results, horizon);
     }
 
     /// <summary>
@@ -107,7 +113,7 @@ public sealed partial class ViewerDataService
     public async Task<DailySummaryRow?> GetDailySummaryAsync(int serverId, DateTime? summaryDate = null, CancellationToken cancellationToken = default)
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
-        var rows = await GetDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1), cancellationToken);
+        var (rows, horizon) = await ReadDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1), cancellationToken);
         if (rows.Count > 0)
         {
             return rows[0];
@@ -115,8 +121,8 @@ public sealed partial class ViewerDataService
 
         /* #3653: a day the spine does not hold is not "collected" either — before the horizon it is purged
            (nothing names it any more), inside it there is simply no run record — so the absent row is judged
-           too, the way the MCP single-day tool judges its absent day. */
-        var horizon = await ReadRetentionHorizonAsync(cancellationToken);
+           too, the way the MCP single-day tool judges its absent day, against the horizon the range read
+           already computed. */
         return new DailySummaryRow
         {
             SummaryDate = targetDate,
