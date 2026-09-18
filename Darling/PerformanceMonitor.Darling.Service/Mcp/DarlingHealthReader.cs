@@ -285,27 +285,22 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// <see cref="ShortestSignalRetentionDays"/>. <c>query_stats</c> is included even though old windows route
     /// its CTE to a rollup with its own longer retention: the horizon is a floor over EVERY signal, and the
     /// rollup keeps only the query count, not the band's inputs.
+    /// <para>#3653: the list, the fleet-override SQL and the shortest-retention arithmetic live on
+    /// <see cref="DailySummaryHorizon"/> in Storage, where the viewer's Performance Calendar — which reads the
+    /// same aggregate but cannot see this assembly — computes the SAME horizon. These members keep this reader's
+    /// names as aliases so the tool and its tests read as before; the definitions are one.</para>
     /// </summary>
-    internal static readonly string[] DailySummarySignalCollectors =
-    {
-        "wait_stats", "query_stats", "deadlocks", "blocked_process_report", "dmv_blocking_snapshot",
-        "cpu_utilization", "memory_pressure_events",
-    };
+    internal static readonly string[] DailySummarySignalCollectors = DailySummaryHorizon.SignalCollectors;
 
     /// <summary>
     /// The FLEET-WIDE retention overrides (<c>server_id</c> NULL) for the signal collectors — the same rows
     /// <c>StoreConfigProvider.ResolveFleetRetentionDays</c> layers over <c>CollectorScheduleDefaults</c> for
     /// the purge itself, so the horizon this reader publishes is the horizon the purge actually enforces
     /// rather than the shipped default. A per-server override cannot apply to a shared-table purge, which is
-    /// why only fleet rows are read. $1 the collector names.
+    /// why only fleet rows are read. $1 the collector names. Single definition in
+    /// <see cref="DailySummaryHorizon.FleetRetentionOverridesSql"/> (#3653).
     /// </summary>
-    public const string FleetRetentionOverridesSql = """
-        SELECT collector_name, retention_days
-        FROM config_collector_schedules
-        WHERE server_id IS NULL
-        AND   retention_days IS NOT NULL
-        AND   collector_name = ANY($1)
-        """;
+    public const string FleetRetentionOverridesSql = DailySummaryHorizon.FleetRetentionOverridesSql;
 
     /// <summary>
     /// The shortest effective retention among the daily aggregate's sources, in days — the number the
@@ -318,23 +313,14 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// <c>cpu_utilization</c>). The collection log and the alert log are folded in at their constants; on a
     /// default store they are the LONGER horizons (60 and 90 days), which is exactly why a spine row can
     /// outlive its signals and why the shortest one is the horizon.</para>
+    /// <para>#3653: the arithmetic is <see cref="DailySummaryHorizon.ShortestSignalRetentionDays(Func{string, int}, int)"/>;
+    /// this wrapper feeds it the purge's own resolver over the service's override rows and the baseline floor,
+    /// which is what makes the horizon this tool publishes the horizon the purge enforces.</para>
     /// </summary>
     internal static int ShortestSignalRetentionDays(IReadOnlyList<ScheduleOverride> fleetOverrides)
-    {
-        var shortest = Math.Min(DarlingRetention.CollectionLogRetentionDays, DarlingRetention.AlertHistoryRetentionDays);
-        foreach (var collector in DailySummarySignalCollectors)
-        {
-            var days = StoreConfigProvider.ResolveFleetRetentionDays(collector, fleetOverrides);
-            if (DarlingRetention.BaselineServingRawCollectors.Contains(collector))
-            {
-                days = Math.Max(days, BaselineMath.BaselineWindowDays);
-            }
-
-            shortest = Math.Min(shortest, days);
-        }
-
-        return Math.Max(1, shortest);
-    }
+        => DailySummaryHorizon.ShortestSignalRetentionDays(
+            collector => StoreConfigProvider.ResolveFleetRetentionDays(collector, fleetOverrides),
+            BaselineMath.BaselineWindowDays);
 
     private static async Task<IReadOnlyList<ScheduleOverride>> ReadFleetRetentionOverridesAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken)

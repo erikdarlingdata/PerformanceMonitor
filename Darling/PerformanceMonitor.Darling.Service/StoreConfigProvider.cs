@@ -17,6 +17,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -1764,24 +1765,29 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
     /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
     /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.
+    /// <para>#3653: this locates the fleet row; the RULE (valid override else default, where valid is the same
+    /// <see cref="ValidRetention"/> bound) is <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/>
+    /// in Storage, so the viewer's Performance Calendar — which cannot see this assembly — judges a day against
+    /// the horizon this purge enforces rather than a re-derivation of it. One fleet row per collector exists
+    /// (<c>ux_config_collector_schedules_fleet</c>), so first-match is the match.</para>
     /// </summary>
     public static int ResolveFleetRetentionDays(string collectorName, IReadOnlyList<ScheduleOverride> overrides)
     {
-        var def = CollectorScheduleDefaults.All[collectorName];
+        int? fleetOverrideDays = null;
         if (overrides is not null)
         {
             foreach (var o in overrides)
             {
                 if (o.ServerId is null
-                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase)
-                    && ValidRetention(o.RetentionDays) is int days)
+                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return days;
+                    fleetOverrideDays = o.RetentionDays;
+                    break;
                 }
             }
         }
 
-        return def.RetentionDays;
+        return DarlingRetentionHorizons.ResolveFleetRetentionDays(collectorName, fleetOverrideDays);
     }
 
     /// <summary>

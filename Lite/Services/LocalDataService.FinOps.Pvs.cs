@@ -114,10 +114,16 @@ ORDER BY p.database_name, p.collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* #3653: a NULL size is an UNMEASURED point (the collector could not read the version store that
+               pass), not an empty one — the same class as the trend rates' fabricated first-point 0 (#3642).
+               It is carried as null: the get_pvs_trend payload publishes it as such (a collection happened; its
+               size is unknown — contract rule 5, zero is a measurement), and the FinOps chart leaves it out
+               rather than drawing a cliff into a series that has none. The Darling viewer's reader, which has
+               no payload consumer, skips the row outright. */
             items.Add(new PvsTrendPoint(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3))));
         }
 
@@ -292,4 +298,6 @@ public class PvsStatsRow
 
 /// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
 /// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
-public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double PvsSizeMb, double? PctOfDatabase);
+/// <summary>One point on the PVS top-5 trend. <see cref="PvsSizeMb"/> is null for an UNMEASURED collection
+/// (#3653) — the DMV reported no size that pass — never coerced to 0.</summary>
+public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double? PvsSizeMb, double? PctOfDatabase);
