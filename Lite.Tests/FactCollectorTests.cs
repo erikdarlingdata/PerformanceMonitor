@@ -186,7 +186,12 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.False(context.Coverage!.IsObserved);
         Assert.Equal(0, context.ObservedDurationMs);
         Assert.Equal(1, context.Coverage.SampleCount);
-        Assert.Equal(TestDataSeeder.TestPeriodDurationMs, context.Coverage.LargestGapMs);
+
+        /* The largest SINGLE unobserved stretch, not the whole window: the orphan splits it into a
+           30-minute lead-in and a 210-minute tail, and the tail is the figure — 12,600,000 ms. (The
+           whole window is unobserved, but in two stretches; only a window with no rows at all reports
+           the nominal length here.) */
+        Assert.InRange(context.Coverage.LargestGapMs, 12_599_000, 12_601_000);
 
         /* No rate fact, no fabricated zero, no Infinity — and no gap fact either: "unobserved" is the
            service's unavailable envelope, not a partial reading. */
