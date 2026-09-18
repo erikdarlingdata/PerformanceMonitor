@@ -32,7 +32,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// to, since this series cannot answer one — is switched on (#3175), and <see cref="JobHistoryEvidenceSql"/>
 /// asks whether the connection doing the asking would SEE its rows and how many it does see (#3574). Together
 /// they qualify the redirect, so a caller who follows it can tell a census from an empty table — and can
-/// tell an empty table from a table the view is hiding from them.</para>
+/// tell an empty table from a table the view is hiding from them. Where that connection is one the view
+/// shows nothing (managed mode's <c>mcp</c> role), <see cref="OwnerJobHistoryEvidence"/> decodes the
+/// OWNER's reading that the hourly sweep persisted into the series, so the block can still carry a
+/// measurement and say whose it is.</para>
+///
+/// <para>And, since #3582, the reads that let the tool state its own COVERAGE: <see cref="ComputeInventory"/>
+/// reconciles the per-object rows of one sweep against that sweep's <c>pg_database_size</c>,
+/// <see cref="ContinuousAggregateStateSql"/> reads the catalog facts about each aggregate the series does
+/// not carry (compression enabled, which policies exist), and <see cref="LargestUnenumeratedSql"/> names
+/// the biggest relations inside the <c>other</c> row so that number is something a reader can act on.</para>
 /// </summary>
 internal static class DarlingStoreMetricsReader
 {
@@ -86,11 +95,13 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
     /// MAXIMUM question to, because the daily series cannot answer one — is actually recording (#3175).
     ///
     /// <para><b>Why this read exists at all.</b> An empty <c>job_history</c> and a quiet fleet are the same
-    /// result set. TimescaleDB records nothing there unless
-    /// <c>timescaledb.enable_job_execution_logging</c> is on, and it defaults OFF, so a maximum over the
-    /// table returns zero rows on an unhealed store and that reads as <i>"no run exceeded the line"</i>.
-    /// Redirecting a caller to an instrument without telling them whether it is switched on is how the
-    /// wrong conclusion gets drawn from a correct query.</para>
+    /// result set. TimescaleDB records a SUCCESSFUL run there only while
+    /// <c>timescaledb.enable_job_execution_logging</c> is on, and it defaults OFF — a FAILED run's row is
+    /// written regardless (2.28.1 <c>job_stat_history.c</c>: the failure path logs unconditionally, the
+    /// success path is gated; measured on a fresh rig with the GUC off, the telemetry job's one failure was
+    /// the view's one row) — so a maximum over the table on an unhealed store is a census of FAILURES
+    /// that reads as <i>"no run exceeded the line"</i>. Redirecting a caller to an instrument without telling
+    /// them which runs it is writing is how the wrong conclusion gets drawn from a correct query.</para>
     ///
     /// <para><b>The EFFECTIVE value and its source, never the presence of the managed conf block.</b>
     /// <c>postgresql.auto.conf</c> is read after <c>postgresql.conf</c>, so an
@@ -224,32 +235,22 @@ WHERE name = $1";
     /// strict function yields NULL) — a NULL must read as "not a member" rather than poison a count. Here
     /// the owner comes from the <c>jobs</c> view and cannot be NULL; the guard is kept so the two predicates
     /// stay textually the view's own.</para>
+    ///
+    /// <para><b>The text itself lives on <see cref="StoreSelfMetrics.JobHistoryEvidenceSql"/> and this is
+    /// an alias</b>, because the string gained a second consumer with the managed-mode self-proof: the
+    /// hourly sweep embeds it verbatim in <see cref="StoreSelfMetrics.JobHistoryInsertSql"/> to run it as
+    /// the OWNER role and persist the answer (the Storage project cannot reference this one). Two copies of
+    /// a nine-column predicate would drift without erroring; one string cannot. The reasoning stays here,
+    /// beside the record that interprets the columns.</para>
     /// </summary>
-    public const string JobHistoryEvidenceSql = @"
-SELECT
-    current_user::text AS reader_role,
-    pg_has_role(
-        current_user,
-        (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()),
-        'MEMBER') IS TRUE AS reader_is_database_owner_member,
-    (SELECT count(*) FROM timescaledb_information.jobs) AS job_count,
-    (SELECT count(*)
-       FROM timescaledb_information.jobs AS j
-      WHERE pg_has_role(current_user, j.owner, 'MEMBER') IS TRUE) AS owner_member_job_count,
-    (SELECT count(*)
-       FROM timescaledb_information.job_history AS h
-      WHERE h.start_time >= $1) AS rows_observed,
-    (SELECT max(h.start_time) FROM timescaledb_information.job_history AS h) AS newest_row_at,
-    (SELECT count(*)
-       FROM timescaledb_information.job_stats AS js
-      WHERE js.last_run_started_at >= $1) AS jobs_run_in_window,
-    (SELECT max(NULLIF(js.last_run_started_at, '-infinity'::timestamptz))
-       FROM timescaledb_information.job_stats AS js) AS newest_run_started_at";
+    public const string JobHistoryEvidenceSql = StoreSelfMetrics.JobHistoryEvidenceSql;
 
     /// <summary>The evidence window <see cref="JobHistoryEvidenceSql"/> counts over, in hours. Fixed, not
     /// <c>days_back</c> — the paragraph on that constant says why. Published in the response beside the
-    /// count so the number never travels without its denominator.</summary>
-    public const int JobHistoryEvidenceWindowHours = 24;
+    /// count so the number never travels without its denominator. An alias of the sweep's constant for the
+    /// reason the SQL is: the owner's persisted count and this connection's live one must be over the same
+    /// window or the block would compare unlike things.</summary>
+    public const int JobHistoryEvidenceWindowHours = StoreSelfMetrics.JobHistoryEvidenceWindowHours;
 
     /// <summary>
     /// The four distinguishable states of the <c>job_history</c> precondition. Four rather than a bool
@@ -271,8 +272,10 @@ SELECT
         /// zero-rows paragraph on <see cref="JobExecutionLoggingSql"/> for the measurement.</summary>
         NotRegistered,
 
-        /// <summary>Registered and off. <c>job_history</c> is not recording; an empty result from it means
-        /// the instrument is off, not that nothing happened.</summary>
+        /// <summary>Registered and off. <c>job_history</c> records FAILED runs only — TimescaleDB writes a
+        /// failure's row regardless of this setting and a success's only while it is on — so a result from
+        /// it is a census of failures, not of runs: an empty one means no failure was recorded, not that
+        /// nothing happened, and a non-empty one is not a sign the setting is secretly on.</summary>
         Off,
 
         /// <summary>Registered and on. <c>job_history</c> carries one row per run <b>from the point logging
@@ -577,8 +580,509 @@ SELECT
         }
     }
 
+    /// <summary>
+    /// Whether the series held an OWNER's reading of <c>job_history</c> for the block to lean on (#3574).
+    /// Four states rather than a nullable count, for the reason every other status on this surface has
+    /// more than two: "the sweep has never recorded one", "it recorded one but could not see", "it
+    /// recorded one too long ago to speak for now" and "here is the count" are four different facts about
+    /// the same absent-or-present number.
+    /// </summary>
+    public enum OwnerJobHistoryEvidenceStatus
+    {
+        /// <summary>No <c>job_history</c> row in the series. A store whose sweep predates this row, a
+        /// plain-PostgreSQL store (the arm is TimescaleDB-gated), or a sweep that has not completed since
+        /// the service started on this build.</summary>
+        Absent,
+
+        /// <summary>A row exists, but the sweep's role was itself not admitted to every job's history, so
+        /// it recorded no count (<c>row_count</c> NULL). The role is named so the reader knows which
+        /// connection to fix; the population half is still carried.</summary>
+        Filtered,
+
+        /// <summary>A row exists and carries a census, but its <c>metric_time</c> is older than
+        /// <see cref="OwnerEvidenceFreshHours"/>. Shown with its age; NOT used for a verdict about now.</summary>
+        Stale,
+
+        /// <summary>A fresh census from an admitted role. The one state in which the owner's zero says
+        /// something about recording.</summary>
+        Observed,
+    }
+
+    /// <summary>
+    /// How old the owner's <c>job_history</c> row may be and still speak for the present, in hours. The
+    /// sweep is hourly; over 30 days on one production store the whole-store row's gaps had a mean of
+    /// 58.6 minutes and a largest-that-happened of 2.47 hours (the <see cref="StoreSelfMetrics.LatestStoreSizeSql"/>
+    /// paragraph, with its caveat that the maximum is a window artefact). Three hours is the first whole
+    /// hour past that observed worst case: a row older than this means at least two consecutive sweeps
+    /// did not land, which the sweep's own Warning line already reports, and a 24-hour count taken that
+    /// long ago describes a window that no longer overlaps the present enough to adjudicate a
+    /// contradiction about it — the GUC may have been healed since. The row is still shown when stale,
+    /// with its age; only the verdict is withheld.
+    /// </summary>
+    public const int OwnerEvidenceFreshHours = 3;
+
+    /// <summary>
+    /// The OWNER's reading of <c>job_history</c>, decoded from the <c>object_kind = 'job_history'</c> row
+    /// the hourly sweep persists (#3574) — the managed-mode self-proof. The MCP host reads as the <c>mcp</c>
+    /// role, which the view's ownership filter shows nothing; the sweep runs as the owner, which it admits.
+    /// This record carries what the owner saw, WHEN it saw it, and whether that is recent enough to stand
+    /// beside this connection's own verdict. One value, so the count cannot travel without its instant or
+    /// its role — the omission #3574 is about, one level down.
+    /// </summary>
+    /// <param name="Status">Whether there is a usable reading; see <see cref="OwnerJobHistoryEvidenceStatus"/>.</param>
+    /// <param name="ReaderRole">The role the sweep counted as (<c>object_name</c>). Null when Absent.</param>
+    /// <param name="ObservedAt">The sweep's <c>metric_time</c>, UTC — the instant the count is true of. Null when Absent.</param>
+    /// <param name="AgeHours">How long before <c>nowUtc</c> the sweep ran. Null when Absent.</param>
+    /// <param name="WindowHours">The evidence window the row counted over, from <c>schedule_interval_ms</c>.</param>
+    /// <param name="RowsObserved">History rows with a start inside the window, as the owner saw them
+    /// (<c>row_count</c>). Null when Absent or Filtered — never a plausible zero for a count nobody made.</param>
+    /// <param name="NewestRowAt">The newest history start the owner had ever seen at the sweep, UTC —
+    /// <c>metric_time</c> minus the persisted age. Null when the owner had seen none.</param>
+    /// <param name="JobsRunInWindow">Jobs whose newest start fell inside the window (<c>total_runs</c>),
+    /// from the unfiltered <c>job_stats</c> — the population half.</param>
+    public sealed record OwnerJobHistoryEvidence(
+        OwnerJobHistoryEvidenceStatus Status,
+        string? ReaderRole,
+        DateTime? ObservedAt,
+        double? AgeHours,
+        double? WindowHours,
+        long? RowsObserved,
+        DateTime? NewestRowAt,
+        long? JobsRunInWindow)
+    {
+        /// <summary>The reading when the series holds no <c>job_history</c> row — every field null.</summary>
+        public static OwnerJobHistoryEvidence Absent { get; } =
+            new(OwnerJobHistoryEvidenceStatus.Absent, null, null, null, null, null, null, null);
+
+        /// <summary>
+        /// The contradiction (#3574), judged from the OWNER's numbers: the GUC says recording NOW, the owner
+        /// — a reader the view admits to every job's history — saw NO rows over its window, and jobs started
+        /// runs inside that window. Only for a fresh, admitted reading: a stale row cannot say what the
+        /// instrument is doing now (the GUC may have been healed since it was taken), and a filtered row
+        /// made no count. The benign cause and how to settle it are the same as for the connection's own
+        /// contradiction and the note names them.
+        /// </summary>
+        public bool ContradictsRecording(bool recording) =>
+            recording
+            && Status == OwnerJobHistoryEvidenceStatus.Observed
+            && RowsObserved == 0
+            && JobsRunInWindow is > 0;
+
+        /// <summary>
+        /// Decodes the newest <c>job_history</c> row out of the latest-per-object read. Pure, so the
+        /// mapping the sweep's column overloads define (<see cref="StoreSelfMetrics"/> class summary) is
+        /// unit-tested without a store: <c>row_count</c> is the count, <c>total_runs</c> the population,
+        /// <c>schedule_interval_ms</c> the window, and <c>last_run_duration_ms</c> the newest row's AGE at
+        /// the sweep, turned back into an instant here so nothing downstream ever sees the overload.
+        /// <paramref name="nowUtc"/> is taken rather than read so the staleness verdict is testable.
+        /// </summary>
+        public static OwnerJobHistoryEvidence FromLatest(IReadOnlyList<StoreMetricRow> latest, DateTime nowUtc)
+        {
+            if (latest is null)
+            {
+                throw new ArgumentNullException(nameof(latest));
+            }
+
+            /* The latest read is DISTINCT ON (kind, name), so a store whose owner role was renamed could hold
+               two job_history rows under two names; the newest sweep's is the one that speaks for now. */
+            StoreMetricRow? row = null;
+            foreach (var candidate in latest)
+            {
+                if (candidate.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind
+                    && (row is null || candidate.MetricTime > row.MetricTime))
+                {
+                    row = candidate;
+                }
+            }
+
+            if (row is null)
+            {
+                return Absent;
+            }
+
+            /* metric_time is naive UTC by the store contract; it is the instant the count is true of. */
+            var observedAt = DateTime.SpecifyKind(row.MetricTime, DateTimeKind.Utc);
+            var ageHours = (DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc) - observedAt).TotalHours;
+            double? windowHours = row.ScheduleIntervalMs is { } w ? w / 3_600_000.0 : null;
+            DateTime? newestRowAt = row.LastRunDurationMs is { } age ? observedAt.AddMilliseconds(-age) : null;
+
+            var status = row.RowCount is null ? OwnerJobHistoryEvidenceStatus.Filtered
+                : ageHours > OwnerEvidenceFreshHours ? OwnerJobHistoryEvidenceStatus.Stale
+                : OwnerJobHistoryEvidenceStatus.Observed;
+
+            return new OwnerJobHistoryEvidence(
+                status,
+                row.ObjectName,
+                observedAt,
+                Math.Round(ageHours, 2),
+                windowHours,
+                row.RowCount,
+                newestRowAt,
+                row.TotalRuns);
+        }
+    }
+
+    /* ---------------- #3582: coverage, reconciled ---------------- */
+
+    /// <summary>
+    /// How far the inventory's rows may miss <c>pg_database_size</c> and still be called reconciled, as a
+    /// fraction of the database: 1%. Below this the residual is the database directory's non-relation
+    /// files plus whatever moved between the sweep's statements; above it something is not being
+    /// attributed to any row and the note says so as a finding. Paired with
+    /// <see cref="ReconciliationToleranceFloorBytes"/> so a small store is not failed on a fixed overhead.
+    /// </summary>
+    public const double ReconciliationTolerancePercent = 1.0;
+
+    /// <summary>
+    /// The absolute floor under <see cref="ReconciliationTolerancePercent"/>: 64 MiB. Measured on a fresh
+    /// PG18/TimescaleDB 2.28.1 rig the residual was 161,471 bytes on a 17 MiB database — exactly
+    /// <c>pg_database_size</c> minus the sum of every local relation, i.e. <c>pg_internal.init</c>,
+    /// <c>pg_filenode.map</c>, <c>PG_VERSION</c> and friends — which is already 0.9% of that store and
+    /// would trip a percent-only bar on anything smaller. A fixed floor sized generously above that
+    /// overhead lets the percentage do the work where the percentage means something.
+    /// </summary>
+    public const long ReconciliationToleranceFloorBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// One sweep's inventory, reconciled against its own <c>pg_database_size</c> (#3582). Computed over the
+    /// rows that share the store row's <c>metric_time</c> — the same sweep — because the latest read takes
+    /// each object's newest row and a sweep that died half-way leaves older rows behind for the kinds it
+    /// never reached; summing those against a newer database figure would manufacture a gap.
+    /// </summary>
+    /// <param name="SweepAt">The store row's <c>metric_time</c> — the sweep every figure here comes from.</param>
+    /// <param name="DatabaseBytes"><c>pg_database_size</c> as that sweep recorded it.</param>
+    /// <param name="BytesByKind">Byte totals per byte-bearing kind in that sweep, in the sweep's kind
+    /// order. Kinds with no row in the sweep are absent from the map, never zero.</param>
+    /// <param name="EnumeratedBytes">Bytes under NAMED objects: hypertables, continuous aggregates, payload
+    /// dimensions and named tables. The issue's "inventory covers N%" numerator.</param>
+    /// <param name="AttributedBytes">Every byte the sweep put in some row: the enumerated bytes plus the
+    /// two catch-all rows. The reconciliation numerator.</param>
+    /// <param name="UnenumeratedBytes">The <c>other</c> row's bytes; null when that row is missing from the sweep.</param>
+    /// <param name="UnenumeratedRelationCount">The <c>other</c> row's relation count; null likewise.</param>
+    /// <param name="SystemBytes">The <c>system</c> row's bytes; null when missing.</param>
+    /// <param name="SystemRelationCount">The <c>system</c> row's relation count; null likewise.</param>
+    /// <param name="ResidualBytes"><c>DatabaseBytes - AttributedBytes</c>. Expected small and non-zero (the
+    /// directory's non-relation files, plus movement between statements); can be negative.</param>
+    /// <param name="StaleRowCount">Latest rows whose <c>metric_time</c> is NOT the store row's — objects the
+    /// newest sweep did not reach. Non-zero means the sweep is not completing and the note says so.</param>
+    public sealed record InventoryReconciliation(
+        DateTime SweepAt,
+        long DatabaseBytes,
+        IReadOnlyDictionary<string, long> BytesByKind,
+        long EnumeratedBytes,
+        long AttributedBytes,
+        long? UnenumeratedBytes,
+        int? UnenumeratedRelationCount,
+        long? SystemBytes,
+        int? SystemRelationCount,
+        long ResidualBytes,
+        int StaleRowCount)
+    {
+        /// <summary>Percent of the database under named objects — the coverage statement. Null on a zero-byte
+        /// database, never a division by zero dressed as a hundred.</summary>
+        public double? EnumeratedPercent => DatabaseBytes > 0 ? Math.Round(100.0 * EnumeratedBytes / DatabaseBytes, 2) : null;
+
+        /// <summary>Percent of the database some row attributes — the reconciliation statement.</summary>
+        public double? AttributedPercent => DatabaseBytes > 0 ? Math.Round(100.0 * AttributedBytes / DatabaseBytes, 2) : null;
+
+        /// <summary>Both catch-all rows present in the sweep, so the attribution is complete enough to judge.
+        /// Without them the residual is the un-enumerated bytes themselves and says nothing.</summary>
+        public bool CatchAllPresent => UnenumeratedBytes is not null && SystemBytes is not null;
+
+        /// <summary>The bar the residual is judged against: the larger of the percent and the floor.</summary>
+        public long ToleranceBytes => Math.Max(
+            (long)Math.Ceiling(DatabaseBytes * ReconciliationTolerancePercent / 100.0),
+            ReconciliationToleranceFloorBytes);
+
+        /// <summary><c>true</c> when the catch-all rows are present and the residual is inside the bar. A
+        /// <c>false</c> is a finding: bytes the database holds that no row of the inventory accounts for.</summary>
+        public bool Reconciled => CatchAllPresent && Math.Abs(ResidualBytes) <= ToleranceBytes;
+    }
+
+    /// <summary>
+    /// The kinds whose <c>total_bytes</c> are bytes under a NAMED object. The catch-all kinds are not here
+    /// by definition; the store row is the denominator; the job kinds carry no bytes.
+    /// </summary>
+    private static readonly string[] EnumeratedKinds =
+    {
+        StoreSelfMetrics.HypertableObjectKind,
+        StoreSelfMetrics.ContinuousAggregateObjectKind,
+        StoreSelfMetrics.DimensionObjectKind,
+        StoreSelfMetrics.TableObjectKind,
+    };
+
+    /// <summary>
+    /// Reconciles the newest sweep's inventory against its own database figure (#3582). Pure. Null when
+    /// there is no store row to reconcile against — the tool then says coverage is unknown rather than
+    /// computing a percentage of nothing. Rows from other sweeps are counted, not summed.
+    /// </summary>
+    public static InventoryReconciliation? ComputeInventory(IReadOnlyList<StoreMetricRow> latest)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        StoreMetricRow? store = null;
+        foreach (var row in latest)
+        {
+            if (row.ObjectKind == StoreSelfMetrics.StoreObjectKind && row.TotalBytes is not null
+                && (store is null || row.MetricTime > store.MetricTime))
+            {
+                store = row;
+            }
+        }
+
+        if (store is null)
+        {
+            return null;
+        }
+
+        var byKind = new Dictionary<string, long>(StringComparer.Ordinal);
+        long? other = null, system = null;
+        int? otherCount = null, systemCount = null;
+        var stale = 0;
+
+        foreach (var row in latest)
+        {
+            if (row.ObjectKind == StoreSelfMetrics.StoreObjectKind)
+            {
+                continue;
+            }
+
+            if (row.MetricTime != store.MetricTime)
+            {
+                stale++;
+                continue;
+            }
+
+            if (row.TotalBytes is not { } bytes)
+            {
+                continue;
+            }
+
+            byKind[row.ObjectKind] = byKind.TryGetValue(row.ObjectKind, out var soFar) ? soFar + bytes : bytes;
+
+            if (row.ObjectKind == StoreSelfMetrics.OtherObjectKind)
+            {
+                other = bytes;
+                otherCount = row.ChunkCount;
+            }
+            else if (row.ObjectKind == StoreSelfMetrics.SystemObjectKind)
+            {
+                system = bytes;
+                systemCount = row.ChunkCount;
+            }
+        }
+
+        long enumerated = 0;
+        foreach (var kind in EnumeratedKinds)
+        {
+            if (byKind.TryGetValue(kind, out var bytes))
+            {
+                enumerated += bytes;
+            }
+        }
+
+        var attributed = enumerated + (other ?? 0) + (system ?? 0);
+
+        return new InventoryReconciliation(
+            store.MetricTime,
+            store.TotalBytes!.Value,
+            byKind,
+            enumerated,
+            attributed,
+            other,
+            otherCount,
+            system,
+            systemCount,
+            store.TotalBytes.Value - attributed,
+            stale);
+    }
+
+    /// <summary>
+    /// The catalog facts about each continuous aggregate the series does not carry (#3582), read LIVE at
+    /// tool time the way #2813 reads retention holds: whether compression is enabled on its
+    /// materialization, and which of the three policies exist for it, by job id. These are the fields the
+    /// sibling investigation (#3581) assembled by hand — twenty aggregates, all with compression disabled,
+    /// holding 57% of a production store — and they are STATE rather than series, which is why they are
+    /// not persisted (the aggregate row's paragraph on <see cref="StoreSelfMetrics.ContinuousAggregateInsertSql"/>).
+    ///
+    /// <para><c>timescaledb_information.jobs</c> reports a policy on an aggregate under the aggregate's
+    /// USER-FACING view name (<c>COALESCE(ca.user_view_schema, ht.schema_name)</c> in the view's own
+    /// definition), which is what the three correlated lookups join on. The compression predicate carries
+    /// the 2.18+ <c>columnstore</c> rebrand the rest of the codebase hedges on. <c>hypertable_name</c> in
+    /// the aggregates view is the aggregate's SOURCE; for a hierarchical aggregate that is another
+    /// aggregate's materialization under its internal name, so the source is resolved back to that
+    /// parent's view name where one exists. Readable by the least-privilege <c>mcp</c> role: the
+    /// information views are granted to PUBLIC (measured on 2.28.1 with a bare LOGIN role). No parameters.</para>
+    /// </summary>
+    public const string ContinuousAggregateStateSql = @"
+SELECT
+    ca.view_name,
+    ca.compression_enabled,
+    ca.materialized_only,
+    coalesce(parent.view_name, ca.hypertable_name) AS source_name,
+    (SELECT min(j.job_id) FROM timescaledb_information.jobs j
+      WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+      AND   j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name) AS refresh_job_id,
+    (SELECT min(j.job_id) FROM timescaledb_information.jobs j
+      WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+      AND   j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name) AS compression_job_id,
+    (SELECT min(j.job_id) FROM timescaledb_information.jobs j
+      WHERE j.proc_name = 'policy_retention'
+      AND   j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name) AS retention_job_id
+FROM timescaledb_information.continuous_aggregates ca
+LEFT JOIN timescaledb_information.continuous_aggregates parent
+       ON parent.materialization_hypertable_schema = ca.hypertable_schema
+      AND parent.materialization_hypertable_name = ca.hypertable_name";
+
+    /// <summary>One aggregate's live catalog state. Job ids null where no such policy exists.</summary>
+    public sealed record ContinuousAggregateState(
+        string ViewName,
+        bool CompressionEnabled,
+        bool MaterializedOnly,
+        string? SourceName,
+        int? RefreshJobId,
+        int? CompressionJobId,
+        int? RetentionJobId);
+
+    /// <summary>
+    /// Reads <see cref="ContinuousAggregateStateSql"/>. Failure-isolated to NULL — not an empty list, which
+    /// would read as "no aggregates" and drop the flags from every aggregate row without a word. Not
+    /// attempted where the GUC probe said TimescaleDB is not loaded for this database
+    /// (<see cref="JobExecutionLoggingStatus.NotRegistered"/>): the view does not exist there and there are
+    /// no aggregate rows to decorate. No logger, for the reason <see cref="GetJobExecutionLoggingAsync"/> gives.
+    /// </summary>
+    public static async Task<IReadOnlyList<ContinuousAggregateState>?> GetContinuousAggregateStatesAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        if (logging.Status == JobExecutionLoggingStatus.NotRegistered)
+        {
+            return Array.Empty<ContinuousAggregateState>();
+        }
+
+        try
+        {
+            var states = new List<ContinuousAggregateState>();
+            await using var command = postgres.CreateCommand(ContinuousAggregateStateSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                states.Add(new ContinuousAggregateState(
+                    reader.GetString(0),
+                    reader.GetBoolean(1),
+                    reader.GetBoolean(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                    reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+            }
+
+            return states;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>How many of the un-enumerated relations the tool names, largest first.</summary>
+    public const int LargestUnenumeratedLimit = 10;
+
+    /// <summary>
+    /// The biggest relations inside the <c>other</c> row, by name (#3582) — read LIVE at tool time over
+    /// the SAME census predicate the sweep sums with (the fragments on <see cref="StoreSelfMetrics"/>), so
+    /// the list and the number it explains cannot disagree about what counts. Without this the <c>other</c>
+    /// row is a figure nobody can act on; with it, a growth investigation reads the name of the table that
+    /// grew instead of running the <c>pg_class</c> census by hand — which is the expedition this whole
+    /// tool exists to replace. Named <c>schema.relation</c>, the form the <c>table</c> rows use, so a
+    /// relation the product later names by that kind keeps its name. TimescaleDB variant; readable by the
+    /// <c>mcp</c> role (<c>pg_total_relation_size</c> needs no privilege on the relation, and the
+    /// TimescaleDB catalogs are granted to PUBLIC — both measured). $1 the limit.
+    /// </summary>
+    public const string LargestUnenumeratedSql = $@"
+SELECT
+    n.nspname || '.' || c.relname AS relation,
+    c.relkind::text,
+    pg_total_relation_size(c.oid) AS total_bytes
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+AND   {StoreSelfMetrics.TimescaleInventoriedPredicateSql}
+ORDER BY pg_total_relation_size(c.oid) DESC, 1
+LIMIT $1";
+
+    /// <summary>The plain-PostgreSQL variant of <see cref="LargestUnenumeratedSql"/>: the same census minus
+    /// the TimescaleDB catalogs it cannot name. On such a store the collector tables lead this list, which
+    /// is the honest answer (see <see cref="StoreSelfMetrics.UnenumeratedPlainInsertSql"/>). $1 the limit.</summary>
+    public const string LargestUnenumeratedPlainSql = $@"
+SELECT
+    n.nspname || '.' || c.relname AS relation,
+    c.relkind::text,
+    pg_total_relation_size(c.oid) AS total_bytes
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+ORDER BY pg_total_relation_size(c.oid) DESC, 1
+LIMIT $1";
+
+    /// <summary>One un-enumerated relation, sized live.</summary>
+    public sealed record UnenumeratedRelation(string Relation, string RelKind, long TotalBytes);
+
+    /// <summary>
+    /// Reads the live top-N of un-enumerated relations, choosing the variant by the same signal the other
+    /// TimescaleDB-only reads use (<see cref="JobExecutionLoggingStatus.NotRegistered"/> means the
+    /// TimescaleDB catalogs do not exist for this database). Failure-isolated to NULL, not an empty list,
+    /// for the reason <see cref="GetContinuousAggregateStatesAsync"/> gives.
+    /// </summary>
+    public static async Task<IReadOnlyList<UnenumeratedRelation>?> GetLargestUnenumeratedAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        try
+        {
+            var rows = new List<UnenumeratedRelation>();
+            await using var command = postgres.CreateCommand(
+                logging.Status == JobExecutionLoggingStatus.NotRegistered ? LargestUnenumeratedPlainSql : LargestUnenumeratedSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(LargestUnenumeratedLimit);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new UnenumeratedRelation(reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
+            }
+
+            return rows;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>One object's newest self-metrics row. The four job fields (#2136, V56) are non-null only
-    /// on <c>background_job</c> rows — every other kind leaves them NULL, as the sweep writes them.</summary>
+    /// on <c>background_job</c> rows and, since #3574, on the <c>job_history</c> row under the column
+    /// mapping the <see cref="StoreSelfMetrics"/> class summary states — every other kind leaves them NULL,
+    /// as the sweep writes them.</summary>
     public sealed record StoreMetricRow(
         string ObjectKind,
         string ObjectName,
