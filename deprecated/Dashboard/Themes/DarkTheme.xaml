@@ -87,6 +87,9 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#8B93A1"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <!-- #3609 (Lite parity): ink for text ON a status fill — the Recommendations severity badge. The darkest
+         surface tone: 13.26:1 on WarningColor, 7.52:1 on InfoColor, 9.30:1 on SuccessColor, 6.26:1 on ErrorColor. -->
+    <SolidColorBrush x:Key="StatusForegroundBrush" Color="#111217"/>
 
     <!-- ============================================ -->
     <!-- Window Style                                 -->

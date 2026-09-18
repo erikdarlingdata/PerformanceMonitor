@@ -641,8 +641,9 @@
                                                 </Style.Triggers>
                                             </Style>
                                         </Border.Style>
+                                        <!-- #3609: the ink on a status fill is a theme key. White was 1.41:1 on Dark's amber. -->
                                         <TextBlock Text="{Binding Server.AttentionText}"
-                                                   Foreground="White" FontSize="9" FontWeight="Bold"
+                                                   Foreground="{DynamicResource StatusForegroundBrush}" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
 
@@ -1191,16 +1192,19 @@
                                 <StackPanel>
                                     <!-- Header row: severity badge + [database] -->
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <!-- #3609: badge ink is StatusForegroundBrush (white on the light themes, near-black
+                                             on Dark) because the status fills now read against the page and dark text no
+                                             longer reads on them. Same key as Lite's RecommendationsTab. -->
                                         <Border x:Name="SeverityBadge" CornerRadius="3" Padding="6,1"
                                                 VerticalAlignment="Center"
                                                 Background="{DynamicResource InfoBrush}">
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock Text="{Binding SeverityGlyph}"
                                                            FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                                           Foreground="#1A1A1A" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource StatusForegroundBrush}" VerticalAlignment="Center"
                                                            Margin="0,0,4,0"/>
                                                 <TextBlock Text="{Binding SeverityLabel}" FontWeight="Bold"
-                                                           FontSize="11" Foreground="#1A1A1A"
+                                                           FontSize="11" Foreground="{DynamicResource StatusForegroundBrush}"
                                                            VerticalAlignment="Center"/>
                                             </StackPanel>
                                         </Border>

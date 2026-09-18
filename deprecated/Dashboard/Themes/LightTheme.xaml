@@ -36,9 +36,11 @@
 
     <!-- Status Colors (Material Design 700 — visible against light backgrounds) -->
     <Color x:Key="SuccessColor">#2E7D32</Color>
-    <Color x:Key="WarningColor">#F57F17</Color>
+    <!-- #3609 (Lite parity): was #F57F17, 2.47:1 on BackgroundColor. Now 4.99:1 / 5.35:1 on the card. -->
+    <Color x:Key="WarningColor">#AE4F08</Color>
     <Color x:Key="ErrorColor">#C62828</Color>
-    <Color x:Key="InfoColor">#2eaef1</Color>
+    <!-- #3609 (Lite parity): was #2eaef1 (the accent), 2.32:1 on BackgroundColor. Now 5.53:1 / 5.93:1 on the card. -->
+    <Color x:Key="InfoColor">#0369A1</Color>
 
     <!-- Spacing Scale -->
     <sys:Double x:Key="SpacingXS">2</sys:Double>
@@ -86,6 +88,10 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#5A6270"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <!-- #3609 (Lite parity): ink for text ON a status fill — the Recommendations severity badge. The fills are
+         tuned to read against the page, so dark text no longer reads on them (3.25:1 on the new amber); white
+         is 5.35:1 on WarningColor, 5.93:1 on InfoColor, 5.13:1 on SuccessColor, 5.62:1 on ErrorColor. -->
+    <SolidColorBrush x:Key="StatusForegroundBrush" Color="#FFFFFF"/>
 
     <!-- ============================================ -->
     <!-- Window Style                                 -->

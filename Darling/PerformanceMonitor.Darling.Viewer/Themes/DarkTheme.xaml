@@ -91,6 +91,12 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#8B93A1"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <!-- Ink for text and glyphs that sit ON a status fill — the Recommendations severity badge, the viewer's
+         alert badges (#3609). Dark's status tones are Material 300, light on purpose, so the ink is the
+         darkest surface tone (the same choice #3577 made for AccentForegroundColor): 13.26:1 on WarningColor,
+         7.52:1 on InfoColor, 9.30:1 on SuccessColor, 6.26:1 on ErrorColor. The viewer's alert badges carried a
+         hard-coded White before this key existed — 1.41:1 on this theme's amber, a count you could not read. -->
+    <SolidColorBrush x:Key="StatusForegroundBrush" Color="#111217"/>
 
     <!-- Row-mark tints for "Mark Done / To Do / Do Not Do" (#2645), painted by DataGridRowMarks. Theme keys
          since #3577: the fixed 20% tints that shipped composite to only 1.2-1.4:1 against this theme's
