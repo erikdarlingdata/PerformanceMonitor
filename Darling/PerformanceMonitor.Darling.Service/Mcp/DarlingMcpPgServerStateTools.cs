@@ -592,7 +592,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. Snapshot from the most recent collection, not a window.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -628,6 +628,11 @@ public sealed class DarlingMcpPgServerStateTools
             {
                 server = resolved.ServerName,
                 status = "server_config",
+                /* #3653 (from #3541 A10): the snapshot's own clock, read off the row statement — every row of
+                   this call carries the same collection_time because the reader pins the newest one — so the
+                   answer says when it was true. No age_seconds and no as_of: this read takes no window to
+                   anchor against (the Stamped dialect, McpLatestSnapshotStampTests.DarlingOnlyStamped). */
+                captured_at = rows[0].CollectionTimeUtc.ToString("o"),
                 /* Both counts, because they answer different questions and one without the other invites
                    the wrong conclusion: a small returned count is reassuring only if you know it was
                    filtered rather than truncated. */

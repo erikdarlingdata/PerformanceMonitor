@@ -53,7 +53,12 @@ public static class DarlingPgServerConfigReader
         int SourceLine,
         bool PendingRestart,
         string? ShortDescription,
-        bool IsDefault);
+        bool IsDefault,
+        /* #3653 (from #3541 A10): the snapshot's own clock, carried ON THE ROW so get_pg_server_config can say
+           when its answer was captured without a second MAX() read that could stamp the NEXT collection.
+           Every row of one call carries the same instant — the WHERE pins the newest collection_time — so
+           the tool reads it off rows[0]. Naive UTC, the store's timestamp discipline. */
+        DateTime CollectionTimeUtc);
 
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
@@ -95,7 +100,9 @@ public static class DarlingPgServerConfigReader
                 source = 'default', which is PostgreSQL saying plainly that nobody set them.
                 boot_val is still stored and returned — it is useful to SEE what the default is — it just
                 does not get to decide this. */
-            (coalesce(c.source, 'default') = 'default') AS is_default
+            (coalesce(c.source, 'default') = 'default') AS is_default,
+            /* #3653: the stamp, on the row statement (see PgConfigRow.CollectionTimeUtc). */
+            c.collection_time
         FROM pg_server_config AS c
         WHERE c.server_id = $1
         AND   c.collection_time = (
@@ -180,7 +187,8 @@ public static class DarlingPgServerConfigReader
                 reader.GetInt32(9),
                 reader.GetBoolean(10),
                 reader.IsDBNull(11) ? null : reader.GetString(11),
-                !reader.IsDBNull(12) && reader.GetBoolean(12)));
+                !reader.IsDBNull(12) && reader.GetBoolean(12),
+                reader.GetDateTime(13)));
         }
 
         return rows;

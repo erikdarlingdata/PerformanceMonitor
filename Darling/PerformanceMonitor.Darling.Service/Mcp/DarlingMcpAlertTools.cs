@@ -189,7 +189,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: a PostgreSQL server has no deadlock or blocking health band to calibrate against, and its blocking count is a periodic SAMPLE of pg_stat_activity rather than engine-recorded reports. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers (#3638), a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED (#3593): since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -237,6 +237,17 @@ public sealed class DarlingMcpAlertTools
     /// <c>config_notification.email_cooldown_minutes</c>, so it is passed in separately rather than read off
     /// <paramref name="s"/> — a single set equality across both planes would compare a union against one
     /// table's SELECT list and be satisfiable by drift on either side.</para></summary>
+    /// <summary>
+    /// The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653): emitted beside the value by
+    /// <see cref="BuildAlertSettingsPayload"/>, returned under <c>warnings</c> by <c>update_alert_settings</c>
+    /// when a caller sets the value, and pinned word-for-word on both by <c>DarlingMcpAlertToolsTests</c>. One
+    /// constant so the two surfaces cannot say different things about the same retired knob. Lite's
+    /// <c>McpAlertTools</c> carries the same text by hand (Lite.Tests cannot reference this assembly) and its
+    /// test reads this declaration to hold the two equal.
+    /// </summary>
+    internal const string PoisonWaitThresholdMsNote =
+        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
     private static object BuildAlertSettingsPayload(
         DarlingAlertReader.AlertSettingsReadRow s, int deliveryCooldownMinutes) => new
     {
@@ -283,7 +294,21 @@ public sealed class DarlingMcpAlertTools
             deadlock_warn_per_hour = s.DeadlockWarnPerHour,
             deadlock_critical_per_hour = s.DeadlockCriticalPerHour
         },
-        poison_wait = new { enabled = s.PoisonWaitEnabled, threshold_ms = s.PoisonWaitThresholdMs },
+        poison_wait = new
+        {
+            enabled = s.PoisonWaitEnabled,
+            /* #3653 (from #3541): the key STAYS — it is a published field a client may read or hand back, and
+               removing it would be a contract break for a value that costs nothing to carry — but since #3593
+               nothing consults it. The alert grades ACCUMULATED wait over PoisonWaitEvaluator.WindowMinutes
+               (IAlertEngineSettings.PoisonWaitThresholdMs records why the member survives on the contract);
+               this was the avg-ms-per-wait bar the retired shape judged one collector row against. The note
+               sits BESIDE the value, on the wire, because the description is the only other place an agent
+               could learn it and a description is read once. The writer accepts the note back untouched (a
+               read → modify → write round-trip is this payload's invariant) and warns when the value itself
+               is set. */
+            threshold_ms = s.PoisonWaitThresholdMs,
+            threshold_ms_note = PoisonWaitThresholdMsNote
+        },
         long_running_query = new
         {
             enabled = s.LongRunningQueryEnabled,
@@ -505,7 +530,11 @@ public sealed class DarlingMcpAlertTools
         "— configure them in the standalone Darling Viewer app's Settings window (Notifications section), which " +
         "connects to this store (including remotely, not just localhost) rather than requiring desktop access to " +
         "this specific box. " +
-        "Returns {status:\"updated\", updated_fields:[...], settings:{...}} with the full new settings, or " +
+        "poison_wait.threshold_ms is RETIRED (#3593): the Poison Wait alert grades accumulated wait over a ten-minute window, " +
+        "so this value is accepted and stored for round-trip compatibility but consulted by nothing — setting it returns " +
+        "status updated with a warnings entry saying so, and does not change when the alert fires. poison_wait.enabled still governs the alert. " +
+        "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
+        "empty unless a stored-but-unconsulted field was written), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
         NpgsqlDataSource postgres,
@@ -528,7 +557,7 @@ public sealed class DarlingMcpAlertTools
                 return Outcome("invalid", "settings_json must be a JSON object of the fields to change (see get_alert_settings for the shape).");
             }
 
-            var (updates, error) = BuildAlertSettingsUpdate(body);
+            var (updates, error, warnings) = BuildAlertSettingsUpdate(body);
             if (error != null)
             {
                 return Outcome("invalid", error);
@@ -609,6 +638,10 @@ public sealed class DarlingMcpAlertTools
                    writable column name appears on both tables, so a bare name is still unambiguous --
                    asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
                 updated_fields = updates.Select(u => u.Column).ToArray(),
+                /* #3653: always present, usually empty — a caller branching on it should not have to probe
+                   for the key. Non-empty only when a field was written that nothing consults (today:
+                   poison_wait.threshold_ms); the field IS in updated_fields, because it was updated. */
+                warnings = warnings.ToArray(),
                 settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown.Value)
             }, McpHelpers.JsonOptions);
         }
@@ -1205,10 +1238,17 @@ public sealed class DarlingMcpAlertTools
     /// (<c>SettingsWindow.BuildAlertRowFromControls</c>). Returns a non-null <c>Error</c> — and the caller writes
     /// nothing — on the FIRST bad value or unknown field (top-level or nested). Column names are this method's
     /// compile-time constants (never the input), so interpolating them into the UPDATE's SET list is injection-safe.
+    ///
+    /// <para><c>Warnings</c> (#3653) is the third outcome: a field that IS written but that the caller should
+    /// know is inert. Today that is <c>poison_wait.threshold_ms</c> alone — stored, reported, consulted by
+    /// nothing since #3593. Refusing it would break the round-trip this tool's description tells the caller
+    /// to perform (hand the whole read payload back); silently storing it would let an operator believe they
+    /// had tuned an alert. Accept, store, and say so, on the success envelope where the caller is looking.</para>
     /// </summary>
-    private static (List<UpdateTarget> Updates, string? Error) BuildAlertSettingsUpdate(JsonObject body)
+    private static (List<UpdateTarget> Updates, string? Error, List<string> Warnings) BuildAlertSettingsUpdate(JsonObject body)
     {
         var updates = new List<UpdateTarget>();
+        var warnings = new List<string>();
         string? error = null;
 
         void AddBool(string column, JsonNode? node, string field)
@@ -1447,7 +1487,23 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("poison_wait_enabled", n, "poison_wait.enabled"); break;
-                            case "threshold_ms": AddInt("poison_wait_threshold_ms", n, "poison_wait.threshold_ms", 1, int.MaxValue); break;
+                            /* #3653: accepted and stored under the same bounds it always had, then WARNED about
+                               — nothing has read this column since #3593 (see PoisonWaitThresholdMsNote). The
+                               bound check still runs first, so a value that was never valid is still refused as
+                               invalid rather than stored with a warning. */
+                            case "threshold_ms":
+                                AddInt("poison_wait_threshold_ms", n, "poison_wait.threshold_ms", 1, int.MaxValue);
+                                if (error is null)
+                                {
+                                    warnings.Add("poison_wait.threshold_ms was stored but is " + PoisonWaitThresholdMsNote + ".");
+                                }
+                                break;
+                            /* #3653: the note get_alert_settings emits beside threshold_ms, handed back by a
+                               caller who round-tripped the whole payload. Not a setting, so no column and no
+                               warning — it is our own text coming home, and refusing it would fail the
+                               read → write invariant EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter
+                               holds. */
+                            case "threshold_ms_note": break;
                             default: error = $"Unknown field 'poison_wait.{k}'."; break;
                         }
                     });
@@ -1700,7 +1756,7 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
-        return (updates, error);
+        return (updates, error, warnings);
     }
 
     /// <summary>One validated field of a partial update: the TABLE it writes, the column, the wire field

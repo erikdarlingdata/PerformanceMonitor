@@ -116,6 +116,35 @@ public sealed class McpAlertSettingsKeyTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3653 (from #3541): <c>poison_wait.threshold_ms</c> is reported but consulted by nothing since #3593
+    /// moved the shared engine to accumulated wait over a window. The key stays and a note sits beside it on
+    /// the wire. Cross-app for the reason <see cref="CpuModeVocabulary_IsByteForByteDarlings"/> is: Lite
+    /// cannot reference the service assembly, so Darling's declaration is READ, and the day either app
+    /// rewords the note the other fails here rather than the two saying different things about one knob.
+    /// The description carries the same fact for the agent who reads it before calling.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitThresholdMs_CarriesDarlingsRetirementNote_ByteForByte()
+    {
+        var poison = Settings().GetProperty("poison_wait");
+        Assert.Contains("threshold_ms", KeysOf(poison));
+        Assert.Equal(McpAlertTools.PoisonWaitThresholdMsNote, poison.GetProperty("threshold_ms_note").GetString());
+        Assert.StartsWith("retired by #3593", McpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+
+        var darlingTools = File.ReadAllText(FindRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));
+        var declaration = Regex.Match(darlingTools, @"PoisonWaitThresholdMsNote\s*=\s*""([^""]*)"";");
+        Assert.True(declaration.Success, "Darling's PoisonWaitThresholdMsNote declaration could not be located.");
+        Assert.Equal(McpAlertTools.PoisonWaitThresholdMsNote, declaration.Groups[1].Value);
+
+        var description = typeof(McpAlertTools).GetMethod(nameof(McpAlertTools.GetAlertSettings))!
+            .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false)
+            .Cast<System.ComponentModel.DescriptionAttribute>().Single().Description;
+        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", description, StringComparison.Ordinal);
+        Assert.Contains("threshold_ms_note", description, StringComparison.Ordinal);
+    }
+
     private static string FindRepoFile(string relativePath)
     {
         var dir = AppContext.BaseDirectory;

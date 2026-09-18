@@ -97,11 +97,23 @@ ORDER BY latch_class, collection_time";
         return items;
     }
 
+    /// <summary>The Latch Stats and Spinlock Stats grids' row cap — the default <c>limit</c> of
+    /// <see cref="GetLatchStatsSnapshotAsync"/> and <see cref="GetSpinlockStatsSnapshotAsync"/>, so every
+    /// grid caller reads exactly the 20 rows it always read. The <c>WaitStatsGridCap</c> idiom (#3541 A3).</summary>
+    public const int LatchSpinlockGridRowCap = 20;
+
     /// <summary>
     /// The Latch Stats latest-snapshot grid: every latch class captured at the most recent collection in
-    /// the window, ordered by the last interval's delta wait time then cumulative wait time, capped at 20.
+    /// the window, ordered by the last interval's delta wait time then cumulative wait time, capped at
+    /// <paramref name="limit"/> classes.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3653, the #3541 A3 class on Lite).
+    /// It was <c>LIMIT 20</c> while <c>get_latch_stats</c> published <c>latch_count</c> as if it were the
+    /// snapshot's population — a server with 30 latch classes in its newest snapshot answered 20 with nothing
+    /// on the envelope to say so. The MCP tool passes <c>limit + 1</c> and reads the extra row as truncation;
+    /// the grid passes nothing.</para>
     /// </summary>
-    public async Task<List<LatchStatsSnapshotRow>> GetLatchStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<LatchStatsSnapshotRow>> GetLatchStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = LatchSpinlockGridRowCap)
     {
         using var _q = TimeQuery("GetLatchStatsSnapshotAsync", "v_latch_stats latest snapshot");
         using var connection = await OpenConnectionAsync();
@@ -130,11 +142,12 @@ FROM v_latch_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
 ORDER BY delta_wait_time_ms DESC, wait_time_ms DESC
-LIMIT 20";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<LatchStatsSnapshotRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -232,9 +245,13 @@ ORDER BY spinlock_name, collection_time";
 
     /// <summary>
     /// The Spinlock Stats latest-snapshot grid: every spinlock captured at the most recent collection in
-    /// the window, ordered by the last interval's delta collisions then cumulative collisions, capped at 20.
+    /// the window, ordered by the last interval's delta collisions then cumulative collisions, capped at
+    /// <paramref name="limit"/> spinlocks. The cap is a parameter defaulting to
+    /// <see cref="LatchSpinlockGridRowCap"/> for the reason <see cref="GetLatchStatsSnapshotAsync"/> gives;
+    /// this one matters more, because sys.dm_os_spinlock_stats carries well over a hundred spinlocks and
+    /// <c>get_spinlock_stats</c>' <c>spinlock_count</c> read as the population when it was the cap.
     /// </summary>
-    public async Task<List<SpinlockStatsSnapshotRow>> GetSpinlockStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<SpinlockStatsSnapshotRow>> GetSpinlockStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = LatchSpinlockGridRowCap)
     {
         using var _q = TimeQuery("GetSpinlockStatsSnapshotAsync", "v_spinlock_stats latest snapshot");
         using var connection = await OpenConnectionAsync();
@@ -265,11 +282,12 @@ FROM v_spinlock_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
 ORDER BY delta_collisions DESC, collisions DESC
-LIMIT 20";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<SpinlockStatsSnapshotRow>();
         using var reader = await command.ExecuteReaderAsync();

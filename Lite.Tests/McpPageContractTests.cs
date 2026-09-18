@@ -316,6 +316,66 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         AssertPage(whole, "waits", "wait_types_returned", returned: 3, truncated: false);
     }
 
+    /// <summary>
+    /// #3653 (the #3541 A3 class on Lite): the two latest-snapshot readers carried a <c>LIMIT 20</c> literal and
+    /// the tools published <c>latch_count</c> / <c>spinlock_count</c> as the snapshot's population. Now the cap
+    /// binds to <c>limit</c> and truncation is OBSERVED at the boundary — the pair below is over the same
+    /// three seeded rows, and a <c>count &gt;= limit</c> inference would fail its not-truncated half. An older
+    /// snapshot is seeded too, so the page is the NEWEST snapshot's rows and not a mixture (the reader pins one
+    /// <c>collection_time</c>); the cap counts rows in that snapshot, not rows in the window.
+    /// </summary>
+    [Fact]
+    public async Task GetLatchStats_CapBindsToLimit_AndTruncationIsObserved()
+    {
+        var now = WholeSecondsNow().AddMinutes(-1);
+        await SeedLatchAsync(now.AddMinutes(-10), "ACCESS_METHODS_DATASET_PARENT", 99_000);
+        await SeedLatchAsync(now, "ACCESS_METHODS_DATASET_PARENT", 4000);
+        await SeedLatchAsync(now, "BUFFER", 3000);
+        await SeedLatchAsync(now, "LOG_MANAGER", 2000);
+
+        var cut = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 24, 2));
+        AssertPage(cut, "latches", "latches_returned", returned: 2, truncated: true);
+        Assert.Equal("delta_wait_time_ms_desc", cut.GetProperty("order").GetString());
+        Assert.Equal(Stamp(now), cut.GetProperty("captured_at").GetString());
+        /* The page is the heaviest of the NEWEST snapshot: the hot older row is not in it, the lightest class is
+           the one past the cap. */
+        Assert.Equal(new[] { "ACCESS_METHODS_DATASET_PARENT", "BUFFER" },
+            cut.GetProperty("latches").EnumerateArray().Select(l => l.GetProperty("latch_class").GetString()).ToArray());
+        Assert.Equal(4000, cut.GetProperty("latches")[0].GetProperty("delta_wait_time_ms").GetInt64());
+
+        var whole = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 24, 3));
+        AssertPage(whole, "latches", "latches_returned", returned: 3, truncated: false);
+
+        /* The default IS the grid's cap, named once — a caller who sends nothing reads what the grid reads. */
+        Assert.Equal(20, LocalDataService.LatchSpinlockGridRowCap);
+        Assert.Equal(LocalDataService.LatchSpinlockGridRowCap,
+            (int)ToolMethod(typeof(McpLatchSpinlockTools), "get_latch_stats").GetParameters().Single(p => p.Name == "limit").DefaultValue!);
+    }
+
+    [Fact]
+    public async Task GetSpinlockStats_CapBindsToLimit_AndTruncationIsObserved()
+    {
+        var now = WholeSecondsNow().AddMinutes(-1);
+        await SeedSpinlockAsync(now.AddMinutes(-10), "LOCK_HASH", 99_000);
+        await SeedSpinlockAsync(now, "LOCK_HASH", 4000);
+        await SeedSpinlockAsync(now, "SOS_CACHESTORE", 3000);
+        await SeedSpinlockAsync(now, "XDESMGR", 2000);
+
+        var cut = Parse(await McpLatchSpinlockTools.GetSpinlockStats(_dataService, _serverManager, ServerName, 24, 2));
+        AssertPage(cut, "spinlocks", "spinlocks_returned", returned: 2, truncated: true);
+        Assert.Equal("delta_collisions_desc", cut.GetProperty("order").GetString());
+        Assert.Equal(Stamp(now), cut.GetProperty("captured_at").GetString());
+        Assert.Equal(new[] { "LOCK_HASH", "SOS_CACHESTORE" },
+            cut.GetProperty("spinlocks").EnumerateArray().Select(l => l.GetProperty("spinlock_name").GetString()).ToArray());
+        Assert.Equal(4000, cut.GetProperty("spinlocks")[0].GetProperty("delta_collisions").GetInt64());
+
+        var whole = Parse(await McpLatchSpinlockTools.GetSpinlockStats(_dataService, _serverManager, ServerName, 24, 3));
+        AssertPage(whole, "spinlocks", "spinlocks_returned", returned: 3, truncated: false);
+
+        Assert.Equal(LocalDataService.LatchSpinlockGridRowCap,
+            (int)ToolMethod(typeof(McpLatchSpinlockTools), "get_spinlock_stats").GetParameters().Single(p => p.Name == "limit").DefaultValue!);
+    }
+
     /* ───────────────────────── #3541 A13: a filter is part of the query ───────────────────────── */
 
     /// <summary>
@@ -510,6 +570,10 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         (typeof(McpWaitTools), "get_wait_stats"),
         /* #3541 A13: joined the dialect when its filters moved into the SQL — see the A13 tests above. */
         (typeof(McpSessionTools), "get_active_queries"),
+        /* #3653: the latest-snapshot pair, whose LIMIT 20 literal was the last hidden cap on this SKU's MCP
+           surface — see the two facts above. */
+        (typeof(McpLatchSpinlockTools), "get_latch_stats"),
+        (typeof(McpLatchSpinlockTools), "get_spinlock_stats"),
     ];
 
     [Fact]
@@ -656,6 +720,22 @@ INSERT INTO wait_stats
      delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
 VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 10, $6, 100)",
         _nextId--, Naive(at), _serverId, ServerName, waitType, deltaMs);
+
+    /* #3653: the latest-snapshot pair. The cumulative columns are constants; the delta is the ordering key. */
+
+    private Task SeedLatchAsync(DateTime at, string latchClass, long deltaWaitMs) => ExecAsync(@"
+INSERT INTO latch_stats
+    (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms,
+     delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 1000, 20100, 50, 100, $6, 5, 60)",
+        _nextId--, Naive(at), _serverId, ServerName, latchClass, deltaWaitMs);
+
+    private Task SeedSpinlockAsync(DateTime at, string spinlockName, long deltaCollisions) => ExecAsync(@"
+INSERT INTO spinlock_stats
+    (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs,
+     delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 500000, 900000, 1.8, 10, 20, $6, 1000, 0, 0, 60)",
+        _nextId--, Naive(at), _serverId, ServerName, spinlockName, deltaCollisions);
 
     /* #3541 A13 / A9 fixtures. */
 

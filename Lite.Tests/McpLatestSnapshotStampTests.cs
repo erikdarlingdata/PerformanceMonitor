@@ -171,13 +171,13 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         await SeedLatchAsync(@base, 100);
         await SeedSpinlockAsync(@base);
 
-        var latch = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 1, anchor));
+        var latch = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 1, as_of: anchor));
         Assert.Equal(Stamp(@base), latch.GetProperty("captured_at").GetString());
         Assert.Equal(300, latch.GetProperty("age_seconds").GetInt64());
         /* The snapshot is the newest one: its delta, not the hot earlier one's. */
         Assert.Equal(100, Assert.Single(latch.GetProperty("latches").EnumerateArray()).GetProperty("delta_wait_time_ms").GetInt64());
 
-        var spin = Parse(await McpLatchSpinlockTools.GetSpinlockStats(_dataService, _serverManager, ServerName, 1, anchor));
+        var spin = Parse(await McpLatchSpinlockTools.GetSpinlockStats(_dataService, _serverManager, ServerName, 1, as_of: anchor));
         Assert.Equal(Stamp(@base), spin.GetProperty("captured_at").GetString());
         Assert.Equal(300, spin.GetProperty("age_seconds").GetInt64());
     }
