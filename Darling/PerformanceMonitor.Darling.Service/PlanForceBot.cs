@@ -18,9 +18,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// The auto force-plan bot's orchestration (#2138 phase 1): runs after each scheduled analysis pass,
 /// re-judges the pass's force-plan targets through the SAME policy gate agents inspect on the MCP
-/// surfaces (<see cref="FactRemediation.ForcePlanBlockers"/> feeding
+/// surfaces (<see cref="FactRemediation.ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>,
+/// both halves, wrapped by <see cref="ForcePlanBotPolicy.Blockers"/> and feeding
 /// <see cref="ForcePlanBotPolicy.Evaluate"/>), and journals every decision to
 /// <c>collect.plan_force_actions</c> with the evidence that produced it.
+///
+/// <para><b>The state half is read here, once per pass (#3654).</b> The gate's second half needs what
+/// the store knows about each target's forcing and automatic-plan-correction state NOW — the same
+/// <c>query_store_stats</c> / <c>plan_correction</c> read the MCP tools make (#3652), batched into one
+/// statement for the pass's whole candidate list through the store seam — and the bot judges each
+/// target with it. Without it the bot's gate was the two #2138 blockers only, and on the five live
+/// targets #3652 cross-referenced it would have judged all five unblocked.</para>
 ///
 /// <para><b>Phase 1 cannot write to a monitored server, structurally.</b> This class holds no
 /// <see cref="IPlanForceExecutor"/> — no field, no constructor parameter, no factory — and no
@@ -45,9 +53,11 @@ public sealed class PlanForceBot
 
        It counts targets EVALUATED, not rows journaled, and that is the load-bearing choice: each
        evaluated target costs a store round trip (GetQueryHistoryAsync) whatever the verdict turns out
-       to be, so the cap bounds the WORK a pass can do, not just its output. Counting only journaled
-       rows would let a pass whose targets are all inside their cooldown spend an unbounded number of
-       history reads for an empty journal — the one shape the budget exists to stop. The cost is that
+       to be — plus, since #3654, the pass costs ONE more for all of them together (the batched state
+       read, sized by this same cap) — so the cap bounds the WORK a pass can do, not just its output.
+       Counting only journaled rows would let a pass whose targets are all inside their cooldown spend
+       an unbounded number of history reads for an empty journal — the one shape the budget exists to
+       stop. The cost is that
        a suppressed target can occupy a slot a later actionable one wanted; that is acceptable because
        FactRemediation.ExtractPlanRegressionTargets already caps each finding at 5 targets ordered
        worst-regression-first, so the actionable ones are at the front of the list by construction. If
@@ -127,8 +137,104 @@ public sealed class PlanForceBot
         }
 
         var nowUtc = DateTime.UtcNow;
+        var candidates = CollectCandidates(findings);
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        /* The gate's STATE half, read once for the whole pass (#3654). One statement for every candidate
+           rather than one per target — the read is one server's day of query_store_stats hashed on the
+           targets, and ten of those where one would do is the shape the per-pass cap exists to prevent.
+           Read BEFORE the per-target loop so every target in the pass is judged against the same snapshot;
+           a failure comes back as a reason, never an exception, because for this caller an unreadable
+           state is a verdict (below), not a fault to log and skip past. */
+        var (states, stateUnavailableReason) = await _store.TryGetTargetStatesAsync(
+            runtime.ServerId, candidates, nowUtc, ct);
+
+        foreach (var target in candidates)
+        {
+            ForcePlanTargetState? state = null;
+            if (states is not null)
+            {
+                states.TryGetValue(ForcePlanTargetKey.Of(target), out state);
+            }
+
+            /* THE shared gate, whole: the same two-argument FactRemediation.ForcePlanBlockers that fills
+               structured_remediation's blockers and blocker_evidence on the MCP surfaces (#3652), never
+               recomputed locally, so advise and act cannot drift — plus the two blockers only a bot
+               needs, which ForcePlanBotPolicy.Blockers adds on top.
+
+               Why this caller fails CLOSED where the advice merely notes (#3654, #3652). The advisory
+               surface, handed a state it could not read, writes `state_note: unknown` on the target and
+               leaves `eligible` as the finding-only verdict, because its reader is a human or an agent
+               who will cross-reference get_plan_corrections and sys.query_store_plan before running
+               anything — #3652 was found exactly that way. This caller has no reader between its verdict
+               and the write: with every gate open, Force is sp_query_store_force_plan on a production
+               server with nobody looking. The five #3652 blockers are the facts that would have stopped
+               five contraindicated forces, and every one of them fires only on an OBSERVED value, so an
+               unread state does not merely weaken the gate, it reproduces the pre-#3652 gate exactly. So
+               a null state (the read failed, or returned no row for this key) and an empty one (the read
+               ran and observed nothing — not even the enablement row the plan-correction collector
+               writes for every database it can see, so FORCE_LAST_GOOD_PLAN is unknown here) are both a
+               blocker with the reason as evidence, and the journal says `state_unavailable` rather than
+               a would_force row that nothing checked. Unknown is a note for a reader and a NO for an
+               actor. Likewise FLGP-on: the advice changes its verb and leaves the statement for an
+               operator who has read the guidance; the bot stands down for the whole database
+               (`apc_enabled_for_database`), because two forcers on one database is the failure #3652
+               documented and the bot cannot be the one who read the guidance. */
+            var blockers = ForcePlanBotPolicy.Blockers(
+                target, state, states is null ? stateUnavailableReason : null);
+            var history = await _store.GetQueryHistoryAsync(
+                runtime.ServerId, target.Database, target.QueryId, _settings, nowUtc, ct);
+
+            var decision = ForcePlanBotPolicy.Evaluate(
+                target, ForcePlanBotPolicy.Names(blockers), currentConfig.PlanForceBotEnabled, _settings,
+                history, nowUtc);
+
+            switch (decision.Kind)
+            {
+                case ForcePlanBotDecisionKind.Suppressed:
+                    continue;
+
+                case ForcePlanBotDecisionKind.Blocked:
+                    /* reasons = the blocker NAMES (the consumer API, comma-joined as ever); detail = each
+                       name with the evidence it was built from, one per line, so a blocked row is
+                       auditable against the snapshot it was judged on (#3654). The policy returns the
+                       blocker list as its reasons whenever the list is non-empty; when it is empty the
+                       Blocked came from the bot's own history gates (failed-force memory, daily budget),
+                       which carry no evidence beyond their name, and detail stays null as before. */
+                    await _store.JournalAsync(BuildRecord(
+                        runtime, target, PgPlanForceActionStore.ActionBlocked, decision.Reasons,
+                        PgPlanForceActionStore.OutcomeLogged,
+                        detail: ForcePlanBotPolicy.Evidence(blockers), nowUtc), ct);
+                    continue;
+
+                case ForcePlanBotDecisionKind.WouldForce:
+                    await _store.JournalAsync(BuildRecord(
+                        runtime, target, PgPlanForceActionStore.ActionWouldForce, decision.Reasons,
+                        PgPlanForceActionStore.OutcomeLogged, detail: null, nowUtc), ct);
+                    continue;
+
+                case ForcePlanBotDecisionKind.Force:
+                    await JournalWithheldForceAsync(runtime, target, nowUtc, ct);
+                    continue;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The pass's candidate list: PLAN_REGRESSION targets in finding order, one per (database, query)
+    /// across findings (a query regressed in two findings is one decision), cut at
+    /// <see cref="MaxTargetsPerPass"/>. Materialized up front (rather than judged as it is walked, as it
+    /// was before #3654) so the state read can be ONE statement over the whole list; the order and the
+    /// cap are exactly what the walk produced, so the worst-regression-first assumption the cap rests on
+    /// is unchanged.
+    /// </summary>
+    private static List<ForcePlanTarget> CollectCandidates(IReadOnlyList<AnalysisFinding> findings)
+    {
         var seen = new HashSet<(string Database, long QueryId)>();
-        var evaluated = 0;
+        var candidates = new List<ForcePlanTarget>(MaxTargetsPerPass);
 
         foreach (var finding in findings)
         {
@@ -140,9 +246,9 @@ public sealed class PlanForceBot
 
             foreach (var target in targets)
             {
-                if (evaluated >= MaxTargetsPerPass)
+                if (candidates.Count >= MaxTargetsPerPass)
                 {
-                    return;
+                    return candidates;
                 }
 
                 if (!seen.Add((target.Database, target.QueryId)))
@@ -150,40 +256,11 @@ public sealed class PlanForceBot
                     continue;
                 }
 
-                evaluated++;
-
-                /* THE shared gate: the same function that fills structured_remediation's blockers
-                   on the MCP surfaces. Never recomputed locally, so advise and act cannot drift. */
-                var blockers = FactRemediation.ForcePlanBlockers(target);
-                var history = await _store.GetQueryHistoryAsync(
-                    runtime.ServerId, target.Database, target.QueryId, _settings, nowUtc, ct);
-
-                var decision = ForcePlanBotPolicy.Evaluate(
-                    target, blockers, currentConfig.PlanForceBotEnabled, _settings, history, nowUtc);
-
-                switch (decision.Kind)
-                {
-                    case ForcePlanBotDecisionKind.Suppressed:
-                        continue;
-
-                    case ForcePlanBotDecisionKind.Blocked:
-                        await _store.JournalAsync(BuildRecord(
-                            runtime, target, PgPlanForceActionStore.ActionBlocked, decision.Reasons,
-                            PgPlanForceActionStore.OutcomeLogged, detail: null, nowUtc), ct);
-                        continue;
-
-                    case ForcePlanBotDecisionKind.WouldForce:
-                        await _store.JournalAsync(BuildRecord(
-                            runtime, target, PgPlanForceActionStore.ActionWouldForce, decision.Reasons,
-                            PgPlanForceActionStore.OutcomeLogged, detail: null, nowUtc), ct);
-                        continue;
-
-                    case ForcePlanBotDecisionKind.Force:
-                        await JournalWithheldForceAsync(runtime, target, nowUtc, ct);
-                        continue;
-                }
+                candidates.Add(target);
             }
         }
+
+        return candidates;
     }
 
     /// <summary>

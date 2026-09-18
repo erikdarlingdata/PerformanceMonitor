@@ -591,6 +591,12 @@ public sealed class DarlingWorker : BackgroundService
        collection-time guard: rows collected before the last recorded fire were, by definition, already
        reported by the process that fired it. */
     private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitCooldownSeeded = new(StringComparer.Ordinal);
+    /* #3653: per SERVER, the "held on an unobserved window" Debug line has been written for the current
+       stretch of collector silence. Set when a sweep holds at least one active poison subject because the
+       window had no collector run and no row; removed on the next observed window, so each outage logs
+       once rather than every 30 s sweep. Keyed on the server, not the subject, because the silence is the
+       collector's, not any one event's. */
+    private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitHoldLogged = new(StringComparer.Ordinal);
 
     /* #2719: CPU is a continuous gauge, so it does not need RollingCountAlertGate, which exists for
        rolling-WINDOW COUNTS (Deadlocks/Blocking) where the same event can sit in the window across several
@@ -695,10 +701,6 @@ public sealed class DarlingWorker : BackgroundService
            change (host/auth/excluded-dbs/cost) — paired with dropping Runtime to force a reconnect. */
         public required MonitoredServer Config { get; set; }
         public ServerRuntime? Runtime { get; set; }
-
-        /* Set once per process after the PostgreSQL analysis-state row is written, so the explanation is
-           recorded without rewriting the same row every analysis interval forever. */
-        public bool PostgresAnalysisStateWritten { get; set; }
 
         /* ConcurrentDictionary (#1553 D1): with the fire-and-track sweep the per-server body runs on a pool
            thread, so a reload's RecomputeNextDueAsync on the OUTER thread can touch this map concurrently with the
@@ -2511,37 +2513,19 @@ public sealed class DarlingWorker : BackgroundService
                 var intervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
                 server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(intervalMinutes);
 
-                /* The analysis pipeline is SQL-Server-shaped: its facts come from wait_stats, query_stats,
-                   cpu_utilization_stats and friends, none of which a PostgreSQL target ever writes. Running it
-                   anyway is not harmless. RunAnalysisPassAsync takes a serverId and a storage name — not the
-                   target — so it cannot gate itself, and it would read those tables, find nothing, hit the
-                   24-hour data-span gate and persist insufficient_data = true. FOREVER: those tables will
-                   never have rows for a PostgreSQL server_id, so the Recommendations tab would say "still
-                   collecting" for the life of the deployment, which is the one thing analysis_state exists to
-                   distinguish from a genuine all-clear. Plus a fresh DarlingAnalysisService and up to a
-                   120-second pass per target per interval, producing nothing.
-
-                   So: skip the pass, and say why ONCE rather than leaving the tab silent. The message is the
-                   honest state — not "still collecting", which is a lie about a young deployment. */
-                if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
-                {
-                    if (!server.PostgresAnalysisStateWritten)
-                    {
-                        server.PostgresAnalysisStateWritten = true;
-                        await DarlingObservability.WriteAnalysisStateAsync(
-                            _postgres!,
-                            server.Runtime.ServerId,
-                            insufficientData: true,
-                            message: PostgresAnalysisNotApplicable,
-                            _logger,
-                            stoppingToken);
-                    }
-                }
-                else
-                {
-                    await RunScheduledAnalysisAsync(
-                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
-                }
+                /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
+                   this site gated on the target engine and wrote a tombstone into analysis_state for a
+                   PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
+                   gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
+                   collecting" for the life of the deployment. That gate is gone, and the invariant that
+                   replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
+                   DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
+                   and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
+                   no longer knows or cares which engine it is scheduling. The first real pass then
+                   overwrites any tombstone row still standing with the honest state (D7 — the lazy
+                   overwrite, no migration). */
+                await RunScheduledAnalysisAsync(
+                    server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
             }
         }
         catch (OperationCanceledException)
@@ -4671,6 +4655,20 @@ public sealed class DarlingWorker : BackgroundService
     /// Aurora-only — and no rows is silence, the honest empty. Extending the poison definition to
     /// self-hosted targets via <c>pg_wait_sampling</c> needs its own calibration (sampled counts, not
     /// accumulated time) and its own fleet evidence first.</para>
+    ///
+    /// <para><b>The Cleared edge requires an OBSERVED window (#3653) — the contract
+    /// <c>AlertEngine.CheckPoisonWaitsAsync</c> adopted in #3593, ported.</b> Unwatched is not quiet: a
+    /// collector that stops delivering must not make this host announce "Poison Waits Cleared", which is
+    /// exactly what the pre-#3653 arm did — every active subject cleared the moment the read came back empty.
+    /// On SQL Server the rows are their own witness (THREADPOOL lands a row every cycle); on PostgreSQL they
+    /// are not, because since #2694 the <c>pg_wait_stats</c> collector skips an event whose waits delta is
+    /// zero — a quiet event and a dead collector both read as "no row for that subject". So the read carries
+    /// the collector's own <c>collection_log</c> SUCCESS count over the same window
+    /// (<see cref="PostgresPoisonWaitWindow.Observed"/>, the #3537 xmin-horizon witness), and a standing
+    /// subject clears only when the window was looked at and the subject is no longer over the bar — which
+    /// includes the subject having written NO row (quiet, on an observed window). An unobserved window holds
+    /// every active flag where it is and says so once at Debug per server (the #3282 rule for a CPU reading
+    /// that stops arriving); the next observed window either re-fires or clears on evidence.</para>
     /// </summary>
     private async Task EvaluatePgPoisonWaitAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -4693,8 +4691,9 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
-            var rows = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
+            var window = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
             readClock.Restart();
+            var rows = window.Waits;
             var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(rows);
 
             var now = DateTime.UtcNow;
@@ -4801,11 +4800,32 @@ public sealed class DarlingWorker : BackgroundService
                 readClock.Restart();
             }
 
-            /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
-               window (the rolling sums age out rather than reset), which is accepted — a Cleared that
-               arrives a few minutes conservative beats one that flaps with each sweep. */
+            /* The Cleared edge, per subject: previously active, no longer over the bar, ON AN OBSERVED WINDOW
+               (#3653 — see the method's doc comment). Late by up to one window (the rolling sums age out
+               rather than reset), which is accepted — a Cleared that arrives a few minutes conservative
+               beats one that flaps with each sweep. An UNOBSERVED window — no collector run logged and no
+               row stored inside it — is collector silence, not the server going quiet: every active flag
+               holds, and the hold is logged once per server (Debug: the collector's own Collection Stopped
+               self-alert is the loud channel for a dead collector; this line only explains why a Cleared
+               the operator might expect has not arrived). The once-flag resets on the next observed
+               window so a second outage logs again. */
             var activePrefix = string.Create(
                 CultureInfo.InvariantCulture, $"{serverKey}|{metricName}|");
+            if (!window.Observed)
+            {
+                if (_activePgPoisonWaitAlert.Any(e => e.Value && e.Key.StartsWith(activePrefix, StringComparison.Ordinal))
+                    && _pgPoisonWaitHoldLogged.TryAdd(serverKey, true))
+                {
+                    _logger.LogDebug(
+                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min — holding the standing alert(s) rather than announcing Cleared on collector silence (#3653)",
+                        runtime.Config.DisplayName, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+                }
+
+                return;
+            }
+
+            _pgPoisonWaitHoldLogged.TryRemove(serverKey, out _);
+
             foreach (var entry in _activePgPoisonWaitAlert)
             {
                 if (!entry.Value
@@ -5988,33 +6008,11 @@ LIMIT 1";
             return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
         }
 
-        /* The operator door the scheduled-path gate (see the PostgreSql arm in the analysis tick) did not
-           cover: "Generate now" against a PostgreSQL target ran the full SQL-Server-shaped pass, which
-           found nothing, persisted the GENERIC insufficient_data message, and thereby OVERWROTE the honest
-           engine tombstone the scheduled arm wrote — the Recommendations tab regressed from "does not
-           apply, use the PG reads" back to "still collecting" the moment an operator clicked the button.
-           Same decision, same honest answer, re-written here so the tombstone survives the click. */
-        if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
-        {
-            /* Mirror the scheduled arm's once-latch so the tick does not re-write what this just wrote. */
-            server.PostgresAnalysisStateWritten = true;
-            await DarlingObservability.WriteAnalysisStateAsync(
-                _postgres!,
-                server.Runtime.ServerId,
-                insufficientData: true,
-                message: PostgresAnalysisNotApplicable,
-                _logger,
-                cancellationToken);
-
-            return new CommandOutcome(true, "analysis not applicable",
-                JsonSerializer.Serialize(new
-                {
-                    success = true,
-                    server = server.Config.DisplayName,
-                    message = "Analysis is SQL-Server-shaped and does not apply to a PostgreSQL target; "
-                        + "use the get_pg_* MCP reads and the outage-predictor alerts instead.",
-                }));
-        }
+        /* "Generate now" takes the same pass every engine does (#3542). This door used to carry its own
+           PostgreSQL arm — the scheduled tick's tombstone re-written here so an operator's click could not
+           overwrite it with the generic "still collecting" text — and it went with the tick's gate: the
+           pass routes by the registry's engine_kind inside DarlingAnalysisService, so the honest answer for
+           a PostgreSQL target is now the pass's own result, and there is no tombstone left to protect. */
 
         /* postPassHook: null — analyze_now is an interactive diagnostic, and the force-plan bot only
            rides the SCHEDULED cadence so an operator poking a server cannot spend its action budget.
@@ -7253,13 +7251,14 @@ LIMIT 1";
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
     /// <summary>
-    /// The self-hosted log readers (#3239). Their dispatch entries send Aurora and RDS to the log-API
-    /// ingestors, so a target-side PostgresException under either name comes from the pg_read_file route.
+    /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
+    /// the log-API ingestors, so a target-side PostgresException under any of the names comes from the
+    /// pg_read_file route.
     /// Consulted by two arms: the 42501 grant-pair sentence (#3239) and the 58P01 missing-file sentence
     /// (#3410), which is why it names the ROUTE rather than either fault.
     /// </summary>
     private static bool ReadsServerLogWithPgReadFile(string collectorName)
-        => collectorName is "pg_deadlocks" or "pg_plan_capture";
+        => collectorName is "pg_deadlocks" or "pg_plan_capture" or "pg_log_events";
 
     /// <summary>
     /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
@@ -8229,6 +8228,13 @@ LIMIT 1";
             s.Target.IsAurora || s.Target.IsAwsRds
                 ? r.IngestRdsDeadlocksAsync(s, ct)
                 : r.RunAsync(PgDeadlocksCollector.Instance, s, ct),
+        /* TWO TRANSPORTS, one table, the third time (#3601): the classified log-event pipeline reads the
+           same server log by the same two roads as its two siblings above and below, and the classifier
+           both roads feed is one instance, so the rows are the same whichever road the text took. */
+        ["pg_log_events"] = (r, s, ct) =>
+            s.Target.IsAurora || s.Target.IsAwsRds
+                ? r.IngestRdsLogEventsAsync(s, ct)
+                : r.RunAsync(PgLogEventsCollector.Instance, s, ct),
         ["pg_xmin_horizon"] = (r, s, ct) => r.RunAsync(PgXminHorizonCollector.Instance, s, ct),
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),
@@ -8265,21 +8271,6 @@ LIMIT 1";
            no-ops, the same "not this transport" answer RdsLogSource itself gives a non-RDS host. */
         ["pg_cpu_utilization"] = (r, s, ct) => r.IngestPgCpuAsync(s, ct),
     };
-
-    /// <summary>
-    /// The analysis_state message for a PostgreSQL target, shared by the SCHEDULED pass and the manual
-    /// "Generate now" path.
-    /// <para>One constant because there were two hand-maintained copies and they had already drifted: adding
-    /// <c>get_pg_blocking</c> to the scheduled one left the manual one listing seven tools, so an operator
-    /// clicking Generate now got different guidance from the same product depending on which door they came
-    /// through. The list grows with every PostgreSQL read, which guarantees the drift recurs.</para>
-    /// </summary>
-    internal const string PostgresAnalysisNotApplicable =
-        "Scheduled analysis does not apply to a PostgreSQL target: its findings are derived from SQL Server "
-        + "collectors (waits, query stats, CPU) that this engine does not populate. This is not "
-        + "\"still collecting\" — use the PostgreSQL MCP reads (get_pg_wait_stats, get_pg_top_queries, "
-        + "get_pg_autovacuum_health, get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
-        + "get_pg_io_stats, get_pg_blocking) and the three outage-predictor alerts instead.";
 
     /// <summary>
     /// Signals that a blocking/deadlock XE session is missing or inaccessible so the reader returned no

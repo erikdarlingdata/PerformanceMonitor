@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -48,12 +49,20 @@ public sealed record PlanForceActionRecord(
     long? RelatedActionId);
 
 /// <summary>
-/// The slice of the journal the BOT consumes — a seam so the orchestrator is testable with an
+/// The slice of the STORE the BOT consumes — a seam so the orchestrator is testable with an
 /// in-memory fake (the gate decisions in <c>PlanForceBot</c> are exactly the logic that must be
-/// provable without a live store). Phase 1's bot journals and reads history; the read only a live
+/// provable without a live store). Phase 1's bot journals, reads its history, and (#3654) reads the
+/// store's forcing and automatic-plan-correction state for the pass's targets; the read only a live
 /// force can populate (<c>GetPendingReviewsAsync</c>) and the audit read
 /// (<c>GetRecentActionsAsync</c>) stay on the concrete class, where they are specced against a live
 /// store without widening the seam the orchestrator is written against.
+///
+/// <para>The state read sits on THIS seam rather than on a second one because the bot's every store
+/// read must be fakeable from one object: the orchestrator's tests drive the five #3652 blockers, the
+/// unavailable-state arm and the FLGP stand-down through the same fake that supplies its history, and
+/// <c>DarlingWorker</c> keeps constructing the bot with the journal and nothing else. It is a read of the
+/// monitoring store like the history read — never of a monitored server — so it belongs on the class
+/// whose whole contract is "the monitoring store, from the bot's side".</para>
 /// </summary>
 public interface IPlanForceActionStore
 {
@@ -61,6 +70,17 @@ public interface IPlanForceActionStore
 
     Task<ForcePlanBotHistory> GetQueryHistoryAsync(
         int serverId, string database, long queryId, ForcePlanBotSettings settings, DateTime nowUtc, CancellationToken ct);
+
+    /// <summary>
+    /// What the store knows about each of <paramref name="targets"/>' forcing and APC state right now
+    /// (#3654) — one batched statement for the whole pass, keyed by <see cref="ForcePlanTargetKey"/>, so a
+    /// pass of ten targets costs one store round trip for this half rather than ten. Returns
+    /// <c>(null, reason)</c> when the read failed; the bot treats that as its <c>state_unavailable</c>
+    /// blocker and quotes the reason into the journal. Never throws for a store fault — a cancellation
+    /// requested through <paramref name="ct"/> is the one exception that propagates.
+    /// </summary>
+    Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetTargetStatesAsync(
+        int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc, CancellationToken ct);
 }
 
 /// <summary>
@@ -257,6 +277,42 @@ SELECT
             lastJournaled,
             Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
             Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// <see cref="IPlanForceActionStore.TryGetTargetStatesAsync"/> over <see cref="DarlingForcePlanTargetStateReader"/>
+    /// — the SAME statement the MCP surfaces run (#3652), so the bot's state half and the advice's cannot
+    /// disagree from the same store — under the bot's deadline regime rather than the MCP one: this runs
+    /// inside the post-analysis hook, holding a sweep permit, and is bounded like every other command on
+    /// this class (<see cref="ServiceCommandDeadlines.PostAnalysisForcePlanSeconds"/>; the pass-budget
+    /// arithmetic in <c>StragglerCommandTimeoutTests</c> counts it). A timeout or any other store fault is
+    /// returned as the reason, not thrown: for an unattended actor an unreadable state is a blocker with
+    /// evidence, and the journal row is where that evidence belongs.
+    /// </summary>
+    public async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetTargetStatesAsync(
+        int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc, CancellationToken ct)
+    {
+        if (targets is not { Count: > 0 })
+        {
+            return (new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer), null);
+        }
+
+        try
+        {
+            var states = await DarlingForcePlanTargetStateReader.ReadAsync(
+                _postgres, serverId, targets, nowUtc,
+                commandTimeoutSeconds: ServiceCommandDeadlines.PostAnalysisForcePlanSeconds,
+                cancellationToken: ct);
+            return (states, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message})");
+        }
     }
 
     /// <summary>How long an 'attempting' intent row may stand alone before the review treats it as

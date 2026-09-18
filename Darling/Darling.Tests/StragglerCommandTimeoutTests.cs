@@ -410,12 +410,14 @@ public sealed class StragglerCommandTimeoutTests
         var seconds = ServiceCommandDeadlines.PostAnalysisForcePlanSeconds;
 
         /* Two commands per evaluated target — one history read, one journal write — sequentially, on
-           separate store connections. */
-        var worstCase = 2 * PlanForceBot.MaxTargetsPerPass * seconds;
+           separate store connections; plus ONE for the pass — the batched forcing/APC state read (#3654),
+           which runs under this same constant through PgPlanForceActionStore.TryGetTargetStatesAsync and
+           is sized by the same cap, so it is one statement however many targets the pass holds. */
+        var worstCase = (2 * PlanForceBot.MaxTargetsPerPass + 1) * seconds;
 
         Assert.True(
             worstCase <= DarlingWorker.AnalysisTimeout.TotalSeconds,
-            $"{PlanForceBot.MaxTargetsPerPass} targets x 2 commands x {seconds}s = {worstCase}s exceeds the "
+            $"{PlanForceBot.MaxTargetsPerPass} targets x 2 commands x {seconds}s + one batched state read at {seconds}s = {worstCase}s exceeds the "
             + $"{DarlingWorker.AnalysisTimeout.TotalSeconds}s the analysis pass itself is budgeted for. The "
             + "hook runs after that pass inside the same sweep body, holding a max_concurrent_sweeps permit "
             + "while the server's collection cannot relaunch, so it must not outlast the pass it rides on");

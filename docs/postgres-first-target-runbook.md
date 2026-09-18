@@ -75,7 +75,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-26 collectors are unaffected.
+27 collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -89,9 +89,9 @@ says which arm fed it as `instrument` — `extension_sampled` or `service_sample
 selection (Aurora native › extension › service sampler) is made once when the service connects, so after
 installing the extension let the service reconnect to move up a tier.
 
-### Self-hosted: the log-reader grants (plan capture, deadlocks)
+### Self-hosted: the log-reader grants (plan capture, deadlocks, log events)
 
-`pg_deadlocks` and `pg_plan_capture` read the server log with `pg_read_file()`, and that is the one read
+`pg_deadlocks`, `pg_plan_capture` and `pg_log_events` read the server log with `pg_read_file()`, and that is the one read
 in this step `pg_monitor` does not cover. It takes BOTH halves — the role does not carry the function's
 EXECUTE, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566; granting the role
 alone changes nothing) — and the EXECUTE half lives in each database's own catalog, so **run this in the
@@ -105,7 +105,7 @@ GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint)
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
 `PERMISSIONS` to `SUCCESS` on the next cycle, no restart needed. Self-hosted only: on Aurora/RDS there
-is no filesystem, `pg_read_server_files` is not grantable, and both collectors take the RDS log API
+is no filesystem, `pg_read_server_files` is not grantable, and all three collectors take the RDS log API
 route instead — that is the IAM subsection below.
 
 **Proof:** as the monitoring login, in the same database, mirror the collectors' own read:
@@ -115,15 +115,15 @@ SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logd
 ```
 
 A log line comes back. `permission denied for function pg_read_file` means the EXECUTE half is missing
-*in this database*; until both halves are in place, both collectors fail every cycle as `PERMISSIONS`,
+*in this database*; until both halves are in place, all three collectors fail every cycle as `PERMISSIONS`,
 with an `error_message` naming this exact pair and the database to run it in.
 
-### IAM, for the two collectors that read the server log (plan capture, deadlocks)
+### IAM, for the three collectors that read the server log (plan capture, deadlocks, log events)
 
 This is a **different axis from the grant above** — it authorizes the **monitoring host's AWS identity**,
 not the PostgreSQL login. On Aurora/RDS there is no local log directory a SQL session can read with
-`pg_read_file()`; plan capture and deadlock detection instead pull the log tail through the RDS control
-plane. Attach this to the instance role/profile the Darling service actually runs as:
+`pg_read_file()`; plan capture, deadlock detection and the log-event pipeline instead pull the log tail
+through the RDS control plane. Attach this to the instance role/profile the Darling service actually runs as:
 
 ```json
 {
@@ -217,20 +217,20 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 **Proof:** a `[PASS]` line that reports PostgreSQL facts, ending in how many collectors will actually run.
 
 ```
-  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 27 PostgreSQL collectors apply
+  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 28 PostgreSQL collectors apply
 ```
 
 **Read the count.** It is computed by asking the same gate the collector runner asks, so it is the real
 answer, and it is the difference between "this is configured" and "this will collect". A gated-off
-collector is named in the line itself — `23 of 27 PostgreSQL collectors apply (skipped: ...)` — and the
+collector is named in the line itself — `24 of 28 PostgreSQL collectors apply (skipped: ...)` — and the
 reasons come from the collectors' own gates in `CollectorCatalog`:
 
 | Target | Applies | Skipped, and why |
 |---|---|---|
-| Aurora writer, PG 16+ | 27 of 27 | — |
-| Aurora reader | 23 of 27 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
-| Self-managed 16+ writer | 25 of 27 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
-| Self-managed 15 reader | 20 of 27 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
+| Aurora writer, PG 16+ | 28 of 28 | — |
+| Aurora reader | 24 of 28 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
+| Self-managed 16+ writer | 26 of 28 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
+| Self-managed 15 reader | 21 of 28 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
 
 A PostgreSQL 13 target additionally skips `pg_write_stats`, whose `pg_stat_wal` source is 14+.
 
@@ -261,11 +261,11 @@ carries any older store to **v127**. `StorageVersion.SchemaVersion` is the sourc
 proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
-settings. Every collector table becomes a hypertable — all 69 of them, 27 PostgreSQL — so the required
+settings. Every collector table becomes a hypertable — all 70 of them, 28 PostgreSQL — so the required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-today the numbers are 72 and 83 for 70 hypertables, and both need a server restart. Managed mode does this itself.
+today the numbers are 73 and 84 for 71 hypertables, and both need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 
@@ -343,7 +343,7 @@ Two different waits, and conflating them is the most likely way to mistake a wor
 one. A row exists after the first cycle. A **reader** — the MCP tool — needs two samples before it can
 difference a cumulative counter, so the first read after startup legitimately shows zero activity.
 
-All 27, from `CollectorScheduleDefaults` — the shared table both SKUs schedule by:
+All 28, from `CollectorScheduleDefaults` — the shared table both SKUs schedule by:
 
 | Collector | Cadence | First row | First meaningful read |
 |---|---|---|---|
@@ -360,6 +360,7 @@ All 27, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_lock_stats` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_deadlocks` | 5 min | 5 min | the first deadlock reported — an event log, not a counter |
+| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes beside the fingerprint of the statement that spilled once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
 | `pg_cpu_utilization` | 5 min | 5 min | 5 min (Performance Insights backfills the 1-minute points) |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
@@ -422,7 +423,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 34 `get_pg_*` tools in all, registered by the same service:
+them; 35 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|
@@ -436,7 +437,7 @@ them; 34 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_xmin_horizon` | *why* vacuum is reclaiming nothing, attributed to the specific holder |
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
 | `get_pg_replication_stats` | the CONNECTED replicas: send/replay lag, with the window's worst beside the latest |
-| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold |
+| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs` — what its automatic vacuums and analyzes cost, from the `log_autovacuum_min_duration` reports in `pg_log_events` (#3603) |
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why (PostgreSQL 16+) |
 | `get_pg_io_trend` | one (backend type, context) pair's rates and hit ratio over time |
 | `get_pg_cpu_utilization` | instance CPU from AWS Performance Insights (Aurora/RDS only) |
@@ -446,6 +447,7 @@ them; 34 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_lock_stats` | contended lock modes and relations over time, sampled from `pg_locks` |
 | `get_pg_deadlocks` | deadlocks parsed from the server log, one row per distinct deadlock |
 | `get_pg_deadlock_detail` | one deadlock in full: the complete wait graph and every participant's SQL |
+| `get_pg_log_events` | the server log, classified: errors (WARNING and worse), connections, lock waits, spills with their exact bytes per file (#3602), autovacuum / autoanalyze runs with their duration, pages, tuples, buffers and WAL (#3603), plus checkpoints recognised for later structure — redacted, filtered by `family` and `min_severity`, the page saying what bounded it. The "check the error log" read (#3601) |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
 | `get_pg_database_trend` | one database's spills, hit ratio, deadlocks and rollback share, interval by interval |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
@@ -719,11 +721,13 @@ sends a new operator away from the thing that would have answered their first we
 
 What genuinely remains, re-checked against `dev` at the time of this revision:
 
-- **Scheduled analysis findings.** The analysis pipeline is still SQL-Server-shaped and a PostgreSQL
-  target produces no findings — but it now says so instead of sitting blank: `analysis_state` records
-  that scheduled analysis does not apply to a PostgreSQL target and routes you to the `get_pg_*` reads
-  and the outage-predictor alerts. Do not read that message as "still collecting". Deliberate, until a
-  PostgreSQL inference engine exists.
+- **Scheduled analysis findings.** The analysis pass now runs for a PostgreSQL target: the service
+  routes by the registry's `engine_kind`, measures the 24-hour data-span gate on `pg_database_stats`
+  and scores the PostgreSQL-target vocabulary (`PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`). Until the #3542
+  v1 detector families land, a pass over a target with a day of history returns an honest all-clear over
+  the facts it has; `analysis_state` clears on the first real pass (no more "does not apply" tombstone).
+  A target whose registry row has no engine stamp yet says so in its insufficient-data message and is
+  measured correctly from its next connect.
 - **Knobs on the three Tier 0 predictors.** Not a gap in the sense the rest of this list is — see above
   and step 9 — but listed so nobody goes looking for a `pgWraparound...` setting that does not exist.
 - **The `pg_stats` helper-function route.** Step 8 documents `pg_read_all_data` and the

@@ -662,6 +662,7 @@ public sealed class DarlingCollectorRunner
        read "the same bounded tail of the same file" - matching the pg_read_file route, where the two
        collectors' SQL queries already read that tail independently rather than sharing a cursor. */
     private RdsDeadlockIngestor? _rdsDeadlocks;
+    private RdsLogEventIngestor? _rdsLogEvents;
 
     /* Own ingestor for the same "one instance per transport" reason as the two above — see
        RdsCpuIngestor's own doc comment for why it does NOT need the marker-survival treatment
@@ -723,6 +724,31 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// Classified log events for Aurora and RDS Postgres, read from the RDS log API (#3601) — the managed
+    /// half of the log-event pipeline, dispatched where <c>pg_log_events</c>' <c>pg_read_file</c> route
+    /// cannot run. Same shape, same outcome vocabulary and same note pair as
+    /// <see cref="IngestRdsDeadlocksAsync"/>; the classifier it feeds is the one the self-hosted collector
+    /// feeds, so the two transports store identical rows for identical text.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsLogEventsAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var outcome = await _rdsLogEvents.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+            RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
+    }
+
+    /// <summary>
     /// Instance CPU for Aurora and RDS Postgres, read from the AWS Performance Insights API (#2719) — the
     /// third "reach the target a different way" collector alongside <see cref="IngestRdsPlansAsync"/> and
     /// <see cref="IngestRdsDeadlocksAsync"/>, and unlike either of those, the ONLY route: PostgreSQL exposes
@@ -779,6 +805,14 @@ public sealed class DarlingCollectorRunner
     /// <summary>The deadlock log was never opened: this host is not an RDS or Aurora endpoint.</summary>
     internal const string RdsDeadlockLogNotReachedNote =
         "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no deadlock "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>The log was read and no line in it classified to a family (#3601).</summary>
+    internal const string RdsLogEventsEmptyNote = "no new classifiable log events in the RDS log window";
+
+    /// <summary>The log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsLogEventsNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no log-event "
         + "capture was attempted - this cycle did not look";
 
     /// <summary>Performance Insights answered and had no new CPU sample.</summary>

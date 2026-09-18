@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 
@@ -43,9 +44,10 @@ public sealed class DarlingMcpTools
     /// </summary>
     internal const string FactSourceFilterDescription =
         "Filter to one source category. Accepted values (the engine's complete source registry, refused otherwise): "
-        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, queries, sessions, tempdb, waits. Omit for all.";
+        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_buffer, pg_config, pg_cpu, pg_database, pg_posture, pg_queries, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits. "
+        + "Omit for all. The pg_ sources are emitted only for a PostgreSQL target.";
 
-    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
+    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
     public static async Task<string> AnalyzeServer(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -147,6 +149,14 @@ public sealed class DarlingMcpTools
             foreach (var wf in findings)
                 coFiredTitles.Add((FactAdvice.GetForFinding(wf)?.Headline ?? wf.RootFactKey, wf.Severity));
 
+            /* #3652: the forcing / automatic-plan-correction state behind every force-plan target, read
+               ONCE for the whole result and NOW rather than frozen into the finding — APC completes a
+               verification in minutes, and the verdict has to describe the plan as it is when the reader
+               acts. A failed read does not fail the tool: the reason lands on every target's state_note
+               and eligible is then explicitly the finding-only verdict. */
+            var (forcePlanStates, forcePlanStateNote) =
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
@@ -208,8 +218,10 @@ public sealed class DarlingMcpTools
                         // #2138: the machine-first projection — verdict (eligible/blockers, the future
                         // bot's policy gate), evidence, and split force/unforce/verify artifacts as
                         // named fields, so an agent never regexes the comment prose above. Null for
-                        // non-force-plan remediations. ADVISORY like everything else here.
-                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation),
+                        // non-force-plan remediations. ADVISORY like everything else here. #3652: the
+                        // verdict now also reads the store's forcing/APC state (blocker_evidence,
+                        // forcing_state, apc_mode, guidance), and says so when it could not (state_note).
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // B3 Phase 3 (§6): two-sided risk DISCLOSURE for a destructive
                         // remediation, read-only (like Lite, Darling has no Apply path; its
                         // RCSI fields are null/0 so the inaction side shows the weak-case baseline).
@@ -517,6 +529,35 @@ public sealed class DarlingMcpTools
 
         try
         {
+            /* #3542: every check below is a SQL Server setting (CTFP, MAXDOP, max server memory, worker
+               threads), so for a PostgreSQL target the loop found nothing and answered "no_config_data — the
+               config collector may not have run yet" — false for a target whose pg_server_config collector
+               runs hourly. Say what this tool IS instead, and where the PostgreSQL setting checks live: they
+               are the CONFIG_PG_* facts the analysis pass emits, read through get_analysis_facts and
+               analyze_server. An honest envelope rather than a projection of those facts into this tool's
+               recommendations shape, because the projection is a content question (which settings, which
+               units, which bars) that the knobs lane owns; this is the plumbing that stops the lie. Same
+               registry read the not_collected envelopes use; a registry that cannot answer falls through
+               to the SQL Server audit exactly as before. */
+            var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId);
+            if (MonitoredEngineKind.IsPostgres(engineKind))
+            {
+                return McpHelpers.Status(
+                    "not_collected",
+                    $"audit_config evaluates SQL Server settings (cost threshold for parallelism, MAXDOP, max server memory, max worker threads) and does not apply to {resolved.ServerName}, a {MonitoredEngineKind.DescribeEngineKind(engineKind)} target. " +
+                    "A PostgreSQL target's configuration advisories are the CONFIG_PG_* facts the analysis pass emits: call get_analysis_facts with source pg_config for the current settings and their scores, or analyze_server for the advisory findings they root.",
+                    new
+                    {
+                        engine_kind = engineKind,
+                        next_tools = new object[]
+                        {
+                            new { tool = "get_analysis_facts", reason = "CONFIG_PG_* setting facts for this target", suggested_params = new { source = "pg_config" } },
+                            new { tool = "analyze_server", reason = "the advisory findings those settings root" },
+                            new { tool = "get_pg_server_config", reason = "the raw pg_settings snapshot with sources and pending restarts" },
+                        },
+                    });
+            }
+
             /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
                configuration facts, which are the latest row regardless of window, and a one-hour window
                the collector missed changes nothing about what the server is configured to. */
@@ -728,7 +769,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed).")]
+    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed).")]
     public static async Task<string> GetAnalysisFindings(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -788,6 +829,10 @@ public sealed class DarlingMcpTools
                     coFiredByRun[wf.AnalysisTime] = list = new List<(string, double)>();
                 list.Add((FactAdvice.GetComposedForFinding(wf)?.Headline ?? wf.RootFactKey, wf.Severity));
             }
+
+            /* #3652: one state read for every representative's force-plan targets — see analyze_server. */
+            var (forcePlanStates, forcePlanStateNote) =
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest));
 
             return JsonSerializer.Serialize(new
             {
@@ -863,7 +908,7 @@ public sealed class DarlingMcpTools
                         // has no remediable action. PRODUCE ONLY — the read-only MCP never executes it.
                         remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
                         // #2138: the machine-first projection — see analyze_server's twin field.
-                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation)
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote)
                     };
                 })
             }, McpHelpers.JsonOptions);
@@ -1001,6 +1046,20 @@ internal static class ToolRecommendations
             new("get_file_io_stats", "Check transaction log file latency"),
             new("get_file_io_trend", "Track log I/O latency over time"),
             new("get_perfmon_trend", "Check Transactions/sec to see commit rate driving log flush pressure", new() { ["counter_name"] = "Transactions/sec" })
+        ],
+        /* #3653 (from #3538 A5): the scorer has graded HADR_SYNC_COMMIT since #3616 and this table had no entry,
+           so the finding arrived with next_tools empty — the one wait on the table whose card told the agent
+           nothing to do next. The AG sibling of WRITELOG: the primary waiting for a synchronous secondary to
+           harden the log before a commit can return. Lite's twin landed in #3659 pointing at get_alert_history,
+           because Lite has no AG-health read; this SKU has get_ag_health, so the health half points there — the
+           one deliberate difference between the two entries. The remediation is never "switch to async":
+           synchronous commit is a durability policy (FactAdvice), so every tool here is a read. */
+        ["HADR_SYNC_COMMIT"] =
+        [
+            new("get_wait_trend", "Track synchronous-commit wait over time — does it track commit volume, or step up when a secondary falls behind", new() { ["wait_type"] = "HADR_SYNC_COMMIT" }),
+            new("get_ag_health", "Check the synchronous secondaries' state, send/redo queues and hardening latency in the same window — the secondary-side cause this wait is the primary-side symptom of"),
+            new("get_perfmon_trend", "Check Transactions/sec: a commit-rate rise raises this wait without any replica fault", new() { ["counter_name"] = "Transactions/sec" }),
+            new("get_file_io_stats", "Check log-file write latency — a slow log on either replica shows up here as commit latency")
         ],
         ["LCK"] =
         [
@@ -1196,8 +1255,13 @@ internal static class ToolRecommendations
         {
             if (!ByFactKey.TryGetValue(key, out var recommendations))
             {
+                /* #3542: the PostgreSQL-target vocabulary FIRST, by its three prefixes, so a PG_ / CONFIG_PG_ /
+                   ANOMALY_PG_ key reaches the get_pg_* reads and never the SQL Server arms below (ANOMALY_PG_CPU_SPIKE
+                   does not start with ANOMALY_CPU, but the order says so rather than relying on it). */
+                if (PgTargetFactKeys.IsPgKey(key))
+                    recommendations = PgTargetToolRecommendations.GetForKey(key);
                 // Handle dynamic keys by checking prefix
-                if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
+                else if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("BAD_ACTOR", out recommendations);
                 else if (key.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("ANOMALY_CPU", out recommendations);

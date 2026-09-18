@@ -318,9 +318,12 @@ ORDER BY severity DESC;";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs. Returns whether the mute row
+    /// LANDED (#3653, #3615's class): the write swallows and logs its failure so the Recommendations
+    /// button keeps its no-throw contract, but the MCP <c>mute_analysis_finding</c> used to answer
+    /// <c>"muted"</c> for any hash on any outcome — the caller now learns which of the two things happened.
     /// </summary>
-    public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
+    public async Task<bool> MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
         try
         {
@@ -341,11 +344,48 @@ VALUES (@muteId, @serverId, @storyPathHash, @storyPath, @mutedDate, @reason);";
             cmd.Parameters.Add(new SqlParameter("@reason", (object?)reason ?? DBNull.Value));
 
             await cmd.ExecuteNonQueryAsync();
+            return true;
         }
         catch (Exception ex)
         {
             Logger.Error($"[SqlServerFindingStore] MuteStoryAsync failed: {ex.Message}");
+            return false;
         }
+    }
+
+    /// <summary>
+    /// How many stored findings for <paramref name="serverId"/> carry <paramref name="storyPathHash"/> right
+    /// now — the <c>matched_now</c> disclosure behind <c>mute_analysis_finding</c> (#3653, #3615's class). The
+    /// mute registry is a PATTERN registry (no row references a finding; the filter phase consults it by
+    /// hash on every pass), so a hash matching nothing today is a legitimate registration — the pattern may
+    /// return after retention purged its history — AND the most likely shape of a typo. The count is a
+    /// disclosure, not a gate. A plain equality on <c>config.analysis_findings</c>, which this store indexes by
+    /// <c>(server_id, analysis_time)</c> only: the read walks one server's retained findings (30 days by
+    /// default), off the alert path, on an operator-initiated write. Throws on failure like the other reads
+    /// here do not — deliberately: the caller is reporting what happened, and a count it could not take is
+    /// not zero.
+    /// </summary>
+    public async Task<long> CountStoredFindingsAsync(int serverId, string storyPathHash)
+    {
+        using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await EnsureTablesExistAsync(connection);
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    matched_now = COUNT_BIG(*)
+FROM config.analysis_findings
+WHERE server_id = @serverId
+AND   story_path_hash = @storyPathHash;";
+
+        cmd.Parameters.Add(new SqlParameter("@serverId", serverId));
+        cmd.Parameters.Add(new SqlParameter("@storyPathHash", storyPathHash));
+
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>

@@ -125,11 +125,23 @@ public class PgBaselineProvider
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
-        var query = GetBaselineQuery(metricName);
+        var query = ResolveBaselineQuery(metricName);
         if (query == null) return null;
 
         return await ComputeBucketsAsync(serverId, metricName, analysisTime, query, cancellationToken);
     }
+
+    /// <summary>
+    /// The one seam a derived provider overrides (#3542): which SQL computes <paramref name="metricName"/>'s
+    /// buckets. The base answers from <see cref="GetBaselineQuery"/> — the SQL Server store tables and CAGGs.
+    /// <see cref="PgTargetBaselineProvider"/> answers from its own <c>clean</c> CTEs over the PostgreSQL raw
+    /// hypertables and inherits everything else here unchanged: the hour×dow cache, the parameter binding,
+    /// the eight-column robust reader, the timeout classification (<see cref="IsCommandTimeout"/> — ONE
+    /// definition, <c>BaselineTimeoutIsNamedTests</c>) and the degrade-to-empty posture. A second provider
+    /// that copied that machinery to swap one <c>switch</c> would be the drift this seam exists to prevent.
+    /// Null means "no baseline for this metric", exactly as it always has.
+    /// </summary>
+    protected virtual string? ResolveBaselineQuery(string metricName) => GetBaselineQuery(metricName);
 
     /// <summary>
     /// Did this failure mean "the statement ran out of time" rather than "the connection broke"?

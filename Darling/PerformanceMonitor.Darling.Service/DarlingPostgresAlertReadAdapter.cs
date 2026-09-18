@@ -194,46 +194,94 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     /// under a bar the combined value clears. The cost of MAX() is that the alert subject can flip casing
     /// once, at upgrade time, changing that subject's dedup fingerprint for one fire — a visible one-off,
     /// versus an invisible undercount at the exact moment an upgrade makes contention most likely.</para>
+    /// <para><b>#3653: the window's observation witness rides on the same read.</b> <c>captures_in_window</c>
+    /// counts the <c>pg_wait_stats</c> collector's own SUCCESS rows in <c>collection_log</c> inside the same
+    /// window — <see cref="XminSql"/>'s <c>captures</c> CTE, same source, same reasoning (#3537): the log gets
+    /// a row per run INCLUDING a zero-row run, and since #2694 a zero-row run is exactly what a quiet poison
+    /// event produces (the collector skips an event whose waits delta is zero), so the accumulation rows
+    /// cannot witness their own absence. The host needs the witness to tell "the storm ended" from "the
+    /// collector stopped" before it announces Cleared — see <see cref="PostgresPoisonWaitWindow"/>. Joined
+    /// <c>captures LEFT JOIN accumulated ON true</c> so the read returns exactly one row when no poison
+    /// event wrote inside the window (the witness with NULL accumulation columns) and one row per event
+    /// otherwise, each carrying the same count; the reader skips the witness-only row's accumulation.</para>
+    /// <para><b>Still sub-second by shape under the alert pass's 10 s deadline (#3597).</b> The accumulation
+    /// half is unchanged: one <c>server_id</c>, the window's last ten minutes, two event literals — the
+    /// uncompressed head of one chunk, tens of rows. The witness half is one server's <c>collection_log</c>
+    /// rows for ten minutes behind <c>idx_collection_log_time (server_id, collection_time)</c> — a few
+    /// hundred rows at most on the busiest cadence, filtered on name and status, counted; the xmin-horizon
+    /// read has run this exact CTE under the same deadline since #3537. No LIMIT (a limit on a count is an
+    /// undercount), no ORDER BY, no join key beyond the constant <c>true</c>.</para>
     /// </summary>
     internal const string PoisonWaitSql = """
+        WITH captures AS (
+            SELECT COUNT(*)::int AS captures_in_window
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'pg_wait_stats'
+            AND   collection_time >= $2
+            AND   status = 'SUCCESS'
+        ),
+        accumulated AS (
+            SELECT
+                MAX(wait_type) AS wait_type,
+                MAX(wait_event) AS wait_event,
+                (SUM(delta_wait_time_us) / 1000)::bigint AS accumulated_wait_ms,
+                SUM(delta_waits)::bigint AS accumulated_waits,
+                MAX(collection_time) AS newest_collection_time
+            FROM pg_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   lower(wait_type) = 'ipc'
+            AND   lower(wait_event) IN ('btreepage', 'bufferio')
+            GROUP BY lower(wait_type), lower(wait_event)
+        )
         SELECT
-            MAX(wait_type) AS wait_type,
-            MAX(wait_event) AS wait_event,
-            (SUM(delta_wait_time_us) / 1000)::bigint AS accumulated_wait_ms,
-            SUM(delta_waits)::bigint AS accumulated_waits,
-            MAX(collection_time) AS newest_collection_time
-        FROM pg_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   lower(wait_type) = 'ipc'
-        AND   lower(wait_event) IN ('btreepage', 'bufferio')
-        GROUP BY lower(wait_type), lower(wait_event)
+            a.wait_type,
+            a.wait_event,
+            a.accumulated_wait_ms,
+            a.accumulated_waits,
+            a.newest_collection_time,
+            c.captures_in_window
+        FROM captures AS c
+        LEFT JOIN accumulated AS a ON true
         """;
 
-    public async Task<List<PostgresPoisonWaitAlertInfo>> GetPoisonWaitPressureAsync(
+    public async Task<PostgresPoisonWaitWindow> GetPoisonWaitPressureAsync(
         int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<PostgresPoisonWaitAlertInfo>();
+        var capturesInWindow = 0;
         await using var command = _postgres.CreateCommand(PoisonWaitSql);
         command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         /* The evaluator's window, not this adapter's 2-hour Freshness: the window IS the denominator the
            threshold normalizes against, so read and evaluation must agree on it or the "average backends
-           stuck" arithmetic silently means something else. */
+           stuck" arithmetic silently means something else. The SAME bind bounds the witness count, so
+           "observed" and "accumulated over" describe one window by construction. */
         command.Parameters.AddWithValue(
             NaiveUtcNow().AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* ordinal 5 rides on every row (the captures CTE is one aggregate row); the witness-only row —
+               no poison event wrote inside the window — has NULL accumulation columns and contributes
+               nothing to the list. wait_type cannot be NULL on a matched row (the WHERE requires it), so
+               its nullness IS the LEFT JOIN miss. */
+            capturesInWindow = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+            if (reader.IsDBNull(0))
+            {
+                continue;
+            }
+
             rows.Add(new PostgresPoisonWaitAlertInfo(
-                reader.IsDBNull(0) ? "(unknown)" : reader.GetString(0),
+                reader.GetString(0),
                 reader.IsDBNull(1) ? "(unknown)" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4)));
         }
 
-        return rows;
+        return new PostgresPoisonWaitWindow(rows, capturesInWindow);
     }
 
     public async Task<List<PostgresWraparoundAlertInfo>> GetWraparoundRiskAsync(

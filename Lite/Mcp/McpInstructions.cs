@@ -80,8 +80,8 @@ internal static class McpInstructions
         ### Contention Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_latch_stats` | Latest latch-contention snapshot by class (waits + last-interval delta waits); `captured_at` / `age_seconds` | `server_name`, `hours_back` (default 24; the span SEARCHED for the newest snapshot), `as_of` |
-        | `get_spinlock_stats` | Latest spinlock-contention snapshot (collisions, spins, backoffs); `captured_at` / `age_seconds` | `server_name`, `hours_back` (default 24; the span SEARCHED for the newest snapshot), `as_of` |
+        | `get_latch_stats` | Latest latch-contention snapshot by class (waits + last-interval delta waits); `captured_at` / `age_seconds`; a PAGE — `latches_returned` / `truncated` | `server_name`, `hours_back` (default 24; the span SEARCHED for the newest snapshot), `limit` (default 20), `as_of` |
+        | `get_spinlock_stats` | Latest spinlock-contention snapshot (collisions, spins, backoffs); `captured_at` / `age_seconds`; a PAGE — `spinlocks_returned` / `truncated` (well over a hundred spinlocks exist; the default page is the hot tail) | `server_name`, `hours_back` (default 24; the span SEARCHED for the newest snapshot), `limit` (default 20), `as_of` |
 
         ### Plan Cache Tools
         | Tool | Purpose | Key Parameters |

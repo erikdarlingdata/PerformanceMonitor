@@ -55,7 +55,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// since 16 (the product's minimum PG is 17) — all pinned by the AN3 tests.
 /// </para>
 /// </summary>
-public sealed partial class PgDrillDownCollector
+public sealed partial class PgDrillDownCollector : IDrillDownCollector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly IPlanFetcher? _planFetcher;

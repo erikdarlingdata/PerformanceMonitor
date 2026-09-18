@@ -544,18 +544,25 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
     }
 
     /// <summary>
-    /// <b>Every consumer says PLANNED today, and this pin is meant to go red.</b> The issue's sequencing
-    /// note says the audit earns its keep once #3601's pipeline and its parser families (#3602, #3603)
-    /// consume the lines, and none of those ships. Each facet says so beside the read that exists today.
-    /// When a consumer lands, the facet whose lines it reads must stop saying planned — and this assertion
-    /// is what makes that a deliberate edit rather than stale prose an agent plans against.
+    /// <b>Every consumer says PLANNED or SHIPPED, honestly, and this pin is meant to go red when that
+    /// changes.</b> The issue's sequencing note says the audit earns its keep once #3601's pipeline and its
+    /// parser families (#3602, #3603) consume the lines. The two parser families have landed, so their two
+    /// facets say SHIPPED and name the read; every other facet still says PLANNED beside the read that
+    /// exists today — including #3601's own three families, whose re-wording is the pipeline's follow-up and
+    /// is what this pin will go red for next. The assertion is what makes each flip a deliberate edit
+    /// rather than stale prose an agent plans against.
     /// </summary>
     [Fact]
     public void EveryConsumer_IsHonestlyPlanned_UntilTheLogPipelineShips()
     {
         var audit = DarlingPgLoggingAudit.Audit(AllOff());
 
-        Assert.All(audit.Facets, f => Assert.StartsWith("PLANNED", f.Consumer, StringComparison.Ordinal));
+        var shipped = new[] { "log_temp_files", "log_autovacuum_min_duration" };
+        Assert.All(audit.Facets, f => Assert.StartsWith(
+            shipped.Contains(f.Setting, StringComparer.Ordinal) ? "SHIPPED" : "PLANNED", f.Consumer, StringComparison.Ordinal));
+        Assert.Contains("get_pg_log_events", FacetOf(audit, "log_temp_files").Consumer, StringComparison.Ordinal);
+        Assert.Contains("family temp_file", FacetOf(audit, "log_temp_files").Consumer, StringComparison.Ordinal);
+        Assert.Contains("recent_runs", FacetOf(audit, "log_autovacuum_min_duration").Consumer, StringComparison.Ordinal);
 
         /* And each names its issue and the read that exists today, so "planned" is a pointer and not a shrug. */
         Assert.Contains("#3601", FacetOf(audit, "log_min_duration_statement").Consumer, StringComparison.Ordinal);

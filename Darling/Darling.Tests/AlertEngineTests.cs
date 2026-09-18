@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -54,6 +55,8 @@ public sealed class AlertEngineTests
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        /* #3653 (A8e): the shipped #3368 pair unless a test raises it — the grade a fire wears, never whether it fires. */
+        public DeadlockRateThresholds DeadlockRateThresholds { get; set; } = DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;
@@ -523,7 +526,13 @@ public sealed class AlertEngineTests
         Assert.Equal("High CPU", fired.MetricName);
         Assert.Equal("80% (Total CPU)", fired.CurrentValue);    /* :82 current-value shape, :64 label */
         Assert.Equal("80%", fired.ThresholdValue);
-        Assert.Null(fired.Context);                              /* :91-98 — CPU passes no context */
+        /* :91-98 passed no context; since #3653 (A8e) the context exists for its grade alone — no details,
+           so every channel renders the same card plus the tier. 80% is at the knob and under the band's
+           Critical bar: Warning, on the context AND the outcome. */
+        Assert.NotNull(fired.Context);
+        Assert.Empty(fired.Context!.Details);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context.SeverityOverride);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         /* #1830: the numerics are REQUIRED — without them the history stores text-parsed
            "80% (Total CPU)", failed on the parenthesized label, and stored 0 for every row. */
         Assert.Equal(80d, fired.NumericCurrentValue);
@@ -1397,6 +1406,131 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
+    /* ---------------- deadlocks: the #3653 (A8e) grade ---------------- */
+
+    /// <summary>
+    /// The grade is the band's, over the engine's own one-hour window, and the count knob is not consulted
+    /// for it: with the knob at 1, one deadlock fires WARNING (before #3653 the same row rendered red by
+    /// name), nineteen in the hour is still WARNING, and twenty — <c>DeadlockCriticalPerHourDefault</c>,
+    /// the #3368 measured tier that sits inside the empty [16, 89] interval of 14,448 server-hours — is
+    /// CRITICAL. The tier rides on the context (what the row persists) and the outcome (what Darling's
+    /// deliverer folds), equal by construction.
+    /// </summary>
+    [Theory]
+    [InlineData(1, AlertSeverityLevel.Warning)]
+    [InlineData(19, AlertSeverityLevel.Warning)]
+    [InlineData(20, AlertSeverityLevel.Critical)]
+    [InlineData(100, AlertSeverityLevel.Critical)]
+    public async Task Deadlock_GradesWarningByDefault_AndCriticalAtTheBandsMeasuredRateTier(int deadlocks, AlertSeverityLevel expected)
+    {
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        for (var i = 0; i < deadlocks; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Deadlocks Detected", fired.MetricName);
+        Assert.Equal(deadlocks.ToString(), fired.CurrentValue);
+        Assert.Equal(expected, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(expected, fired.Context!.SeverityOverride);
+        /* The fire's own facts are untouched by the grade: the count and the knob are what they were. */
+        Assert.Equal(deadlocks, fired.NumericCurrentValue);
+        Assert.Equal(1d, fired.NumericThresholdValue);
+    }
+
+    /// <summary>
+    /// The store-tunable pair, not the shipped one: an operator who raised Darling's V120 Critical tier to
+    /// 31/hr (the <c>update_alert_settings</c> fixture value) must see 25 deadlocks grade WARNING on the
+    /// alert exactly as the fleet card bands that hour — the reason the pair is plumbed through the settings
+    /// contract rather than read from <c>DeadlockRateThresholds.Default</c> inside the engine.
+    /// </summary>
+    [Fact]
+    public async Task Deadlock_GradesOnTheOperatorsRateTiers_NotTheShippedPair()
+    {
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockRateThresholds = new DeadlockRateThresholds(7.0, 31.0);
+        var engine = h.Build();
+
+        for (var i = 0; i < 25; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(AlertSeverityLevel.Warning, Assert.Single(h.Deliverer.Outcomes).Severity);
+
+        /* Same hour, six more: at the raised tier. The watermark gate lets the larger count through once
+           the cooldown elapses; the grade follows the new count. */
+        for (var i = 0; i < 6; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Context!.SeverityOverride);
+    }
+
+    /// <summary>The pure grade, at the seams the engine test above cannot drive one row at a time: the
+    /// clamp on the record means a default struct grades on the FLOOR (1/hr), not on zero.</summary>
+    [Fact]
+    public void GradeDeadlockFire_IsTheBandsClassifier_OverTheEnginesOneHourWindow()
+    {
+        Assert.Equal(AlertSeverityLevel.Warning, AlertEngine.GradeDeadlockFire(1, DeadlockRateThresholds.Default));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertEngine.GradeDeadlockFire(19, DeadlockRateThresholds.Default));
+        Assert.Equal(AlertSeverityLevel.Critical, AlertEngine.GradeDeadlockFire(20, DeadlockRateThresholds.Default));
+        Assert.Equal(
+            (int)PerformanceMonitor.Common.ServerHealthThresholds.DeadlockCriticalPerHourDefault,
+            20);
+        /* A default (all-zero) struct clamps to the floor: one deadlock is then "at or above 1/hr", Critical.
+           That is the record's documented reading of a knob parked at zero, not this grade's opinion. */
+        Assert.Equal(AlertSeverityLevel.Critical, AlertEngine.GradeDeadlockFire(1, default));
+        Assert.Equal(1, AlertEngine.RollingCountWindowHours);
+    }
+
+    /* ---------------- CPU: the #3653 (A8e) grade ---------------- */
+
+    /// <summary>
+    /// WARNING at the knob, CRITICAL at the CPU health band's Critical bar (95% of a fixed host — the ONE
+    /// ladder the fleet card and the Performance Calendar band on, #3539 A2), so a 100% fire no longer wears
+    /// the amber an 80% one does while the card beside it is red. The DetailText is byte-identical to the
+    /// pre-#3653 block: the context carries the tier and nothing else.
+    /// </summary>
+    [Theory]
+    [InlineData(80, AlertSeverityLevel.Warning)]
+    [InlineData(94, AlertSeverityLevel.Warning)]
+    [InlineData(95, AlertSeverityLevel.Critical)]
+    [InlineData(100, AlertSeverityLevel.Critical)]
+    public async Task Cpu_GradesWarningAtTheKnob_AndCriticalAtTheBandsCriticalBar(double totalCpu, AlertSeverityLevel expected)
+    {
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal(expected, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(expected, fired.Context!.SeverityOverride);
+        Assert.Empty(fired.Context.Details);
+        Assert.Null(fired.Context.Incidents);
+        Assert.Equal($"  Total CPU: {totalCpu:F0}%\n  Threshold: 80%", fired.DetailText);
+
+        Assert.Equal(expected, AlertEngine.GradeCpuFire(totalCpu));
+        Assert.Equal(95d, PerformanceMonitor.Common.ServerHealthThresholds.CpuCriticalPercent);
+    }
+
     /* ---------------- poison waits (#3539 A4: the accumulation shape) ---------------- */
 
     private static readonly DateTime PoisonCollected = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified);
@@ -2083,6 +2217,34 @@ public sealed class AlertEngineTests
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
+    }
+
+    /// <summary>
+    /// #3653 (A8e): the fire carries an EXPLICIT Warning tier — on the context the row persists and on the
+    /// outcome — and never Critical, at 80% or at 100% of the ceiling. The product has no measured "tempdb
+    /// nearly full" bar to cite (the fire site lists the candidates it declined), so the only honest grade is
+    /// the one the operator configured; what changes is that the row now SAYS Warning instead of leaving
+    /// the by-name map to imply it.
+    /// </summary>
+    [Theory]
+    [InlineData(800d, 200d, -1d)]      /* 80%, unlimited files */
+    [InlineData(1000d, 0d, -1d)]       /* 100%, unlimited files */
+    [InlineData(1000d, 0d, 1000d)]     /* 100% of a measured ceiling */
+    public async Task TempDb_FiresAnExplicitWarning_AndNeverGradesCritical(double reservedMb, double unallocatedMb, double maxSizeMb)
+    {
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = reservedMb, UnallocatedMb = unallocatedMb, MaxSizeMb = maxSizeMb };
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("tempdb Space", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.NotNull(fired.Context);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
+        /* The card is the same card: the grade did not displace the detail item the builder renders. */
+        Assert.StartsWith("tempdb — ", Assert.Single(fired.Context.Details).Heading, StringComparison.Ordinal);
     }
 
     /* ---------------- low disk ---------------- */

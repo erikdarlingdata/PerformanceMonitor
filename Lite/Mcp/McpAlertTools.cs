@@ -18,6 +18,12 @@ public sealed class McpAlertTools
     /// <summary>All non-idle CPU. Darling's <c>ViewerDataService.CpuModeTotal</c>.</summary>
     internal const string CpuModeTotal = "total";
 
+    /// <summary>The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653) — Darling's
+    /// <c>DarlingMcpAlertTools.PoisonWaitThresholdMsNote</c>, byte for byte; <c>McpAlertSettingsKeyTests</c>
+    /// reads that declaration to hold the two equal, the way it holds the cpu.mode vocabulary.</summary>
+    internal const string PoisonWaitThresholdMsNote =
+        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
     /// <summary>
     /// Lite's <see cref="CpuAlertMode"/> in Darling's wire vocabulary (#1911). Deliberately NOT
     /// <c>App.AlertCpuMode.ToString()</c>: that emits the C# enum names <c>Total</c>/<c>SqlOnly</c>, which no
@@ -123,7 +129,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window. poison_wait.threshold_ms is RETIRED (#3593): the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, so this value is stored and reported for compatibility but consulted by nothing — poison_wait.threshold_ms_note says so beside it, and poison_wait.enabled is the live switch. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
     public static Task<string> GetAlertSettings()
     {
         try
@@ -184,7 +190,15 @@ public sealed class McpAlertTools
                 poison_wait = new
                 {
                     enabled = App.AlertPoisonWaitEnabled,
-                    threshold_ms = App.AlertPoisonWaitThresholdMs
+                    /* #3653 (from #3541): the key stays — a published field a client may already read — but
+                       since #3593 the shared AlertEngine grades ACCUMULATED wait over a ten-minute window and
+                       reads no per-wait bar (IAlertEngineSettings.PoisonWaitThresholdMs records why the member
+                       survives). The note sits beside the value so an agent reading the payload learns it
+                       there rather than only in a description read once. Same text as Darling's
+                       DarlingMcpAlertTools.PoisonWaitThresholdMsNote, held equal by McpAlertSettingsKeyTests
+                       reading that declaration — Lite cannot reference the service assembly. */
+                    threshold_ms = App.AlertPoisonWaitThresholdMs,
+                    threshold_ms_note = PoisonWaitThresholdMsNote
                 },
                 long_running_query = new
                 {

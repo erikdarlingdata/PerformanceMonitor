@@ -36,8 +36,10 @@ namespace PerformanceMonitor.Alerting;
 ///
 /// <para><b>Why the by-name fallback still exists, and what it is for.</b> A row carries no tier when it was
 /// written before the member existed, when the alert fired with no override (the per-metric map decided,
-/// and the name IS the tier — Deadlocks Detected, High CPU, tempdb Space are presence-flat at their fire
-/// sites today), or when it is a resolution row (persisted with a null context). For all of those the
+/// and the name IS the tier — the two deliberately INFO reports, and the PostgreSQL host's count and
+/// live-state arms; Deadlocks Detected, High CPU and tempdb Space were in this population until #3653
+/// graded them at the engine's fire sites), or when it is a resolution row (persisted with a null context).
+/// For all of those the
 /// name is the only evidence the row has, and the classifier's reading of it is the reading the channels
 /// gave at the time — <c>AlertSeverity.ForMetric</c>'s override-less arm, which is why its "Poison Wait"
 /// arm stays CRITICAL: every SQL Server poison row written before #3539 A4 WAS a critical fire. The

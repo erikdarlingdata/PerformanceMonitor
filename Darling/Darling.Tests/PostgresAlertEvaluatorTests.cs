@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -643,6 +644,101 @@ public class PostgresAlertEvaluatorTests
         Assert.Equal(
             PostgresAlertEvaluator.PoisonWaitSubject(row),
             PostgresAlertEvaluator.EvaluatePoisonWait(row)!.Subject);
+    }
+
+    /* ---------------- poison waits: the observed-window clear (#3653) ---------------- */
+
+    /// <summary>
+    /// The witness the PostgreSQL host clears on. Zero rows AND zero logged runs is an UNOBSERVED window —
+    /// collector silence, the read the pre-#3653 host announced "Cleared" on. One logged run with no rows
+    /// is observed-and-quiet (the #2694 skip means a quiet poison event writes no row, so this is the
+    /// normal shape of a storm that ended). Rows with no logged run is observed too: a stored row is proof
+    /// the collector ran even when the failure-isolated log write skipped its row. The static
+    /// <c>Unobserved</c> is the first shape, for fakes and failed reads.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitWindow_IsObservedWhenTheCollectorRan_ByLogOrByRow()
+    {
+        var none = Array.Empty<PostgresPoisonWaitAlertInfo>();
+        Assert.False(new PostgresPoisonWaitWindow(none, 0).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(none, 1).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(none, 10).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(new[] { Poison(0, waits: 0) }, 0).Observed);
+        Assert.True(new PostgresPoisonWaitWindow(new[] { Poison(600_000) }, 10).Observed);
+
+        Assert.False(PostgresPoisonWaitWindow.Unobserved.Observed);
+        Assert.Empty(PostgresPoisonWaitWindow.Unobserved.Waits);
+        Assert.Equal(0, PostgresPoisonWaitWindow.Unobserved.CapturesInWindow);
+
+        /* Observation is orthogonal to the grade: an observed window with a sub-bar row evaluates to no
+           finding, which is exactly the "quiet, and we looked" shape the host clears on. */
+        Assert.Empty(PostgresAlertEvaluator.EvaluatePoisonWaits(new PostgresPoisonWaitWindow(new[] { Poison(599_999) }, 3).Waits));
+    }
+
+    /// <summary>
+    /// The read carries the witness from the collector's own <c>collection_log</c> SUCCESS rows — the #3537
+    /// xmin-horizon source, the one table that records a run that stored nothing — bounded by the SAME
+    /// window bind as the accumulation, and joined so the witness arrives even when no poison event wrote
+    /// a row. The accumulation half is the #2711 text unchanged: no task filter, no LIMIT (a limit on a sum
+    /// or a count is an undercount), no ORDER BY, no threshold.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitSql_CarriesTheCollectionLogWitness_OverTheSameWindow()
+    {
+        var sql = DarlingPostgresAlertReadAdapter.PoisonWaitSql;
+
+        Assert.Contains("FROM collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("collector_name = 'pg_wait_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*)::int AS captures_in_window", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN accumulated AS a ON true", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split("collection_time >= $2").Length - 1);
+        Assert.Equal(2, sql.Split("server_id = $1").Length - 1);
+
+        Assert.Contains("SUM(delta_wait_time_us)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_waits)", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("lower(wait_event) IN ('btreepage', 'bufferio')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("delta_waits > 0", sql, StringComparison.Ordinal);
+
+        /* The collector the witness counts is the collector that writes the rows it stands in for. */
+        Assert.Equal("pg_wait_stats", PerformanceMonitor.Collectors.PgWaitStatsCollector.Instance.Name);
+    }
+
+    /// <summary>
+    /// Both engines' hosts gate the Cleared edge on an observation — the SQL Server engine on the rows
+    /// (<c>accumulated.Count > 0</c>, #3593) and the PostgreSQL host on the window witness
+    /// (<c>window.Observed</c>, #3653) — and the PostgreSQL host's pre-#3653 shape, which walked straight
+    /// into the clear loop off an empty read, is gone. Source-pinned because the host method is private and
+    /// needs a live store to drive; the witness's truth table is pinned above and the SQL beside it.
+    /// </summary>
+    [Fact]
+    public void BothEngines_ClearPoisonWaitsOnlyOnAnObservedWindow()
+    {
+        var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
+        Assert.Contains("else if (accumulated.Count > 0", engine, StringComparison.Ordinal);
+
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var start = worker.IndexOf("private async Task EvaluatePgPoisonWaitAsync(", StringComparison.Ordinal);
+        var end = worker.IndexOf("Writes a Postgres Deadlocks/Blocking resolution", start, StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "EvaluatePgPoisonWaitAsync must precede NotifyPgResolutionAsync's doc comment as it does today.");
+        var host = worker[start..end];
+
+        Assert.Contains("var window = await adapter.GetPoisonWaitPressureAsync(", host, StringComparison.Ordinal);
+        Assert.Contains("var rows = window.Waits;", host, StringComparison.Ordinal);
+        Assert.Contains("if (!window.Observed)", host, StringComparison.Ordinal);
+        /* The hold is announced once per server at Debug, and the once-flag resets on the next observed
+           window — a second outage logs again. */
+        Assert.Contains("_pgPoisonWaitHoldLogged.TryAdd(serverKey, true)", host, StringComparison.Ordinal);
+        Assert.Contains("_pgPoisonWaitHoldLogged.TryRemove(serverKey, out _);", host, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogDebug(", host, StringComparison.Ordinal);
+        /* The unobserved arm returns BEFORE the clear loop: the flag-flip and the Cleared write sit after it. */
+        var hold = host.IndexOf("if (!window.Observed)", StringComparison.Ordinal);
+        var clear = host.IndexOf("_activePgPoisonWaitAlert[entry.Key] = false;", StringComparison.Ordinal);
+        Assert.True(hold > 0 && clear > hold);
+        Assert.Contains("\"Poison Waits Cleared\"", host, StringComparison.Ordinal);
     }
 
     /* ---------------- poison waits: the SQL Server port (#3539 A4) ---------------- */

@@ -288,7 +288,7 @@ public class CollectorMeasurementSeamTests
     [Fact]
     public void AnOrdinaryRunLeavesTheColumnNull_ExactlyAsBefore()
     {
-        /* 69 collectors measure nothing. None of them may start writing a note. */
+        /* 70 collectors measure nothing. None of them may start writing a note. */
         Assert.Null(CollectorMeasurementNote.Render(CollectorContext.NoMeasurements));
         Assert.Null(CollectorMeasurementNote.Compose(null, CollectorContext.NoMeasurements));
         Assert.Null(new CollectorRunResult(12, 34, 56, CollectorContext.NoMeasurements).Note);
@@ -435,7 +435,7 @@ public class CollectorMeasurementSeamTests
            a skip would silently exempt exactly the case a scanner cannot reason about.
 
            WHAT THIS SCAN CANNOT SEE, stated rather than assumed. It reads PerformanceMonitor.Collectors
-           only - which is where every definition lives (69 concrete ones, flat, one-to-one with
+           only - which is where every definition lives (70 concrete ones, flat, one-to-one with
            CollectorCatalog.All), but Measure is public, so a HOST could call it and this would not know.
            Widening the sweep would be worse rather than better: `.Measure(` is a name this codebase uses
            heavily for unrelated things - WPF's UIElement.Measure(Size), and the Compose subsystem's

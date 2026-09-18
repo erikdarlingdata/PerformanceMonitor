@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// the PgFindingStore/DarlingAlertReadAdapter pattern.
 /// </para>
 /// </summary>
-public class PgAnomalyDetector
+public class PgAnomalyDetector : IAnomalyDetector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly PgBaselineProvider _baselineProvider;

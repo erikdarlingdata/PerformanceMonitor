@@ -171,15 +171,17 @@ public sealed class AlertHistoryRowSeverityTests
         Assert.True(AlertHistoryRowSeverity.IsWarning(metric, null));
     }
 
-    /// <summary>The presence-flat metrics fire with no override, so their rows carry no tier and the name
-    /// decides exactly as before — this change moves nothing for them. (Grading them is the engine's half of
-    /// A8e, not the grid's.)</summary>
+    /// <summary>A row with NO tier — written before its metric was graded, or a metric still presence-flat
+    /// (Blocking Detected) — keeps the name's colour exactly, and says the name decided. For the three
+    /// metrics #3653 graded at the engine (Deadlocks Detected, High CPU, tempdb Space) this is now the
+    /// REPLAY arm for pre-#3653 rows: every such deadlock row rendered red, every CPU and tempdb row amber,
+    /// so the by-name reading is the faithful one for exactly the rows that reach it.</summary>
     [Theory]
     [InlineData("Deadlocks Detected", true)]
     [InlineData("High CPU", false)]
     [InlineData("tempdb Space", false)]
     [InlineData("Blocking Detected", false)]
-    public void APresenceFlatMetric_KeepsItsByNameColour(string metric, bool criticalByName)
+    public void ARowWithNoTier_KeepsItsByNameColour(string metric, bool criticalByName)
     {
         Assert.Equal(criticalByName, AlertHistoryRowSeverity.IsCritical(metric, null));
         Assert.Equal(!criticalByName, AlertHistoryRowSeverity.IsWarning(metric, null));
@@ -187,6 +189,32 @@ public sealed class AlertHistoryRowSeverityTests
         Assert.Equal(
             (criticalByName ? "critical" : "warning", AlertHistoryRowSeverity.SourceMetricName),
             AlertHistoryRowSeverity.Describe(metric, null));
+    }
+
+    /// <summary>
+    /// #3653 (A8e), the engine's half landing on the grid: a Deadlocks Detected row that fired WARNING (one
+    /// deadlock at a count knob of 1) is an amber row despite the name's red, and a High CPU row that fired
+    /// CRITICAL (at the band's 95% bar) is red despite the name's amber — the same projection the Poison Wait
+    /// case above proved, applied to the two metrics whose grades run in opposite directions from their
+    /// names. tempdb grades only Warning, which agrees with its name; the row still says the FIRE decided.
+    /// </summary>
+    [Fact]
+    public void AGradedDeadlockOrCpuRow_RendersTheTierItFiredAt_NotTheNames()
+    {
+        var warning = WithSeverity(AlertSeverityLevel.Warning);
+        Assert.True(AlertMetricClassifier.IsCritical("Deadlocks Detected"));   // the name alone says red
+        Assert.True(AlertHistoryRowSeverity.IsWarning("Deadlocks Detected", warning));
+        Assert.False(AlertHistoryRowSeverity.IsCritical("Deadlocks Detected", warning));
+        Assert.Equal(("warning", AlertHistoryRowSeverity.SourceFired), AlertHistoryRowSeverity.Describe("Deadlocks Detected", warning));
+
+        var critical = WithSeverity(AlertSeverityLevel.Critical);
+        Assert.True(AlertMetricClassifier.IsWarning("High CPU"));               // the name alone says amber
+        Assert.True(AlertHistoryRowSeverity.IsCritical("High CPU", critical));
+        Assert.False(AlertHistoryRowSeverity.IsWarning("High CPU", critical));
+        Assert.Equal(("critical", AlertHistoryRowSeverity.SourceFired), AlertHistoryRowSeverity.Describe("High CPU", critical));
+
+        Assert.True(AlertHistoryRowSeverity.IsWarning("tempdb Space", warning));
+        Assert.Equal(("warning", AlertHistoryRowSeverity.SourceFired), AlertHistoryRowSeverity.Describe("tempdb Space", warning));
     }
 
     /// <summary>Resolution rows are the name's business and never consult a tier — they are persisted with

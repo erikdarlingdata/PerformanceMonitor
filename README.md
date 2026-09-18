@@ -226,7 +226,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (87 tools) | On request (152 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (87 tools) | On request (153 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -263,12 +263,12 @@ Every edition includes a real-time alert engine that monitors for performance is
 | Metric | Default Threshold | Description |
 |---|---|---|
 | **Blocking** | 5 seconds | Fires when the longest blocked session exceeds the threshold |
-| **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
+| **Deadlocks** | 1 | Fires when the rolling one-hour deadlock count reaches the threshold. Graded: WARNING by default, CRITICAL when the hour's rate reaches the deadlock health band's critical tier (20/hr, the measured bar the fleet card uses) — one deadlock and a storm no longer wear the same colour |
 | **Poison waits** | 600 s accumulated in 10 min (WARNING); 6,000 s (CRITICAL) | Fires when a poison wait type accumulates enough wait inside a rolling ten-minute window to average **one task continuously stuck** for the whole window (WARNING), or ten (CRITICAL) — the same shape and the same bars as the PostgreSQL edition's Poison Wait, judged per wait type. Accumulation, not a per-wait average: one slow wait does not page, and a storm of thousands of short waits does not sleep. Fleet-calibrated — the worst ten-minute bucket measured across a 43-server production fleet over four days sat ~100× under the WARNING bar. Clears once the window's accumulated wait falls back under the bar (up to ten minutes after the last of it), and only on an observed window: a collector that stops delivering holds the alert open rather than announcing a recovery. The older `Poison wait threshold (ms)` setting remains in Settings for compatibility but is no longer consulted |
 | **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
-| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
+| **TempDB space** | 80% | Fires (WARNING; there is no CRITICAL tier, because no measured "nearly full" bar exists to grade one on) when TempDB usage exceeds the percentage threshold. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
 | **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
-| **High CPU** | 80%, held for 3 samples | Fires when total CPU (SQL + other) is at or above the threshold on **3 consecutive collected samples** — about three minutes at the one-minute CPU sample cadence — and resolves after 2 consecutive samples below it. A momentary spike above a steady baseline is detected but is not an incident, so it is not delivered. The count is per SAMPLE, not per alert sweep, so a sweep re-reading a sample it has already seen does not advance it. A CPU reading that stops arriving holds the count where it is rather than announcing a recovery |
+| **High CPU** | 80%, held for 3 samples | Fires when total CPU (SQL + other) is at or above the threshold on **3 consecutive collected samples** — about three minutes at the one-minute CPU sample cadence — and resolves after 2 consecutive samples below it. A momentary spike above a steady baseline is detected but is not an incident, so it is not delivered. The count is per SAMPLE, not per alert sweep, so a sweep re-reading a sample it has already seen does not advance it. A CPU reading that stops arriving holds the count where it is rather than announcing a recovery. Graded WARNING at the threshold and CRITICAL at 95% — the same bar the health band colours the server card red at |
 | **Volume free space** | 10% or 5 GB free | Fires when a monitored volume's free space drops below the percentage or absolute threshold (either check can be disabled). Never fires on Azure SQL Database. |
 | **Failed agent job** | 60-minute lookback | Fires when a SQL Agent job run fails within the lookback window. Skipped on Azure SQL Database. |
 | **Server unreachable** | N/A | Fires when a monitored server goes offline or comes back online |
@@ -362,7 +362,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 87 tools; **Darling** exposes 152 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 87 tools; **Darling** exposes 153 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|

@@ -48,12 +48,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// names the <c>off</c> and <c>unknown</c> settings as the actionable ones, and a <c>partial</c> row's
 /// <c>cost_note</c> says whether its threshold is the recommendation or a compromise.</para>
 ///
-/// <para><b>Consumers are named honestly, "planned" included.</b> The issue's own sequencing note says this
-/// audit earns its keep once the log pipeline (#3601) and its first parser families (#3602 temp files,
-/// #3603 autovacuum) consume the lines, and none of those ships yet. Each facet therefore names the Darling
-/// family that would read its lines and says <c>planned</c> where that is the truth, beside the read that
-/// exists today and what it cannot see. The setting is still worth turning on before the consumer lands:
-/// the log it fills is the one somebody opens at incident time, whichever tool reads it.</para>
+/// <para><b>Consumers are named honestly, "planned" and "shipped" alike.</b> The issue's own sequencing note
+/// says this audit earns its keep once the log pipeline (#3601) and its first parser families (#3602 temp
+/// files, #3603 autovacuum) consume the lines. The two parser families have landed and their facets say
+/// <c>SHIPPED</c> with the read that consumes the lines; the rest still say <c>PLANNED</c> where that is the
+/// truth, beside the read that exists today and what it cannot see (the #3601 pipeline's own three families
+/// — lock waits, connections, checkpoints — ship in <c>get_pg_log_events</c> too, and re-wording those facets
+/// is the pipeline's follow-up, pinned by <c>DarlingMcpPgLoggingAuditToolsTests</c> so the edit is deliberate).
+/// The setting is still worth turning on before a consumer lands: the log it fills is the one somebody
+/// opens at incident time, whichever tool reads it.</para>
 ///
 /// <para><b>Plan capture's own settings are shown, not re-judged.</b> <c>shared_preload_libraries</c>,
 /// <c>auto_explain.log_min_duration</c>, <c>log_line_prefix</c> and <c>lc_messages</c> appear in the same
@@ -357,9 +360,10 @@ public static class DarlingPgLoggingAudit
                      + "(get_pg_top_queries). Between them you can know a database spilled and that a shape "
                      + "spills - never that THIS execution spilled 4 GB at 03:07, which is the question when a "
                      + "disk fills.",
-            Consumer: "PLANNED - #3602, per-event temp spill attribution, is the parser family that would read "
-                      + "these lines; its statement text needs plan capture's redaction pass first. "
-                      + "get_pg_database_stats carries the spill FINDING from the counters today.",
+            Consumer: "SHIPPED - #3602: get_pg_log_events with family temp_file stores one event per spilled "
+                      + "file with its exact bytes and the fingerprint of the statement that spilled (the "
+                      + "statement itself is never stored - plan capture's redaction pass runs first). "
+                      + "get_pg_database_stats still carries the spill FINDING from the counters.",
             Recommended: "0 (every spill), or a kilobyte threshold on a workload that spills small files constantly.",
             CostNote: cost,
             Remedy: Remedy(Setting, "0", row, managed, verdict, alreadyRight: verdict is Instrumented or Partial),
@@ -422,9 +426,9 @@ public static class DarlingPgLoggingAudit
                      + "elapsed time - what the run COST. What this product has instead is pg_stat_user_tables "
                      + "through get_pg_autovacuum_health: whether autovacuum ran and when, never what it cost, "
                      + "so a run that takes 40 minutes of I/O in the business peak reads as healthy there.",
-            Consumer: "PLANNED - #3603, autovacuum per-run cost, is the parser family that would read these "
-                      + "lines and put run history beside get_pg_autovacuum_health. That read is the "
-                      + "whether-not-what read today.",
+            Consumer: "SHIPPED - #3603: get_pg_log_events with family autovacuum stores one event per completed "
+                      + "run with its duration, pages, tuples, buffers and WAL lifted, and get_pg_autovacuum_health "
+                      + "shows them per table as recent_runs beside the whether-it-ran catalog half.",
             Recommended: "0 (every run).",
             CostNote: cost,
             Remedy: Remedy(Setting, "0", row, managed, verdict, alreadyRight: verdict == Instrumented),

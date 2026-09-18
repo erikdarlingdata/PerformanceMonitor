@@ -19,9 +19,50 @@ namespace PerformanceMonitorDashboard.Tests;
 /// whose collectors have gone stale, leaving FailedCollectorCount at 0 — rendered a green "OK / Healthy: 0,
 /// Failing: 0". It now reads a neutral "Stale" off the live IsOnline signal, while a real failure on a
 /// reachable server and a plain healthy server are unchanged.
+/// <para>#3653 (#3635's class, mirrored): an ONLINE server with zero collectors banded — the
+/// report.collection_health SUM came back NULL, or the read failed and left both counts at 0 — is
+/// UNMEASURED, not healthy: Unknown, "--", "No collector banded yet". Any collector banded is unchanged.</para>
 /// </summary>
 public class ServerHealthStatusCollectorVerdictTests
 {
+    [Fact]
+    public void OnlineServer_WithNoCollectorBanded_IsUnknown_NotGreenOk()
+    {
+        var unbanded = new ServerHealthStatus(new ServerConnection()) { IsOnline = true, HealthyCollectorCount = 0, FailedCollectorCount = 0 };
+        Assert.Equal(HealthSeverity.Unknown, unbanded.CollectorSeverity);
+        Assert.Equal("--", unbanded.CollectorDisplayText);
+        Assert.Equal("No collector banded yet", unbanded.CollectorDetailText);
+
+        /* A failing count with no healthy denominator is still a Warning: a failure was observed even if the
+           population was not. */
+        var failingOnly = new ServerHealthStatus(new ServerConnection()) { IsOnline = true, HealthyCollectorCount = 0, FailedCollectorCount = 1 };
+        Assert.Equal(HealthSeverity.Warning, failingOnly.CollectorSeverity);
+        Assert.Equal("1 failed", failingOnly.CollectorDisplayText);
+
+        /* One collector banded lifts the verdict — the (0, 0) arm is exactly zero, not a threshold. */
+        var oneBanded = new ServerHealthStatus(new ServerConnection()) { IsOnline = true, HealthyCollectorCount = 1, FailedCollectorCount = 0 };
+        Assert.Equal(HealthSeverity.Healthy, oneBanded.CollectorSeverity);
+        Assert.Equal("OK", oneBanded.CollectorDisplayText);
+        Assert.Equal("Healthy: 1, Failing: 0", oneBanded.CollectorDetailText);
+    }
+
+    [Fact]
+    public void FirstCollectionLanding_RaisesPropertyChanged_ForCollectorVerdict()
+    {
+        // The verdict now depends on the healthy count too (0 -> N is Unknown -> Healthy), so the first
+        // collection landing must repaint the dot / value / detail, not only the detail line it used to.
+        var status = new ServerHealthStatus(new ServerConnection()) { IsOnline = true, HealthyCollectorCount = 0, FailedCollectorCount = 0 };
+        var raised = new List<string>();
+        status.PropertyChanged += (_, e) => raised.Add(e.PropertyName ?? "");
+
+        status.HealthyCollectorCount = 30;
+
+        Assert.Equal(HealthSeverity.Healthy, status.CollectorSeverity);
+        Assert.Contains(nameof(ServerHealthStatus.CollectorSeverity), raised);
+        Assert.Contains(nameof(ServerHealthStatus.CollectorDisplayText), raised);
+        Assert.Contains(nameof(ServerHealthStatus.CollectorDetailText), raised);
+    }
+
     [Fact]
     public void OfflineServer_CollectorsReadStaleNeutral_NotGreenOk()
     {

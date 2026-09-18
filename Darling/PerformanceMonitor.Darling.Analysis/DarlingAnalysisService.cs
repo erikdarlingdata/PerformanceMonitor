@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -50,14 +51,46 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// static AppLogger / Dashboard's static Logger become an injected optional
 /// <see cref="ILogger"/>; the data-span SQL moves to a <c>public const</c> for the ungated
 /// dialect pins (text is Lite's verbatim — <c>EXTRACT(EPOCH FROM ...)</c> is shared-dialect
-/// and runs unchanged on Postgres, reading the raw <c>wait_stats</c> table with Lite's
-/// multi-server <c>server_id = $1</c> filter, which the single-server Dashboard twin
+/// and runs unchanged on Postgres, reading the raw <c>wait_stats</c> table for a SQL Server target
+/// with Lite's multi-server <c>server_id = $1</c> filter, which the single-server Dashboard twin
 /// drops). Dashboard's <c>GetServerClockAsync</c>/<c>GetServerLocalNowAsync</c> are
 /// deliberately NOT ported — they exist only for its server-local collection clock. */
+/// </para>
+///
+/// <para>
+/// <b>Two engines, one pipeline (#3542).</b> Since the PostgreSQL-target analysis engine landed, this
+/// service holds TWO component sets — <see cref="AnalysisEngineSet"/>: the SQL Server one (the five
+/// objects above, unchanged) and the PostgreSQL-target one (<see cref="PgTargetFactCollector"/>,
+/// <see cref="PgTargetAnomalyDetector"/>, <see cref="PgTargetRelationshipGraph"/>,
+/// <see cref="PgTargetDrillDownCollector"/>, <see cref="PgTargetBaselineProvider"/>, and a data-span
+/// gate over <c>pg_database_stats</c>) — and picks one PER CALL by reading the registry's
+/// <c>servers.engine_kind</c> for the server being analyzed (<see cref="ResolveEngineAsync"/>). Per call,
+/// not per constructor, because two of this class's three construction sites are process-wide singletons
+/// shared by every server (the MCP host and the web endpoints), and the MCP tools resolve a server by
+/// NAME and never see an engine; only the worker constructs a fresh service per pass and could have
+/// passed one. The pipeline body below is engine-blind by construction — gate, collect, detect, score,
+/// story, cluster, reconcile, mute-filter, enrich, persist, notify run once, on whichever set was
+/// resolved — so a PostgreSQL finding persists, mutes, recurs and notifies through exactly the code a
+/// SQL Server finding does (design decision D4, realised at the call rather than the constructor).
 /// </para>
 /// </summary>
 public sealed class DarlingAnalysisService
 {
+    /// <summary>
+    /// One engine's worth of analysis components (#3542): the fact collector, the anomaly detector, the
+    /// inference engine over that engine's relationship graph, the drill-down, the baseline provider the
+    /// comparison banding reads dispersion from, and the SQL that measures the server's total collected
+    /// history for the data-span gate. Two instances live for the life of the service; the pipeline body
+    /// never names a concrete type.
+    /// </summary>
+    internal sealed record AnalysisEngineSet(
+        IFactCollector Collector,
+        IAnomalyDetector Detector,
+        InferenceEngine Engine,
+        IDrillDownCollector DrillDown,
+        PgBaselineProvider Baselines,
+        string DataSpanSql);
+
     /// <summary>
     /// The deadline every command in the analysis pass runs under (#2871), and the reason it is a
     /// number rather than an inheritance.
@@ -95,13 +128,9 @@ public sealed class DarlingAnalysisService
 
     private readonly NpgsqlDataSource _postgres;
     private readonly PgFindingStore _findingStore;
-    private readonly PgFactCollector _collector;
     private readonly FactScorer _scorer;
-    private readonly RelationshipGraph _graph;
-    private readonly InferenceEngine _engine;
-    private readonly PgDrillDownCollector _drillDown;
-    private readonly PgAnomalyDetector _anomalyDetector;
-    private readonly PgBaselineProvider _baselineProvider;
+    private readonly AnalysisEngineSet _sqlServerEngine;
+    private readonly AnalysisEngineSet _pgTargetEngine;
     private readonly ILogger? _logger;
 
     /// <summary>
@@ -171,13 +200,29 @@ public sealed class DarlingAnalysisService
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _findingStore = new PgFindingStore(postgres, logger);
-        _collector = new PgFactCollector(postgres, logger);
         _scorer = new FactScorer();
-        _graph = new RelationshipGraph();
-        _engine = new InferenceEngine(_graph);
-        _drillDown = new PgDrillDownCollector(postgres, planFetcher, logger);
-        _baselineProvider = new PgBaselineProvider(postgres, logger);
-        _anomalyDetector = new PgAnomalyDetector(postgres, _baselineProvider, logger);
+
+        /* The SQL Server set: the five objects this service always composed, in the same order. */
+        var sqlServerBaselines = new PgBaselineProvider(postgres, logger);
+        _sqlServerEngine = new AnalysisEngineSet(
+            new PgFactCollector(postgres, logger),
+            new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
+            new InferenceEngine(new RelationshipGraph()),
+            new PgDrillDownCollector(postgres, planFetcher, logger),
+            sqlServerBaselines,
+            TotalDataSpanSql);
+
+        /* The PostgreSQL-target set (#3542). No plan fetcher: that object connects to a monitored SQL Server
+           to fetch a cached plan, and a PostgreSQL target's plans arrive through the collectors
+           (pg_plan_capture) — there is nothing for it to fetch. */
+        var pgTargetBaselines = new PgTargetBaselineProvider(postgres, logger);
+        _pgTargetEngine = new AnalysisEngineSet(
+            new PgTargetFactCollector(postgres, logger),
+            new PgTargetAnomalyDetector(postgres, pgTargetBaselines, logger),
+            new InferenceEngine(new PgTargetRelationshipGraph()),
+            new PgTargetDrillDownCollector(postgres, logger),
+            pgTargetBaselines,
+            PgTargetDataSpanSql);
     }
 
     /// <summary>
@@ -242,9 +287,15 @@ public sealed class DarlingAnalysisService
 
         try
         {
+            /* #3542: which engine's components this pass runs on, decided from the registry for THIS server
+               and this call. Ahead of the data-span gate because the gate itself is engine-specific: a
+               PostgreSQL target has no wait_stats rows and would otherwise sit at "0 hours of history" forever,
+               which is the exact lie the deleted worker-side tombstone existed to paper over. */
+            var (engine, engineKind) = await ResolveEngineAsync(context.ServerId, context.CancellationToken);
+
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.CancellationToken);
             if (dataSpanHours < MinimumDataHours)
             {
                 var needed = MinimumDataHours >= 24
@@ -257,6 +308,21 @@ public sealed class DarlingAnalysisService
                 InsufficientDataMessage =
                     $"Not enough data for reliable analysis. Need {needed} of collected data, " +
                     $"have {have}. Keep the collector running and try again later.";
+
+                /* #3542: an UNSTAMPED registry row took the SQL Server set above (a NULL makes no claim,
+                   #2530). For a SQL Server target that is today's answer exactly; for a PostgreSQL target
+                   whose connect has not yet recorded engine_kind it is the wrong series, and "0 hours"
+                   would read as "still collecting" forever. So the message names the missing fact instead
+                   of guessing from the data — the stamp arrives on the next successful connect and the
+                   next pass measures the right series without anyone doing anything. Stamped rows get the
+                   sentence above, byte for byte. */
+                if (engineKind is null)
+                {
+                    InsufficientDataMessage +=
+                        " This server's registry row carries no engine stamp yet (no connect has recorded engine_kind), " +
+                        "so the history was measured on the SQL Server series; if this is a PostgreSQL target, the next " +
+                        "successful connect stamps it and the next pass measures pg_database_stats instead.";
+                }
 
                 _logger?.LogInformation(
                     "[DarlingAnalysisService] Skipping analysis for {Server}: {Have:F1}h data, need {Need}h",
@@ -275,7 +341,7 @@ public sealed class DarlingAnalysisService
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1. Collect facts from the Postgres store
-            var facts = await _collector.CollectFactsAsync(context);
+            var facts = await engine.Collector.CollectFactsAsync(context);
             LastWindowCoverage = context.Coverage;
 
             if (facts.Count == 0 || context.ObservedDurationMs <= 0)
@@ -327,14 +393,14 @@ public sealed class DarlingAnalysisService
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
-            var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
+            var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
             facts.AddRange(anomalies);
 
             // 2. Score facts (base severity + amplifiers)
             _scorer.ScoreAll(facts);
 
             // 3. Build stories via graph traversal
-            var stories = _engine.BuildStories(facts);
+            var stories = engine.Engine.BuildStories(facts);
 
             // 3.5. Freeze value-stated advice (current MAXDOP/CTFP/etc.) into each story's StoryText
             // from the FULL fact set, BEFORE the store copies StoryText onto the finding. This is the
@@ -346,7 +412,7 @@ public sealed class DarlingAnalysisService
             // stamp each with its own trackable id, BEFORE the store copies it onto the finding. The
             // grouped surface renders one report per incident; the id fingerprints the incident's
             // primary so the same recurring incident is trackable across runs.
-            var incidents = _engine.ClusterIntoIncidents(stories, facts);
+            var incidents = engine.Engine.ClusterIntoIncidents(stories, facts);
             IncidentId.StampClusters(context.ServerName, incidents);
 
             // 3.7. Fold each ANOMALY_* story into the REGULAR finding that describes the same symptom
@@ -364,7 +430,7 @@ public sealed class DarlingAnalysisService
 
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built
             //    action; the cheap config drill-downs run below the 0.5 gate inside the collector).
-            await _drillDown.EnrichFindingsAsync(findings, context);
+            await engine.DrillDown.EnrichFindingsAsync(findings, context);
 
             // 6. Build + attach each finding's RemediationAction from the now drill-down-
             //    populated finding (D2). The builders REQUIRE finding.DrillDown, which the
@@ -494,7 +560,8 @@ public sealed class DarlingAnalysisService
 
         try
         {
-            var facts = await _collector.CollectFactsAsync(context);
+            var (engine, _) = await ResolveEngineAsync(context.ServerId, context.CancellationToken);
+            var facts = await engine.Collector.CollectFactsAsync(context);
             if (facts.Count == 0) return (facts, context.Coverage);
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage);
@@ -548,13 +615,14 @@ public sealed class DarlingAnalysisService
 
         try
         {
-            var baselineFacts = await _collector.CollectFactsAsync(baselineContext);
-            var comparisonFacts = await _collector.CollectFactsAsync(comparisonContext);
+            var (engine, _) = await ResolveEngineAsync(serverId, comparisonContext.CancellationToken);
+            var baselineFacts = await engine.Collector.CollectFactsAsync(baselineContext);
+            var comparisonFacts = await engine.Collector.CollectFactsAsync(comparisonContext);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
+            var dispersion = await LookUpDispersionAsync(engine, serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
@@ -572,13 +640,13 @@ public sealed class DarlingAnalysisService
     /// degrades to "no dispersion" rather than failing the comparison.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(
-        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
+        AnalysisEngineSet engine, int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
     {
         var dispersion = new Dictionary<string, BaselineBucket>(StringComparer.Ordinal);
         try
         {
             foreach (var metric in ComparisonBanding.DispersionMetricsFor(baselineFacts, comparisonFacts))
-                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart);
+                dispersion[metric] = await engine.Baselines.GetBaselineAsync(serverId, metric, comparisonStart);
         }
         catch (Exception ex)
         {
@@ -653,7 +721,7 @@ public sealed class DarlingAnalysisService
     /// Lite's data-span query VERBATIM — EXTRACT(EPOCH FROM ...) is shared dialect and runs
     /// unchanged on Postgres. Reads the raw wait_stats table (not the view) like Lite, with
     /// Lite's multi-server server_id filter (the Dashboard twin is single-server and drops it).
-    /// Exposed const so Darling.Tests can pin the dialect ungated.
+    /// Exposed const so Darling.Tests can pin the dialect ungated. The SQL Server engine set's gate.
     /// </summary>
     public const string TotalDataSpanSql = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
@@ -661,18 +729,83 @@ FROM wait_stats
 WHERE server_id = $1";
 
     /// <summary>
-    /// Returns the total span of collected data for a server (no time range filter).
+    /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over
+    /// <c>pg_database_stats</c> — the one-minute series every PostgreSQL flavour writes with no extension,
+    /// and the same table the pass's coverage witness and baseline gate read, so "how long has this server
+    /// been monitored" and "how much of this window was observed" cannot disagree about which series counts.
+    /// <see cref="MinimumDataHours"/> is shared with the SQL Server gate: the fraction-of-period distortion it
+    /// guards against is a property of short windows, not of either engine.
+    /// </summary>
+    public const string PgTargetDataSpanSql = @"
+SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
+FROM pg_database_stats
+WHERE server_id = $1";
+
+    /// <summary>
+    /// The registry read behind <see cref="ResolveEngineAsync"/>: the server's engine KIND token, stamped on
+    /// every connect since V82 (#2530). One indexed row by primary key. The same column the MCP capability
+    /// helper reads for its <c>not_collected</c> envelopes, so the analysis pass and the reads that explain
+    /// its NULLs answer the engine question from one fact.
+    /// </summary>
+    public const string ServerEngineKindSql = @"
+SELECT engine_kind
+FROM servers
+WHERE server_id = $1";
+
+    /// <summary>
+    /// Which engine set analyzes <paramref name="serverId"/> — decided from the registry on EVERY call (#3542).
+    ///
+    /// <para><b>The mapping.</b> <see cref="MonitoredEngineKind.IsPostgres"/> (the <c>postgres</c> and
+    /// <c>aurora-postgres</c> tokens) selects the PostgreSQL-target set; anything else selects the SQL Server
+    /// set — including a NULL, an unknown token, and a server with no registry row. A NULL kind is a row no
+    /// connect has stamped since V82 landed and "makes no claim" (#2530); taking the SQL Server set for it is
+    /// exactly what every pass did before this seam existed, so an unstamped SQL Server row behaves
+    /// identically, and an unstamped PostgreSQL row lands on the honest data-span message ("0 hours of
+    /// wait_stats history") until its next connect stamps it — the message names the engine stamp as the
+    /// missing fact rather than guessing from the data.</para>
+    ///
+    /// <para><b>No cache, deliberately.</b> <c>engine_kind</c> is written on BOTH connect arms precisely so a
+    /// re-pointed registration corrects it, and a cached answer here would keep analyzing the old engine's
+    /// tables for the life of the process. One primary-key read per pass is cheaper than the first fact read
+    /// that follows it.</para>
+    ///
+    /// <para><b>No catch, deliberately.</b> A registry that cannot answer this is a store that cannot answer
+    /// anything; the caller's catch classifies it (shutdown / budget / fault) exactly as it would the first
+    /// collector read. Catching here and defaulting to SQL Server would run a SQL Server pass against a
+    /// PostgreSQL target on a transient fault and persist its "0 hours" verdict.</para>
+    /// </summary>
+    internal async Task<(AnalysisEngineSet Engine, string? EngineKind)> ResolveEngineAsync(int serverId, CancellationToken cancellationToken)
+    {
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        using var cmd = new NpgsqlCommand(ServerEngineKindSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(serverId);
+
+        /* A missing row and a NULL column both come back as null here (ExecuteScalar returns null for no
+           rows and DBNull for a NULL, and DBNull is not a string) — the two cases the mapping treats alike. */
+        var kind = await cmd.ExecuteScalarAsync(cancellationToken) as string;
+        return (EngineFor(kind), kind);
+    }
+
+    /// <summary>The set <see cref="ResolveEngineAsync"/> answers for a token, without a store — the mapping
+    /// itself, exposed so the engine-routing pins can assert it on every token in <see cref="MonitoredEngineKind"/>.</summary>
+    internal AnalysisEngineSet EngineFor(string? engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) ? _pgTargetEngine : _sqlServerEngine;
+
+    /// <summary>
+    /// Returns the total span of collected data for a server (no time range filter), measured on the
+    /// resolved engine's own series (<see cref="AnalysisEngineSet.DataSpanSql"/>).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<double> GetTotalDataSpanHoursAsync(AnalysisEngineSet engine, int serverId, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            using var cmd = new NpgsqlCommand(TotalDataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+            using var cmd = new NpgsqlCommand(engine.DataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);

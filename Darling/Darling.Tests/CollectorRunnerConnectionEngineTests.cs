@@ -164,45 +164,52 @@ public sealed class CollectorRunnerConnectionEngineTests
     }
 
     /// <summary>
-    /// The scheduled ANALYSIS pass is gated by engine too, and for a reason worth stating: the pass cannot
-    /// gate itself. <c>RunAnalysisPassAsync</c> takes a serverId and a storage name, not the target, so the
-    /// decision has to be made at the call site.
-    /// <para>Ungated, a PostgreSQL target got a full pass — a fresh analysis service and up to 120 seconds —
-    /// reading SQL Server tables that will never have rows for its server_id. It would hit the 24-hour
-    /// data-span gate and persist <c>insufficient_data = true</c> forever, so the Recommendations tab would
-    /// read "still collecting" for the life of the deployment: exactly the state <c>analysis_state</c> exists
-    /// to tell apart from a genuine all-clear.</para>
+    /// The scheduled ANALYSIS pass is NOT gated by engine at the call site any more (#3542) — and the history
+    /// of why it used to be is the argument for what replaced it. <c>RunAnalysisPassAsync</c> takes a serverId
+    /// and a storage name, not the target, so the pass could not gate itself; ungated, a PostgreSQL target got
+    /// a full SQL-Server-shaped pass reading tables that would never have rows for its server_id, hit the
+    /// 24-hour data-span gate and persisted <c>insufficient_data = true</c> forever — "still collecting" for
+    /// the life of the deployment, the one state <c>analysis_state</c> exists to tell apart from an all-clear.
+    /// So #2213 gated the call site and wrote an engine tombstone instead.
+    ///
+    /// <para>The PostgreSQL-target analysis engine makes that gate wrong in the other direction: a gated call
+    /// site would skip the pass that now exists. The invariant moved one layer DOWN, into the service, which
+    /// resolves the engine set from the registry's <c>engine_kind</c> on every call — the only place that can
+    /// decide it, because two of the service's three construction sites are process-wide singletons that
+    /// never see a target. This pin holds both halves: the worker no longer tests the engine or names the
+    /// tombstone anywhere, and the service resolves the engine at every one of its three entry points.</para>
     /// </summary>
     [Fact]
-    public void TheScheduledAnalysisPassIsGatedByEngine()
+    public void TheScheduledAnalysisPassRoutesByRegistryEngine()
     {
         var source = File.ReadAllText(WorkerSourcePath());
 
-        var gateAt = source.IndexOf(
-            "server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql", StringComparison.Ordinal);
+        /* The tombstone and its latch are gone from the worker entirely, not merely unused. */
+        Assert.DoesNotContain("PostgresAnalysisNotApplicable", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PostgresAnalysisStateWritten", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not apply to a PostgreSQL target", source, StringComparison.Ordinal);
+
+        /* No engine test between the analysis tick's due check and the call: the call is unconditional.
+           Anchored on the tick's own comment so the window is the tick, not the whole file — the pileup gate a
+           few lines above legitimately tests the engine, and a whole-file DoesNotContain would forbid it. */
+        var tickAt = source.IndexOf("Every engine takes the pass (#3542)", StringComparison.Ordinal);
         var callAt = source.IndexOf("await RunScheduledAnalysisAsync(", StringComparison.Ordinal);
+        Assert.True(tickAt > 0, "the analysis tick's rationale comment has moved or been rewritten");
+        Assert.True(callAt > tickAt, "the scheduled analysis call must follow the tick's rationale");
+        Assert.DoesNotContain("CollectorTargetEngine.PostgreSql", source[tickAt..callAt], StringComparison.Ordinal);
 
-        Assert.True(gateAt > 0, "the analysis call site must test the target engine");
-        Assert.True(
-            gateAt < callAt,
-            "the engine test must come BEFORE the analysis call, or the pass runs and then discovers it "
-            + "should not have");
+        /* And the service resolves the engine at every entry point — the pass, the facts read and the
+           period comparison — so no consumer of the singleton can reach a collector without the registry's
+           answer. Exactly three call sites: one per entry point, none cached in a field. */
+        var service = File.ReadAllText(AnalysisServiceSourcePath());
+        Assert.Equal(3, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
+        Assert.DoesNotMatch(new Regex(@"private\s+(?:readonly\s+)?AnalysisEngineSet\??\s+_resolved"), service);
+    }
 
-        /* And the PostgreSQL arm must say why rather than leaving the tab blank. */
-        Assert.Contains("does not apply to a PostgreSQL target", source, StringComparison.Ordinal);
-
-        /* ONE message, shared by the scheduled pass and the manual "Generate now" path. There were two
-           hand-maintained copies and they had already drifted — adding get_pg_blocking to the scheduled one
-           left the manual one listing seven tools, so the same product gave different guidance depending on
-           which door the operator came through. The list grows with every PostgreSQL read, so the drift
-           recurs by construction unless there is only one copy. */
-        Assert.Equal(
-            2,
-            Regex.Matches(source, @"message: PostgresAnalysisNotApplicable,").Count);
-        Assert.DoesNotContain(
-            "Scheduled analysis does not apply to a PostgreSQL target: its findings are \"",
-            source,
-            StringComparison.Ordinal);
+    private static string AnalysisServiceSourcePath([CallerFilePath] string thisFile = "")
+    {
+        var testsDir = Path.GetDirectoryName(thisFile)!;
+        return Path.Combine(testsDir, "..", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs");
     }
 
     private static string WorkerSourcePath([CallerFilePath] string thisFile = "")

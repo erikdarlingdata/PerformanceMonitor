@@ -23,6 +23,20 @@ public class RelationshipGraph
     }
 
     /// <summary>
+    /// The seam a sibling graph derives through (#3542): <c>false</c> starts EMPTY, so the derived class's
+    /// constructor builds its own edge sets with <see cref="AddEdge"/> and none of the SQL Server chains
+    /// above are reachable from its facts. The parameterless constructor is untouched and builds exactly
+    /// what it always did — seven Lite tests construct it directly and its behaviour is the SQL Server
+    /// graph's contract. <c>true</c> is the same graph by another route, kept so a derived class that WANTS
+    /// the SQL Server chains underneath its own can say so explicitly rather than by omission.
+    /// </summary>
+    protected RelationshipGraph(bool buildSqlServerEdges)
+    {
+        if (buildSqlServerEdges)
+            BuildGraph();
+    }
+
+    /// <summary>
     /// Returns all edges originating from the given fact key,
     /// filtered to only those whose predicates are true.
     /// </summary>
@@ -43,7 +57,10 @@ public class RelationshipGraph
         return _edges.TryGetValue(sourceKey, out var edges) ? edges : [];
     }
 
-    private void AddEdge(string source, string destination, string category,
+    /// <summary>Registers one conditional edge. Protected rather than private (#3542) so
+    /// <see cref="PgTargetRelationshipGraph"/> declares its chains through the same machinery — the
+    /// edge shape, the predicate contract and <see cref="GetActiveEdges"/> are the shared part.</summary>
+    protected void AddEdge(string source, string destination, string category,
         string predicateDescription, System.Func<IReadOnlyDictionary<string, Fact>, bool> predicate)
     {
         if (!_edges.ContainsKey(source))

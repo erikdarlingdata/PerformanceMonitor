@@ -455,10 +455,16 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal("  Total CPU: 92%\n  Threshold: 80%", fired.DetailText);
         /* :84 — the toast body minus the "{server}: " prefix. */
         Assert.Equal("Total CPU at 92% (threshold: 80%)", fired.ShortMessage);
-        /* :93-100 — CPU passes no context. #1830: the numerics are REQUIRED — without them the
-           history stores text-parsed "92% (Total CPU)", failed on the parenthesized label, and
-           stored 0 for every High CPU row. */
-        Assert.Null(fired.Context);
+        /* :93-100 passed no context; since #3653 (A8e) the context exists for the grade alone — no
+           details — because Lite's deliverer persists only the context, so a tier carried on the outcome
+           alone would never reach a Lite history row. 92% is at/over the knob and under the CPU band's
+           95% Critical bar: Warning. #1830: the numerics are REQUIRED — without them the history stores
+           text-parsed "92% (Total CPU)", failed on the parenthesized label, and stored 0 for every High
+           CPU row. */
+        Assert.NotNull(fired.Context);
+        Assert.Empty(fired.Context!.Details);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context.SeverityOverride);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal(92d, fired.NumericCurrentValue);
         Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
@@ -1130,6 +1136,11 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal(EngineCpuAlertMode.TotalServer, settings.CpuAlertMode);
         App.AlertCpuMode = CpuAlertMode.SqlOnly;
         Assert.Equal(EngineCpuAlertMode.SqlProcess, settings.CpuAlertMode);
+
+        /* #3653 (A8e): the one member with NO Lite knob behind it — the deadlock-rate pair the engine grades a
+           fire with is the shipped #3368 pair, the same pair Lite's own card bands on. Not a pass-through, and
+           pinned as such so a future knob has to come with a card that honours it. */
+        Assert.Equal(PerformanceMonitor.Common.DeadlockRateThresholds.Default, settings.DeadlockRateThresholds);
     }
 
     /* =====================================================================================

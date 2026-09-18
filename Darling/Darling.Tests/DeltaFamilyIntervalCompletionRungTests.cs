@@ -25,10 +25,11 @@ namespace Darling.Tests;
 /// over, so the calculator's (delta 0, interval 0) "no delta knowable" marker reaches the store from every
 /// family, and the restart seed can rebuild the one key the store could not reproduce.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="DeltaFamilyIntervalColumnsRungTests"/> (V127) when this rung landed, the same handoff that file
-/// received from <see cref="SelfDiskWarnGbFloorRungTests"/> (V126) — a fully-migrated store must map to
-/// EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually current.</para>
+/// <para>The "I am the top rung" claims this file carried moved to <c>PgLogEventsRungTests</c> (V129) when
+/// that rung landed, the same handoff this file received from <see cref="DeltaFamilyIntervalColumnsRungTests"/>
+/// (V127) and that one from <see cref="SelfDiskWarnGbFloorRungTests"/> (V126). What stays here is the
+/// one-rung-behind half: a store carrying this and not V129 maps to 128, which is the honest answer for it
+/// and what makes the upgrade banner correct in both directions.</para>
 /// </summary>
 public sealed class DeltaFamilyIntervalCompletionRungTests
 {
@@ -36,7 +37,9 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
 
     private const int PreviousVersion = 127;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V129 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later rung
+    /// appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 103;
 
     private const string IntervalColumn = "sample_interval_seconds";
@@ -58,7 +61,9 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V129 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to PgLogEventsRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V128 is expected to sit below the ladder's top now that V129 has landed");
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -283,7 +288,6 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasDeltaFamilyIntervalCompletion", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -292,13 +296,9 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
-
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V129 has appended its own; the
+           "is the last argument" claim moved to PgLogEventsRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V128's sentinel is expected to sit below the top rung's now that V129 has landed");
 
         /* This rung's own arm answers for a store that stopped here. Expressed as "false above" rather than
            as one named ordinal, so a rung landing on top of this one does not quietly turn this case into a
@@ -319,8 +319,8 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
         Assert.True(thisArm < previousArm, "the V128 arm sits below the previous rung's, so a current store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..], StringComparison.Ordinal);
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     /* ---- the writers ---------------------------------------------------------------------------------- */

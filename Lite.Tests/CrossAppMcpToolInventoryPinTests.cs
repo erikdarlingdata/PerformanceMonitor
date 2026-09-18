@@ -86,6 +86,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_io_trend",
         "get_pg_database_trend",
         "get_pg_deadlock_detail",
+        /* #3601: the classified log-event pipeline's read. Same SKU boundary as every entry around it. */
+        "get_pg_log_events",
         "get_pg_server_config_changes",
         "get_pg_replication_stats",
         "get_pg_top_queries",
