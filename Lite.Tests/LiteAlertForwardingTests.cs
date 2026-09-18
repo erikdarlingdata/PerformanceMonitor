@@ -254,6 +254,15 @@ public class LiteAlertForwardingTests : IDisposable
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
+
+        /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
+           Parity), so every fake answers it by hand. This one reports nothing: null is "unreported", which the
+           two daily documents treat as delivered, exactly as every fire before #3580 was. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
     }
 
     /// <summary>Engine over Lite's REAL live-settings adapter + fakes + a controllable clock.</summary>

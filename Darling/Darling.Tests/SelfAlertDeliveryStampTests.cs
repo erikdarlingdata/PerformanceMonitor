@@ -84,8 +84,9 @@ public class SelfAlertDeliveryStampTests
         }
     }
 
-    /// <summary>The pre-#3580 shape: records, never reports. What every other suite's fake is, and what
-    /// Lite's deliverer still is — the default interface method answers null.</summary>
+    /// <summary>The pre-#3580 shape: records, never reports — what every other suite's fake is, and what
+    /// Lite's deliverer is. The report member is REQUIRED on the seam (CONTRIBUTING, Two-Store Parity), so
+    /// "never reports" is written down here as an explicit null rather than inherited from a default.</summary>
     private sealed class SilentDeliverer : IAlertDeliverer
     {
         public List<AlertOutcome> Outcomes { get; } = new();
@@ -94,6 +95,12 @@ public class SelfAlertDeliveryStampTests
         {
             Outcomes.Add(outcome);
             return Task.CompletedTask;
+        }
+
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
         }
     }
 
@@ -428,7 +435,7 @@ public class SelfAlertDeliveryStampTests
         Assert.Equal(2, deliverer.Outcomes.Count);
         Assert.Equal(1, store.Reads);
         Assert.Equal(1, h.ReadFailures.ReadInstance().ReadFailures);
-        Assert.Equal(1, Regex.Matches(h.Log.Joined, "delivery stamp could not be read").Count);
+        Assert.Single(Regex.Matches(h.Log.Joined, "delivery stamp could not be read"));
 
         /* The next hour: still nothing landed, still one read on record — the retry runs from memory. */
         h.Now = h.Now.AddHours(1);
@@ -475,9 +482,9 @@ public class SelfAlertDeliveryStampTests
 
     /* ---------------- what counts as delivered ---------------- */
 
-    /// <summary>A deliverer that does not REPORT — the default interface method, every pre-#3580 fake,
-    /// Lite's deliverer — stamps: null is "unreported", treated as every fire before #3580 was, and never
-    /// read as "failed". A deliverer that knows a send failed says so.</summary>
+    /// <summary>A deliverer that does not REPORT — every pre-#3580 fake, Lite's deliverer — stamps: null is
+    /// "unreported", treated as every fire before #3580 was, and never read as "failed". A deliverer that
+    /// knows a send failed says so.</summary>
     [Theory]
     [InlineData(Digest)]
     [InlineData(Rollup)]

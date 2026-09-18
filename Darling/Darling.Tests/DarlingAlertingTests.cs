@@ -199,6 +199,15 @@ public sealed class DarlingAlertingTests
             Outcomes.Add(outcome);
             await _inner.DeliverAsync(outcome, cancellationToken);
         }
+
+        /* #3580: REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store Parity). This wrapper
+           records and forwards, so it forwards the REPORT too — the inner deliverer here is the real
+           DarlingAlertDeliverer, and swallowing its answer would make the wrapper lie about it. */
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            Outcomes.Add(outcome);
+            return await _inner.DeliverAndReportAsync(outcome, cancellationToken);
+        }
     }
 
     [Fact]
