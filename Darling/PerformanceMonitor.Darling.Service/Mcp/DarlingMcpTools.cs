@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 
@@ -43,7 +44,8 @@ public sealed class DarlingMcpTools
     /// </summary>
     internal const string FactSourceFilterDescription =
         "Filter to one source category. Accepted values (the engine's complete source registry, refused otherwise): "
-        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, queries, sessions, tempdb, waits. Omit for all.";
+        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_buffer, pg_config, pg_cpu, pg_database, pg_posture, pg_queries, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits. "
+        + "Omit for all. The pg_ sources are emitted only for a PostgreSQL target.";
 
     [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
     public static async Task<string> AnalyzeServer(
@@ -527,6 +529,35 @@ public sealed class DarlingMcpTools
 
         try
         {
+            /* #3542: every check below is a SQL Server setting (CTFP, MAXDOP, max server memory, worker
+               threads), so for a PostgreSQL target the loop found nothing and answered "no_config_data — the
+               config collector may not have run yet" — false for a target whose pg_server_config collector
+               runs hourly. Say what this tool IS instead, and where the PostgreSQL setting checks live: they
+               are the CONFIG_PG_* facts the analysis pass emits, read through get_analysis_facts and
+               analyze_server. An honest envelope rather than a projection of those facts into this tool's
+               recommendations shape, because the projection is a content question (which settings, which
+               units, which bars) that the knobs lane owns; this is the plumbing that stops the lie. Same
+               registry read the not_collected envelopes use; a registry that cannot answer falls through
+               to the SQL Server audit exactly as before. */
+            var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId);
+            if (MonitoredEngineKind.IsPostgres(engineKind))
+            {
+                return McpHelpers.Status(
+                    "not_collected",
+                    $"audit_config evaluates SQL Server settings (cost threshold for parallelism, MAXDOP, max server memory, max worker threads) and does not apply to {resolved.ServerName}, a {MonitoredEngineKind.DescribeEngineKind(engineKind)} target. " +
+                    "A PostgreSQL target's configuration advisories are the CONFIG_PG_* facts the analysis pass emits: call get_analysis_facts with source pg_config for the current settings and their scores, or analyze_server for the advisory findings they root.",
+                    new
+                    {
+                        engine_kind = engineKind,
+                        next_tools = new object[]
+                        {
+                            new { tool = "get_analysis_facts", reason = "CONFIG_PG_* setting facts for this target", suggested_params = new { source = "pg_config" } },
+                            new { tool = "analyze_server", reason = "the advisory findings those settings root" },
+                            new { tool = "get_pg_server_config", reason = "the raw pg_settings snapshot with sources and pending restarts" },
+                        },
+                    });
+            }
+
             /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
                configuration facts, which are the latest row regardless of window, and a one-hour window
                the collector missed changes nothing about what the server is configured to. */
@@ -1016,6 +1047,16 @@ internal static class ToolRecommendations
             new("get_file_io_trend", "Track log I/O latency over time"),
             new("get_perfmon_trend", "Check Transactions/sec to see commit rate driving log flush pressure", new() { ["counter_name"] = "Transactions/sec" })
         ],
+        /* #3616 rider: the synchronous-commit wait fact scores since that lane landed but had no next_tools
+           here, so its story rendered an empty list. Lite's twin landed in #3659; this is the Darling half. The
+           AG read exists only on this SKU, which is why the pair is not byte-identical. */
+        ["HADR_SYNC_COMMIT"] =
+        [
+            new("get_wait_trend", "Track synchronous-commit wait time over the window", new() { ["wait_type"] = "HADR_SYNC_COMMIT" }),
+            new("get_ag_health", "Check the availability group's synchronous replicas, their send/redo queues and hardening latency"),
+            new("get_perfmon_trend", "Check Transactions/sec to see the commit rate the secondary must harden", new() { ["counter_name"] = "Transactions/sec" }),
+            new("get_file_io_stats", "Check transaction log file latency on the primary, which a slow secondary compounds")
+        ],
         ["LCK"] =
         [
             new("get_blocked_process_reports", "Get detailed blocking event reports"),
@@ -1210,8 +1251,13 @@ internal static class ToolRecommendations
         {
             if (!ByFactKey.TryGetValue(key, out var recommendations))
             {
+                /* #3542: the PostgreSQL-target vocabulary FIRST, by its three prefixes, so a PG_ / CONFIG_PG_ /
+                   ANOMALY_PG_ key reaches the get_pg_* reads and never the SQL Server arms below (ANOMALY_PG_CPU_SPIKE
+                   does not start with ANOMALY_CPU, but the order says so rather than relying on it). */
+                if (PgTargetFactKeys.IsPgKey(key))
+                    recommendations = PgTargetToolRecommendations.GetForKey(key);
                 // Handle dynamic keys by checking prefix
-                if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
+                else if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("BAD_ACTOR", out recommendations);
                 else if (key.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("ANOMALY_CPU", out recommendations);

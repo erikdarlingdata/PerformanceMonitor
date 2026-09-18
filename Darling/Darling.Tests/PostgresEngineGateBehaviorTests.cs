@@ -33,8 +33,9 @@ namespace Darling.Tests;
 /// scan cannot tell a gate that returns early from one that falls through and happens to write the same
 /// text.</para>
 ///
-/// <para><b>All three doors.</b> The analyze_now gate's observable is a PRESENCE — a row in
-/// <c>analysis_state</c> carrying the engine tombstone — so it is asserted directly. The reconcile gate
+/// <para><b>All three doors.</b> The analyze_now door's observable is a PRESENCE — a row in
+/// <c>analysis_state</c> — so it is asserted directly; since #3542 that row is the REAL pass's data-state rather
+/// than an engine tombstone (see the two analyze_now cases). The reconcile gate
 /// looked like it needed a counting seam to observe an absence, and that was wrong: the belt gate inside
 /// <see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/> is public and its own precondition,
 /// so an ungated call THROWS and a gated one returns — a difference an assertion can see with no seam, no
@@ -42,12 +43,14 @@ namespace Darling.Tests;
 /// collectors it ran, and every run it makes writes itself to <c>collection_log</c>, so the gate's effect is
 /// a count and a set of rows rather than something that has to be inferred.</para>
 ///
-/// <para><b>The regression it guards is specific and was real.</b> Clicking "Generate now" against a
-/// PostgreSQL target used to run the full SQL-Server-shaped pass, find nothing, and persist the GENERIC
-/// <c>insufficient_data</c> message — OVERWRITING the honest engine tombstone the scheduled arm had already
-/// written. The Recommendations tab regressed from "does not apply, use the PG reads" back to "still
-/// collecting" the moment an operator pressed the button. So the assertion that matters is not just
-/// "insufficient_data is true", it is that the MESSAGE is the engine one.</para>
+/// <para><b>The analyze_now door's history, since it explains the shape of its two cases.</b> #2230 pinned
+/// that clicking "Generate now" against a PostgreSQL target wrote the engine TOMBSTONE rather than running the
+/// SQL-Server-shaped pass and overwriting it with "still collecting". #3542 deleted the tombstone, the latch
+/// and the gate together: the pass now routes to the PostgreSQL-target engine set inside the analysis
+/// service off the registry's <c>engine_kind</c>, so the honest answer IS the pass's own result. The two
+/// cases therefore assert what the real pass persists — the generic gate message on an empty fixture, a
+/// cleared marker after a planted day of <c>pg_database_stats</c> — and that the SQL Server outcome is
+/// byte-identical to what it always was.</para>
 ///
 /// <para>Live-store gated on <c>DARLING_TEST_PG</c>, which CI's "Darling PostgreSQL tests" job sets — the
 /// gate's whole effect is a write through <c>_postgres</c>, so there is nothing to observe without one.</para>
@@ -90,123 +93,126 @@ public sealed class PostgresEngineGateBehaviorTests
     private static int ServerIdFor(string host, string? engine = null) =>
         ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, null, false, engine, 0));
 
+    /// <summary>
+    /// #3542: the door no longer short-circuits. A PostgreSQL target takes the REAL pass, and the pass routes
+    /// to the PostgreSQL-target engine set inside <c>DarlingAnalysisService</c> off the registry's
+    /// <c>engine_kind</c>. Two phases against the live store, because the two outcomes are the two halves of
+    /// the invariant that replaced the tombstone:
+    /// <list type="number">
+    /// <item><description>Empty fixture: the pass runs, hits the PostgreSQL data-span gate (measured on
+    /// <c>pg_database_stats</c>, not <c>wait_stats</c>) and persists the GENERIC insufficient-data message —
+    /// never the old "does not apply" tombstone, which no longer exists anywhere.</description></item>
+    /// <item><description>A planted 25-hour <c>pg_database_stats</c> series: the pass clears the gate, the
+    /// coverage witness observes the window, the registry metadata fact gives it something to score, and it
+    /// completes with <c>analysis_state</c> CLEARED (<c>insufficient_data = false</c>, message NULL) — the D7
+    /// lazy overwrite: the first real pass replaces whatever tombstone row was standing.</description></item>
+    /// </list>
+    /// </summary>
     [Fact]
-    public async Task AnalyzeNow_AgainstAPostgresTarget_WritesTheEngineTombstone_AndDoesNotRunThePass()
+    public async Task AnalyzeNow_AgainstAPostgresTarget_RunsThePgEnginePass()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-gate test.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-routing test.");
 
+        var ct = TestContext.Current.CancellationToken;
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var serverId = ServerIdFor(PgHost, "postgres");
 
-        /* Fabricated worker, the CollectorMemoryKnobTests.SweepGate idiom: the real ctor wants a host's worth
-           of dependencies, and the gate under test reads exactly three fields. Reflection because pinning the
-           BEHAVIOUR beats widening the surface just to observe it. */
-        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers
-            .GetUninitializedObject(typeof(DarlingWorker));
-        SetField(worker, "_serversLock", new object());
-        SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
-        SetField(worker, "_postgres", postgres);
-
+        var worker = PassCapableWorker(postgres);
         var server = PostgresLoopState(serverId);
         var servers = NewLoopStateList(server);
 
         var bodySucceeded = false;
         try
         {
-            var outcome = await InvokeAnalyzeNowAsync(worker, servers, serverId);
+            /* The registry row IS the routing input: engine_kind = postgres selects the PostgreSQL-target set,
+               and postgres_major_version is the one fact the skeleton collector emits. */
+            await RegisterServerAsync(postgres, serverId, PgHost, "postgres", 18, ct);
 
-            /* 1. The gate returned the success shape, not a failure and not the analysis result. */
-            /* Assert the STATUS first: if the lookup missed, the status is "server not monitored" and says
-               so, where a bare Assert.True on Success only reports Expected/Actual booleans. */
-            Assert.Equal("analysis not applicable", GetOutcomeStatus(outcome));
-            Assert.True(GetOutcomeSuccess(outcome));
+            /* Phase 1 — no history. The generic gate, on the PostgreSQL series. */
+            var gated = (CommandOutcome)await InvokeAnalyzeNowAsync(worker, servers, serverId);
+            Assert.Equal("insufficient data", gated.ResultStatus);
+            Assert.True(gated.Success);
 
-            /* 2. The once-latch is set, so the scheduled tick will not re-write what this just wrote —
-                  the two arms share the tombstone rather than racing to overwrite it. */
-            Assert.True(AnalysisStateWritten(server));
-
-            /* 3. THE REGRESSION GUARD: the persisted message is the ENGINE tombstone, not the generic
-                  insufficient-data text the SQL-Server-shaped pass would have left. */
             var state = await ReadAnalysisStateAsync(postgres, serverId);
-            var (found, insufficient, message) = (state.Found, state.Insufficient, state.Message);
-            Assert.True(found, "the gate must PERSIST a row, or the Recommendations tab has nothing to show");
-            Assert.True(insufficient);
-            Assert.Equal(DarlingWorker.PostgresAnalysisNotApplicable, message);
+            Assert.True(state.Found, "the pass must PERSIST its data-state, or the Recommendations tab has nothing to show");
+            Assert.True(state.Insufficient);
+            Assert.StartsWith("Not enough data for reliable analysis.", state.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("does not apply", state.Message, StringComparison.Ordinal);
+            /* A STAMPED row gets the plain sentence — the engine-stamp caveat is for NULL kinds only. */
+            Assert.DoesNotContain("engine stamp", state.Message, StringComparison.Ordinal);
 
-            /* And the specific words that make it honest rather than merely non-empty. */
-            Assert.Contains("does not apply to a PostgreSQL target", message, StringComparison.Ordinal);
-            Assert.Contains("get_pg_blocking", message, StringComparison.Ordinal);
-            /* And it DISCLAIMS the still-collecting reading rather than avoiding the words: the message
-               quotes the phrase in order to contrast with it ("This is not \"still collecting\""), so a
-               DoesNotContain on those words can never pass and asserting it was my error, not the
-               product's. The property worth pinning is that the disclaimer is present. */
-            Assert.Contains("This is not \"still collecting\"", message, StringComparison.Ordinal);
+            /* Phase 2 — 25 hours of pg_database_stats, one row a minute across the pass's 4-hour window and
+               one old row to carry the span. Whole-minute stamps so the PG microsecond comparisons are exact. */
+            var now = TruncateToMinutes(DateTime.UtcNow);
+            await PlantDatabaseStatsAsync(postgres, serverId, PgHost, now.AddHours(-25), ct);
+            for (var minute = 4 * 60 + 2; minute >= 0; minute--)
+                await PlantDatabaseStatsAsync(postgres, serverId, PgHost, now.AddMinutes(-minute), ct);
+
+            var ran = (CommandOutcome)await InvokeAnalyzeNowAsync(worker, servers, serverId);
+            Assert.Equal("analysis complete", ran.ResultStatus);
+            Assert.True(ran.Success);
+
+            state = await ReadAnalysisStateAsync(postgres, serverId);
+            Assert.True(state.Found);
+            Assert.False(state.Insufficient, "a real pass over 25 hours of pg_database_stats must clear the gate");
+            Assert.Equal(string.Empty, state.Message);
 
             bodySucceeded = true;
         }
         finally
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
-                DeleteAnalysisStateAsync(cleanup, cleanupCt, serverId));
+                DeleteServerRowsAsync(cleanup, cleanupCt, serverId));
         }
     }
 
     /// <summary>
-    /// The same door against a SQL Server target must NOT take the gate — otherwise the test above would
-    /// pass on a gate that fires unconditionally, which is the failure mode a presence-assertion is blind to.
-    /// <para>Asserted by the outcome status alone: a SQL Server target falls through to the real pass, which
-    /// on a store with no data for this server_id reports insufficient data. Either way it is NOT
-    /// "analysis not applicable", and that is the discriminator.</para>
+    /// The same door against a SQL Server target resolves to the SQL Server set: on a store with no history for
+    /// this server_id that is the insufficient-data outcome with the plain gate message — the same shape a SQL
+    /// Server target has always produced here, byte for byte, which is the "SQL Server pass is unchanged" half
+    /// of #3542. And because THIS row carries an explicit <c>sqlserver</c> stamp, the NULL-kind caveat that
+    /// names the missing engine stamp must not appear.
     /// </summary>
     [Fact]
-    public async Task AnalyzeNow_AgainstASqlServerTarget_DoesNotTakeTheEngineGate()
+    public async Task AnalyzeNow_AgainstASqlServerTarget_TakesTheSqlServerSet_Unchanged()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-gate test.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-routing test.");
 
+        var ct = TestContext.Current.CancellationToken;
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
         var serverId = ServerIdFor(SqlHost);
 
-        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers
-            .GetUninitializedObject(typeof(DarlingWorker));
-        SetField(worker, "_serversLock", new object());
-        SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
-        SetField(worker, "_postgres", postgres);
-
+        var worker = PassCapableWorker(postgres);
         var server = SqlServerLoopState(serverId);
         var servers = NewLoopStateList(server);
 
         var bodySucceeded = false;
         try
         {
-            /* The SQL Server path runs the real analysis pass, which needs collaborators the fabricated
-               worker does not have — so the assertion is that it did NOT short-circuit as the PG arm, which
-               is observable either as a different status or as a throw from the pass itself. Both prove the
-               gate is engine-conditional; only "analysis not applicable" would disprove it. */
-            string? status = null;
-            try
-            {
-                status = GetOutcomeStatus(await InvokeAnalyzeNowAsync(worker, servers, serverId));
-            }
-            catch (Exception ex) when (ex is not Xunit.Sdk.XunitException)
-            {
-                /* Fell through into the pass and hit a missing collaborator — which is itself the proof. */
-                Assert.NotNull(ex);
-            }
+            await RegisterServerAsync(postgres, serverId, SqlHost, "sqlserver", null, ct);
 
-            Assert.NotEqual("analysis not applicable", status);
-            Assert.False(AnalysisStateWritten(server),
-                "the PostgreSQL once-latch must not be set for a SQL Server target");
+            var outcome = (CommandOutcome)await InvokeAnalyzeNowAsync(worker, servers, serverId);
+            Assert.Equal("insufficient data", outcome.ResultStatus);
+            Assert.True(outcome.Success);
+
+            var state = await ReadAnalysisStateAsync(postgres, serverId);
+            Assert.True(state.Found);
+            Assert.True(state.Insufficient);
+            Assert.Equal(
+                "Not enough data for reliable analysis. Need 1.0 days of collected data, have 0.0 hours. "
+                + "Keep the collector running and try again later.",
+                state.Message);
 
             bodySucceeded = true;
         }
         finally
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) =>
-                DeleteAnalysisStateAsync(cleanup, cleanupCt, serverId));
+                DeleteServerRowsAsync(cleanup, cleanupCt, serverId));
         }
     }
 
@@ -440,21 +446,16 @@ public sealed class PostgresEngineGateBehaviorTests
         var method = typeof(DarlingWorker).GetMethod(
             "RunAnalyzeNowAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
-        /* planFetcher / notificationService / config are only touched on the SQL Server path, so the gate
-           can be driven with nulls — which is itself part of what "short-circuits" means here. */
+        /* planFetcher and notificationService stay null (#3542): the service takes an optional fetcher, and
+           NoDeliveryConfig closes the notify path before the service is ever consulted. The config is real
+           because ShouldNotifyAnalysisFindings reads it ahead of the pass. */
         var task = (Task)method.Invoke(worker, new object?[]
         {
-            servers, null, null, null, serverId, CancellationToken.None,
+            servers, null, null, NoDeliveryConfig(), serverId, CancellationToken.None,
         })!;
         await task;
         return task.GetType().GetProperty("Result")!.GetValue(task)!;
     }
-
-    /* CommandOutcome is public (DarlingCommandExecutor), so no reflection is needed for the result —
-       only for ServerLoopState, which is a private nested type. */
-    private static bool GetOutcomeSuccess(object outcome) => ((CommandOutcome)outcome).Success;
-
-    private static string? GetOutcomeStatus(object? outcome) => (outcome as CommandOutcome)?.ResultStatus;
 
     /// <summary>
     /// <c>DarlingWorker.ServerLoopState</c> is a PRIVATE nested class, so the test cannot name the type and
@@ -473,8 +474,89 @@ public sealed class PostgresEngineGateBehaviorTests
         return state;
     }
 
-    private static bool AnalysisStateWritten(object loopState) =>
-        (bool)LoopStateType.GetProperty("PostgresAnalysisStateWritten")!.GetValue(loopState)!;
+    /// <summary>
+    /// A fabricated worker that can run the REAL analysis pass (#3542): the three fields the old gate read,
+    /// plus <c>_analysisInFlight</c> — the in-flight marker <c>RunAnalysisPassAsync</c> takes before its try, whose
+    /// value type is a private nested class, so both the dictionary and its type argument are built
+    /// reflectively. The plan fetcher and notification service stay null: the fetcher is optional on the
+    /// service, and the notification path is closed by a config with alerts off, so neither is touched.
+    /// </summary>
+    private static DarlingWorker PassCapableWorker(NpgsqlDataSource postgres)
+    {
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers
+            .GetUninitializedObject(typeof(DarlingWorker));
+        SetField(worker, "_serversLock", new object());
+        SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
+        SetField(worker, "_postgres", postgres);
+
+        var passStateType = typeof(DarlingWorker).GetNestedType("AnalysisPassState", BindingFlags.NonPublic)!;
+        var inFlight = Activator.CreateInstance(
+            typeof(System.Collections.Concurrent.ConcurrentDictionary<,>).MakeGenericType(typeof(int), passStateType))!;
+        SetField(worker, "_analysisInFlight", inFlight);
+        return worker;
+    }
+
+    /// <summary>Alerts off closes <c>ShouldNotifyAnalysisFindings</c>, so the null notification service is never
+    /// reached; analysis itself stays enabled, which is what the pass reads.</summary>
+    private static DarlingConfig NoDeliveryConfig() => new() { Alerts = { Enabled = false } };
+
+    private static DateTime TruncateToMinutes(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+
+    /// <summary>The registry row the pass routes on: <c>engine_kind</c> decides the set and
+    /// <c>postgres_major_version</c> is the skeleton collector's one fact. Naive-UTC stamps.</summary>
+    private static async Task RegisterServerAsync(
+        NpgsqlDataSource postgres, int serverId, string host, string engineKind, int? postgresMajor, CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(@"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, $3, $4, $5, $5)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, engine_kind = EXCLUDED.engine_kind, postgres_major_version = EXCLUDED.postgres_major_version");
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(host);
+        command.Parameters.AddWithValue(engineKind);
+        command.Parameters.AddWithValue(postgresMajor.HasValue ? postgresMajor.Value : DBNull.Value);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One <c>pg_database_stats</c> row as the collector writes it — one database, the counters
+    /// flat, because the plumbing pass reads only the collection SERIES (span and coverage), never the values.</summary>
+    private static async Task PlantDatabaseStatsAsync(
+        NpgsqlDataSource postgres, int serverId, string host, DateTime at, CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL)");
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(host);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Everything the two analyze_now cases write for their server_id: the registry row, the planted series,
+    /// the pass's own findings and its data-state marker. Through <c>LiveStoreCleanup</c> so the teardown runs
+    /// on its OWN connection rather than the body's (#1902): a finally that tears down on the body's connection
+    /// throws out of the finally and REPLACES the body's exception with the teardown's — and it is the body's
+    /// failure that closed the connection in the first place, so the teardown fails because of the thing it
+    /// then hides. Opening a fresh connection by hand is explicitly not accepted either: it is half the fix and
+    /// still throws from the finally.
+    /// </summary>
+    private static async Task DeleteServerRowsAsync(NpgsqlConnection cleanup, CancellationToken cleanupCt, int serverId)
+    {
+        /* Interpolated rather than bound: a multi-statement command cannot carry positional parameters, and the
+           value is this test's own deterministic int. */
+        await using var command = new NpgsqlCommand(
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; "
+            + $"DELETE FROM analysis_findings WHERE server_id = {serverId}; "
+            + $"DELETE FROM analysis_state WHERE server_id = {serverId}; "
+            + $"DELETE FROM servers WHERE server_id = {serverId}", cleanup);
+        await command.ExecuteNonQueryAsync(cleanupCt);
+    }
 
     /// <summary>The parameter is <c>List&lt;ServerLoopState&gt;</c>, so the list is reflective too.</summary>
     private static object NewLoopStateList(object single)
@@ -522,23 +604,6 @@ public sealed class PostgresEngineGateBehaviorTests
         return (true,
             !reader.IsDBNull(0) && reader.GetBoolean(0),
             reader.IsDBNull(1) ? string.Empty : reader.GetString(1));
-    }
-
-    /// <summary>
-    /// Deletes only this test's own synthetic server_id, through <c>LiveStoreCleanup</c> so the teardown runs
-    /// on its OWN connection rather than the body's (#1902). A finally that tears down on the body's
-    /// connection throws out of the finally and REPLACES the body's exception with the teardown's — and it is
-    /// the body's failure that closed the connection in the first place, so the teardown fails because of the
-    /// thing it then hides. Opening a fresh connection by hand is explicitly not accepted either: it is half
-    /// the fix and still throws from the finally.
-    /// </summary>
-    private static async Task DeleteAnalysisStateAsync(
-        NpgsqlConnection cleanup, CancellationToken cleanupCt, int serverId)
-    {
-        await using var command = new NpgsqlCommand(
-            "DELETE FROM analysis_state WHERE server_id = $1", cleanup);
-        command.Parameters.AddWithValue(serverId);
-        await command.ExecuteNonQueryAsync(cleanupCt);
     }
 
     /// <summary>

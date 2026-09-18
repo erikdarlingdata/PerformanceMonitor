@@ -170,8 +170,14 @@ public static class AnomalyIncidentReconciler
             return family is null ? Array.Empty<string>() : new[] { family };
         }
 
-        return AnomalyToFamilies.TryGetValue(anomaly.RootFactKey, out var families)
-            ? families
+        if (AnomalyToFamilies.TryGetValue(anomaly.RootFactKey, out var families))
+            return families;
+
+        /* #3542: the PostgreSQL-target anomalies register their parents in PgTargetFactKeys.AnomalyToFamilies
+           (ANOMALY_PG_DEADLOCK_RATE -> PG_DEADLOCK_RATE and so on) — one lookup here, so the content lanes
+           add a parent in the shared keys file and never edit this map. A key in neither map stays solo. */
+        return PgTargetFactKeys.AnomalyToFamilies.TryGetValue(anomaly.RootFactKey, out var pgFamilies)
+            ? pgFamilies
             : Array.Empty<string>();
     }
 

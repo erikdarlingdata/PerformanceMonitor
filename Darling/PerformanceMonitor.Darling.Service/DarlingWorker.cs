@@ -702,10 +702,6 @@ public sealed class DarlingWorker : BackgroundService
         public required MonitoredServer Config { get; set; }
         public ServerRuntime? Runtime { get; set; }
 
-        /* Set once per process after the PostgreSQL analysis-state row is written, so the explanation is
-           recorded without rewriting the same row every analysis interval forever. */
-        public bool PostgresAnalysisStateWritten { get; set; }
-
         /* ConcurrentDictionary (#1553 D1): with the fire-and-track sweep the per-server body runs on a pool
            thread, so a reload's RecomputeNextDueAsync on the OUTER thread can touch this map concurrently with the
            body's RunDueCollectorsAsync read-and-advance. It is only ever INDEXED by the static collector-catalog
@@ -2517,37 +2513,19 @@ public sealed class DarlingWorker : BackgroundService
                 var intervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
                 server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(intervalMinutes);
 
-                /* The analysis pipeline is SQL-Server-shaped: its facts come from wait_stats, query_stats,
-                   cpu_utilization_stats and friends, none of which a PostgreSQL target ever writes. Running it
-                   anyway is not harmless. RunAnalysisPassAsync takes a serverId and a storage name — not the
-                   target — so it cannot gate itself, and it would read those tables, find nothing, hit the
-                   24-hour data-span gate and persist insufficient_data = true. FOREVER: those tables will
-                   never have rows for a PostgreSQL server_id, so the Recommendations tab would say "still
-                   collecting" for the life of the deployment, which is the one thing analysis_state exists to
-                   distinguish from a genuine all-clear. Plus a fresh DarlingAnalysisService and up to a
-                   120-second pass per target per interval, producing nothing.
-
-                   So: skip the pass, and say why ONCE rather than leaving the tab silent. The message is the
-                   honest state — not "still collecting", which is a lie about a young deployment. */
-                if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
-                {
-                    if (!server.PostgresAnalysisStateWritten)
-                    {
-                        server.PostgresAnalysisStateWritten = true;
-                        await DarlingObservability.WriteAnalysisStateAsync(
-                            _postgres!,
-                            server.Runtime.ServerId,
-                            insufficientData: true,
-                            message: PostgresAnalysisNotApplicable,
-                            _logger,
-                            stoppingToken);
-                    }
-                }
-                else
-                {
-                    await RunScheduledAnalysisAsync(
-                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
-                }
+                /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
+                   this site gated on the target engine and wrote a tombstone into analysis_state for a
+                   PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
+                   gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
+                   collecting" for the life of the deployment. That gate is gone, and the invariant that
+                   replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
+                   DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
+                   and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
+                   no longer knows or cares which engine it is scheduling. The first real pass then
+                   overwrites any tombstone row still standing with the honest state (D7 — the lazy
+                   overwrite, no migration). */
+                await RunScheduledAnalysisAsync(
+                    server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
             }
         }
         catch (OperationCanceledException)
@@ -6030,33 +6008,11 @@ LIMIT 1";
             return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
         }
 
-        /* The operator door the scheduled-path gate (see the PostgreSql arm in the analysis tick) did not
-           cover: "Generate now" against a PostgreSQL target ran the full SQL-Server-shaped pass, which
-           found nothing, persisted the GENERIC insufficient_data message, and thereby OVERWROTE the honest
-           engine tombstone the scheduled arm wrote — the Recommendations tab regressed from "does not
-           apply, use the PG reads" back to "still collecting" the moment an operator clicked the button.
-           Same decision, same honest answer, re-written here so the tombstone survives the click. */
-        if (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql)
-        {
-            /* Mirror the scheduled arm's once-latch so the tick does not re-write what this just wrote. */
-            server.PostgresAnalysisStateWritten = true;
-            await DarlingObservability.WriteAnalysisStateAsync(
-                _postgres!,
-                server.Runtime.ServerId,
-                insufficientData: true,
-                message: PostgresAnalysisNotApplicable,
-                _logger,
-                cancellationToken);
-
-            return new CommandOutcome(true, "analysis not applicable",
-                JsonSerializer.Serialize(new
-                {
-                    success = true,
-                    server = server.Config.DisplayName,
-                    message = "Analysis is SQL-Server-shaped and does not apply to a PostgreSQL target; "
-                        + "use the get_pg_* MCP reads and the outage-predictor alerts instead.",
-                }));
-        }
+        /* "Generate now" takes the same pass every engine does (#3542). This door used to carry its own
+           PostgreSQL arm — the scheduled tick's tombstone re-written here so an operator's click could not
+           overwrite it with the generic "still collecting" text — and it went with the tick's gate: the
+           pass routes by the registry's engine_kind inside DarlingAnalysisService, so the honest answer for
+           a PostgreSQL target is now the pass's own result, and there is no tombstone left to protect. */
 
         /* postPassHook: null — analyze_now is an interactive diagnostic, and the force-plan bot only
            rides the SCHEDULED cadence so an operator poking a server cannot spend its action budget.
@@ -8315,21 +8271,6 @@ LIMIT 1";
            no-ops, the same "not this transport" answer RdsLogSource itself gives a non-RDS host. */
         ["pg_cpu_utilization"] = (r, s, ct) => r.IngestPgCpuAsync(s, ct),
     };
-
-    /// <summary>
-    /// The analysis_state message for a PostgreSQL target, shared by the SCHEDULED pass and the manual
-    /// "Generate now" path.
-    /// <para>One constant because there were two hand-maintained copies and they had already drifted: adding
-    /// <c>get_pg_blocking</c> to the scheduled one left the manual one listing seven tools, so an operator
-    /// clicking Generate now got different guidance from the same product depending on which door they came
-    /// through. The list grows with every PostgreSQL read, which guarantees the drift recurs.</para>
-    /// </summary>
-    internal const string PostgresAnalysisNotApplicable =
-        "Scheduled analysis does not apply to a PostgreSQL target: its findings are derived from SQL Server "
-        + "collectors (waits, query stats, CPU) that this engine does not populate. This is not "
-        + "\"still collecting\" — use the PostgreSQL MCP reads (get_pg_wait_stats, get_pg_top_queries, "
-        + "get_pg_autovacuum_health, get_pg_wraparound_risk, get_pg_xmin_horizon, get_pg_replication_slots, "
-        + "get_pg_io_stats, get_pg_blocking) and the three outage-predictor alerts instead.";
 
     /// <summary>
     /// Signals that a blocking/deadlock XE session is missing or inaccessible so the reader returned no

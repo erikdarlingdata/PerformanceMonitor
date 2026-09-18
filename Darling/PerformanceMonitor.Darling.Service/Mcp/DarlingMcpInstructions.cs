@@ -58,7 +58,7 @@ internal static class DarlingMcpInstructions
         - Data is only as fresh as the last collection cycle.
         - Wait stats represent delta values since the last collection, not instantaneous snapshots.
         - All tools accept a `server_name` parameter. If only one server is monitored, it's used automatically. Names resolve against the service's server registry (exact match first, then partial, against the storage name and the display name).
-        - Analysis needs at least 24 hours of collected history for a server; before that, analyze_server returns `insufficient_data`.
+        - Analysis needs at least 24 hours of collected history for a server; before that, analyze_server returns `insufficient_data`. The history is measured on the engine's own one-minute series: `wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target. The analysis pass routes by the registry's `engine_kind`, so a PostgreSQL target is analyzed by the PostgreSQL-target engine (facts keyed `PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`, sources `pg_*`), never by the SQL Server one.
 
         ## Tool Reference
 

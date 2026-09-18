@@ -35,11 +35,21 @@ public class FactScorer
     /// context, base severity 0); they are still filterable, so they are still members. <c>perfmon</c> is
     /// named in the amplifier context set below but no collector emits it, so it is NOT a member — a filter
     /// on it would always be empty, which is the outcome this registry exists to refuse.</para>
+    ///
+    /// <para>The eleven <c>pg_</c> members are the PostgreSQL-TARGET vocabulary (#3542 D2), declared in
+    /// <see cref="PgTargetSources"/> and registered here the day they were declared — before any content lane
+    /// emits one — so the D2 rule (a PostgreSQL fact can never wear a SQL Server source) is enforced by the same
+    /// sweep that guards the rest of the list rather than by convention.</para>
     /// </summary>
     public static readonly IReadOnlyList<string> KnownSources = new[]
     {
         "anomaly", "bad_actor", "blocking", "config", "coverage", "cpu", "database_config", "disk", "io",
-        "jobs", "memory", "queries", "sessions", "tempdb", "waits",
+        "jobs", "memory",
+        PgTargetSources.BufferSource, PgTargetSources.ConfigSource, PgTargetSources.CpuSource,
+        PgTargetSources.DatabaseSource, PgTargetSources.PostureSource, PgTargetSources.QueriesSource,
+        PgTargetSources.SessionsSource, PgTargetSources.TempSource, PgTargetSources.VacuumSource,
+        PgTargetSources.WaitsSource, PgTargetSources.WriteSource,
+        "queries", "sessions", "tempdb", "waits",
     };
 
     /// <summary>
@@ -65,6 +75,9 @@ public class FactScorer
                 "disk" => ScoreDiskFact(fact),
                 "bad_actor" => ScoreBadActorFact(fact),
                 "anomaly" => ScoreAnomalyFact(fact),
+                /* #3542 D2: the PostgreSQL-target vocabulary is pg_-prefixed precisely so it lands in ONE
+                   arm and never in any of the SQL Server ones above; PgTargetScorer routes it per source. */
+                _ when PgTargetSources.IsPgSource(fact.Source) => PgTargetScorer.ScoreBase(fact),
                 _ => 0.0
             };
         }
@@ -73,6 +86,10 @@ public class FactScorer
         var contextSources = new HashSet<string>
             { "config", "cpu", "io", "tempdb", "memory", "queries", "perfmon",
               "database_config", "jobs", "sessions", "disk", "bad_actor", "anomaly" };
+        /* The pg_ sources join the context set for the same reason "cpu" and "sessions" are in it: a
+           PG_CPU_PERCENT at 30% or a CONFIG_PG_MAX_CONNECTIONS context fact has base 0, and an amplifier
+           that reads it (the load-family confirmer, the saturation ceiling) must still be able to see it. */
+        contextSources.UnionWith(PgTargetSources.All);
         var factsByKey = facts
             .Where(f => f.BaseSeverity > 0 || contextSources.Contains(f.Source))
             .ToFactLookup();
@@ -802,7 +819,10 @@ public class FactScorer
     /// <see cref="IsExtremeAnomaly"/> so the two cannot route a key differently.
     /// </summary>
     private static bool IsDeviationScoredAnomalyKey(string key) =>
-        key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
+        /* #3542: the PostgreSQL z-score families are registered in PgTargetScorer, not here — the shared
+           extremity escape and ramp then read the same AnomalyGate metadata for both engines (#3584). */
+        PgTargetScorer.IsDeviationScoredAnomalyKey(key)
+        || key.StartsWith("ANOMALY_CPU_SPIKE", StringComparison.OrdinalIgnoreCase)
         || key.StartsWith("ANOMALY_READ_LATENCY", StringComparison.OrdinalIgnoreCase)
         || key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
         || key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
@@ -876,6 +896,13 @@ public class FactScorer
     /// </summary>
     private static double ScoreAnomalyFact(Fact fact)
     {
+        /* #3542: the PostgreSQL ratio families (deadlock rate) have their own ramp — the SQL Server ratio
+           arms below recognise ANOMALY_BLOCKING_SPIKE / ANOMALY_DEADLOCK_SPIKE by literal prefix and would
+           never see them. The PostgreSQL z-score families deliberately fall THROUGH to the shared
+           deviation ramp below via IsDeviationScoredAnomalyKey. */
+        if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))
+            return PgTargetScorer.ScoreRatioAnomaly(fact);
+
         if (IsDeviationScoredAnomalyKey(fact.Key))
         {
             // Deviation-based scoring: 2σ = 0.5, 4σ = 1.0
@@ -1025,6 +1052,9 @@ public class FactScorer
             "PLAN_REGRESSION" => PlanRegressionAmplifiers(),
             "DB_CONFIG" => DbConfigAmplifiers(),
             "DISK_SPACE" => DiskSpaceAmplifiers(),
+            /* #3542: BEFORE the ANOMALY_ arm, so ANOMALY_PG_* routes to the PostgreSQL table and not to the
+               SQL Server load-family confirmers (CPU_SQL_PERCENT is not a fact a PostgreSQL pass can emit). */
+            _ when PgTargetScorer.IsPgKey(fact.Key) => PgTargetScorer.Amplifiers(fact.Key),
             _ when fact.Key.StartsWith("ANOMALY_", StringComparison.OrdinalIgnoreCase) => AnomalyAmplifiers(fact.Key),
             _ => []
         };
