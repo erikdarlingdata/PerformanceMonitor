@@ -424,8 +424,10 @@ public sealed class DarlingMcpTools
                 "better" with no caveat at all — the empty-window arms above fire only when a side has NO
                 facts. The rates are now per observed time on both sides, so the deltas are honest; what
                 a reader still cannot know without being told is that one side speaks for an hour and the
-                other for four. Either side under the partial bar, or unobserved with point-in-time
-                facts only, earns its sentence; both sides can earn one.
+                other for four. Either side under the partial bar, or unobserved, earns its sentence
+                whether or not it produced facts — an idle hour the collector saw a quarter of is still a
+                quarter-seen window, and the empty-window sentence alone would send the reader to the
+                collection log without saying what they will find there. Both sides can earn one.
             */
             var emptyCaveat =
                 baselineServerFacts.Count == 0
@@ -435,9 +437,9 @@ public sealed class DarlingMcpTools
                         : null;
 
             var coverageCaveats = new List<string>(2);
-            if (baselineServerFacts.Count > 0 && baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved))
+            if (baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved))
                 coverageCaveats.Add($"The BASELINE window was only partly collected: {baselineCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
-            if (comparisonServerFacts.Count > 0 && comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved))
+            if (comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved))
                 coverageCaveats.Add($"The COMPARISON window was only partly collected: {comparisonCoverage.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
             if (coverageCaveats.Count > 0)
                 coverageCaveats.Add("A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.");
