@@ -39,11 +39,12 @@ public sealed class NpgsqlRootCertificateValidationTests
     {
         var generated = StoreTlsCertificates.Create("localhost", IPAddress.Loopback, validityYears: 2);
 
-        var completed = await HandshakeCompletesAsync(generated.ServerCertChainPem, generated.ServerKeyPem, generated.RootCertPem);
+        var (completed, serverFailure) = await HandshakeCompletesAsync(generated.ServerCertChainPem, generated.ServerKeyPem, generated.RootCertPem);
 
         Assert.True(completed,
             "VerifyFull with the printed root must survive Npgsql's certificate validation on this platform — " +
-            "this is the exact remote-viewer path #2117 exists to fix.");
+            "this is the exact remote-viewer path #2117 exists to fix." +
+            (serverFailure is null ? string.Empty : $" Server side of the harness failed: {serverFailure}"));
     }
 
     [Fact]
@@ -69,17 +70,22 @@ public sealed class NpgsqlRootCertificateValidationTests
         using var legacy = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(2));
 
         var pem = legacy.ExportCertificatePem();
-        var completed = await HandshakeCompletesAsync(pem, rsa.ExportPkcs8PrivateKeyPem(), pem);
+        var (completed, serverFailure) = await HandshakeCompletesAsync(pem, rsa.ExportPkcs8PrivateKeyPem(), pem);
 
         /* Recorded, not required: the CHAIN shape's test above is the guarantee. The dynamic skip
            puts the platform fact in every CI log without inventing a requirement that the legacy
            shape fail — the first cut asserted that and Windows CI refuted it. */
-        Assert.Skip($"legacy self-signed shape at VerifyFull: handshake completed = {completed} on {Environment.OSVersion.Platform}");
+        Assert.Skip($"legacy self-signed shape at VerifyFull: handshake completed = {completed} on {Environment.OSVersion.Platform}"
+            + (serverFailure is null ? string.Empty : $"; server-side failure: {serverFailure.GetType().Name}: {serverFailure.Message}"));
     }
 
-    /// <summary>Runs the fake server + a VerifyFull Npgsql connect; true when the server-side TLS
-    /// handshake completed (the client accepted the certificate).</summary>
-    private static async Task<bool> HandshakeCompletesAsync(string serverCertChainPem, string serverKeyPem, string rootPem)
+    /// <summary>Runs the fake server + a VerifyFull Npgsql connect. <c>Completed</c> is true when the
+    /// server-side TLS handshake completed (the client accepted the certificate); <c>ServerFailure</c>
+    /// is whatever the server task threw, because "completed = false" alone cannot distinguish an
+    /// Npgsql rejection from the server never reaching TLS at all — #3557 was exactly that, a
+    /// <see cref="SslStreamCertificateContext"/> chain-build failure swallowed here and misread as a
+    /// certificate-validation verdict for days.</summary>
+    private static async Task<(bool Completed, Exception? ServerFailure)> HandshakeCompletesAsync(string serverCertChainPem, string serverKeyPem, string rootPem)
     {
         var rootPath = Path.Combine(Path.GetTempPath(), $"darling-test-root-{Guid.NewGuid():N}.crt");
         await File.WriteAllTextAsync(rootPath, rootPem);
@@ -168,9 +174,10 @@ public sealed class NpgsqlRootCertificateValidationTests
                is handshakeCompleted, not the exception. */
         }
 
-        try { await serverTask; } catch { /* aborted handshakes land here; the flag says enough */ }
+        Exception? serverFailure = null;
+        try { await serverTask; } catch (Exception ex) { serverFailure = ex; /* client-rejection aborts AND pre-TLS failures both land here — return it so the caller can tell them apart */ }
         try { File.Delete(rootPath); } catch { /* temp file, best-effort */ }
 
-        return handshakeCompleted;
+        return (handshakeCompleted, serverFailure);
     }
 }
