@@ -222,6 +222,17 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
+    /// <summary>
+    /// The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653): emitted beside the value by
+    /// <see cref="BuildAlertSettingsPayload"/>, returned under <c>warnings</c> by <c>update_alert_settings</c>
+    /// when a caller sets the value, and pinned word-for-word on both by <c>DarlingMcpAlertToolsTests</c>. One
+    /// constant so the two surfaces cannot say different things about the same retired knob. Lite's
+    /// <c>McpAlertTools</c> carries the same text by hand (Lite.Tests cannot reference this assembly) and its
+    /// test reads this declaration to hold the two equal.
+    /// </summary>
+    internal const string PoisonWaitThresholdMsNote =
+        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
     /// <summary>The nested JSON shape get_alert_settings returns AND update_alert_settings echoes back — the same
     /// field names update_alert_settings accepts on the way in, so a read → modify → write round-trips.
     ///
@@ -237,17 +248,6 @@ public sealed class DarlingMcpAlertTools
     /// <c>config_notification.email_cooldown_minutes</c>, so it is passed in separately rather than read off
     /// <paramref name="s"/> — a single set equality across both planes would compare a union against one
     /// table's SELECT list and be satisfiable by drift on either side.</para></summary>
-    /// <summary>
-    /// The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653): emitted beside the value by
-    /// <see cref="BuildAlertSettingsPayload"/>, returned under <c>warnings</c> by <c>update_alert_settings</c>
-    /// when a caller sets the value, and pinned word-for-word on both by <c>DarlingMcpAlertToolsTests</c>. One
-    /// constant so the two surfaces cannot say different things about the same retired knob. Lite's
-    /// <c>McpAlertTools</c> carries the same text by hand (Lite.Tests cannot reference this assembly) and its
-    /// test reads this declaration to hold the two equal.
-    /// </summary>
-    internal const string PoisonWaitThresholdMsNote =
-        "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
-
     private static object BuildAlertSettingsPayload(
         DarlingAlertReader.AlertSettingsReadRow s, int deliveryCooldownMinutes) => new
     {
