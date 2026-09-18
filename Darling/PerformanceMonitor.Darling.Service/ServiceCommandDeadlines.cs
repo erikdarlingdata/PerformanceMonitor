@@ -86,7 +86,11 @@ public static class ServiceCommandDeadlines
     ///
     /// <para>It happens to land on the same 10 s the alert pass uses. That is two derivations meeting,
     /// not a number being reused: the alert pass is bounded above by its own 30 s sweep interval and
-    /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above.</para>
+    /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above. (That read has
+    /// since been re-pathed — #3573 found it streaming the whole fleet's window per server, and the
+    /// covering index in <c>PgTableTuning</c> made it an Index Only Scan — so its 1,744.9 ms is now the
+    /// recorded cost of a replaced plan rather than a live figure. Nothing here rested on it, which is
+    /// the point of this paragraph.)</para>
     /// </summary>
     public const int CollectionSweepSeconds = 10;
 
@@ -129,7 +133,14 @@ public static class ServiceCommandDeadlines
     /// deliberately pathological 2,925-row window (the volume a per-query cooldown of zero would produce).
     /// Those figures are from a local container, so the floor is anchored on the one COLD store read this
     /// sweep has measured in production instead: #2882's forced-plan read at <b>1,744.9 ms</b> over ~6.0 GB.
-    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it.</para>
+    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it. That anchor has since aged
+    /// in both directions and still holds as a floor: the table it was measured over grew to 23 GB and the
+    /// read's cold tail reached 10.3 s (#3573) — because its plan walked the entire fleet's two-hour slice and
+    /// filtered one server out of it, a fleet-width tax that scales with servers, not with this table — and
+    /// then the covering index in <c>PgTableTuning</c> made it an Index Only Scan over one server's rows. So
+    /// 1,744.9 ms is the recorded cost of a cold store read under an access path that no longer exists; as
+    /// a stand-in for "what a cold store read can cost here" it is, if anything, generous, and the
+    /// arithmetic above is unchanged.</para>
     ///
     /// <para><b>So the CEILING is what fixes this number, not the floor.</b> The pass budget puts it at
     /// 6 s or less and the floor only rules out the bottom two, which is worth saying plainly rather than

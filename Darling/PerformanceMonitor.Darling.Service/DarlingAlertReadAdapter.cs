@@ -62,10 +62,21 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// one read — the forced-plan check at <b>1,744.9 ms</b> cold, scanning ~6.0 GB of
     /// <c>query_store_stats</c>; every other read in the family lands under 3 ms. Ten seconds is 5.7x
     /// that worst case, so it absorbs a substantial stall rather than only the happy path. That margin
-    /// has been measured being eaten once: the collection-signals read's whole-history top-N sort grew
-    /// with the 90-day retention fill until its cold excursions clocked ~12 s against this deadline —
-    /// the first measured breach — and #3496 restored the margin by making that read chunk-orderable
-    /// rather than by moving this number.</para>
+    /// has been measured being eaten twice, and both times restored by fixing the read rather than by
+    /// moving this number. First the collection-signals read's whole-history top-N sort grew with the
+    /// 90-day retention fill until its cold excursions clocked ~12 s — the first measured breach — and
+    /// #3496 made that read chunk-orderable. Then the 1,744.9 ms read itself: the ~6.0 GB it was measured
+    /// over became 23 GB, and its plan turned out to have been paying a fleet-width tax the whole time —
+    /// the planner walked the entire fleet's two-hour slice through the time index and filtered 95% of it
+    /// away per server (<c>Rows Removed by Filter: 691,058</c>, 57,307 buffers) rather than take the
+    /// <c>(server_id, collection_time)</c> composite that was already there — so the cold tail crossed
+    /// this deadline at 10.3 s while the fixed #3496 site sat at zero (#3573). The covering index in
+    /// <c>PgTableTuning</c> made that read an Index Only Scan over one server's rows (50 buffers against
+    /// 1,514 for the same statement on the rig; see <see cref="ForcePlanFailuresSql"/>). The 1,744.9 ms
+    /// figure therefore stands as the measured floor this number was derived from and as the recorded
+    /// cost of the access path that has since been replaced, not as a current cost — and 10 s stays: the
+    /// cadence bound below has not moved, and a deadline re-fitted to a read that now costs milliseconds
+    /// would only mean the next drift is caught later.</para>
     ///
     /// <para><b>Bounded above</b> by the cadence this pass runs on: <c>s_alertSweepInterval</c> is
     /// 30 s, so one stalled read must still leave the pass able to finish inside the interval that
@@ -1092,6 +1103,20 @@ ORDER BY l.database_name";
     ///
     /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
     /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
+    ///
+    /// <para><b>The access path is a covering index, and the column list here is what it covers (#3573).</b>
+    /// <c>PgTableTuning.ForcePlanFailuresIndexName</c> is <c>(server_id, collection_time DESC) INCLUDE</c>
+    /// every other column this statement touches, so it runs as an Index Only Scan over one server's two
+    /// hours. That is not a nicety. V1's plain <c>(server_id, collection_time)</c> composite was on the
+    /// production store the whole time and the planner refused it: <c>server_id</c>'s physical correlation is
+    /// ~0.02 (forty-three servers interleaved by collection pass), so the cost model priced the composite's
+    /// heap fetches as one random page per row and preferred streaming the ENTIRE fleet's two-hour slice through
+    /// the time index — <c>Rows Removed by Filter: 691,058</c> to keep 37,878, 57,307 buffers, 422 ms warm and
+    /// a 10.3 s cold tail against the 10 s deadline. Covering deletes the heap term the model got wrong. The
+    /// consequence for anyone editing this SQL: reference a column of <c>qs</c> that the index does not carry
+    /// and nothing fails — the plan silently reverts to the fleet-wide scan. <c>ForcePlanFailuresAccessPathTests</c>
+    /// pins the two lists against each other and EXPLAINs the shipped statement against a live store; add the
+    /// column to the index in the same change or that test tells you.</para>
     /// </summary>
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
