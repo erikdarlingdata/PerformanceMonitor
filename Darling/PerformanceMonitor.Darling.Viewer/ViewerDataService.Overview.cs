@@ -1099,12 +1099,13 @@ public sealed class ServerSummaryItem
     /// was measured (amber) &gt; calm (dark). Enriches Lite's border (which only knew CPU / blocking /
     /// deadlock) with the added Threads / Memory / Collectors bands via <see cref="OverallMetricSeverity"/>.
     ///
-    /// <para>The nothing-measured arm (#3539 A6) paints the awaiting-first-collection amber rather than the
-    /// Warning orange, because that is the state it is: <see cref="OverallMetricSeverity"/> folds an
-    /// all-Unknown card to Unknown and <see cref="FleetRollup.ClassifyBand"/> bands that Warning the way
-    /// it bands a server awaiting its first collection — so the border says what the band says, in the
-    /// colour the card already uses for "nothing to report yet". A dark border here was the card claiming
-    /// calm about readings it never took.</para>
+    /// <para>The nothing-measured arm (#3539 A6) paints the Warning brush, because that is the band it is:
+    /// <see cref="OverallMetricSeverity"/> folds an all-Unknown card to Unknown and
+    /// <see cref="FleetRollup.ClassifyBand"/> bands that Warning the way it bands a server awaiting its
+    /// first collection — and the two amber arms below are the SAME hex (<c>#FFD54F</c>), so the border says
+    /// what the band says in the colour the card already uses for "nothing to report yet". A dark border
+    /// here was the card claiming calm about readings it never took. The cached brush rather than
+    /// another <c>MakeBrush</c>: this getter runs per card per refresh.</para>
     /// </summary>
     public SolidColorBrush CardBorderBrush
     {
@@ -1115,7 +1116,7 @@ public sealed class ServerSummaryItem
             {
                 HealthSeverity.Critical => s_criticalBrush,
                 HealthSeverity.Warning => s_warningBrush,
-                HealthSeverity.Unknown => MakeBrush("#FFD54F"),
+                HealthSeverity.Unknown => s_warningBrush,
                 _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
             };
         }

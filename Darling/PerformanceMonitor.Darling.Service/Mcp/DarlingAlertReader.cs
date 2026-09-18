@@ -62,8 +62,8 @@ internal static class DarlingAlertReader
     send_error,
     muted,
     detail_text,
-    dismissed,
-    context_json";
+    context_json,
+    dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
     /// end, $3 server_id, $4 limit, $5 include-dismissed (naive UTC / naive UTC / int / int / bool).
@@ -170,8 +170,10 @@ AND   dismissed = TRUE";
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 !reader.IsDBNull(9) && reader.GetBoolean(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                !reader.IsDBNull(11) && reader.GetBoolean(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12)));
+                /* context_json sits at ordinal 11 and dismissed stays the LAST column at 12 — the viewer's
+                   own column order, and the "dismissed is selected" pin anchors on it closing the list. */
+                !reader.IsDBNull(12) && reader.GetBoolean(12),
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
 
         return rows;
