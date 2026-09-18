@@ -267,6 +267,131 @@ public sealed class TimescaleSupportTests
             TimescaleSupport.StuckCompressionJobsSql, StringComparison.Ordinal);
     }
 
+    /* ---------------- the -infinity arm's sentence, by TimescaleDB version (#3591) ---------------- */
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("2.14.2")]
+    [InlineData("2.26.0")]
+    [InlineData("2.26.3")]
+    public void NegInfinityArm_BelowTheFix_OrUnknown_SaysTheSchedulerWillNeverRunIt(string? extversion)
+    {
+        /* Below 2.26.4 a persisted -infinity is returned to the scheduler as the due time and the job is never
+           due again — #1581's sentence, byte for byte, because it is true there. An unknown version (null: the
+           read failed, or the pre-#3591 callers) gets the same text on purpose: it is the sentence that costs
+           nothing when wrong on a new store and everything when wrong on an old one. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.False(TimescaleSupport.SchedulerRecoversNegativeInfinity(version));
+
+        var arm = TimescaleSupport.ClassifyCompressionJob(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var reason);
+
+        Assert.Equal(StuckCompressionJobArm.NextStartNegativeInfinity, arm);
+        Assert.Equal("next_start is -infinity — the scheduler will never run it again", reason);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityPermanentReason, reason);
+    }
+
+    [Theory]
+    [InlineData("2.26.4")]
+    [InlineData("2.27.0")]
+    [InlineData("2.28.1")]
+    [InlineData("2.29.0-dev")]
+    public void NegInfinityArm_FromTheFix_SaysCrashBackoff_AndStillFires(string extversion)
+    {
+        /* Upstream #9360 shipped in 2.26.4 (the CHANGELOG lists it there, not under 2.27.0), so from 2.26.4 the
+           only persistent -infinity is a crashed run in the scheduler's crash backoff. Same arm — the verdict
+           does not move — different sentence, naming the fix so the reader knows where the claim comes from. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.NotNull(version);
+        Assert.True(TimescaleSupport.SchedulerRecoversNegativeInfinity(version));
+
+        var arm = TimescaleSupport.ClassifyCompressionJob(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var reason);
+
+        Assert.Equal(StuckCompressionJobArm.NextStartNegativeInfinity, arm);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, reason);
+        Assert.Contains("crash backoff", reason, StringComparison.Ordinal);
+        Assert.Contains("#9360", reason, StringComparison.Ordinal);
+        Assert.Contains("2.26.4", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("never", reason, StringComparison.Ordinal);
+
+        /* And the boolean projection with the version agrees with the classifier. */
+        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: s_now.AddHours(-1),
+            scheduleInterval: TimeSpan.FromHours(1), nowUtc: s_now, timescaleVersion: version, out var boolReason));
+        Assert.Equal(reason, boolReason);
+    }
+
+    [Fact]
+    public void NegInfinityArm_TheVersionChangesTheSentenceOnly_NeverTheVerdict()
+    {
+        /* Every row shape the predicate knows, on both sides of the fix: the arm is identical, and only the
+           -infinity arm's text differs. The stuck-Running arm did not change upstream and reads the version
+           for nothing. */
+        var old = new Version(2, 26, 3);
+        var fixedVersion = new Version(2, 28, 1);
+        foreach (var (negInf, status, started) in new (bool, string, DateTime?)[]
+        {
+            (true, "Scheduled", null),                   /* the dead-job / crash-backoff arm */
+            (true, "Running", s_now.AddMinutes(-3)),     /* mid-run marker */
+            (true, "Running", s_now.AddHours(-30)),      /* hung run carrying the marker */
+            (false, "Scheduled", s_now.AddMinutes(-5)),  /* healthy */
+            (false, "Running", s_now.AddHours(-8)),      /* hung run */
+            (false, "Running", DateTime.MinValue),       /* #1760 sentinel */
+        })
+        {
+            var armOld = TimescaleSupport.ClassifyCompressionJob(negInf, status, started, TimeSpan.FromHours(1), s_now, old, out var reasonOld);
+            var armNew = TimescaleSupport.ClassifyCompressionJob(negInf, status, started, TimeSpan.FromHours(1), s_now, fixedVersion, out var reasonNew);
+            var armNone = TimescaleSupport.ClassifyCompressionJob(negInf, status, started, TimeSpan.FromHours(1), s_now, out var reasonNone);
+
+            Assert.Equal(armOld, armNew);
+            Assert.Equal(armOld, armNone);
+            Assert.Equal(reasonOld, reasonNone);  /* version-less IS the old text */
+            if (armOld == StuckCompressionJobArm.NextStartNegativeInfinity)
+            {
+                Assert.NotEqual(reasonOld, reasonNew);
+            }
+            else
+            {
+                Assert.Equal(reasonOld, reasonNew);
+            }
+        }
+    }
+
+    [Fact]
+    public void TimescaleNextStartSanitizedFrom_Is_2_26_4()
+    {
+        /* Pinned to the release the upstream CHANGELOG lists #9360 under. The issue and the first brief said
+           2.27.0; a check keyed there would have told every 2.26.4–2.26.x store the old lie. */
+        Assert.Equal(new Version(2, 26, 4), TimescaleSupport.TimescaleNextStartSanitizedFrom);
+    }
+
+    [Theory]
+    [InlineData("2.28.1", "2.28.1")]
+    [InlineData(" 2.26.4 ", "2.26.4")]
+    [InlineData("2.29.0-dev", "2.29.0")]
+    [InlineData("2.28", "2.28")]
+    public void ParseTimescaleVersion_TakesTheNumericPrefix(string raw, string expected)
+    {
+        Assert.Equal(Version.Parse(expected), TimescaleSupport.ParseTimescaleVersion(raw));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("2")]
+    [InlineData("dev")]
+    [InlineData("v2.28.1")]
+    public void ParseTimescaleVersion_AnythingElse_IsNull_WhichReadsAsOld(string? raw)
+    {
+        var parsed = TimescaleSupport.ParseTimescaleVersion(raw);
+        Assert.Null(parsed);
+        Assert.False(TimescaleSupport.SchedulerRecoversNegativeInfinity(parsed));
+    }
+
     [Fact]
     public void StuckRunningBound_UsesMaxOfTwiceIntervalAndFloor()
     {
