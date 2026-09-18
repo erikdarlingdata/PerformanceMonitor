@@ -8,6 +8,14 @@ new `config_alert_settings` columns, no migration and no Settings-window work. E
 from PostgreSQL's own mechanics (see the evaluator) rather than picked, which is why this is a defensible
 first cut rather than a shortcut — but the moment someone wants a different number, that is the work.
 
+That paragraph is about the three Tier 0 predictors this note scopes, and it still holds for them. It is
+NOT a statement about PostgreSQL alerting as a whole, which is how it was being read (#3608): the
+Deadlocks and Blocking alerts that later joined the PostgreSQL pass (#2711) got exactly the work described
+above — `pg_deadlock_count_threshold` / `pg_blocking_count_threshold` on `config_alert_settings` (#3444,
+V122), exposed on `get_alert_settings` / `update_alert_settings`, the Viewer and `darling.json` — and the
+first-target runbook's step 9 lays out which of the eight PostgreSQL alert families has a knob and which
+does not.
+
 The three Tier 0 outage predictors (`pg_wraparound_stats`, `pg_xmin_horizon`, `pg_replication_slots`) each
 name a condition that stops the server outright, and each is silent until it is nearly too late — exactly
 the profile that needs an alert rather than a dashboard. They now have one.

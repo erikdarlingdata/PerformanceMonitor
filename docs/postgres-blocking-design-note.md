@@ -1,10 +1,15 @@
 # PostgreSQL blocking chains — design note
 
-Status: **not started.** Decisions below are the ones worth making before writing code; none needs Erik
-unless flagged.
+Status: **built and shipped** — `pg_blocking` → `collect.pg_blocking_edges` (rung V71), `get_pg_blocking`,
+and the `Blocking Detected` alert with its own `pgBlockingCountThreshold` knob (#3444, V122). The decisions
+below are kept as written, for the reasoning; [What building it changed](#what-building-it-changed--2026-08-12)
+records where the live runs corrected them, and the header notes on `PgBlockingCollector` are the current
+word on what shipped. This header used to read "not started", which was true on the day and stale for a
+month after — the kind of denial #3608 was filed about.
 
 The SQL Server side has three blocking surfaces (`dmv_blocking_snapshots`, `blocked_process_reports`,
-`get_blocking`). PostgreSQL has none of it yet, and blocking is the condition people actually call about.
+`get_blocking`). PostgreSQL had none of it when this was written, and blocking is the condition people
+actually call about.
 
 ## What the source looks like
 
