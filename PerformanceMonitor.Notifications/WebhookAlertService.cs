@@ -547,6 +547,14 @@ public class WebhookAlertService
     /// <c>Details</c> section ahead of the per-incident ones, because a multi-paragraph remedy in a
     /// label/value fact renders as an unreadable column — <c>text</c> is the MessageCard-native place for
     /// prose, and the snooze footer already uses it.</para>
+    /// <para>#3612: this card carries NO analogue of the Slack block budget, on purpose. The MessageCard
+    /// format has no section-count limit (its reference offers "don't include more than 10 sections" as a
+    /// readability guideline, not a rejection), and the connector's one hard ceiling is the ~28 KB payload.
+    /// The analysis page that Slack lost renders here at 16.6 KB with its 21 items and 17.4 KB at the 25
+    /// items the heaviest shape the story can produce (fifteen incidents, the most three five-row
+    /// drill-downs can surface) — about 210 bytes per incident, so the cap is some fifty incidents away
+    /// from any shape a producer can emit. <c>SlackDetailsSizeTests</c> pins the heaviest shape against
+    /// the cap so a producer that widens the page finds out there rather than in a lost delivery.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -805,11 +813,62 @@ public class WebhookAlertService
     internal const int SlackTextObjectLimit = 3000;
 
     /// <summary>
-    /// Slack's documented ceiling on blocks per message. The prose splitter
-    /// (<see cref="AddSlackProseSections"/>) spends only what the payload's OTHER blocks leave over,
-    /// because a fifty-first block fails the delivery as surely as an oversized text object does.
+    /// Slack's documented ceiling on blocks per message. A fifty-first block fails the delivery as surely
+    /// as an oversized text object does, and it fails it with the SAME error string — which is how #3612
+    /// hid behind #3493 for two builds. Both splitters spend only what the payload's other blocks leave
+    /// over: the prose splitter (<see cref="AddSlackProseSections"/>) since #3493, the structured details
+    /// (<see cref="AddSlackDetailBlocks"/>) since #3612.
+    ///
+    /// <para>Measured live (#3612): three analysis pages — the product's highest-severity compound
+    /// findings, five-fact stories rooted in a plan regression — died with <c>invalid_attachments</c>
+    /// across two builds while a three-fact page delivered through the same webhook the same hour. The
+    /// monitoring seat's read of the persisted <c>context_json</c> named the separator: every text
+    /// object on the failed pages was under its cap (their longest body was 2,122 characters, and a
+    /// DELIVERED page carried a 2,835-character one), and the failed pages carried 19–21 detail items against
+    /// the largest delivered page's 18. At roughly two blocks per item plus the fixed head and tail,
+    /// that is the fifty-block line. The fixture in <c>SlackDetailsSizeTests</c> reproduces the shape
+    /// from source: ten items the story's drill-downs produce (33 blocks) plus one two-block incident
+    /// item per distinct query hash, so seven or more incidents cross the limit.</para>
     /// </summary>
     internal const int SlackMessageBlockLimit = 50;
+
+    /// <summary>
+    /// Slack's documented ceiling on ONE text object inside a section's <c>fields</c> — tighter than the
+    /// <see cref="SlackTextObjectLimit"/> a section's own text gets. Applied to every detail field
+    /// (<see cref="SlackFieldText"/>) as the field-side half of the #3612 discipline. No observed page
+    /// has approached it (the analysis formatter truncates drill-down values at 300 characters and the
+    /// longest measured field text is 318), so this is hygiene rather than the fix; the fix is the block
+    /// budget.
+    /// </summary>
+    internal const int SlackFieldTextLimit = 2000;
+
+    /// <summary>
+    /// The most of a detail's heading a Slack section carries. Headings are producer literals and
+    /// humanized drill-down keys — the longest observed is an advice headline under 100 characters — so
+    /// this never fires on a real page; it exists because the body splitter sizes its per-section
+    /// capacity as the text-object ceiling minus the heading's width, and an unbounded heading would
+    /// leave it no capacity at all.
+    /// </summary>
+    private const int SlackDetailHeadingLimit = 500;
+
+    /// <summary>
+    /// What the stated-omission item for dropped details costs: its own divider, so it reads as the
+    /// final item rather than as a continuation of whichever detail happened to be last, and one section.
+    /// </summary>
+    private const int SlackDetailOmissionCost = 2;
+
+    /// <summary>How much of the omitted details' heading list the stated-omission item quotes before
+    /// cutting it, so a message with dozens of dropped items cannot blow the omission section past the
+    /// text-object ceiling it exists to respect.</summary>
+    private const int SlackOmittedHeadingsLimit = 1000;
+
+    /// <summary>
+    /// Where every stated omission points: the full document has always lived in the alert row (the
+    /// prose as <c>detail_text</c>, the details as <c>context_json</c>) and in the email body, the way
+    /// <see cref="TsqlWebhookHint"/> already points there. One string, so the three omission sites
+    /// (prose lines, dropped details, truncated fields) cannot drift into three different directions.
+    /// </summary>
+    private const string SlackOmissionPointer = " - see email or in-app Alert Details for the full text.";
 
     /// <summary>The prose sections' leading header — on the FIRST section only; see
     /// <see cref="AddSlackProseSections"/> for why continuations carry nothing.</summary>
@@ -840,8 +899,16 @@ public class WebhookAlertService
     /// boundaries, because the long-prose producers are line-oriented documents (the Collector Cost
     /// Digest is one mover per line) and a line cut mid-thought misstates a figure. Consecutive sections
     /// carry no divider between them, so a split reads as one continued document; only the first section
-    /// leads with the <c>*Details*</c> header, and continuations carry nothing — a repeated header would
+    /// leads with <paramref name="header"/>, and continuations carry nothing — a repeated header would
     /// read as several detail sections rather than one that continued.
+    ///
+    /// <para><b>One splitter, two callers (#3612).</b> The header is a parameter because the alert's
+    /// flat prose (<see cref="SlackProseHeader"/>) and a structured detail's <see cref="AlertDetailItem.Body"/>
+    /// (<c>*Heading*</c>) are the same thing to Slack — one mrkdwn section under one ceiling — and #3493
+    /// covered only the first. The analysis pages carry their whole substance as details and deliver no
+    /// prose at all, so a second, detail-side splitter would have been a second contract to keep in step;
+    /// instead <see cref="AddSlackDetailBlocks"/> routes every body through this one, and the omission
+    /// wording, the continuation marker and the packing arithmetic are shared by construction.</para>
     ///
     /// <para><b>The block budget, and what yields to it.</b> <paramref name="blockBudget"/> is what the
     /// payload's other blocks leave under <see cref="SlackMessageBlockLimit"/>, and the PROSE is what
@@ -849,7 +916,11 @@ public class WebhookAlertService
     /// real payload shapes carry: the producers with long prose (the digest, the self-alerts) fire with
     /// no structured context at all, and the alerts with heavy per-incident details carry prose that is
     /// short or suppressed as redundant (<see cref="AlertDetailText.ProseForDelivery"/>), so the yielding
-    /// branch never costs a real payload both halves at once.</para>
+    /// branch never costs a real payload both halves at once. Since #3612 the details are themselves
+    /// bounded, and they reserve one block for the prose when there is one, so every caller hands in a
+    /// budget of at least one — and the packer floors it at one locally as well, so the invariant the
+    /// repack loop depends on (it terminates by reaching its final block) does not live only in three
+    /// call sites' subtraction (review note on #3618).</para>
     ///
     /// <para><b>Degrading is stated, never silent.</b> A prose the budget cannot hold keeps as many whole
     /// lines as fit and ends with one omission line naming HOW MANY lines were dropped and quoting the
@@ -857,33 +928,39 @@ public class WebhookAlertService
     /// magnitude), so the first dropped line is the headline of what the reader is not seeing, and an
     /// omission note that is itself vague would recreate the silent-truncation problem one level up. The
     /// full text has always lived in the alert row and the email body, so the omission line points there
-    /// the way <see cref="TsqlWebhookHint"/> already does.</para>
+    /// (<see cref="SlackOmissionPointer"/>) the way <see cref="TsqlWebhookHint"/> already does.</para>
     ///
     /// <para>A budget of one matches the pre-#3493 block cost exactly (the old single section also cost
     /// one block), so a payload whose OTHER blocks already crowd the message limit is no worse off than
     /// it ever was — the prose does not decide that verdict.</para>
     /// </summary>
-    private static void AddSlackProseSections(List<object> blocks, string prose, int blockBudget)
+    private static void AddSlackProseSections(List<object> blocks, string header, string prose, int blockBudget)
     {
         /* Uniform per-section line capacity, sized to the first section (the only one carrying the
            header): continuations run a header's width under the ceiling, which keeps the packing
-           single-pass. */
-        var capacity = SlackTextObjectLimit - SlackProseHeader.Length;
+           single-pass. The header is bounded by its producers (SlackDetailHeadingLimit for a detail's
+           heading), so the capacity is always comfortably positive. */
+        var capacity = SlackTextObjectLimit - header.Length;
 
         /* The one-section fast path IS the pre-#3493 rendering, byte for byte — 1-mover digests and
-           every ordinary alert take it, so their payloads do not change shape at all. */
+           every ordinary alert take it, and so does every detail body an analysis page has ever carried
+           (the longest measured is 2,835 characters), so their payloads do not change shape at all. */
         if (prose.Length <= capacity)
         {
-            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*Details*\n{prose}" } });
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = header + prose } });
             return;
         }
 
+        /* The floor is local on purpose: PackProseLines' repack loop terminates by reaching its final
+           block, which a budget of zero would never present, and a budget below one cannot render any
+           section anyway. Every caller already hands in at least one; this keeps that true if one of
+           them is edited. */
         var lines = SplitProseIntoSectionSafeLines(prose, capacity);
-        var texts = PackProseLines(lines, capacity, blockBudget);
+        var texts = PackProseLines(lines, capacity, Math.Max(1, blockBudget));
 
         for (var i = 0; i < texts.Count; i++)
         {
-            var text = i == 0 ? SlackProseHeader + texts[i] : texts[i];
+            var text = i == 0 ? header + texts[i] : texts[i];
             blocks.Add(new { type = "section", text = new { type = "mrkdwn", text } });
         }
     }
@@ -995,7 +1072,7 @@ public class WebhookAlertService
             : firstDropped[..SlackOmissionFragmentLimit] + "...";
         var noun = dropped == 1 ? "line" : "lines";
         var omission = string.Create(CultureInfo.InvariantCulture,
-            $"... and {dropped:N0} more {noun}, first omitted: \"{fragment}\" - see email or in-app Alert Details for the full text.");
+            $"... and {dropped:N0} more {noun}, first omitted: \"{fragment}\"{SlackOmissionPointer}");
 
         if (sb.Length > 0)
         {
@@ -1005,6 +1082,237 @@ public class WebhookAlertService
         sb.Append(omission);
         texts.Add(sb.ToString());
         return texts;
+    }
+
+    /// <summary>
+    /// Appends <paramref name="details"/> as divider-led block runs — the rendering every structured
+    /// detail has always had — inside <paramref name="blockBudget"/>, dropping WHOLE details from the
+    /// end and stating what was dropped when they cannot all fit. The detail-side half of the #3493
+    /// discipline, added by #3612 after three analysis pages were lost to it.
+    ///
+    /// <para><b>Why the block total is the fix, and why it is a budget on blocks rather than on facts or
+    /// details.</b> An analysis page carries its whole finding as details: a Diagnosis item, the advice,
+    /// the remediation T-SQL pointer, one item per drill-down the story's fact keys attach (a five-fact
+    /// plan-regression story attaches seven, and three of them are 30–40 fields wide, so four or five
+    /// blocks each), and one incident item per distinct query hash the drill-downs surfaced (up to fifteen).
+    /// Measured from source for that story: two head blocks, 33 blocks for the ten fixed items, two
+    /// blocks per incident, and two footer blocks — 37 + 2×incidents — so the seventh incident is the
+    /// fifty-first block. The count that matters is blocks: a four-fact story with wider drill-downs can
+    /// reach the line with fewer items, and the SAME 18 items can land either side of it depending on how
+    /// many fields each carries, which is why the budget is computed from the rendered runs and not from
+    /// any count upstream of them.</para>
+    ///
+    /// <para><b>What drops first.</b> Producers order their details most-essential-first — the analysis
+    /// path emits Diagnosis, then Advice, then the T-SQL pointer, then the drill-downs, then the incident
+    /// fingerprints; the engine alerts emit the finding's own items before the per-incident ones — so
+    /// keeping the longest PREFIX that fits keeps the finding and drops the drill-down's tail. A body
+    /// detail that reaches the boundary is not dropped whole: it takes the blocks that remain and states
+    /// its own line omission, because the advice is the finding and a shortened advice beats a missing
+    /// one. No detail is skipped to make room for a smaller one behind it; a reader who sees
+    /// "Incident 6 of 11" and then the omission item knows exactly where the message stopped. The
+    /// omission item's two blocks are held back only while something can still be dropped: the LAST
+    /// detail is offered the whole remainder, so a page whose only degradation is a shortened body
+    /// carries no omission item — the body's own line omission is the whole truth of it — and no item is
+    /// dropped to make room for an announcement that costs what the item did.</para>
+    ///
+    /// <para><b>The omission is stated, and it names the items.</b> The final run is a divider and one
+    /// section naming how many details were dropped and listing their headings — the headings ARE the
+    /// identity of a detail ("Regressed Queries", "Incident 7 of 11"), so a reader knows what to open
+    /// the alert for — and pointing at the surfaces that carry the whole document
+    /// (<see cref="SlackOmissionPointer"/>): the alert row's <c>context_json</c> renders in full in-app
+    /// and in the email, neither of which has a block limit. Its cost
+    /// (<see cref="SlackDetailOmissionCost"/>) is charged against the budget before any detail is
+    /// kept, so the omission item is always affordable when it is needed.</para>
+    ///
+    /// <para><b>A page that fits is byte-identical.</b> When every run fits the budget the runs are
+    /// appended exactly as the pre-#3612 loop appended them — the same anonymous shapes in the same
+    /// order — so every engine alert and every analysis page that delivered before this change
+    /// serializes to the same bytes after it. The text-object caps the runs apply
+    /// (<see cref="RenderSlackDetail"/>) only change a payload that would have been rejected.</para>
+    /// </summary>
+    private static void AddSlackDetailBlocks(List<object> blocks, List<AlertDetailItem> details, int blockBudget)
+    {
+        if (details.Count == 0)
+        {
+            return;
+        }
+
+        /* First pass: every detail rendered whole, each body free to take as many sections as it needs.
+           This is the answer whenever it fits, and it is the pre-#3612 rendering. */
+        var runs = new List<List<object>>(details.Count);
+        var total = 0;
+        foreach (var detail in details)
+        {
+            var run = RenderSlackDetail(detail, bodyBlockBudget: int.MaxValue);
+            runs.Add(run);
+            total += run.Count;
+        }
+
+        if (total <= blockBudget)
+        {
+            foreach (var run in runs)
+            {
+                blocks.AddRange(run);
+            }
+
+            return;
+        }
+
+        /* Over budget: keep the longest prefix whose runs fit beside the omission item. A body detail at
+           the boundary is re-rendered into whatever remains rather than dropped — see the doc block. The
+           omission item's cost is bounded by the budget itself so a degenerate budget (one block) still
+           states the omission rather than overflowing; the real budgets are in the forties. A budget of
+           zero or less leaves no block to state anything in, so nothing is appended — the only honest
+           rendering of a budget that cannot exist: the head is two blocks and the footer at most two, so
+           the caller hands in forty-five or more, and a change to that composition is what this comment
+           is for. */
+        var omissionCost = Math.Min(SlackDetailOmissionCost, Math.Max(0, blockBudget));
+        var spent = 0;
+        var kept = 0;
+        while (kept < details.Count)
+        {
+            /* The omission item is only owed when something AFTER this detail is dropped, so the last
+               detail is offered the whole remainder, reserve included: a last body shrinks into two more
+               blocks, and a last small item that fits in the reclaimed two is kept instead of being
+               replaced by an omission item of the same cost that would announce it (review catch on
+               #3618). For every other detail the reserve stands, and a body shrunk into it fills the
+               remainder exactly, so the detail after it necessarily drops and the item is earned. */
+            var last = kept == details.Count - 1;
+            var remaining = blockBudget - spent - (last ? 0 : omissionCost);
+            var run = runs[kept];
+            if (run.Count > remaining)
+            {
+                var detail = details[kept];
+                /* One divider plus at least one section is the least a body detail can cost. */
+                if (string.IsNullOrEmpty(detail.Body) || detail.IsCodeBlock || remaining < 2)
+                {
+                    break;
+                }
+
+                run = RenderSlackDetail(detail, bodyBlockBudget: remaining - 1);
+                if (run.Count > remaining)
+                {
+                    break;
+                }
+            }
+
+            blocks.AddRange(run);
+            spent += run.Count;
+            kept++;
+        }
+
+        /* Nothing dropped — the boundary body's own line omission already states its cut — or no block
+           to state a drop in: either way an omission item here would be a false statement. */
+        var dropped = details.Count - kept;
+        if (dropped == 0 || omissionCost == 0)
+        {
+            return;
+        }
+
+        var list = new StringBuilder();
+        for (var i = kept; i < details.Count; i++)
+        {
+            if (list.Length > 0)
+            {
+                list.Append("; ");
+            }
+
+            list.Append(details[i].Heading);
+        }
+
+        var headings = list.Length <= SlackOmittedHeadingsLimit
+            ? list.ToString()
+            : list.ToString(0, SlackOmittedHeadingsLimit) + "...";
+
+        var noun = dropped == 1 ? "detail" : "details";
+        var omission = string.Create(CultureInfo.InvariantCulture,
+            $"*Omitted from this message*\n{dropped:N0} more {noun} did not fit Slack's {SlackMessageBlockLimit}-block message limit: {headings}{SlackOmissionPointer}");
+
+        if (omissionCost == SlackDetailOmissionCost)
+        {
+            blocks.Add(new { type = "divider" });
+        }
+
+        blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = omission } });
+    }
+
+    /// <summary>
+    /// One detail's block run: its leading divider, then the shape its kind has always rendered — a
+    /// fixed pointer for remediation T-SQL (never inlined on a chat surface), a <c>*Heading*</c>-led
+    /// mrkdwn section for a body, or field sections (heading first, then <c>*label:*</c> fields) for
+    /// everything else. #3612 bounds each text object in the run: the body goes through the prose
+    /// splitter (<see cref="AddSlackProseSections"/>) with the heading as its header and
+    /// <paramref name="bodyBlockBudget"/> as its block budget, and every field through
+    /// <see cref="SlackFieldText"/>. A detail inside every cap renders the pre-#3612 bytes.
+    /// </summary>
+    private static List<object> RenderSlackDetail(AlertDetailItem detail, int bodyBlockBudget)
+    {
+        var run = new List<object> { new { type = "divider" } };
+        var heading = SlackHeading(detail.Heading);
+
+        if (detail.IsCodeBlock)
+        {
+            /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
+            run.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{heading}*\n{TsqlWebhookHint}" } });
+            return run;
+        }
+
+        if (!string.IsNullOrEmpty(detail.Body))
+        {
+            /* Advice prose flows as mrkdwn sections; the synthesized Body is
+               "Investigation: ...\n\nRemediation: ..." which Slack renders verbatim. One section when it
+               fits the ceiling (every observed body does); split on line boundaries when it does not. */
+            AddSlackProseSections(run, $"*{heading}*\n", detail.Body, bodyBlockBudget);
+            return run;
+        }
+
+        var detailFields = new List<object>();
+        detailFields.Add(new { type = "mrkdwn", text = $"*{heading}*" });
+
+        foreach (var (label, value) in detail.Fields)
+        {
+            detailFields.Add(new { type = "mrkdwn", text = SlackFieldText(label, value) });
+        }
+
+        AddSlackFieldSections(run, detailFields);
+        return run;
+    }
+
+    /// <summary>A detail heading bounded to <see cref="SlackDetailHeadingLimit"/>; unchanged for every
+    /// heading a producer has ever emitted.</summary>
+    private static string SlackHeading(string heading) =>
+        heading.Length <= SlackDetailHeadingLimit ? heading : heading[..SlackDetailHeadingLimit] + "...";
+
+    /// <summary>
+    /// One detail field's text object, <c>*label:*</c> over its value, inside
+    /// <see cref="SlackFieldTextLimit"/>. A value too long for the field keeps its leading stretch and
+    /// states the cut inline — how many characters were omitted and where the whole value lives — the
+    /// same posture as the prose and detail omissions, in the field's own text because a field has no
+    /// room for a closing line. Two passes size the kept stretch: the first against the longest count
+    /// the note could carry, the second against the count it actually carries, so the result never
+    /// exceeds the limit. Every field inside the limit renders the pre-#3612 bytes.
+    /// </summary>
+    private static string SlackFieldText(string label, string value)
+    {
+        var prefix = $"*{label}:*\n";
+        if (prefix.Length + value.Length <= SlackFieldTextLimit)
+        {
+            return prefix + value;
+        }
+
+        static string Note(int omitted) => string.Create(CultureInfo.InvariantCulture,
+            $"... ({omitted:N0} more characters{SlackOmissionPointer.TrimEnd('.')})");
+
+        /* The label is producer-controlled and short; a label that alone crowds the field is bounded so
+           the arithmetic below stays positive. */
+        if (prefix.Length > SlackFieldTextLimit / 2)
+        {
+            prefix = prefix[..(SlackFieldTextLimit / 2)];
+        }
+
+        var keep = Math.Max(0, SlackFieldTextLimit - prefix.Length - Note(value.Length).Length);
+        var note = Note(value.Length - keep);
+        return prefix + value[..keep] + note;
     }
 
     /// <summary>
@@ -1018,6 +1326,11 @@ public class WebhookAlertService
     /// the per-incident dividers so the remedy reads before the drill-down. #3493: as many section blocks
     /// as its size needs rather than one, each inside Slack's per-text-object ceiling and all of them
     /// inside the message's block budget — see <see cref="AddSlackProseSections"/>.</para>
+    /// <para>#3612: the structured details are under the same discipline — every body through the same
+    /// splitter, every field inside the field cap, and the whole run inside the block budget the head and
+    /// footer leave, dropping whole details from the end with the omission stated — see
+    /// <see cref="AddSlackDetailBlocks"/>. The message never exceeds <see cref="SlackMessageBlockLimit"/>
+    /// blocks by construction, whichever half is heavy.</para>
     /// </summary>
     internal static string BuildSlackPayload(
         string metricName,
@@ -1077,51 +1390,21 @@ public class WebhookAlertService
 
         AddSlackFieldSections(blocks, fields);
 
-        /* #3493: everything that renders BELOW the prose is composed first, into its own list, because
-           the prose splitter can only spend what the rest of the message leaves under the 50-block
-           budget — and "the rest" includes blocks that have not been appended yet. The visual order is
-           unchanged: the tail is appended after the prose sections, exactly where these blocks always
-           rendered. */
-        var tailBlocks = new List<object>();
-
-        if (context?.Details != null)
-        {
-            foreach (var detail in context.Details)
-            {
-                tailBlocks.Add(new { type = "divider" });
-
-                if (detail.IsCodeBlock)
-                {
-                    /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
-                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{TsqlWebhookHint}" } });
-                    continue;
-                }
-
-                if (!string.IsNullOrEmpty(detail.Body))
-                {
-                    /* Advice prose flows as a single mrkdwn section; the synthesized Body is
-                       "Investigation: ...\n\nRemediation: ..." which Slack renders verbatim. */
-                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
-                    continue;
-                }
-
-                var detailFields = new List<object>();
-                detailFields.Add(new { type = "mrkdwn", text = $"*{detail.Heading}*" });
-
-                foreach (var (label, value) in detail.Fields)
-                {
-                    detailFields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
-                }
-
-                AddSlackFieldSections(tailBlocks, detailFields);
-            }
-        }
+        /* #3493 / #3612: the message is composed in three runs and budgeted in the order of what is
+           FIXED first. The head (above: one header block and one field section, since the lead fields
+           never exceed ten) and the footer (below: the triage button when there is one, and the context
+           line — one or two blocks) are small and cannot yield; the structured details are bounded next,
+           against what the head and footer leave under the 50-block limit less one block held for the
+           prose when there is one; the prose is packed last into exactly what remains. Composed out of
+           visual order because a budget can only count blocks that already exist. The visual order is
+           unchanged: head, prose, details, footer — exactly where each has always rendered. */
+        var footerBlocks = new List<object>();
 
         /* #2710: the triage-page link button, above the footer so it reads as part of the alert rather than
            the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
         if (triageUrl is not null)
         {
-            tailBlocks.Add(new
+            footerBlocks.Add(new
             {
                 type = "actions",
                 elements = new object[]
@@ -1145,21 +1428,35 @@ public class WebhookAlertService
             contextElements.Add(new { type = "mrkdwn", text = branding.SnoozeHint });
         }
 
-        tailBlocks.Add(new
+        footerBlocks.Add(new
         {
             type = "context",
             elements = contextElements
         });
 
-        /* #3297: the prose detail, before the per-incident dividers; #3493: split across as many section
-           blocks as its size needs, inside the block budget the head and tail leave over. */
-        if (prose is not null)
+        /* #3612: the structured details, inside the budget the head and footer leave — less the one
+           block the prose needs to state itself when there is prose. The analysis pages that were lost
+           carry their whole finding here and deliver no prose, so on them this budget is the fix; see
+           AddSlackDetailBlocks for what drops first and how the omission is stated. */
+        var detailBlocks = new List<object>();
+        if (context?.Details is { Count: > 0 } details)
         {
-            AddSlackProseSections(blocks, prose,
-                blockBudget: Math.Max(1, SlackMessageBlockLimit - blocks.Count - tailBlocks.Count));
+            var proseReserve = prose is not null ? 1 : 0;
+            AddSlackDetailBlocks(detailBlocks, details,
+                blockBudget: SlackMessageBlockLimit - blocks.Count - footerBlocks.Count - proseReserve);
         }
 
-        blocks.AddRange(tailBlocks);
+        /* #3297: the prose detail, before the per-incident dividers; #3493: split across as many section
+           blocks as its size needs, inside the block budget the head, details and footer leave over —
+           at least one, because the details reserved it. */
+        if (prose is not null)
+        {
+            AddSlackProseSections(blocks, SlackProseHeader, prose,
+                blockBudget: SlackMessageBlockLimit - blocks.Count - detailBlocks.Count - footerBlocks.Count);
+        }
+
+        blocks.AddRange(detailBlocks);
+        blocks.AddRange(footerBlocks);
 
         var payload = new
         {
