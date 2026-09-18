@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <summary>
 /// Collects facts from Darling's Postgres store for the analysis engine — Lite's
 /// <c>DuckDbFactCollector</c> ported method-for-method (Phase-5 analysis slice AN2a): the same
-/// 28 collect methods across the same seven partial files, the same fact keys / values /
+/// collect methods across the same seven partial files (thirty-one fact readers plus the #3538
+/// coverage witness, censused by name in <c>PgFactCollectorTests</c>), the same fact keys / values /
 /// metadata shapes, the same emission order, and the same per-method degrade-to-no-facts error
 /// posture — a missing table or empty store yields "no facts", never an exception. Since #2826
 /// that degradation is REPORTED rather than silent on both sides (see
@@ -170,6 +171,10 @@ public sealed partial class PgFactCollector : IFactCollector
     {
         var facts = new List<Fact>();
 
+        /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
+           it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
+           denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
+        await CollectObservedCoverageAsync(context, facts);
         await CollectWaitStatsFactsAsync(context, facts);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);
@@ -215,6 +220,7 @@ public sealed partial class PgFactCollector : IFactCollector
     /// </summary>
     public static IReadOnlyList<string> AllSql { get; } = new[]
     {
+        CoverageSql,
         WaitStatsSql,
         BlockingSql,
         BlockingChainSql,

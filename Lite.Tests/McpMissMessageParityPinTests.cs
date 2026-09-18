@@ -91,6 +91,23 @@ public sealed class McpMissMessageParityPinTests
         "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against.",
         "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against.",
 
+        /* The analysis family's coverage caveats (#3538 A2). The NUMBERS in them come from
+           WindowCoverage.Describe(), shared by construction; what lives twice is the sentence each tool
+           body wraps around them, and that is what would drift — one SKU telling a caller its rates are
+           per observed time while the other said nothing. analyze_server (findings and the scoped
+           all-clear), get_analysis_facts (the partial caveat and the unobserved miss), compare_analysis
+           (either side partly collected, and the closing warning). */
+        "Rates and fractions below are per observed time, so they are not deflated by the gap — but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped.",
+        "of this window the collector observed — a PARTIAL reading, not a full all-clear. ",
+        ". The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
+        "Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole.",
+        ", so no windowed fact (wait fractions, blocking or deadlock rates) exists to show.",
+        "point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those.",
+        "The BASELINE window was only partly collected: ",
+        "The COMPARISON window was only partly collected: ",
+        ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
+        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
+
         /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
            window) no other read has. */
         "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",

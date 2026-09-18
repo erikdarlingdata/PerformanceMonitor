@@ -143,6 +143,16 @@ public sealed class DarlingAnalysisService
     public string? WindowEmptyMessage { get; private set; }
 
     /// <summary>
+    /// How much of the last pass's window the collector actually observed (#3538 A2), stamped by the
+    /// fact collector and carried out here the way <see cref="WindowEmptyMessage"/> is, because the
+    /// findings list cannot say it: a pass over a window with a three-hour hole returns the SAME shape as
+    /// a pass over a fully collected one, and only this tells the caller that the rates were divided by
+    /// one hour rather than four and that the caveat is owed. Null when the pass never reached
+    /// collection (the data-span gate, or a fault before it).
+    /// </summary>
+    public WindowCoverage? LastWindowCoverage { get; private set; }
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -226,6 +236,7 @@ public sealed class DarlingAnalysisService
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
+        LastWindowCoverage = null;
         EndedEarlyAs = null;
 
         try
@@ -264,26 +275,50 @@ public sealed class DarlingAnalysisService
 
             // 1. Collect facts from the Postgres store
             var facts = await _collector.CollectFactsAsync(context);
+            LastWindowCoverage = context.Coverage;
 
-            if (facts.Count == 0)
+            if (facts.Count == 0 || context.ObservedDurationMs <= 0)
             {
                 /* #3524: the span gate above passed on LIFETIME history, so an empty WINDOW here means
                    collection stopped producing rows for it — not that the server is healthy. Say so,
-                   instead of returning a bare [] that reads exactly like "analyzed and found nothing". */
-                WindowEmptyMessage =
-                    $"No facts were collected in the analysis window " +
-                    $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC) " +
-                    $"even though this server has {dataSpanHours:F1} hours of total collected history. " +
-                    "Collection appears to have stopped or broken for this window, so nothing was measured " +
-                    "— this is NOT an all-clear.";
+                   instead of returning a bare [] that reads exactly like "analyzed and found nothing".
+
+                   #3538 A2 widens the branch to a window with NO OBSERVED COLLECTION TIME even when some
+                   facts exist. The facts that survive an unobserved window are the point-in-time ones
+                   (server config, trace flags, hardware) — read from the latest row regardless of
+                   window — and scoring those alone would produce a pass whose every windowed rate is
+                   absent and whose all-clear (or config-only findings) still reads as "analyzed this
+                   window". Nothing was measured over the window; the same envelope says so. */
+                var unobserved = facts.Count > 0;
+                WindowEmptyMessage = unobserved
+                    ? $"The collector observed none of the analysis window " +
+                      $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC): " +
+                      $"no collection interval landed inside it, even though this server has {dataSpanHours:F1} hours " +
+                      $"of total collected history. The {facts.Count} fact(s) that could still be read are point-in-time " +
+                      "configuration and state, not measurements of this window. Collection appears to have stopped or " +
+                      "broken for this window, so nothing was measured — this is NOT an all-clear."
+                    : $"No facts were collected in the analysis window " +
+                      $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC) " +
+                      $"even though this server has {dataSpanHours:F1} hours of total collected history. " +
+                      "Collection appears to have stopped or broken for this window, so nothing was measured " +
+                      "— this is NOT an all-clear.";
 
                 _logger?.LogWarning(
-                    "[DarlingAnalysisService] No facts in the analysis window for {Server} ({Start} to {End}) " +
-                    "despite {Span:F1}h of total history — collection may be down",
-                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours);
+                    "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
+                    "despite {Span:F1}h of total history — collection may be down ({FactCount} point-in-time fact(s) only)",
+                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
+            }
+
+            if (context.Coverage is { IsPartial: true } partial)
+            {
+                /* Logged, not just carried: a scheduled pass has no payload to put the caveat in, and
+                   the persisted findings from this pass were rated against the observed hours. */
+                _logger?.LogWarning(
+                    "[DarlingAnalysisService] Partial collection coverage for {Server}: {Coverage} — rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole",
+                    context.ServerName, partial.Describe());
             }
 
             context.CancellationToken.ThrowIfCancellationRequested();
@@ -430,13 +465,16 @@ public sealed class DarlingAnalysisService
 
     /// <summary>
     /// Runs the collect + score pipeline without graph traversal.
-    /// Returns raw scored facts with amplifier details for direct inspection.
+    /// Returns raw scored facts with amplifier details for direct inspection, together with the
+    /// window's observed coverage (#3538 A2) — returned rather than parked on a property because this
+    /// path has no <see cref="IsAnalyzing"/> guard and two on-demand callers can overlap; a shared
+    /// property would let one read the other's window. Coverage is null only when collection threw.
     ///
     /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
     /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
     /// write-side question — this is a read that happens to score what it read.</para>
     /// </summary>
-    public async Task<List<Fact>> CollectAndScoreFactsAsync(
+    public async Task<(List<Fact> Facts, WindowCoverage? Coverage)> CollectAndScoreFactsAsync(
         int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
@@ -454,22 +492,25 @@ public sealed class DarlingAnalysisService
         try
         {
             var facts = await _collector.CollectFactsAsync(context);
-            if (facts.Count == 0) return facts;
+            if (facts.Count == 0) return (facts, context.Coverage);
             _scorer.ScoreAll(facts);
-            return facts;
+            return (facts, context.Coverage);
         }
         catch (Exception ex)
         {
             _logger?.LogError("[DarlingAnalysisService] Fact collection failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return [];
+            return ([], null);
         }
     }
 
     /// <summary>
-    /// Compares analysis of two time periods, returning facts from both for comparison.
+    /// Compares analysis of two time periods, returning facts from both for comparison, each with its
+    /// window's observed coverage (#3538 A2) so the caller can say when one side was only partly
+    /// collected — the case the empty-window caveats never reached, where a half-collected window
+    /// produces confident numbers with nothing to flag them.
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd)
@@ -498,13 +539,13 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            return (baselineFacts, comparisonFacts);
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage);
         }
         catch (Exception ex)
         {
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return ([], []);
+            return ([], [], null, null);
         }
     }
 

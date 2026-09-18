@@ -12,11 +12,150 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgFactCollector
 {
+    /// <summary>
+    /// The coverage witness (#3538 A2): how much of the window the collector actually observed, from the
+    /// wait-stats collection series — the same rows <see cref="WaitStatsSql"/> sums, so numerator and
+    /// denominator agree about when the collector was up. <see cref="WindowCoverage"/> carries the full
+    /// argument for the three rules; the parameters are what make them concrete:
+    /// <list type="bullet">
+    /// <item><description><c>$1..$3</c> server and window, as every windowed fact query binds
+    /// them.</description></item>
+    /// <item><description><c>$4</c> = window start minus the gap policy: the scan reaches back ONE policy
+    /// so the first in-window row can find its predecessor (its interval is then clipped to the window
+    /// by the <c>GREATEST</c>). A predecessor further back than that would have exceeded the policy
+    /// anyway, so nothing honest is lost by not looking further.</description></item>
+    /// <item><description><c>$5</c> = <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, bound
+    /// rather than inlined so this query and the calculator that produced the deltas can never disagree
+    /// about where "observed" ends. An interval past it is credited as 0 (its delta was discarded) and is
+    /// reported separately as a discarded stretch for the largest-gap figure.</description></item>
+    /// </list>
+    /// <c>DISTINCT collection_time</c> because a collection writes one row per wait type; the interval
+    /// belongs to the collection, not to each of its hundred rows. Shared dialect, byte-identical to
+    /// Lite's: <c>EXTRACT(EPOCH FROM …)</c>, <c>LAG</c>, <c>GREATEST</c> and <c>COALESCE</c> all run
+    /// unchanged on DuckDB and Postgres (the anomaly detector's <c>WaitRateWindowSql</c> already leans on
+    /// the first two). The lead-in and tail gaps are finished in C# from <c>first_sample</c> /
+    /// <c>last_sample</c> / <c>orphan_count</c>, because they are about the WINDOW's edges, which the
+    /// row set cannot see.
+    /// </summary>
+    public const string CoverageSql = @"
+WITH samples AS (
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4
+    AND   collection_time <= $3
+),
+intervals AS (
+    SELECT collection_time,
+           LAG(collection_time) OVER (ORDER BY collection_time) AS previous_time
+    FROM samples
+)
+SELECT
+    COUNT(*) AS sample_count,
+    COALESCE(SUM(CASE
+        WHEN previous_time IS NULL THEN 0
+        WHEN EXTRACT(EPOCH FROM (collection_time - previous_time)) > $5 THEN 0
+        ELSE EXTRACT(EPOCH FROM (collection_time - GREATEST(previous_time, $2)))
+    END), 0) AS observed_seconds,
+    COALESCE(MAX(CASE
+        WHEN previous_time IS NOT NULL AND EXTRACT(EPOCH FROM (collection_time - previous_time)) > $5
+        THEN EXTRACT(EPOCH FROM (collection_time - GREATEST(previous_time, $2)))
+        ELSE 0
+    END), 0) AS largest_discarded_seconds,
+    COALESCE(SUM(CASE WHEN previous_time IS NULL THEN 1 ELSE 0 END), 0) AS orphan_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
+FROM intervals
+WHERE collection_time >= $2";
+
+    /// <summary>
+    /// Step 0 of every pass: stamps <see cref="AnalysisContext.Coverage"/> from <see cref="CoverageSql"/>
+    /// and, when the window was only partly observed, emits the <see cref="WindowCoverage.FactKey"/>
+    /// context fact beside the facts it qualifies (#3538 A2).
+    ///
+    /// <para>It lives in the collector rather than in the analysis service so that EVERY path that
+    /// collects facts — the scheduled pass, <c>get_analysis_facts</c>, both windows of
+    /// <c>compare_analysis</c>, and a test that hands the collector a bare context — gets the stamp
+    /// before the first division, with no caller able to forget it. It runs BEFORE the wait read and,
+    /// like that read, carries no catch: this is the canary series, and a store that cannot answer it
+    /// should fail the pass loudly (the service's catch classifies and logs it) rather than degrade into
+    /// "unobserved", which would report a dead collector for a store that merely timed out.</para>
+    ///
+    /// <para>A zero-length or reversed window skips the read and stamps unobserved: there is no time to
+    /// divide by and nothing the series could say about it.</para>
+    /// </summary>
+    private async Task CollectObservedCoverageAsync(AnalysisContext context, List<Fact> facts)
+    {
+        var nominalMs = context.PeriodDurationMs;
+        if (nominalMs <= 0)
+        {
+            context.Coverage = WindowCoverage.Unobserved(nominalMs);
+            return;
+        }
+
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+        using var command = new NpgsqlCommand(CoverageSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(context.ServerId);
+        command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds)));
+        command.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken))
+        {
+            context.Coverage = WindowCoverage.Unobserved(nominalMs);
+            return;
+        }
+
+        var sampleCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        var observedSeconds = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+        var largestDiscardedSeconds = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
+        var orphanCount = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+        DateTime? firstSample = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+        DateTime? lastSample = reader.IsDBNull(5) ? null : reader.GetDateTime(5);
+
+        context.Coverage = BuildCoverage(
+            context, nominalMs, sampleCount, observedSeconds, largestDiscardedSeconds, orphanCount, firstSample, lastSample);
+
+        if (context.Coverage.IsPartial)
+            facts.Add(context.Coverage.ToGapFact(context.ServerId));
+    }
+
+    /// <summary>
+    /// Finishes the coverage stamp from the query's row: the lead-in gap (window start to a first row
+    /// that had no predecessor — the row itself is the earliest thing we know about) and the tail gap
+    /// (last row to window end — a collector that died mid-window leaves nothing after itself to LAG
+    /// from) are edge properties of the window and are computed here; the in-series discarded stretch
+    /// comes from the query. Largest gap is the longest of the three.
+    /// </summary>
+    private static WindowCoverage BuildCoverage(
+        AnalysisContext context, double nominalMs, long sampleCount, double observedSeconds,
+        double largestDiscardedSeconds, long orphanCount, DateTime? firstSample, DateTime? lastSample)
+    {
+        if (sampleCount == 0 || firstSample is null || lastSample is null)
+            return WindowCoverage.Unobserved(nominalMs);
+
+        var leadInMs = orphanCount > 0 ? Math.Max(0, (firstSample.Value - context.TimeRangeStart).TotalMilliseconds) : 0;
+        var tailMs = Math.Max(0, (context.TimeRangeEnd - lastSample.Value).TotalMilliseconds);
+        var largestGapMs = Math.Max(largestDiscardedSeconds * 1000.0, Math.Max(leadInMs, tailMs));
+
+        return new WindowCoverage
+        {
+            NominalMs = nominalMs,
+            ObservedMs = Math.Min(nominalMs, Math.Max(0, observedSeconds * 1000.0)),
+            SampleCount = (int)Math.Min(int.MaxValue, sampleCount),
+            LargestGapMs = Math.Min(nominalMs, largestGapMs)
+        };
+    }
+
     public const string WaitStatsSql = @"
 SELECT
     wait_type,
@@ -33,10 +172,27 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 
     /// <summary>
     /// Collects wait stats facts — one Fact per significant wait type.
-    /// Value is wait_time_ms / period_duration_ms (fraction of examined period).
+    /// Value is wait_time_ms / the OBSERVED collection time in the window
+    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), i.e. the fraction of the time the collector
+    /// was actually up that this wait type was being waited on — not the fraction of the nominal window
+    /// (#3538 A2). The metadata keeps <c>period_duration_ms</c> (the nominal window) and adds
+    /// <c>coverage_fraction</c>, so the divisor is recoverable as their product.
+    ///
+    /// <para>Read the Value with its known scale-dependence in mind: <c>delta_wait_time_ms</c> sums the
+    /// wait time of every CONCURRENT task, so a fraction above 1.0 is legal (many tasks waiting at once)
+    /// and the same 25% means different things on 4 schedulers and on 64 — a handful of parallel
+    /// queries on the big box, most of the machine on the small one. The thresholds that score it do not
+    /// yet normalise for that; documented here rather than corrected, because the correction belongs
+    /// with the threshold re-derivation (#3538 A5), not with the denominator fix.</para>
+    ///
+    /// <para>An unobserved window (coverage 0) emits NO wait facts: there is no time to divide by, and
+    /// a fabricated fraction of 0 would read as a quiet server. The service turns that into the
+    /// "unavailable" envelope; this method's job is only to not lie.</para>
     /// </summary>
     private async Task CollectWaitStatsFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(WaitStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
@@ -54,8 +210,19 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 
             if (waitTimeMs <= 0) continue;
 
-            var fractionOfPeriod = waitTimeMs / context.PeriodDurationMs;
+            var fractionOfPeriod = waitTimeMs / context.ObservedDurationMs;
             var avgMsPerWait = waitingTasks > 0 ? (double)waitTimeMs / waitingTasks : 0;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["wait_time_ms"] = waitTimeMs,
+                ["waiting_tasks_count"] = waitingTasks,
+                ["signal_wait_time_ms"] = signalWaitTimeMs,
+                ["resource_wait_time_ms"] = waitTimeMs - signalWaitTimeMs,
+                ["avg_ms_per_wait"] = avgMsPerWait,
+                ["period_duration_ms"] = context.PeriodDurationMs
+            };
+            FactCollectorHelpers.AddCoverageFraction(metadata, context);
 
             facts.Add(new Fact
             {
@@ -63,15 +230,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
                 Key = waitType,
                 Value = fractionOfPeriod,
                 ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["wait_time_ms"] = waitTimeMs,
-                    ["waiting_tasks_count"] = waitingTasks,
-                    ["signal_wait_time_ms"] = signalWaitTimeMs,
-                    ["resource_wait_time_ms"] = waitTimeMs - signalWaitTimeMs,
-                    ["avg_ms_per_wait"] = avgMsPerWait,
-                    ["period_duration_ms"] = context.PeriodDurationMs
-                }
+                Metadata = metadata
             });
         }
     }
@@ -91,10 +250,16 @@ AND   collection_time <= $3";
     /// <summary>
     /// Collects blocking facts from blocked_process_reports.
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
-    /// Value is events per hour for threshold comparison.
+    /// Value is events per OBSERVED hour — the hours the collector was actually up inside the window
+    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), not the nominal window (#3538 A2): forty
+    /// events in the one hour the collector saw of a four-hour window is a 40/hr storm, not a 10/hr
+    /// murmur. <c>period_hours</c> stays the nominal window; <c>observed_hours</c> is the divisor. An
+    /// unobserved window emits no fact.
     /// </summary>
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(BlockingSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
@@ -114,7 +279,8 @@ AND   collection_time <= $3";
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
-        var eventsPerHour = periodHours > 0 ? eventCount / periodHours : 0;
+        var observedHours = context.ObservedDurationMs / 3_600_000.0;
+        var eventsPerHour = eventCount / observedHours;
 
         facts.Add(new Fact
         {
@@ -130,7 +296,8 @@ AND   collection_time <= $3";
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,
                 ["sleeping_blocker_count"] = sleepingBlockerCount,
-                ["period_hours"] = periodHours
+                ["period_hours"] = periodHours,
+                ["observed_hours"] = observedHours
             }
         });
     }
@@ -145,10 +312,14 @@ AND   collection_time <= $3";
     /// <summary>
     /// Collects deadlock facts from the deadlocks table.
     /// Produces a single DEADLOCKS fact with count and rate.
-    /// Value is deadlocks per hour for threshold comparison.
+    /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
+    /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
+    /// unobserved window emits no fact.
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        if (context.ObservedDurationMs <= 0) return;
+
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
@@ -163,7 +334,8 @@ AND   collection_time <= $3";
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
-        var deadlocksPerHour = periodHours > 0 ? deadlockCount / periodHours : 0;
+        var observedHours = context.ObservedDurationMs / 3_600_000.0;
+        var deadlocksPerHour = deadlockCount / observedHours;
 
         facts.Add(new Fact
         {
@@ -175,7 +347,8 @@ AND   collection_time <= $3";
             {
                 ["deadlock_count"] = deadlockCount,
                 ["deadlocks_per_hour"] = deadlocksPerHour,
-                ["period_hours"] = periodHours
+                ["period_hours"] = periodHours,
+                ["observed_hours"] = observedHours
             }
         });
     }

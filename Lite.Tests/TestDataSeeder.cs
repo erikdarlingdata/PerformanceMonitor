@@ -158,6 +158,40 @@ public class TestDataSeeder : IDisposable
     }
 
     /// <summary>
+    /// The memory-starved server above at the SAME wait intensity, with its collector DOWN for the last
+    /// three hours of the four-hour window (#3538 A2): a quarter of that scenario's wait totals — one
+    /// hour's worth — plus 40 blocking events and 8 deadlocks, all recorded inside the first hour, and no
+    /// rows at all after it.
+    ///
+    /// <para>Divided by the nominal window these read as a quarter of what happened —
+    /// PAGEIOLATCH_SH 17.4%, blocking 10/hr, deadlocks 2/hr — and every one lands under its bar. Divided
+    /// by the hour the collector actually observed they read as they were: PAGEIOLATCH_SH 69.4% (the
+    /// memory-starved scenario's own figure, because the server was equally starved), blocking 40/hr,
+    /// deadlocks 8/hr. The COLLECTION_GAP fact at 0.25 with a three-hour largest gap is the pass saying
+    /// so.</para>
+    /// </summary>
+    public async Task SeedCollectorGapServerAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        var waits = new Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)>
+        {
+            ["PAGEIOLATCH_SH"]      = (2_500_000, 1_250_000, 25_000),
+            ["PAGEIOLATCH_EX"]      = (  125_000,    50_000,  2_500),
+            ["SOS_SCHEDULER_YIELD"] = (  750_000, 2_000_000,      0),
+            ["CXPACKET"]            = (  375_000,   500_000,      0),
+            ["WRITELOG"]            = (   50_000,    25_000,  5_000),
+        };
+
+        await SeedWaitStatsAsync(waits, coveredMinutes: 60);
+        await SeedBlockingEventsAsync(40, avgWaitTimeMs: 20_000, sleepingBlockerCount: 3, distinctBlockers: 6, coveredMinutes: 60);
+        await SeedDeadlocksAsync(8, coveredMinutes: 60);
+        await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 57344);
+        await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 56_000, targetMb: 57_344);
+    }
+
+    /// <summary>
     /// Bad parallelism config: CTFP=5, MAXDOP=0, high CX and SOS waits.
     ///
     /// Expected stories:
@@ -925,13 +959,16 @@ VALUES ($1, $2, $3, true, true)";
     /// Seeds blocked_process_reports with synthetic blocking events.
     /// </summary>
     internal async Task SeedBlockingEventsAsync(int count, long avgWaitTimeMs,
-        int sleepingBlockerCount = 0, int distinctBlockers = 3)
+        int sleepingBlockerCount = 0, int distinctBlockers = 3, int coveredMinutes = 240)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        var intervalMinutes = 240.0 / count; // Spread across 4-hour window
+        /* Spread across the collected part of the 4-hour window — all of it by default; the first
+           coveredMinutes when the scenario's collector died mid-window (#3538 A2), because a collector
+           that is down records no blocking either. */
+        var intervalMinutes = (double)coveredMinutes / count;
 
         for (var i = 0; i < count; i++)
         {
@@ -1066,13 +1103,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     /// <summary>
     /// Seeds deadlocks table with synthetic deadlock events.
     /// </summary>
-    internal async Task SeedDeadlocksAsync(int count)
+    internal async Task SeedDeadlocksAsync(int count, int coveredMinutes = 240)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        var intervalMinutes = 240.0 / count;
+        /* Same spread rule as SeedBlockingEventsAsync: only the collected part of the window. */
+        var intervalMinutes = (double)coveredMinutes / count;
 
         for (var i = 0; i < count; i++)
         {
@@ -1096,14 +1134,35 @@ VALUES ($1, $2, $3, $4, $5)";
     }
 
     /// <summary>
-    /// Seeds wait_stats with the given wait type values.
-    /// Distributes data across 16 collection points (every 15 minutes)
-    /// so the data looks realistic in trend queries.
+    /// Seeds wait_stats with the given wait type values as a REALISTIC delta series: a baseline
+    /// reading at the window start (delta 0 — the calculator's first sighting, whose change is
+    /// unknowable) followed by one collection every 15 minutes, each carrying the delta that accrued
+    /// over the 15 minutes before it, the last landing on the window end. The totals are spread
+    /// evenly over the collections that fall inside the first <paramref name="coveredMinutes"/> of
+    /// the window (default: all 240, i.e. sixteen deltas), so the SAME wait totals can be seeded as a
+    /// fully covered window or as one the collector saw only part of.
+    ///
+    /// <para>#3538 A2 is why the shape matters. The fact collector now divides every wait fraction
+    /// by the OBSERVED collection time — the sum of the intervals between consecutive collections in
+    /// the window — rather than by the nominal window. A series that starts with a delta row and has
+    /// no reading before it (the pre-#3538 seeder: sixteen deltas at 0, 15, …, 225 minutes) has
+    /// fifteen intervals covering 225 of 240 minutes, so every scenario's fractions would come out
+    /// 6.7% high against the values documented on the scenarios. A physically possible series has a
+    /// reading to subtract from before its first delta; this one does, and covers the window
+    /// exactly. With <paramref name="coveredMinutes"/> = 60 the collector "dies" after the first
+    /// hour: four deltas carry the whole total, the remaining three hours hold no rows, and the
+    /// honest fraction is four times the nominal one.</para>
     /// </summary>
     internal async Task SeedWaitStatsAsync(
-        Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)> waits)
+        Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)> waits,
+        int coveredMinutes = 240)
     {
-        const int collectionPoints = 16;
+        const int collectionIntervalMinutes = 15;
+        if (coveredMinutes < collectionIntervalMinutes || coveredMinutes > 240 || coveredMinutes % collectionIntervalMinutes != 0)
+            throw new ArgumentOutOfRangeException(nameof(coveredMinutes), coveredMinutes,
+                "coveredMinutes must be a multiple of 15 between 15 and 240 so the deltas divide evenly over whole collections.");
+
+        var collectionPoints = coveredMinutes / collectionIntervalMinutes;
 
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -1115,42 +1174,56 @@ VALUES ($1, $2, $3, $4, $5)";
             var deltaTasksPerPoint = totals.waitingTasks / collectionPoints;
             var deltaSignalPerPoint = totals.signalMs / collectionPoints;
 
-            long cumulativeWait = 0;
-            long cumulativeTasks = 0;
-            long cumulativeSignal = 0;
+            /* The baseline reading: cumulative counters as they stood when collection started, with
+               no knowable delta (0, 0, 0). Its cumulative values are arbitrary but non-zero, because
+               the wait_stats collector only stores wait types whose cumulative wait_time_ms > 0. */
+            long cumulativeWait = deltaWaitPerPoint;
+            long cumulativeTasks = deltaTasksPerPoint;
+            long cumulativeSignal = deltaSignalPerPoint;
+            await InsertWaitRowAsync(connection, TestPeriodStart, waitType,
+                cumulativeTasks, cumulativeWait, cumulativeSignal, 0, 0, 0);
 
-            for (var i = 0; i < collectionPoints; i++)
+            for (var i = 1; i <= collectionPoints; i++)
             {
                 cumulativeWait += deltaWaitPerPoint;
                 cumulativeTasks += deltaTasksPerPoint;
                 cumulativeSignal += deltaSignalPerPoint;
 
-                var collectionTime = TestPeriodStart.AddMinutes(i * 15);
-                var id = _nextId--;
+                await InsertWaitRowAsync(connection, TestPeriodStart.AddMinutes(i * collectionIntervalMinutes), waitType,
+                    cumulativeTasks, cumulativeWait, cumulativeSignal,
+                    deltaTasksPerPoint, deltaWaitPerPoint, deltaSignalPerPoint);
+            }
+        }
+    }
 
-                using var cmd = connection.CreateCommand();
-                cmd.CommandText = @"
+    private async Task InsertWaitRowAsync(
+        DuckDBConnection connection, DateTime collectionTime, string waitType,
+        long cumulativeTasks, long cumulativeWait, long cumulativeSignal,
+        long deltaTasks, long deltaWait, long deltaSignal)
+    {
+        var id = _nextId--;
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name, wait_type,
      waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
      delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
-                cmd.Parameters.Add(new DuckDBParameter { Value = id });
-                cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
-                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
-                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-                cmd.Parameters.Add(new DuckDBParameter { Value = waitType });
-                cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeTasks });
-                cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeWait });
-                cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeSignal });
-                cmd.Parameters.Add(new DuckDBParameter { Value = deltaTasksPerPoint });
-                cmd.Parameters.Add(new DuckDBParameter { Value = deltaWaitPerPoint });
-                cmd.Parameters.Add(new DuckDBParameter { Value = deltaSignalPerPoint });
+        cmd.Parameters.Add(new DuckDBParameter { Value = id });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = waitType });
+        cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeTasks });
+        cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeWait });
+        cmd.Parameters.Add(new DuckDBParameter { Value = cumulativeSignal });
+        cmd.Parameters.Add(new DuckDBParameter { Value = deltaTasks });
+        cmd.Parameters.Add(new DuckDBParameter { Value = deltaWait });
+        cmd.Parameters.Add(new DuckDBParameter { Value = deltaSignal });
 
-                await cmd.ExecuteNonQueryAsync();
-            }
-        }
+        await cmd.ExecuteNonQueryAsync();
     }
 
     /// <summary>

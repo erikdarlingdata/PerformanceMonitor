@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
@@ -67,6 +69,7 @@ public sealed class PgFactCollectorTests
         "CollectMemoryFactsAsync",
         "CollectMemoryGrantFactsAsync",
         "CollectMemoryPressureEventFactsAsync",
+        "CollectObservedCoverageAsync",
         "CollectParameterSensitivityFactsAsync",
         "CollectPerfmonFactsAsync",
         "CollectPlanAdvisoryFactsAsync",
@@ -106,10 +109,104 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_CoversEveryQuery_OnePerCollectMethodPlusTheDmvFallback()
     {
-        /* 31 collect methods, one query each, plus the DMV-snapshot fallback the blocking-chain
-           method appends through PgBlockingPairRowQuery. */
+        /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
+           the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery. */
         Assert.Equal(LiteCollectMethodSurface.Length + 1, PgFactCollector.AllSql.Count);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
+        Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
+    }
+
+    /* ---------------- #3538 A2: the coverage witness ---------------- */
+
+    /// <summary>
+    /// #3538 A2: the coverage witness reads the SAME series the wait fractions are summed from, finds
+    /// the first in-window row's predecessor by scanning one gap policy back ($4) and clips its
+    /// interval to the window, and credits an interval past the policy ($5, bound — never a literal, so
+    /// it cannot drift from the calculator that discarded the delta) as zero. Pinned on the text
+    /// because each of those is a behaviour a well-meaning simplification would remove: drop the
+    /// lookback and every window under-credits one cadence; inline 3600 and the next policy change
+    /// deflates rates again; drop the policy branch and a three-hour outage credits an hour of
+    /// observation to a delta the calculator threw away.
+    /// </summary>
+    [Fact]
+    public void CoverageSql_ReadsTheWaitSeries_LooksBackOnePolicy_ClipsToTheWindow_AndDiscardsPastThePolicy()
+    {
+        var sql = PgFactCollector.CoverageSql;
+
+        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT DISTINCT collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+
+        /* The lookback bound and the policy are PARAMETERS. */
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
+        Assert.Contains("> $5 THEN 0", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("3600", sql, StringComparison.Ordinal);
+
+        /* Clipped to the window start, so observed time can never exceed the nominal window. */
+        Assert.Contains("GREATEST(previous_time, $2)", sql, StringComparison.Ordinal);
+
+        /* The edge columns the C# finishes the lead-in and tail gaps from. */
+        Assert.Contains("AS orphan_count", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_sample", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) AS last_sample", sql, StringComparison.Ordinal);
+
+        /* Byte-identical to Lite's inline text — the two collectors are a method-for-method port and
+           the shared dialect is the whole reason this query could be written once. */
+        var lite = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Analysis", "DuckDbFactCollector.Waits.cs"));
+        Assert.Contains(sql.Trim(), lite, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three rate-fact sites divide by the OBSERVED duration and bail on an unobserved window, in
+    /// both SKUs — a wait fact emitted against the nominal window on either side would silently
+    /// re-open the defect for that SKU only, and the census above cannot see a divisor.
+    /// </summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Analysis/PgFactCollector.Waits.cs")]
+    [InlineData("Lite/Analysis/DuckDbFactCollector.Waits.cs")]
+    public void RateFacts_DivideByObservedDuration_AndBailWhenUnobserved(string relativePath)
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+
+        Assert.Contains("waitTimeMs / context.ObservedDurationMs", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("waitTimeMs / context.PeriodDurationMs", source, StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(source, "var observedHours = context.ObservedDurationMs / 3_600_000.0;"));
+        Assert.Equal(3, CountOf(source, "if (context.ObservedDurationMs <= 0) return;"));
+
+        /* Every use of the nominal window left in the file is a metadata statement of what was asked
+           for, never a divisor. */
+        foreach (var line in source.Split('\n').Where(l => l.Contains("context.PeriodDurationMs", StringComparison.Ordinal)))
+        {
+            Assert.True(
+                line.Contains("[\"period_duration_ms\"]", StringComparison.Ordinal)
+                    || line.Contains("var periodHours = ", StringComparison.Ordinal)
+                    || line.Contains("var nominalMs = ", StringComparison.Ordinal),
+                $"{relativePath} still uses the nominal window somewhere other than metadata: {line.Trim()}");
+        }
+    }
+
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
+    }
+
+    /* The house idiom for source-anchored pins (AnalysisPassCommandTimeoutTests et al.): walk up from
+       THIS file, so the pin reads the tree it was compiled from rather than wherever the binary runs. */
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     [Fact]
@@ -247,21 +344,34 @@ public sealed class PgFactCollectorTests
             /* Plant the two representative collectors' inputs:
                1. wait_stats — a wait with delta_wait_time_ms > 0 (the WaitStatsSql emission
                   gate) that is neither LCK_M_* nor CX* so the shared grouping helpers no-op:
-                  900,000 ms over a 3,600,000 ms window = 0.25 fraction, 3,000 tasks = 300 ms avg. */
-            using (var plant = new NpgsqlCommand(@"
+                  900,000 ms over a 3,600,000 ms window = 0.25 fraction, 3,000 tasks = 300 ms avg.
+
+                  Two rows, not one (#3538 A2): a baseline reading at the window start with no
+                  knowable delta, and the delta row at the window end whose change accrued over the
+                  hour between them. The fraction now divides by the OBSERVED collection time — the
+                  interval between consecutive readings — and a lone delta row with nothing before it
+                  observes no time at all (the calculator's first sighting), so the single-row fixture
+                  this used to plant would correctly yield no wait fact. The series covers the window
+                  exactly, so the 0.25 the scenario documents is unchanged. */
+            foreach (var (time, deltaTasks, deltaWaitMs, deltaSignalMs) in new[]
+            {
+                (windowStart, 0L, 0L, 0L),
+                (windowEnd, 3000L, 900000L, 100000L)
+            })
+            {
+                using var plant = new NpgsqlCommand(@"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name,
      wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection))
-            {
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
                 plant.Parameters.AddWithValue(CollectionIdGenerator.Next());
-                plant.Parameters.AddWithValue(sampleTime);
+                plant.Parameters.AddWithValue(time);
                 plant.Parameters.AddWithValue(TestServerId);
                 plant.Parameters.AddWithValue(TestServerName);
                 plant.Parameters.AddWithValue("SOS_SCHEDULER_YIELD");
-                plant.Parameters.AddWithValue(3000L);
-                plant.Parameters.AddWithValue(900000L);
-                plant.Parameters.AddWithValue(100000L);
+                plant.Parameters.AddWithValue(deltaTasks);
+                plant.Parameters.AddWithValue(deltaWaitMs);
+                plant.Parameters.AddWithValue(deltaSignalMs);
                 await plant.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             }
 
@@ -305,6 +415,16 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
             Assert.Equal(800000, wait.Metadata["resource_wait_time_ms"]);
             Assert.Equal(300.0, wait.Metadata["avg_ms_per_wait"], precision: 10);
 
+            /* #3538 A2: the series covered the window exactly, so coverage is full, the wait fact
+               carries a coverage_fraction of 1, and no COLLECTION_GAP fact is emitted. */
+            Assert.NotNull(context.Coverage);
+            Assert.Equal(1.0, context.Coverage!.Fraction, precision: 6);
+            Assert.False(context.Coverage.IsPartial);
+            Assert.Equal(2, context.Coverage.SampleCount);
+            Assert.Equal(1.0, wait.Metadata["coverage_fraction"], precision: 6);
+            Assert.Equal(3_600_000, wait.Metadata["period_duration_ms"]);
+            Assert.DoesNotContain(facts, f => f.Key == WindowCoverage.FactKey);
+
             /* The CPU fact: Value = average SQL CPU %, and no spurious CPU_SPIKE. */
             var cpu = Assert.Single(facts, f => f.Source == "cpu");
             Assert.Equal("CPU_SQL_PERCENT", cpu.Key);
@@ -331,6 +451,8 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
                 ServerUtcOffset = TimeSpan.Zero
             };
             Assert.Empty(await collector.CollectFactsAsync(emptyContext));
+            Assert.NotNull(emptyContext.Coverage);
+            Assert.False(emptyContext.Coverage!.IsObserved);
 
             bodySucceeded = true;
         }

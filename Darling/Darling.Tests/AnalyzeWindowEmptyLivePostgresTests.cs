@@ -83,17 +83,34 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
             Assert.Null(service.InsufficientDataMessage);
 
             /* ── the control, and the reason the fix is a distinction rather than a rewording: the
-               SAME server with one benign wait INSIDE the window has facts to score, finds nothing
-               wrong, and keeps the genuine true-negative all-clear. */
-            await PlantWaitAsync(connection, Naive(DateTime.UtcNow.AddMinutes(-30)), BenignWait, 100L, ct);
+               SAME server with a benign wait collected THROUGHOUT the window has facts to score, finds
+               nothing wrong, and keeps the genuine true-negative all-clear.
+
+               A realistic series — a reading every fifteen minutes from the window's start to now —
+               rather than the single row this control originally planted, because since #3538 A2 the
+               engine divides by the time the collector actually observed, and a lone reading with
+               nothing before it observes no time at all (its delta was the calculator's first
+               sighting). A single in-window row is now, correctly, the dead-collector shape; the
+               all-clear is earned by a window the collector was up for. */
+            var now = DateTime.UtcNow;
+            for (var minutesAgo = 240; minutesAgo >= 0; minutesAgo -= 15)
+                await PlantWaitAsync(connection, Naive(now.AddMinutes(-minutesAgo)), BenignWait, 100L, ct);
 
             var healthyWindow = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName);
             using (var doc = JsonDocument.Parse(healthyWindow))
             {
                 Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+
+                /* #3538 A2: the all-clear now says how much of the window it speaks for. */
+                Assert.InRange(
+                    doc.RootElement.GetProperty("hints").GetProperty("coverage").GetProperty("observed_fraction").GetDouble(),
+                    0.99, 1.0);
             }
             Assert.Contains("All metrics are within normal ranges", healthyWindow, StringComparison.Ordinal);
+            Assert.DoesNotContain("PARTIAL", healthyWindow, StringComparison.Ordinal);
             Assert.Null(service.WindowEmptyMessage);
+            Assert.NotNull(service.LastWindowCoverage);
+            Assert.False(service.LastWindowCoverage!.IsPartial);
 
             bodySucceeded = true;
         }
