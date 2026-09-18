@@ -371,6 +371,17 @@ LIMIT 500";
            changes arm at its next connect, and the reads must follow on the next cycle, not the next restart. */
         context.PendingState[InstrumentStateKey] = PgWaitInstrument.ExtensionSampled;
 
+        /* And the sampler's tally CLEARED, every cycle this arm runs (#3645 review). The host persists only
+           the keys in PendingState, so an extension-arm cycle that left this key alone would leave the last
+           sampler tally sitting in collector_state for as long as the extension stayed installed — and a
+           target that later fell back to the sampler arm (extension dropped, a reconnect) would resume
+           accumulating from a months-old baseline. Usually that reads as an honest counter_reset (the stale
+           tally is smaller than the extension's cumulative counts); but if the extension's own profile had
+           just been reset before the fallback, a stale-but-larger tally would look like continued monotonic
+           growth with no reset flag, splicing two unrelated eras into one series. An empty tally is what
+           ParseTally reads as "start over", so the fallback starts at zero and the read reports the reset. */
+        context.PendingState[TallyStateKey] = string.Empty;
+
         var rows = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))

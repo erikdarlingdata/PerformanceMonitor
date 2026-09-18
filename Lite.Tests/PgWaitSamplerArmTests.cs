@@ -315,7 +315,36 @@ public sealed class PgWaitSamplerArmTests
 
         Assert.Single(rows);
         Assert.Equal(PgWaitInstrument.ExtensionSampled, context.PendingState[PgWaitSamplingCollector.InstrumentStateKey]);
-        Assert.False(context.PendingState.ContainsKey(PgWaitSamplingCollector.TallyStateKey));
+        /* And it CLEARS the sampler's tally rather than leaving the last one to be resumed months later if
+           the target ever falls back to the sampler arm (#3645 review) - the host persists only PendingState
+           keys, so "leave it alone" would mean "keep it forever". */
+        Assert.Equal(string.Empty, context.PendingState[PgWaitSamplingCollector.TallyStateKey]);
+    }
+
+    /// <summary>The whole reversion path: a tally carried from the sampler era, an extension-arm cycle, then
+    /// the sampler arm again — which must start from zero, not from the carried era.</summary>
+    [Fact]
+    public async Task AFallbackToTheSamplerAfterTheExtensionArm_StartsFromZero()
+    {
+        var samplerEra = MakeContext(hasExtension: false);
+        await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 111, 10), Snap("Lock", "relation", 111, 11) }),
+            samplerEra, CancellationToken.None);
+        Assert.Equal(2, PgWaitSamplingCollector.ParseTally(samplerEra.PendingState[PgWaitSamplingCollector.TallyStateKey])[("Lock", "relation", 111)]);
+
+        var extensionEra = MakeContext(hasExtension: true, state: new Dictionary<string, string>(samplerEra.PendingState));
+        await PgWaitSamplingCollector.Instance.ReadAsync(
+            new FakeCollectorDataReader(new object[] { "Lock", "relation", 111L, 9_999L, 10, 2 }),
+            extensionEra, CancellationToken.None);
+
+        var fallback = MakeContext(hasExtension: false, state: new Dictionary<string, string>(extensionEra.PendingState));
+        var rows = await PgWaitSamplingCollector.Instance.ReadAsync(
+            FakeCollectorDataReader.WithResultSets(new[] { Snap("Lock", "relation", 111, 12) }),
+            fallback, CancellationToken.None);
+
+        var lock_ = Assert.Single(rows);
+        Assert.Equal(1, lock_.SampleCount);
+        Assert.Equal(PgWaitInstrument.ServiceSampled, fallback.PendingState[PgWaitSamplingCollector.InstrumentStateKey]);
     }
 
     [Fact]
