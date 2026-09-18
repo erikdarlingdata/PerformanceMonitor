@@ -328,6 +328,10 @@ public partial class ViewerServerTab
         }
 
         QueryStatsSlicer.UpdateMetric(label);
+
+        // Re-compute overlay with new metric if a row is selected
+        if (QueryStatsGrid.SelectedItem != null)
+            QueryStatsGrid_SelectionChanged(QueryStatsGrid, null!);
     }
 
     /// <summary>Sorting the Top Procedures grid swaps the slicer's aggregate curve to match the sorted column.</summary>
@@ -344,7 +348,10 @@ public partial class ViewerServerTab
             "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
             "TotalLogicalReads" or "AvgReads" => ("TotalReads", "Total Reads"),
             "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
-            "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+            /* #3556's Darling half: the #3547 bug one grid over — this arm mapped the physical sort to the
+               LOGICAL series under a physical label. The shared slicer reader has always mapped ordinal 6's
+               total_physical_reads into TotalPhysicalReads; only this handler pointed at the wrong series. */
+            "TotalPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
 
@@ -362,11 +369,15 @@ public partial class ViewerServerTab
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 _ => bucket.TotalCpu,
             };
         }
 
         ProcStatsSlicer.UpdateMetric(label);
+
+        if (ProcedureStatsGrid.SelectedItem != null)
+            ProcedureStatsGrid_SelectionChanged(ProcedureStatsGrid, null!);
     }
 
     /// <summary>Sorting the Query Store grid swaps the slicer's aggregate curve to match the sorted column.</summary>
@@ -381,9 +392,14 @@ public partial class ViewerServerTab
             "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
             "TotalDurationMs" => ("TotalElapsed", "Total Duration (ms)"),
             "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
-            "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
-            "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
-            "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+            /* #3556: the plotted bucket values are execution-weighted slice TOTALS, so the old "Avg"
+               labels under-claimed what the bars showed. Total labels, matching the physical arm below. */
+            "AvgLogicalReads" => ("TotalReads", "Total Reads"),
+            "AvgLogicalWrites" => ("TotalWrites", "Total Writes"),
+            /* #3547's Darling half: this arm still mapped physical to the LOGICAL series under a physical
+               label — the swap Lite fixed in #3550, never ported here. The reader side needed nothing: the
+               slicer SQL computes total_physical_reads and the shared reader maps it. */
+            "AvgPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             "TotalExecutions" => ("Sessions", "Executions"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
@@ -402,12 +418,16 @@ public partial class ViewerServerTab
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 "Sessions" => bucket.SessionCount,
                 _ => bucket.TotalCpu,
             };
         }
 
         QueryStoreSlicer.UpdateMetric(label);
+
+        if (QueryStoreGrid.SelectedItem != null)
+            QueryStoreGrid_SelectionChanged(QueryStoreGrid, null!);
     }
 
     /// <summary>The sorted column's member path (SortMemberPath, else the bound Binding path) — Lite's fallback.</summary>

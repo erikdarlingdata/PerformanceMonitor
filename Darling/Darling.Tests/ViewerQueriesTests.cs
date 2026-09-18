@@ -317,6 +317,15 @@ public sealed class ViewerQueriesSqlTests
         /* The bucket key and the window filter agree, stated as the invariant rather than left implicit in
            two InlineData columns that a future edit could change one of. */
         Assert.Contains(windowFilter, bucketExpression, StringComparison.Ordinal);
+
+        /* #3556: ReadQueryStatsSlicerAsync maps the IO columns by ORDINAL (4 reads, 5 writes, 6 physical)
+           for all three slicers, so every SELECT must keep the three aliases in that relative order — a
+           reorder would silently swap series under the sort-driven metric labels. */
+        var reads = sql.IndexOf("AS total_reads", StringComparison.Ordinal);
+        var writes = sql.IndexOf("AS total_writes", StringComparison.Ordinal);
+        var physical = sql.IndexOf("AS total_physical_reads", StringComparison.Ordinal);
+        Assert.True(reads >= 0 && writes > reads && physical > writes,
+            $"{sqlName}: expected total_reads, then total_writes, then total_physical_reads in the SELECT.");
     }
 
     /// <summary>
@@ -902,6 +911,12 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(13.0, bucket.TotalCpu, 3);
             Assert.Equal(282.0, bucket.TotalElapsed, 3);
 
+            /* #3556: the insert helper's fixed per-execution averages (logical 100, physical 10) make the
+               two IO series distinct, so the QS slicer feeding physical from the logical ordinal — or vice
+               versa — goes red. 41 deduped executions x 100 / x 10. */
+            Assert.Equal(4100.0, bucket.TotalReads, 3);
+            Assert.Equal(410.0, bucket.TotalPhysicalReads, 3);
+
             /* ── the comparison ── this read groups by (database, query_hash), which is COARSER than the
                   interval grain, and the seed gives both queries the same hash — so it is also the pin that
                   dedup happens at the INTERVAL grain FIRST and only then re-aggregates up to the hash.
@@ -933,6 +948,10 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(bucketStart.AddMinutes(15), point.PointTime);
             Assert.Equal(280.0, point.ElapsedMs, 3);       /* 40 x 7,000us; un-deduped this is 3 points, 50/150/280 */
             Assert.Equal(12.0, point.CpuMs, 3);            /* 40 x 300us */
+            /* #3556's overlay half: the physical-sorted bars now draw under a physical overlay, so the
+               timeline's logical/physical split gets the same distinct-value pin as the bars'. */
+            Assert.Equal(4000.0, point.Reads, 3);          /* 40 x 100 logical */
+            Assert.Equal(400.0, point.PhysicalReads, 3);   /* 40 x 10 physical */
 
             /* ── the MCP / REST surface ── the same dedup, so an agent and the web dashboard see the grid's
                   numbers rather than the inflated ones. */
@@ -1289,9 +1308,11 @@ public sealed class ViewerQueriesLivePostgresTests
         try
         {
             await InsertQueryStatsAsync(connection, SlicerServerId, hour1.AddMinutes(5), "DB", "0xA",
-                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 10, queryText: "a");
+                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 60, queryText: "a",
+                deltaWrites: 20, deltaPhysicalReads: 30);
             await InsertQueryStatsAsync(connection, SlicerServerId, hour1.AddMinutes(35), "DB", "0xB",
-                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 10, queryText: "b");
+                deltaExec: 1, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 50, queryText: "b",
+                deltaWrites: 10, deltaPhysicalReads: 20);
             await InsertQueryStatsAsync(connection, SlicerServerId, hour2.AddMinutes(5), "DB", "0xA",
                 deltaExec: 1, deltaWorker: 30_000, deltaElapsed: 60_000, deltaReads: 10, queryText: "a");
 
@@ -1302,6 +1323,15 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(hour1, first.BucketTime);
             Assert.Equal(2, first.SessionCount);        /* two distinct query hashes in hour1 */
             Assert.Equal(120.0, first.TotalCpu, 3);     /* (60000 + 60000) us / 1000 -> ms */
+
+            /* #3556's distinct-per-column pin (Lite's ProcStatsSlicerReadTests twin, same 110/30/50
+               signature): the three slicers share ReadQueryStatsSlicerAsync, so mapping any IO ordinal to
+               the wrong bucket field goes red here — equal fixture values are exactly how a swap would stay
+               invisible. TotalReads and TotalLogicalReads are deliberate aliases of the LOGICAL aggregate. */
+            Assert.Equal(110.0, first.TotalReads, 3);
+            Assert.Equal(110.0, first.TotalLogicalReads, 3);
+            Assert.Equal(30.0, first.TotalWrites, 3);
+            Assert.Equal(50.0, first.TotalPhysicalReads, 3);
 
             bodySucceeded = true;
         }
@@ -1316,7 +1346,8 @@ public sealed class ViewerQueriesLivePostgresTests
 
     private static async Task InsertQueryStatsAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string databaseName, string queryHash,
-        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string queryText, string sqlHandle = "0xSQLHANDLE")
+        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string queryText, string sqlHandle = "0xSQLHANDLE",
+        long deltaWrites = 0, long deltaPhysicalReads = 0)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_stats
@@ -1344,8 +1375,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(deltaElapsed);
         command.Parameters.AddWithValue(deltaReads);
         command.Parameters.AddWithValue(0L);
-        command.Parameters.AddWithValue(0L);
-        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue(deltaWrites);
+        command.Parameters.AddWithValue(deltaPhysicalReads);
         command.Parameters.AddWithValue(0L);
         command.Parameters.AddWithValue(0L);
         command.Parameters.AddWithValue(1L);
