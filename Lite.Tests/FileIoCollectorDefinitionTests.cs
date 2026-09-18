@@ -79,8 +79,12 @@ public sealed class FileIoCollectorDefinitionTests
                 "io_stall_read_ms", "io_stall_write_ms", "io_stall_queued_read_ms", "io_stall_queued_write_ms",
                 "delta_reads", "delta_writes", "delta_read_bytes", "delta_write_bytes",
                 "delta_stall_read_ms", "delta_stall_write_ms", "delta_stall_queued_read_ms", "delta_stall_queued_write_ms",
+                "sample_interval_seconds",
             },
             FileIoStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
+
+        /* #3540: the interval is the TRAILING column, INTEGER like perfmon_stats' and query_stats'. */
+        Assert.Equal(CollectorColumnType.Integer, FileIoStatsCollector.Instance.PayloadColumns[^1].Type);
     }
 
     [Fact]
@@ -107,11 +111,12 @@ public sealed class FileIoCollectorDefinitionTests
 
         FileIoStatsCollector.Instance.WritePayload(row, writer, context);
 
-        Assert.Equal(21, writer.Values.Count);
+        Assert.Equal(22, writer.Values.Count);
         Assert.Equal("SO", writer.Values[0]);
         Assert.Equal(8L, writer.Values[12]);
         Assert.Equal(10L, writer.Values[13]);   /* delta_reads = 1 * 10 */
         Assert.Equal(80L, writer.Values[20]);   /* delta_stall_queued_write_ms = 8 * 10 */
+        Assert.Equal(0, writer.Values[21]);     /* sample_interval_seconds (#3540): the fake reports 0, the unknowable marker */
 
         Assert.Equal(8, deltas.Calls.Count);
         Assert.All(deltas.Calls, c => Assert.Equal("SO|SO_data", c.Key));
@@ -123,6 +128,28 @@ public sealed class FileIoCollectorDefinitionTests
                 "file_io_stall_read", "file_io_stall_write", "file_io_stall_queued_read", "file_io_stall_queued_write",
             },
             deltas.Calls.Select(c => c.Group).ToArray());
+    }
+
+    /// <summary>
+    /// #3540: the measured interval reaches the payload, and it is the MINIMUM over the row's eight groups —
+    /// one unknowable group marks the row unknowable, so a latency reader never divides a reset stall counter
+    /// by a sibling's real reads and renders it as 0.00 ms (see WaitStatsCollectorDefinitionTests).
+    /// </summary>
+    [Fact]
+    public void WritePayload_WritesTheMeasuredInterval_AsTheMinimumOverTheRowsGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+        var row = new FileIoStatsCollector.Row("SO", "SO_data", "ROWS", @"D:\so.mdf", 100.5m, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9, 1);
+
+        var writer = new RecordingCollectorRowWriter();
+        FileIoStatsCollector.Instance.WritePayload(row, writer, context);
+        Assert.Equal(137, writer.Values[^1]);
+
+        deltas.IntervalByGroup["file_io_stall_queued_write"] = 0;
+        writer = new RecordingCollectorRowWriter();
+        FileIoStatsCollector.Instance.WritePayload(row, writer, context);
+        Assert.Equal(0, writer.Values[^1]);
     }
 }
 

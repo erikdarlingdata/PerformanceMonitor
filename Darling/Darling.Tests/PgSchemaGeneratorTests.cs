@@ -181,7 +181,8 @@ public sealed class PgSchemaGeneratorTests
             "    max_wait_time_ms bigint,\n" +
             "    delta_waiting_requests_count bigint,\n" +
             "    delta_wait_time_ms bigint,\n" +
-            "    delta_max_wait_time_ms bigint\n" +
+            "    delta_max_wait_time_ms bigint,\n" +
+            "    sample_interval_seconds integer\n" +
             ");",
             ddl);
     }
@@ -206,7 +207,8 @@ public sealed class PgSchemaGeneratorTests
             "    delta_collisions bigint,\n" +
             "    delta_spins bigint,\n" +
             "    delta_sleep_time bigint,\n" +
-            "    delta_backoffs bigint\n" +
+            "    delta_backoffs bigint,\n" +
+            "    sample_interval_seconds integer\n" +
             ");",
             ddl);
     }

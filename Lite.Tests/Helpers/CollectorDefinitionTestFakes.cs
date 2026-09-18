@@ -130,6 +130,12 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     /// interval rather than a constant of its own (#2234, where perfmon wrote a literal 60).</summary>
     public int ReportedInterval { get; set; }
 
+    /// <summary>Per-group overrides of <see cref="ReportedInterval"/>, keyed by delta-group name (#3540). A
+    /// row's several delta groups normally report the SAME interval, and the four naked-family collectors
+    /// store the MINIMUM over their groups so a (0, 0) pair means "no delta in this row is knowable"; a test
+    /// proving that rule needs one group to report 0 while its siblings report the real interval.</summary>
+    public Dictionary<string, int> IntervalByGroup { get; } = new(StringComparer.Ordinal);
+
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
         DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
@@ -141,7 +147,7 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     public long CalculateDeltaWithInterval(int serverId, string collectorName, string key, long currentValue,
         out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
-        intervalSeconds = ReportedInterval;
+        intervalSeconds = IntervalByGroup.TryGetValue(collectorName, out var perGroup) ? perGroup : ReportedInterval;
         return CalculateDelta(serverId, collectorName, key, currentValue, collectionTime, maxGapSeconds);
     }
 

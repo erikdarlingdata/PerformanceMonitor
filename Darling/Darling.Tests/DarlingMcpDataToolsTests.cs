@@ -570,6 +570,12 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("wait_type = $2", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -596,6 +602,22 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("delta_stall_write_ms", sql, StringComparison.Ordinal);
         Assert.Contains("delta_reads", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* #3540: the interval rides along so the tool can report latency as null on the unknowable marker. */
+        Assert.Contains("sample_interval_seconds", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3540: a file whose latest row is the calculator's unknowable marker (stored interval 0) reports
+    /// null latencies, not "0.00 ms"; a pre-V127 row (NULL interval) and a measured row keep the stall/op reading.</summary>
+    [Fact]
+    public void FileIoRow_ReportsUnknowable_OnlyForAStoredZeroInterval()
+    {
+        static DarlingDataReader.FileIoRow Row(int? interval) => new(
+            "AppDb", "AppDb_data", "ROWS", "D:\\AppDb.mdf", 100, DeltaReads: 0, DeltaWrites: 0, DeltaReadBytes: 0,
+            DeltaWriteBytes: 0, DeltaStallReadMs: 0, DeltaStallWriteMs: 0, SampleIntervalSeconds: interval);
+
+        Assert.True(Row(0).IsUnknowable);
+        Assert.False(Row(null).IsUnknowable);
+        Assert.False(Row(60).IsUnknowable);
     }
 
     [Fact]

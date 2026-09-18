@@ -151,6 +151,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("delta_stall_write_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_stall_queued_read_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_stall_queued_write_ms", CollectorColumnType.BigInt),
+        /* Appended (Darling V127 / Lite v60, #3540): the measured seconds the row's deltas accrued over, or
+           0 when no delta was knowable. At the END because both stores' writers are positional. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -184,14 +187,25 @@ OPTION(RECOMPILE);";
     {
         /* "{database}|{file}" delta key and the eight group names are the parity contract. */
         var deltaKey = $"{row.DatabaseName}|{row.FileName}";
-        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaReadBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWriteBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallQueuedReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaStallQueuedWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReadBytes = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, out var readBytesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWriteBytes = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, out var writeBytesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallReadMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, out var stallReadInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallWriteMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, out var stallWriteInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedReadMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, out var stallQueuedReadInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedWriteMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, out var stallQueuedWriteInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* The interval is stored beside the deltas (#3540), the minimum over the row's eight groups, so the
+           stored (0, 0) pair means "no delta in this row is knowable" and a latency reader can tell a
+           restart's fabricated (0 stall, 0 reads) from a file that genuinely did nothing — the former used
+           to render as a confident "0.00 ms" mid-restart. See WaitStatsCollector.WritePayload for the full
+           argument; the eight groups share the key and collection time, and dm_io_virtual_file_stats resets
+           every counter of a file together (restore, detach/attach, instance restart), so the minimum only
+           ever differs from any one group's interval when seeding restored some groups and not others. */
+        var sampleIntervalSeconds = Math.Min(
+            Math.Min(Math.Min(readsInterval, writesInterval), Math.Min(readBytesInterval, writeBytesInterval)),
+            Math.Min(Math.Min(stallReadInterval, stallWriteInterval), Math.Min(stallQueuedReadInterval, stallQueuedWriteInterval)));
 
         writer
             .Value(row.DatabaseName)
@@ -214,6 +228,7 @@ OPTION(RECOMPILE);";
             .Value(deltaStallReadMs)
             .Value(deltaStallWriteMs)
             .Value(deltaStallQueuedReadMs)
-            .Value(deltaStallQueuedWriteMs);
+            .Value(deltaStallQueuedWriteMs)
+            .Value(sampleIntervalSeconds);   /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

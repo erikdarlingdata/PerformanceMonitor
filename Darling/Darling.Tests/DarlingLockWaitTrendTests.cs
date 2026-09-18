@@ -122,13 +122,15 @@ public sealed class DarlingLockWaitTrendTests
             /* The reset row is dropped rather than charted as a negative wait. */
             Assert.DoesNotContain(trend, r => r.GetProperty("wait_type").GetString() == "LCK_M_U");
 
-            /* Four rows: two wait types x two collections. The FIRST collection of each type has no prior
-               sample to difference against, so its interval is NULL and its rate is 0 rather than the raw
-               delta — the LAG is per wait type, which is what stops one type's cadence describing another. */
-            Assert.Equal(4, trend.Length);
+            /* Two rows: two wait types x the SECOND collection only. The FIRST collection of each type has
+               no prior sample to difference against and (a pre-V127 row) no stored interval, so its rate is
+               NULL and the row is dropped — it used to be charted as 0.00, a fabricated idle point (#3540).
+               The LAG is per wait type, which is what stops one type's cadence describing another. */
+            Assert.Equal(2, trend.Length);
+            Assert.DoesNotContain(trend, r => r.GetProperty("collection_time").GetString()!
+                .StartsWith(first.ToString("yyyy-MM-ddTHH:mm:ss"), StringComparison.Ordinal));
 
             Assert.Equal(100d, RateOf(trend, "LCK_M_X", second), 3);
-            Assert.Equal(0d, RateOf(trend, "LCK_M_X", first), 3);
 
             /* The fractional rate. Asserted as > 0 as well as by value, because "0.05" and "0" differ by a
                cast and the point of the assertion is that the cast is there. */
@@ -153,8 +155,9 @@ public sealed class DarlingLockWaitTrendTests
                 dataSource, ServerName, 1, pastSecond.ToString("yyyy-MM-ddTHH:mm:ss") + "Z")).RootElement;
             var anchoredRows = anchored.GetProperty("trend").EnumerateArray().ToArray();
 
-            Assert.Equal(2, anchoredRows.Length);
-            Assert.All(anchoredRows, r => Assert.Equal("LCK_M_IX", r.GetProperty("wait_type").GetString()));
+            /* One row: the first anchored collection has no prior and is not a point (#3540). */
+            var anchoredRow = Assert.Single(anchoredRows);
+            Assert.Equal("LCK_M_IX", anchoredRow.GetProperty("wait_type").GetString());
             Assert.Equal(30d, RateOf(anchoredRows, "LCK_M_IX", pastSecond), 3);
 
             bodySucceeded = true;

@@ -42,9 +42,11 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Total wait time across ALL wait types as one per-second series — Lite's <c>GetTotalWaitTrendAsync</c>
     /// ported to Postgres. A <c>per_collection</c> CTE SUMs <c>delta_wait_time_ms</c> per collection and
-    /// derives the collection interval from the LAG of the prior collection_time (the truncate-then-diff
-    /// epoch idiom proven value-identical DuckDB↔Postgres); the outer query divides the delta by the
-    /// interval for a per-second rate (delta CAST to double precision for the typed reader). Lite's
+    /// takes the collection's stored interval (MAX of its rows' <c>sample_interval_seconds</c>, #3540),
+    /// deriving it from the LAG of the prior collection_time (the truncate-then-diff epoch idiom proven
+    /// value-identical DuckDB↔Postgres) only for pre-V127 collections; the outer query divides the delta by
+    /// the interval for a per-second rate (delta CAST to double precision for the typed reader), NULL — and
+    /// the point dropped — when the whole collection was unknowable. Lite's
     /// per-user <c>IgnoredWaitTypes</c> exclusion clause is deliberately DROPPED — the viewer has no
     /// per-user ignore config, matching the W1b wait-picker read. $1 server_id, $2 window start, $3 window
     /// end (naive UTC).
@@ -55,7 +57,15 @@ public sealed partial class ViewerDataService
             SELECT
                 collection_time,
                 SUM(delta_wait_time_ms) AS total_delta_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the collection's STORED interval — MAX over its rows, because a wait type first
+                   seen in an otherwise steady pass carries 0 beside its siblings' real interval and adds 0
+                   to the sum; MAX is 0 only when EVERY row was unknowable (a restart), and that 0 becomes
+                   NULL through NULLIF so the point is dropped rather than rendered as 0.00. NULL (pre-V127
+                   rows) falls back to the LAG this read always used. */
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END AS interval_seconds
             FROM v_wait_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -64,7 +74,7 @@ public sealed partial class ViewerDataService
         )
         SELECT
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS double precision) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second
         FROM per_collection
         ORDER BY collection_time
         """;
@@ -114,9 +124,15 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new WaitStatsTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                reader.GetDouble(1),
                 0,
                 0));
         }

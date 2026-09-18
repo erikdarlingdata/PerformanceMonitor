@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -61,6 +62,11 @@ OPTION(RECOMPILE);";
         new CollectorColumn("delta_waiting_tasks", CollectorColumnType.BigInt),
         new CollectorColumn("delta_wait_time_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_signal_wait_time_ms", CollectorColumnType.BigInt),
+        /* Appended (Darling V127 / Lite v60, #3540): the measured seconds the row's three deltas accrued
+           over, or 0 when no delta was knowable. Appended at the END because both stores' writers are
+           positional — the same rule GoldenCollectorSchema's header states for every column a numbered
+           migration adds by ALTER TABLE. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -89,10 +95,25 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta groups, keys, and the shared gap policy are the parity contract — do not reorder. */
-        var deltaWaitingTasks = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_tasks", row.WaitType, row.WaitingTasks, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_time", row.WaitType, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSignalWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_signal", row.WaitType, row.SignalWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        /* Delta groups, keys, and the shared gap policy are the parity contract — do not reorder.
+
+           The interval is stored beside the deltas (#3540). The calculator reports (delta 0, interval 0)
+           when no delta is knowable — first sighting, counter reset, a gap past the policy — and (0, n)
+           when the interval was genuinely idle, and that pairing is the ONLY way a reader can tell the two
+           apart. This collector used to discard the interval at the write, so the fabricated zero survived
+           as a measured one and every per-second reader LAG-divided it into a confident 0.00 ms/sec at
+           exactly the moments (restarts) it was unknowable.
+
+           One interval per ROW, the minimum over the row's three groups. The groups share a key and a
+           collection time, so first-sighting, gap-policy and seeding decisions are identical across them
+           and the three intervals agree in every case but an independent single-counter reset — which for
+           this DMV means DBCC SQLPERF CLEAR, and that resets all three together. Taking the minimum rather
+           than one headline group's value makes the stored pair mean "every delta in this row is knowable",
+           so a reader never divides a reset counter's 0 by a sibling's real interval and reads it as idle. */
+        var deltaWaitingTasks = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "wait_stats_tasks", row.WaitType, row.WaitingTasks, out var tasksInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWaitTimeMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "wait_stats_time", row.WaitType, row.WaitTimeMs, out var timeInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSignalWaitTimeMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "wait_stats_signal", row.WaitType, row.SignalWaitTimeMs, out var signalInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var sampleIntervalSeconds = Math.Min(tasksInterval, Math.Min(timeInterval, signalInterval));
 
         writer
             .Value(row.WaitType)              /* wait_type VARCHAR */
@@ -101,6 +122,7 @@ OPTION(RECOMPILE);";
             .Value(row.SignalWaitTimeMs)      /* signal_wait_time_ms BIGINT */
             .Value(deltaWaitingTasks)         /* delta_waiting_tasks BIGINT */
             .Value(deltaWaitTimeMs)           /* delta_wait_time_ms BIGINT */
-            .Value(deltaSignalWaitTimeMs);    /* delta_signal_wait_time_ms BIGINT */
+            .Value(deltaSignalWaitTimeMs)     /* delta_signal_wait_time_ms BIGINT */
+            .Value(sampleIntervalSeconds);    /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

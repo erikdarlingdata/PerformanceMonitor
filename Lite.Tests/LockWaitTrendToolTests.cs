@@ -128,13 +128,15 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.DoesNotContain(trend, r => r.GetProperty("wait_type").GetString() == "CXPACKET");
         Assert.DoesNotContain(trend, r => r.GetProperty("wait_type").GetString() == "LCK_M_U");
 
-        /* Four rows: two wait types x two collections. The FIRST collection of each type has no prior
-           sample to difference against, so its interval is NULL and its rate is 0 rather than the raw
-           delta — the LAG is per wait type, which is what stops one type's cadence describing another. */
-        Assert.Equal(4, trend.Length);
+        /* Two rows: two wait types x the SECOND collection only. The FIRST collection of each type has no
+           prior sample to difference against and (a pre-v60 row) no stored interval, so its rate is NULL and
+           the row is dropped — it used to be charted as 0.00, a fabricated idle point (#3540). The LAG is per
+           wait type, which is what stops one type's cadence describing another. */
+        Assert.Equal(2, trend.Length);
+        Assert.DoesNotContain(trend, r => r.GetProperty("collection_time").GetString()!
+            .StartsWith(first.ToString("yyyy-MM-ddTHH:mm:ss"), StringComparison.Ordinal));
 
         Assert.Equal(100d, RateOf(trend, "LCK_M_X", second), 3);
-        Assert.Equal(0d, RateOf(trend, "LCK_M_X", first), 3);
 
         /* The fractional rate. Asserted as > 0 as well as by value, because "0.05" and "0" differ by a cast
            and the point of the assertion is that the cast is there. */
@@ -162,8 +164,9 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         var anchored = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 1, anchor));
         var rows = anchored.GetProperty("trend").EnumerateArray().ToArray();
 
-        Assert.Equal(2, rows.Length);
-        Assert.All(rows, r => Assert.Equal("LCK_M_IX", r.GetProperty("wait_type").GetString()));
+        /* One row: the first anchored collection has no prior and is not a point (#3540). */
+        var row = Assert.Single(rows);
+        Assert.Equal("LCK_M_IX", row.GetProperty("wait_type").GetString());
         Assert.Equal(30d, RateOf(rows, "LCK_M_IX", incident.AddSeconds(60)), 3);
 
         /* The same LENGTH of window at the default anchor cannot reach it — so it is the anchor doing the

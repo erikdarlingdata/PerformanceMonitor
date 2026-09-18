@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
@@ -39,11 +40,15 @@ public sealed class ViewerOverviewLanesSqlTests
         Assert.Contains("collection_time >= $2", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
 
-        /* SUM across ALL wait types per collection (the single-line total), the LAG-derived collection
-           interval, and the per-second division with the delta CAST to double for the typed reader. */
+        /* SUM across ALL wait types per collection (the single-line total), the collection's STORED interval
+           (MAX over its rows, 0 → NULL) with the LAG-derived interval only for pre-V127 collections (#3540),
+           and the per-second division with the delta CAST to double for the typed reader — no ELSE 0. */
         Assert.Contains("SUM(delta_wait_time_ms)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("CAST(total_delta_ms AS double precision) / interval_seconds", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST(total_delta_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
     }
@@ -117,8 +122,9 @@ public sealed class ViewerOverviewLanesSqlTests
 
 /// <summary>
 /// Gated (DARLING_TEST_PG) live round-trips for the W1d Overview-lanes reads: the total-wait per-second
-/// rate (SUM across all types divided by the LAG-derived collection interval, first collection reading 0
-/// on a NULL interval), the four-MB memory read (numeric→double), and the per-lane baseline lookup
+/// rate (SUM across all types divided by the collection's stored interval, LAG-derived for pre-V127 rows;
+/// a first collection with no interval and a restart's unknowable collection are both ABSENT, #3540), the
+/// four-MB memory read (numeric→double), and the per-lane baseline lookup
 /// (graceful <see cref="BaselineBucket.Empty"/> on no history — the baseline COMPUTATION itself is
 /// covered by the Analysis suite; this pins the viewer's delegation). Shares the serialized
 /// "live-postgres" collection; uses negative sentinel server_ids and cleans up in finally.
@@ -153,24 +159,28 @@ public sealed class ViewerOverviewLanesLivePostgresTests
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
             var t2 = t1.AddSeconds(60);
+            var t3 = t2.AddSeconds(60);
+            var t4 = t3.AddSeconds(60);
 
-            /* Two collections, two wait types each. The first collection has no prior LAG (interval
-               NULL → per-second rate 0); the second is 60 seconds later, so its total delta divides by
-               60. Totals sum ACROSS types: t2 = (60 + 120) / 60 = 3.0 ms/sec. */
+            /* Four collections, two wait types each (#3540). t1/t2 are pre-V127 rows (NULL interval): t1
+               has no prior and is NOT a point (it used to read as 0.00); t2 is 60 s later, so its total
+               divides by the LAG's 60: (60 + 120) / 60 = 3.0 ms/sec. t3 is a restart — every row stores
+               interval 0 — and must be ABSENT rather than 0.00. t4 stores a measured 30 s on one row and 0
+               on the other (a wait type first seen this pass): MAX = 30 wins over the LAG's 60, so
+               (90 + 0) / 30 = 3.0 ms/sec. */
             await InsertWaitRowAsync(connection, 1, t1, "WAIT_A", 100);
             await InsertWaitRowAsync(connection, 1, t1, "WAIT_B", 200);
             await InsertWaitRowAsync(connection, 2, t2, "WAIT_A", 60);
             await InsertWaitRowAsync(connection, 2, t2, "WAIT_B", 120);
+            await InsertWaitRowAsync(connection, 3, t3, "WAIT_A", 0, sampleIntervalSeconds: 0);
+            await InsertWaitRowAsync(connection, 3, t3, "WAIT_B", 0, sampleIntervalSeconds: 0);
+            await InsertWaitRowAsync(connection, 4, t4, "WAIT_A", 90, sampleIntervalSeconds: 30);
+            await InsertWaitRowAsync(connection, 4, t4, "WAIT_C", 0, sampleIntervalSeconds: 0);
 
-            var points = await viewer.GetTotalWaitTrendAsync(WaitServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            var points = await viewer.GetTotalWaitTrendAsync(WaitServerId, t1.AddMinutes(-1), t4.AddMinutes(1));
 
-            Assert.Equal(2, points.Count);
-
-            /* Ordered by collection_time; first collection's NULL interval reads as 0. */
-            Assert.Equal(t1.Ticks, points[0].CollectionTime.Ticks);
-            Assert.Equal(0.0, points[0].WaitTimeMsPerSecond, precision: 3);
-
-            Assert.Equal(t2.Ticks, points[1].CollectionTime.Ticks);
+            Assert.Equal(new[] { t2.Ticks, t4.Ticks }, points.Select(p => p.CollectionTime.Ticks).ToArray());
+            Assert.Equal(3.0, points[0].WaitTimeMsPerSecond, precision: 3);
             Assert.Equal(3.0, points[1].WaitTimeMsPerSecond, precision: 3);
 
             bodySucceeded = true;
@@ -251,20 +261,23 @@ public sealed class ViewerOverviewLanesLivePostgresTests
     }
 
     private static async Task InsertWaitRowAsync(
-        NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc, string waitType, long deltaWaitTimeMs)
+        NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc, string waitType, long deltaWaitTimeMs,
+        int? sampleIntervalSeconds = null)
     {
+        /* sample_interval_seconds NULL by default — a pre-V127 row; 0 is the unknowable marker (#3540). */
         using var command = new NpgsqlCommand(@"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name, wait_type,
      waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
-     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, $6, 0)", connection);
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, $6, 0, $7)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(WaitServerId);
         command.Parameters.AddWithValue(WaitServerName);
         command.Parameters.AddWithValue(waitType);
         command.Parameters.AddWithValue(deltaWaitTimeMs);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)sampleIntervalSeconds ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

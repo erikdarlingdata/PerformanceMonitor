@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -67,6 +68,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("delta_waiting_requests_count", CollectorColumnType.BigInt),
         new CollectorColumn("delta_wait_time_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_max_wait_time_ms", CollectorColumnType.BigInt),
+        /* Appended (Darling V127 / Lite v60, #3540): the measured seconds the row's deltas accrued over, or
+           0 when no delta was knowable. At the END because both stores' writers are positional. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -87,10 +91,19 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta groups, key (latch_class), and the shared gap policy are the parity contract. */
-        var deltaWaitingRequests = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_waiting_requests", row.LatchClass, row.WaitingRequestsCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_wait_time", row.LatchClass, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaMaxWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_max_wait", row.LatchClass, row.MaxWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        /* Delta groups, key (latch_class), and the shared gap policy are the parity contract.
+
+           The interval is stored beside the deltas (#3540), the minimum over the row's three groups, so the
+           stored (0, 0) pair means "no delta in this row is knowable" and a reader can tell it from a
+           genuinely idle (0, n) — see WaitStatsCollector.WritePayload for the full argument; this collector
+           mirrors it exactly, as its class comment says it mirrors everything else. The one latch-specific
+           note: max_wait_time_ms is a high-water mark, not a rate counter, so its delta is usually 0 over a
+           REAL interval — that is the idle case, correctly reported, and not a reason to leave it out of the
+           minimum (a reset of the DMV resets all three together). */
+        var deltaWaitingRequests = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "latch_stats_waiting_requests", row.LatchClass, row.WaitingRequestsCount, out var requestsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWaitTimeMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "latch_stats_wait_time", row.LatchClass, row.WaitTimeMs, out var timeInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaMaxWaitTimeMs = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "latch_stats_max_wait", row.LatchClass, row.MaxWaitTimeMs, out var maxWaitInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var sampleIntervalSeconds = Math.Min(requestsInterval, Math.Min(timeInterval, maxWaitInterval));
 
         writer
             .Value(row.LatchClass)             /* latch_class VARCHAR */
@@ -99,6 +112,7 @@ OPTION(RECOMPILE);";
             .Value(row.MaxWaitTimeMs)          /* max_wait_time_ms BIGINT */
             .Value(deltaWaitingRequests)       /* delta_waiting_requests_count BIGINT */
             .Value(deltaWaitTimeMs)            /* delta_wait_time_ms BIGINT */
-            .Value(deltaMaxWaitTimeMs);        /* delta_max_wait_time_ms BIGINT */
+            .Value(deltaMaxWaitTimeMs)         /* delta_max_wait_time_ms BIGINT */
+            .Value(sampleIntervalSeconds);     /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

@@ -199,6 +199,7 @@ public static class PgMigrations
         new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
         new Migration(125, "collector-database-scope", V125Sql),
         new Migration(126, "self-disk-warn-gb-floor", V126Sql),
+        new Migration(127, "delta-family-interval-columns", V127Sql),
     };
 
     /// <summary>
@@ -678,6 +679,71 @@ ALTER TABLE config.config_collector_schedules
     private const string V126Sql = @"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS self_disk_free_warn_gb integer NOT NULL DEFAULT 50;";
+
+    /// <summary>
+    /// V127 — <c>sample_interval_seconds</c> on the four delta families that persisted their deltas NAKED
+    /// (#3540): <c>wait_stats</c>, <c>file_io_stats</c>, <c>latch_stats</c>, <c>spinlock_stats</c>. The
+    /// measurement-layer keystone: the shared delta calculator reports (delta 0, interval 0) when no delta is
+    /// knowable — first sighting, counter reset, a gap past the measured 3600 s policy — and (0, n) when an
+    /// interval was genuinely idle, and the interval is the ONLY thing that tells those apart. These four
+    /// collectors discarded it at the write, so the fabricated zero survived as a measured one and every
+    /// per-second reader LAG-divided it into a confident 0.00 ms/sec at exactly the moments (restarts) it was
+    /// unknowable; the file-I/O latency chart rendered "0.00 ms" mid-restart; and the wait-rate window
+    /// statistic counted the restart collection as a sample. <c>perfmon_stats</c> and <c>query_stats</c> have
+    /// carried the column from the start and their readers <c>NULLIF(sample_interval_seconds, 0)</c> — this
+    /// rung gives the other four the same column, in the same <c>integer</c> type, so the same idiom applies.
+    /// Pinned by <c>DeltaFamilyIntervalColumnsRungTests</c>.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector
+    /// table (V80, V81, V121): the interval a historical row accrued over was never recorded, so NULL is the
+    /// honest value and a backfilled 0 would stamp every pre-V127 row as "unknowable" and erase 30 days of
+    /// perfectly good history from every rate chart. Readers treat the three states distinctly: <c>n &gt; 0</c>
+    /// is the measured interval; <c>0</c> is the calculator's unknowable marker and maps to NULL (the point is
+    /// absent, never 0.00); <c>NULL</c> is a pre-V127 row and falls back to the LAG-over-collection_time
+    /// derivation those readers always used, so history keeps rendering exactly as it did. A nullable
+    /// no-default ADD COLUMN is a catalog-only change in PostgreSQL and TimescaleDB accepts it on a
+    /// compressed hypertable, so this stays instant on a multi-hundred-GB <c>wait_stats</c>.</para>
+    ///
+    /// <para><b>The passthrough views are refreshed</b> because Postgres freezes a view's <c>SELECT *</c>
+    /// column list at CREATE (the V14 lesson, restated by V80 and V81): without the four
+    /// <c>CREATE OR REPLACE VIEW</c> lines every <c>v_*</c> reader would keep seeing the pre-V127 column list
+    /// forever and the new column would be invisible to the whole read layer. Appending is the one alteration
+    /// <c>CREATE OR REPLACE VIEW</c> permits, which is exactly what an ADD COLUMN produces. Fresh stores get
+    /// the column from the generated CREATE TABLE at V4/V10 (the collector definitions carry it now) and
+    /// this rung's ALTERs no-op there; the view refresh is idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do: touch <c>collect.wait_stats_baseline</c>.</b> That
+    /// continuous aggregate sums <c>delta_wait_time_ms</c> per collection over the raw table, so a restart
+    /// collection materializes as a <c>total_wait_ms = 0</c> sample and drags the WaitStats/WaitMsPerSec
+    /// baselines' mean down (the campaign's A6). The measurement contract says the rollup should aggregate
+    /// <c>sample_interval_seconds IS DISTINCT FROM 0</c> rows only — but a continuous aggregate cannot change
+    /// its defining query in place; the only path is DROP + CREATE + refresh, and the raw <c>wait_stats</c>
+    /// horizon is operator-editable and typically 30 days against the aggregate's 35-day baseline tier, so
+    /// a rebuild forfeits materialized baseline history that raw can no longer refill. That is the exact
+    /// trade #3527 declined for <c>perfmon_baseline</c> (its interval is LAG-derived from the collapsed series
+    /// for the same reason), and this rung declines it the same way. The follow-up is a NEW aggregate under
+    /// a new name with the filter baked in, built <c>WITH NO DATA</c> and backfilled by
+    /// <c>--backfill-rollups</c>, with the old one retired through <c>RetiredBaselineRelations</c> once the
+    /// new one has 35 days — the #2007 retirement shape, which loses nothing. Until then the baseline
+    /// provider's magnitude heuristic (the QUALIFY restart signature) is the guard it always was.</para>
+    /// </summary>
+    private const string V127Sql = @"
+ALTER TABLE collect.wait_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.file_io_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.latch_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.spinlock_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the four passthroughs would keep serving
+   the pre-V127 column list forever — the V14 lesson, restated by V80 and V81. Appending is the one
+   alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_wait_stats AS SELECT * FROM collect.wait_stats;
+CREATE OR REPLACE VIEW collect.v_file_io_stats AS SELECT * FROM collect.file_io_stats;
+CREATE OR REPLACE VIEW collect.v_latch_stats AS SELECT * FROM collect.latch_stats;
+CREATE OR REPLACE VIEW collect.v_spinlock_stats AS SELECT * FROM collect.spinlock_stats;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

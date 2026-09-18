@@ -61,8 +61,18 @@ OPTION(RECOMPILE);";
                 "delta_waiting_tasks",
                 "delta_wait_time_ms",
                 "delta_signal_wait_time_ms",
+                "sample_interval_seconds",
             },
             names);
+
+        /* #3540: the interval is the TRAILING column, in the same INTEGER type perfmon_stats and query_stats
+           have always used, so the two stores' positional writers land it after every pre-existing column. */
+        var interval = WaitStatsCollector.Instance.PayloadColumns[^1];
+        Assert.Equal("sample_interval_seconds", interval.Name);
+        Assert.Equal(CollectorColumnType.Integer, interval.Type);
+        Assert.Equal(
+            PerfmonStatsCollector.Instance.PayloadColumns.Single(c => c.Name == "sample_interval_seconds").Type,
+            interval.Type);
     }
 
     [Fact]
@@ -92,8 +102,9 @@ OPTION(RECOMPILE);";
 
         WaitStatsCollector.Instance.WritePayload(row, writer, context);
 
-        /* Payload order: raw values then the three deltas (recording calculator returns value * 10). */
-        Assert.Equal(new object?[] { "PAGEIOLATCH_SH", 7L, 300L, 20L, 70L, 3000L, 200L }, writer.Values);
+        /* Payload order: raw values, the three deltas (recording calculator returns value * 10), then the
+           measured interval (#3540) — the fake reports 0, the calculator's "no delta knowable" marker. */
+        Assert.Equal(new object?[] { "PAGEIOLATCH_SH", 7L, 300L, 20L, 70L, 3000L, 200L, 0 }, writer.Values);
 
         /* Delta contract: group names, key = wait_type, the host collection time, the shared gap policy. */
         Assert.Equal(3, deltas.Calls.Count);
@@ -101,6 +112,42 @@ OPTION(RECOMPILE);";
         Assert.Equal(("wait_stats_time", "PAGEIOLATCH_SH", 300L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[1]);
         Assert.Equal(("wait_stats_signal", "PAGEIOLATCH_SH", 20L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[2]);
         Assert.All(deltas.Calls, _ => Assert.Equal(42, deltas.LastServerId));
+    }
+
+    /// <summary>
+    /// #3540: the interval reaches the payload MEASURED, not as a constant. A distinctive value (neither 0
+    /// nor a plausible cadence) so this can only pass if what the calculator reported is what was written.
+    /// </summary>
+    [Fact]
+    public void WritePayload_WritesTheMeasuredInterval()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+        var writer = new RecordingCollectorRowWriter();
+
+        WaitStatsCollector.Instance.WritePayload(new WaitStatsCollector.Row("PAGEIOLATCH_SH", 7, 300, 20), writer, context);
+
+        Assert.Equal(137, writer.Values[^1]);
+    }
+
+    /// <summary>
+    /// #3540: one interval per ROW, the MINIMUM over the row's delta groups. If any one group's delta is
+    /// unknowable (interval 0) the row is stored as (…, 0) so no reader divides a reset counter's 0 by a
+    /// sibling's real interval and reads it as idle. The three groups share a key and a collection time, so
+    /// they disagree only on an independent single-counter reset — which the minimum is for.
+    /// </summary>
+    [Fact]
+    public void WritePayload_StoresTheMinimumIntervalAcrossTheRowsDeltaGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 300 };
+        deltas.IntervalByGroup["wait_stats_signal"] = 0;
+        var context = CollectorTestContext.Make(deltas);
+        var writer = new RecordingCollectorRowWriter();
+
+        WaitStatsCollector.Instance.WritePayload(new WaitStatsCollector.Row("PAGEIOLATCH_SH", 7, 300, 20), writer, context);
+
+        Assert.Equal(0, writer.Values[^1]);
+        Assert.Equal(3, deltas.Calls.Count);
     }
 }
 

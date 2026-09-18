@@ -33,8 +33,8 @@ public sealed record FileIoLatencyPoint(
 /// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
 /// <c>FileIoThroughputPoint</c>. <c>file_label</c> is the pre-concatenated <c>database_name.file_name</c>
-/// the read builds, and the per-second rates come from the delta bytes divided by the LAG-derived
-/// collection interval.
+/// the read builds, and the per-second rates come from the delta bytes divided by the row's stored
+/// <c>sample_interval_seconds</c> (LAG-derived only for pre-V127 rows that never recorded one, #3540).
 /// </summary>
 public sealed record FileIoThroughputPoint(
     DateTime CollectionTime,
@@ -51,7 +51,8 @@ public sealed partial class ViewerDataService
     /// delta ops over the window, then per-collection average read/write (and queued read/write) latency
     /// is computed as stall-ms / op with the delta-stall sums CAST to double precision before division.
     /// The queued-stall columns are COALESCE'd to 0 so a server whose build predates them still reads 0.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta knowable, a restart — are dropped
+    /// rather than rendered as 0.00 ms (#3540). $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string FileIoLatencyTrendSql = """
         WITH top_files AS (
@@ -86,6 +87,11 @@ public sealed partial class ViewerDataService
         WHERE f.server_id = $1
         AND   f.collection_time >= $2
         AND   f.collection_time <= $3
+        /* #3540: a stored interval of 0 is the calculator's "no delta knowable" marker (first sighting,
+           counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
+           confident "0.00 ms" a restart used to render. IS DISTINCT FROM 0 keeps pre-V127 rows (NULL: interval
+           never recorded), which carry on reading exactly as they always did. */
+        AND   f.sample_interval_seconds IS DISTINCT FROM 0
         GROUP BY f.collection_time, f.database_name, f.file_name
         ORDER BY f.collection_time, f.database_name, f.file_name
         """;
@@ -93,10 +99,12 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The File I/O throughput read — Lite's <c>GetFileIoThroughputTrendAsync</c> ported to Postgres
     /// verbatim (LAG + EXTRACT(EPOCH ...) run identically on PG). A <c>top_files</c> CTE picks the 10
-    /// busiest (database, file) pairs by total delta bytes, a <c>with_interval</c> CTE derives each
-    /// row's collection interval from the LAG of the prior collection_time (partitioned by
-    /// server/database/file), and the per-second MB rate is delta-bytes / interval-seconds / 1 MiB.
-    /// Rows with no prior sample (NULL interval) are dropped so the first point per file isn't plotted.
+    /// busiest (database, file) pairs by total delta bytes, a <c>with_interval</c> CTE takes each row's
+    /// stored <c>sample_interval_seconds</c> (falling back to the LAG of the prior collection_time,
+    /// partitioned by server/database/file, for pre-V127 rows that never recorded one — #3540), and the
+    /// per-second MB rate is delta-bytes / interval-seconds / 1 MiB. Rows with no usable interval (NULL:
+    /// the first sample per file, or a stored 0 meaning no delta was knowable) are dropped, never plotted
+    /// as 0.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string FileIoThroughputTrendSql = """
@@ -117,10 +125,17 @@ public sealed partial class ViewerDataService
                 f.database_name || '.' || f.file_name AS file_label,
                 f.delta_read_bytes,
                 f.delta_write_bytes,
-                EXTRACT(EPOCH FROM (f.collection_time - LAG(f.collection_time) OVER (
-                    PARTITION BY f.server_id, f.database_name, f.file_name
-                    ORDER BY f.collection_time
-                ))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one — 0 (no delta knowable) becomes NULL
+                   through NULLIF and the outer WHERE drops the row, exactly as it always dropped the first
+                   row per file. NULL (a pre-V127 row that never recorded one) falls back to the LAG this
+                   read always used. */
+                CASE WHEN f.sample_interval_seconds IS NULL
+                     THEN EXTRACT(EPOCH FROM (f.collection_time - LAG(f.collection_time) OVER (
+                              PARTITION BY f.server_id, f.database_name, f.file_name
+                              ORDER BY f.collection_time
+                          )))
+                     ELSE NULLIF(f.sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_file_io_stats f
             JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
             WHERE f.server_id = $1

@@ -239,11 +239,13 @@ public sealed class PayloadDimensionTests
     [Fact]
     public void CopyCommandFor_NonDivertingCollector_IsUnchangedByTheDimensions()
     {
-        /* Every collector that declares no dimension keeps the pre-#1767 command verbatim, byte for byte. */
+        /* Every collector that declares no dimension keeps the pre-#1767 command verbatim, byte for byte —
+           plus the trailing sample_interval_seconds V127 appended (#3540), which lands last because the
+           COPY column list is the PayloadColumns order and the column was appended there. */
         Assert.Equal(
             "COPY wait_stats (collection_id, collection_time, server_id, server_name, wait_type, " +
             "waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, " +
-            "delta_signal_wait_time_ms) FROM STDIN (FORMAT BINARY)",
+            "delta_signal_wait_time_ms, sample_interval_seconds) FROM STDIN (FORMAT BINARY)",
             PgCollectorRowWriter.CopyCommandFor(WaitStatsCollector.Instance));
     }
 

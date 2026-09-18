@@ -23,11 +23,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para>
 /// Darling's <c>latch_stats</c> / <c>spinlock_stats</c> collectors are cumulative-counter delta collectors
-/// (like wait_stats) that store the last interval's <c>delta_*</c> directly but NO
-/// <c>sample_interval_seconds</c>, so the per-second rate is derived in SQL from the per-class <c>LAG</c>
-/// interval (the truncate-then-diff epoch idiom the viewer's trend reads use). Each read aggregates the
-/// window per class into one row (the top N by total delta wait time / total delta collisions), carrying the
-/// latest interval's per-second rate and last delta. The Dashboard's <c>severity</c> / <c>latch_description</c>
+/// (like wait_stats) that store the last interval's <c>delta_*</c> beside the measured
+/// <c>sample_interval_seconds</c> it accrued over (V127, #3540 — before which the per-second rate could only
+/// be derived from the per-class <c>LAG</c> interval, the truncate-then-diff epoch idiom the viewer's trend
+/// reads use, and that derivation remains the fallback for pre-V127 rows). Each read aggregates the window
+/// per class into one row (the top N by total delta wait time / total delta collisions), carrying the latest
+/// interval's per-second rate and last delta; the rate is null when the latest interval was unknowable (a
+/// stored 0: first sighting, counter reset, gap past the policy) rather than the 0.00 a restart used to read
+/// as. The Dashboard's <c>severity</c> / <c>latch_description</c>
 /// / <c>recommendation</c> and <c>spinlock_description</c> are NOT stored columns — they are the Dashboard
 /// view's own CASE derivations (deterministic functions of <c>latch_class</c> / <c>spinlock_name</c> and the
 /// latest delta), reproduced VERBATIM as pure static helpers here so the tools serve the FULL Dashboard result
@@ -43,22 +46,23 @@ internal static class DarlingLatchSpinlockReader
     /// per-second rate and last delta wait (the severity input).</summary>
     public sealed record LatchStatRow(
         string LatchClass, long TotalDeltaWaitTimeMs, long TotalDeltaWaitingRequests,
-        double WaitsPerSecond, double WaitMsPerSecond, long LatestDeltaWaitTimeMs, DateTime LatestCollectionTime);
+        double? WaitsPerSecond, double? WaitMsPerSecond, long LatestDeltaWaitTimeMs, DateTime LatestCollectionTime);
 
     /// <summary>One spinlock aggregated over the window: the summed deltas plus the latest interval's
     /// per-second collision/spin rates.</summary>
     public sealed record SpinlockStatRow(
         string SpinlockName, long TotalDeltaCollisions, long TotalDeltaSpins, long TotalDeltaBackoffs,
-        double CollisionsPerSecond, double SpinsPerSecond, DateTime LatestCollectionTime);
+        double? CollisionsPerSecond, double? SpinsPerSecond, DateTime LatestCollectionTime);
 
     /* ─────────────────────────── latch stats (top N over the window) ─────────────────────────── */
 
     /// <summary>
     /// The top-N latch classes over the window, one row per class — mirroring the Dashboard's
     /// <c>get_latch_stats</c> per-class aggregation (SUM of the last interval's deltas, top by total delta
-    /// wait time). The per-second rate comes from the latest interval via the per-class <c>LAG</c> interval
-    /// (Darling stores no <c>sample_interval_seconds</c>), the same idiom the viewer's <c>LatchTrendSql</c>
-    /// uses. <c>latest_delta_wait_time_ms</c> feeds the reproduced severity CASE. Runs on the
+    /// wait time). The per-second rate comes from the latest interval's stored <c>sample_interval_seconds</c>
+    /// (the per-class <c>LAG</c> interval only for pre-V127 rows), the same idiom the viewer's
+    /// <c>LatchTrendSql</c> uses; null when that interval was unknowable. <c>latest_delta_wait_time_ms</c>
+    /// feeds the reproduced severity CASE. Runs on the
     /// <c>v_latch_stats</c> passthrough view. $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
     /// </summary>
     public const string LatchStatsTopNSql = """
@@ -69,7 +73,13 @@ internal static class DarlingLatchSpinlockReader
                 collection_time,
                 delta_waiting_requests_count,
                 delta_wait_time_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                   so the latest-interval rates below are NULL — reported as null, never 0.00 — when the newest
+                   collection was a restart. NULL (a pre-V127 row) falls back to the LAG. */
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_latch_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -90,8 +100,8 @@ internal static class DarlingLatchSpinlockReader
             SELECT DISTINCT ON (latch_class)
                 latch_class,
                 delta_wait_time_ms AS latest_delta_wait_time_ms,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_waiting_requests_count AS double precision) / interval_seconds ELSE 0 END AS waits_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds ELSE 0 END AS wait_ms_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_waiting_requests_count AS double precision) / interval_seconds END AS waits_per_second,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_ms_per_second
             FROM windowed
             ORDER BY latch_class, collection_time DESC
         )
@@ -124,8 +134,8 @@ internal static class DarlingLatchSpinlockReader
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 reader.GetDateTime(6)));
         }
@@ -138,8 +148,9 @@ internal static class DarlingLatchSpinlockReader
     /// <summary>
     /// The top-N spinlocks over the window, one row per spinlock — the collision analog of
     /// <see cref="LatchStatsTopNSql"/>, mirroring the Dashboard's <c>get_spinlock_stats</c> per-name
-    /// aggregation (top by total delta collisions). Per-second collision/spin rates from the latest interval
-    /// via the per-name <c>LAG</c> interval. Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end
+    /// aggregation (top by total delta collisions). Per-second collision/spin rates from the latest interval's
+    /// stored <c>sample_interval_seconds</c> (per-name <c>LAG</c> for pre-V127 rows), null when unknowable.
+    /// Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end
     /// (naive UTC), $4 top.
     /// </summary>
     public const string SpinlockStatsTopNSql = """
@@ -151,7 +162,13 @@ internal static class DarlingLatchSpinlockReader
                 delta_collisions,
                 delta_spins,
                 delta_backoffs,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                   so the latest-interval rates below are NULL — reported as null, never 0.00 — when the newest
+                   collection was a restart. NULL (a pre-V127 row) falls back to the LAG. */
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_spinlock_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -172,8 +189,8 @@ internal static class DarlingLatchSpinlockReader
         (
             SELECT DISTINCT ON (spinlock_name)
                 spinlock_name,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS double precision) / interval_seconds ELSE 0 END AS collisions_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_spins AS double precision) / interval_seconds ELSE 0 END AS spins_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS double precision) / interval_seconds END AS collisions_per_second,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_spins AS double precision) / interval_seconds END AS spins_per_second
             FROM windowed
             ORDER BY spinlock_name, collection_time DESC
         )
@@ -207,8 +224,8 @@ internal static class DarlingLatchSpinlockReader
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 reader.GetDateTime(6)));
         }
 

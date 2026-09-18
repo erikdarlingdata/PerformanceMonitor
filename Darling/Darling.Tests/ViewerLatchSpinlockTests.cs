@@ -21,9 +21,9 @@ namespace Darling.Tests;
 /// <summary>
 /// Pins the Latches &amp; Spinlocks tab's four reads against the Darling store contract (no live
 /// Postgres): the two per-second trend reads (top-5 by delta, normalized to ms/sec and collisions/sec via
-/// the per-contender LAG interval — Darling's cumulative-delta tables carry no stored
-/// sample_interval_seconds, so the seconds come from the same truncate-then-diff epoch idiom the wait
-/// trend uses) and the two latest-snapshot grid reads (most recent collection in the window, ordered by
+/// each row's stored sample_interval_seconds since V127/#3540, with the per-contender LAG interval — the
+/// same truncate-then-diff epoch idiom the wait trend uses — as the fallback for pre-V127 rows that never
+/// recorded one) and the two latest-snapshot grid reads (most recent collection in the window, ordered by
 /// recent delta). All four run on the <c>v_latch_stats</c> / <c>v_spinlock_stats</c> passthrough views.
 /// </summary>
 public sealed class ViewerLatchSpinlockSqlTests
@@ -44,11 +44,24 @@ public sealed class ViewerLatchSpinlockSqlTests
         Assert.Contains("LIMIT 5", sql, StringComparison.Ordinal);
         Assert.Contains("latch_class IN (SELECT latch_class FROM top_latches)", sql, StringComparison.Ordinal);
 
-        /* Per-class LAG interval → ms/sec, the wait-stats truncate-then-diff epoch idiom. */
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first; the per-class LAG interval (the wait-stats truncate-then-diff
+           epoch idiom) only for pre-V127 rows; 0 → NULL through NULLIF; no ELSE 0 on the rate. */
+        AssertStoredIntervalIdiom(sql, "latch_class");
+        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END AS wait_time_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY latch_class, collection_time", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The #3540 reader idiom every per-second read over the four interval-carrying delta families
+    /// shares: the stored interval when the row has one (0, the calculator's unknowable marker, mapped to
+    /// NULL), the LAG derivation only when it does not (a pre-V127 row).</summary>
+    internal static void AssertStoredIntervalIdiom(string sql, string partition)
+    {
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"LAG(collection_time) OVER (PARTITION BY {partition} ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -73,8 +86,9 @@ public sealed class ViewerLatchSpinlockSqlTests
         Assert.Contains("ORDER BY SUM(delta_collisions) DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 5", sql, StringComparison.Ordinal);
         Assert.Contains("spinlock_name IN (SELECT spinlock_name FROM top_spinlocks)", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds", sql, StringComparison.Ordinal);
+        AssertStoredIntervalIdiom(sql, "spinlock_name");
+        Assert.Contains("CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds END AS collisions_per_second", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY spinlock_name, collection_time", sql, StringComparison.Ordinal);
     }
 
@@ -188,17 +202,25 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
             var t2 = t1.AddMinutes(5);   // 300 seconds later
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
 
-            /* BUFFER across two collections: 300 ms delta over 300 s = 1.0 ms/sec at t2; 0 at t1 (no LAG). */
+            /* BUFFER across four collections (#3540). t1/t2 are pre-V127 rows (NULL interval): t1 has no
+               prior and is NOT a point (it used to plot as 0.00); t2 is 300 ms over the LAG's 300 s = 1.0.
+               t3 stores interval 0 — the calculator's "no delta knowable" marker, a restart — and must be
+               ABSENT rather than 0.00. t4 stores a measured 120 s beside a 600 ms delta = 5.0 ms/sec, and
+               the stored interval wins over the LAG (which would say 300 s → 2.0). */
             await InsertLatchAsync(connection, 1, t1, "BUFFER", deltaWait: 100, deltaReqs: 5);
             await InsertLatchAsync(connection, 2, t2, "BUFFER", deltaWait: 300, deltaReqs: 3);
+            await InsertLatchAsync(connection, 3, t3, "BUFFER", deltaWait: 0, deltaReqs: 0, sampleIntervalSeconds: 0);
+            await InsertLatchAsync(connection, 4, t4, "BUFFER", deltaWait: 600, deltaReqs: 6, sampleIntervalSeconds: 120);
 
-            var trend = await viewer.GetLatchStatsTrendAsync(LatchServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            var trend = await viewer.GetLatchStatsTrendAsync(LatchServerId, t1.AddMinutes(-1), t4.AddMinutes(1));
 
             var buffer = trend.Where(p => p.LatchClass == "BUFFER").OrderBy(p => p.CollectionTime).ToList();
-            Assert.Equal(2, buffer.Count);
-            Assert.Equal(0.0, buffer[0].WaitTimeMsPerSecond, precision: 3);
-            Assert.Equal(1.0, buffer[1].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(new[] { t2.Ticks, t4.Ticks }, buffer.Select(p => p.CollectionTime.Ticks).ToArray());
+            Assert.Equal(1.0, buffer[0].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(5.0, buffer[1].WaitTimeMsPerSecond, precision: 3);
 
             bodySucceeded = true;
         }
@@ -253,14 +275,16 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
 
     private static async Task InsertLatchAsync(
         NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc,
-        string latchClass, long deltaWait, long deltaReqs)
+        string latchClass, long deltaWait, long deltaReqs, int? sampleIntervalSeconds = null)
     {
+        /* sample_interval_seconds NULL by default — a pre-V127 row, the shape every pin above was written
+           against; a test that wants the V127 contract passes 0 (unknowable) or a measured value. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO latch_stats
     (collection_id, collection_time, server_id, server_name, latch_class,
      waiting_requests_count, wait_time_ms, max_wait_time_ms,
-     delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, 0)", connection);
+     delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, 0, $8)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(LatchServerId);
@@ -268,6 +292,7 @@ VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, 0)", connection);
         command.Parameters.AddWithValue(latchClass);
         command.Parameters.AddWithValue(deltaReqs);
         command.Parameters.AddWithValue(deltaWait);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)sampleIntervalSeconds ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

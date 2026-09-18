@@ -296,8 +296,20 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                        a 0 delta over a REAL interval is a claim that nothing happened for that long,
                        and this is the one case where that claim would be false. That invariant
                        (interval 0 <=> no delta knowable) is what lets a reader tell a fabricated zero
-                       from an idle one, and every consumer already maps 0 to NULL via
-                       NULLIF(sample_interval_seconds, 0). */
+                       from an idle one — but only where the interval REACHES the store. Every SQL Server
+                       delta family that persists a sample_interval_seconds column beside its deltas
+                       (perfmon_stats and query_stats from the start; wait_stats, file_io_stats,
+                       latch_stats and spinlock_stats since Darling V127 / Lite v60, #3540) maps the 0 to
+                       NULL at the read via NULLIF(sample_interval_seconds, 0), or filters it out of an
+                       aggregate with sample_interval_seconds IS DISTINCT FROM 0. Before #3540 this comment
+                       claimed "every consumer" while four of those six families discarded the interval at
+                       the write, so the fabricated zero survived as a measured one and their readers
+                       LAG-divided it into a confident 0.00 at exactly the moments it was unknowable. The
+                       remaining delta families persist no interval: procedure_stats and memory_grant_stats
+                       take CalculateDelta's bare long, and the PostgreSQL pair asks for the interval only
+                       to skip idle rows at the write. A delta-family census in Lite.Tests
+                       (SharedCollectorDefaultsPinTests) names those four so the naked list shrinks
+                       deliberately rather than growing by accident. */
                     delta = 0;
                     interval = 0;
                 }

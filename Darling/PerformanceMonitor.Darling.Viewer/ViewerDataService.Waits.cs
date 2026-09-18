@@ -19,8 +19,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// One point on a selected wait type's trend line, with both picker metrics computed IN SQL: the
-/// per-second wait rate (this interval's <c>delta_wait_time_ms</c> divided by the seconds since the
-/// previous collection via a per-type <c>LAG</c> window) and the average ms per wait (delta wait
+/// per-second wait rate (this interval's <c>delta_wait_time_ms</c> divided by the seconds it accrued
+/// over — the row's stored <c>sample_interval_seconds</c>, or for pre-V127 rows the seconds since the
+/// previous collection via a per-type <c>LAG</c> window; a row whose interval is unknowable is not a
+/// point, #3540) and the average ms per wait (delta wait
 /// time divided by delta waiting tasks). Signal-wait per second rides along for parity with Lite's
 /// row shape though the picker's metric combo exposes only the other two. Copied from Lite's
 /// <c>WaitStatsTrendPoint</c> (LocalDataService.WaitStats.cs).
@@ -76,7 +78,14 @@ public sealed partial class ViewerDataService
                     delta_wait_time_ms,
                     delta_signal_wait_time_ms,
                     delta_waiting_tasks,
-                    extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)))) AS interval_seconds
+                    /* #3540: the STORED interval where the row has one. 0 is the calculator's "no delta
+                       knowable" marker and becomes NULL through NULLIF, so the rates are NULL and the reader
+                       drops the row — a missing sample, never the confident 0.00 ms/sec a restart used to
+                       render. NULL (a pre-V127 row) falls back to the LAG this read always used. */
+                    CASE WHEN sample_interval_seconds IS NULL
+                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+                         ELSE NULLIF(sample_interval_seconds, 0)
+                    END AS interval_seconds
                 FROM v_wait_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
@@ -86,9 +95,9 @@ public sealed partial class ViewerDataService
             SELECT
                 wait_type,
                 collection_time,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second,
-                CASE WHEN delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks ELSE 0 END AS avg_ms_per_wait
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
+                CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
             FROM raw
             ORDER BY wait_type, collection_time
             """;
@@ -155,6 +164,12 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             var waitType = reader.GetString(0);
             if (!result.TryGetValue(waitType, out var list))
             {
@@ -164,7 +179,7 @@ public sealed partial class ViewerDataService
 
             list.Add(new WaitStatsTrendPoint(
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
         }

@@ -34,7 +34,8 @@ SELECT
     delta_read_bytes,
     delta_write_bytes,
     delta_stall_read_ms,
-    delta_stall_write_ms
+    delta_stall_write_ms,
+    sample_interval_seconds
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
@@ -58,7 +59,8 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
                 DeltaReadBytes = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 DeltaWriteBytes = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 DeltaStallReadMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                DeltaStallWriteMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10)
+                DeltaStallWriteMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                SampleIntervalSeconds = reader.IsDBNull(11) ? null : reader.GetInt32(11)
             });
         }
 
@@ -108,6 +110,11 @@ JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.fil
 WHERE f.server_id = $1
 AND   f.collection_time >= $2
 AND   f.collection_time <= $3
+/* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker (first sighting,
+   counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
+   confident 0.00 ms a restart used to render. IS DISTINCT FROM 0 keeps pre-v60 rows (NULL: interval
+   never recorded), which carry on reading exactly as they always did. */
+AND   f.sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY f.collection_time, f.database_name, f.file_name
 ORDER BY f.collection_time, f.database_name, f.file_name";
 
@@ -158,7 +165,8 @@ LIMIT 1";
 
     /// <summary>
     /// Gets file I/O throughput trend data (MB/s) broken down by file for charting.
-    /// Uses LAG() window function to compute collection interval for per-second calculation.
+    /// Divides by each row's stored sample_interval_seconds; a pre-v60 row that never recorded one falls
+    /// back to the LAG() over collection_time this read always used (#3540).
     /// </summary>
     public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -185,10 +193,16 @@ with_interval AS (
         f.database_name || '.' || f.file_name AS file_label,
         f.delta_read_bytes,
         f.delta_write_bytes,
-        EXTRACT(EPOCH FROM (f.collection_time - LAG(f.collection_time) OVER (
-            PARTITION BY f.server_id, f.database_name, f.file_name
-            ORDER BY f.collection_time
-        ))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one — 0 (no delta knowable) becomes NULL through
+           NULLIF and the outer WHERE drops the row, exactly as it always dropped the first row per file.
+           NULL (a pre-v60 row that never recorded one) falls back to the LAG this read always used. */
+        CASE WHEN f.sample_interval_seconds IS NULL
+             THEN EXTRACT(EPOCH FROM (f.collection_time - LAG(f.collection_time) OVER (
+                      PARTITION BY f.server_id, f.database_name, f.file_name
+                      ORDER BY f.collection_time
+                  )))
+             ELSE NULLIF(f.sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_file_io_stats f
     JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
     WHERE f.server_id = $1
@@ -249,6 +263,11 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   database_name = 'tempdb'
+/* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker (first sighting,
+   counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
+   confident 0.00 ms a restart used to render. IS DISTINCT FROM 0 keeps pre-v60 rows (NULL: interval
+   never recorded), which carry on reading exactly as they always did. */
+AND   sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY collection_time, file_name
 ORDER BY collection_time, file_name";
 
@@ -305,8 +324,20 @@ public class FileIoRow
     public long DeltaWriteBytes { get; set; }
     public long DeltaStallReadMs { get; set; }
     public long DeltaStallWriteMs { get; set; }
-    public double AvgReadLatencyMs => DeltaReads > 0 ? (double)DeltaStallReadMs / DeltaReads : 0;
-    public double AvgWriteLatencyMs => DeltaWrites > 0 ? (double)DeltaStallWriteMs / DeltaWrites : 0;
+
+    /// <summary>#3540: the measured seconds the deltas accrued over. 0 is the calculator's "no delta
+    /// knowable" marker (first sighting, counter reset, gap past the policy); null is a pre-v60 row that
+    /// never recorded one and keeps the pre-#3540 reading.</summary>
+    public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0.</summary>
+    public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary>Stall per operation, or null when the row is <see cref="IsUnknowable"/> — a restart's fabricated
+    /// (0 stall, 0 reads) used to read here as a confident 0 ms (#3540). A real interval with no reads still
+    /// reads 0, the pre-existing convention for an idle file.</summary>
+    public double? AvgReadLatencyMs => IsUnknowable ? null : DeltaReads > 0 ? (double)DeltaStallReadMs / DeltaReads : 0;
+    public double? AvgWriteLatencyMs => IsUnknowable ? null : DeltaWrites > 0 ? (double)DeltaStallWriteMs / DeltaWrites : 0;
     public string SizeFormatted => SizeMb >= 1024 ? $"{SizeMb / 1024:F1} GB" : $"{SizeMb:F0} MB";
     public string ReadBytesFormatted => FormatBytes(DeltaReadBytes);
     public string WriteBytesFormatted => FormatBytes(DeltaWriteBytes);
