@@ -968,8 +968,8 @@ public class WebhookAlertService
     /// <summary>
     /// The prose, as lines that each fit a section on their own. A single line longer than
     /// <paramref name="capacity"/> — pathological, but a delivery that fails over it would be this bug
-    /// again — hard-splits at character boundaries, every continuation piece marked with
-    /// <see cref="SlackProseContinuationMarker"/>.
+    /// again — hard-splits at character boundaries (whole characters, through <see cref="SlackCutLength"/>,
+    /// since #3622), every continuation piece marked with <see cref="SlackProseContinuationMarker"/>.
     /// </summary>
     private static List<string> SplitProseIntoSectionSafeLines(string prose, int capacity)
     {
@@ -986,7 +986,12 @@ public class WebhookAlertService
             while (start < raw.Length)
             {
                 var prefix = start == 0 ? string.Empty : SlackProseContinuationMarker;
-                var take = Math.Min(capacity - prefix.Length, raw.Length - start);
+                /* #3622: the piece ends on a character boundary, never between the halves of a surrogate
+                   pair or through a combining sequence — the index arithmetic alone put an emoji's two
+                   halves in two sections, and the reader saw two replacement glyphs and no emoji. The
+                   loop always advances: the capacity is in the thousands and the marker is eight, so the
+                   cut can never back off to nothing. */
+                var take = SlackCutLength(raw.AsSpan(start), capacity - prefix.Length);
                 lines.Add(prefix + raw.Substring(start, take));
                 start += take;
             }
@@ -1069,7 +1074,7 @@ public class WebhookAlertService
         var firstDropped = lines[placed];
         var fragment = firstDropped.Length <= SlackOmissionFragmentLimit
             ? firstDropped
-            : firstDropped[..SlackOmissionFragmentLimit] + "...";
+            : firstDropped[..SlackCutLength(firstDropped, SlackOmissionFragmentLimit)] + "...";
         var noun = dropped == 1 ? "line" : "lines";
         var omission = string.Create(CultureInfo.InvariantCulture,
             $"... and {dropped:N0} more {noun}, first omitted: \"{fragment}\"{SlackOmissionPointer}");
@@ -1220,9 +1225,10 @@ public class WebhookAlertService
             list.Append(details[i].Heading);
         }
 
-        var headings = list.Length <= SlackOmittedHeadingsLimit
-            ? list.ToString()
-            : list.ToString(0, SlackOmittedHeadingsLimit) + "...";
+        var listed = list.ToString();
+        var headings = listed.Length <= SlackOmittedHeadingsLimit
+            ? listed
+            : listed[..SlackCutLength(listed, SlackOmittedHeadingsLimit)] + "...";
 
         var noun = dropped == 1 ? "detail" : "details";
         var omission = string.Create(CultureInfo.InvariantCulture,
@@ -1279,9 +1285,11 @@ public class WebhookAlertService
     }
 
     /// <summary>A detail heading bounded to <see cref="SlackDetailHeadingLimit"/>; unchanged for every
-    /// heading a producer has ever emitted.</summary>
+    /// heading a producer has ever emitted. The cut lands on a whole character (#3622): a heading IS the
+    /// detail's identity, and one ending in half an emoji or a letter shorn of its accent names a
+    /// different thing.</summary>
     private static string SlackHeading(string heading) =>
-        heading.Length <= SlackDetailHeadingLimit ? heading : heading[..SlackDetailHeadingLimit] + "...";
+        heading.Length <= SlackDetailHeadingLimit ? heading : heading[..SlackCutLength(heading, SlackDetailHeadingLimit)] + "...";
 
     /// <summary>
     /// One detail field's text object, <c>*label:*</c> over its value, inside
@@ -1291,6 +1299,13 @@ public class WebhookAlertService
     /// room for a closing line. Two passes size the kept stretch: the first against the longest count
     /// the note could carry, the second against the count it actually carries, so the result never
     /// exceeds the limit. Every field inside the limit renders the pre-#3612 bytes.
+    ///
+    /// <para>#3622: the kept stretch ends on a whole character (<see cref="SlackCutLength"/>), and the
+    /// omitted count is stated in the characters a reader would count — text elements, so one emoji is
+    /// one, a letter with its combining accent is one — not in UTF-16 units. Kept plus omitted is the
+    /// value's own character count, which is the only arithmetic a reader can check. The count can
+    /// only be at or below the UTF-16 count the first sizing pass allowed for, so the note can only be
+    /// narrower than the room held for it, and the field stays inside its limit.</para>
     /// </summary>
     private static string SlackFieldText(string label, string value)
     {
@@ -1307,12 +1322,96 @@ public class WebhookAlertService
            the arithmetic below stays positive. */
         if (prefix.Length > SlackFieldTextLimit / 2)
         {
-            prefix = prefix[..(SlackFieldTextLimit / 2)];
+            prefix = prefix[..SlackCutLength(prefix, SlackFieldTextLimit / 2)];
         }
 
-        var keep = Math.Max(0, SlackFieldTextLimit - prefix.Length - Note(value.Length).Length);
-        var note = Note(value.Length - keep);
+        var keep = SlackCutLength(value, Math.Max(0, SlackFieldTextLimit - prefix.Length - Note(value.Length).Length));
+        /* Counting the omitted characters IS a walk of the omitted tail — the pre-#3622 subtraction counted
+           units, which is the thing that was wrong — so this costs the tail's length, once, on the
+           truncation path only. Every producer bounds its values upstream (the analysis formatter cuts
+           drill-down text at 300 characters; the longest measured field is 318), so the tail is short in
+           practice and the cost is the value's own length in the worst case (review note on #3625). */
+        var note = Note(new StringInfo(value[keep..]).LengthInTextElements);
         return prefix + value[..keep] + note;
+    }
+
+    /// <summary>
+    /// The length of the longest leading stretch of <paramref name="text"/> that fits inside
+    /// <paramref name="limit"/> UTF-16 units without cutting through a character (#3622). Every Slack text
+    /// cut in this builder passes through here — the prose hard split and the omission line's quoted
+    /// fragment (#3493); the detail heading, the field label, the field value and the omitted-headings
+    /// list (#3612) — because each of them sized its cut in UTF-16 units, and a cut landing between the
+    /// two halves of a surrogate pair (any emoji, any supplementary-plane character, in a query text, a
+    /// database name or an advice string) left an unpaired surrogate at the boundary. <c>JsonSerializer</c>
+    /// does not emit that as a lone escape and Slack does not reject it — measured here, System.Text.Json
+    /// substitutes U+FFFD, the same relaxation <see cref="EscapeForJson"/> already relies on — so the
+    /// payload delivered, and what it delivered was wrong: the reader saw a replacement glyph (\uFFFD) that
+    /// was never in the value, the "leading stretch" a cut field claims to show was no longer a prefix of
+    /// the value, the hard split lost the character outright (each half became its own glyph, one per
+    /// section), and the field's stated "N more characters" counted UTF-16 units the reader cannot see.
+    /// #3622 expected the invalid-payload door; the door it actually opened is a payload that lies.
+    ///
+    /// <para><b>Grapheme, not code point, at every site.</b> The cut lands on a text-element boundary — an
+    /// extended grapheme cluster, the unit a reader counts as one character: an emoji with its skin-tone
+    /// modifier, a base letter with its combining accent, a CR LF pair — so no site can leave half a
+    /// visible character behind, and the one omission that is stated in characters
+    /// (<see cref="SlackFieldText"/>) cuts and counts in the same unit. The recommendation on #3622 was a
+    /// code-point cut at the two long-prose sites on cost grounds, and that trade does not exist: the walk
+    /// is bounded by <paramref name="limit"/>, not by the text — it stops at the first element that would
+    /// cross the limit, and the window it hands the segmenter ends two units past the limit rather than at
+    /// the end of the text (see the loop) — so it costs the same at a 120-character fragment as at a
+    /// 3,000-character section, and one rule at six sites is cheaper to keep true than two. The one input a whole-element cut cannot
+    /// serve is a single element wider than the whole limit — a run of combining marks with no base, the
+    /// "Zalgo text" a query comment can carry — where keeping whole elements would keep nothing and the
+    /// hard-split loop would never advance; there the cut falls back to the code-point boundary (one unit
+    /// before a surrogate pair, else the limit itself), because a valid payload showing a broken glyph
+    /// beats a delivery that hangs. Callers pass limits in the hundreds and thousands, so the fallback
+    /// always keeps at least one unit.</para>
+    /// </summary>
+    internal static int SlackCutLength(ReadOnlySpan<char> text, int limit)
+    {
+        if (text.Length <= limit)
+        {
+            return text.Length;
+        }
+
+        if (limit <= 0)
+        {
+            return 0;
+        }
+
+        /* text.Length > limit here, so the window is never empty while cut <= limit, and every element is
+           at least one unit wide, so the walk terminates at the first element that would cross.
+
+           The window handed to the segmenter ends two units past the limit, not at the end of the text.
+           Two units hold any scalar that straddles the limit whole, and grapheme boundaries are decided
+           between one scalar and the next (every rule's context is to the LEFT), so every boundary
+           decision at or before the limit is the one the full text would make: an element that ends
+           inside the window ends where the full text ends it, and an element that reaches the window's
+           end has crossed the limit however the full text would segment the rest of it. That is what
+           makes the cost claim in the doc block true — without the window, one run of combining marks
+           makes this call scan to the end of the text before concluding that it crosses (review note on
+           #3625). */
+        var cut = 0;
+        while (true)
+        {
+            var window = text.Slice(cut, Math.Min(text.Length - cut, limit - cut + 2));
+            var element = StringInfo.GetNextTextElementLength(window);
+            if (cut + element > limit)
+            {
+                break;
+            }
+
+            cut += element;
+        }
+
+        if (cut > 0)
+        {
+            return cut;
+        }
+
+        /* No whole element fits: a code-point boundary keeps the payload valid and the caller moving. */
+        return char.IsHighSurrogate(text[limit - 1]) && char.IsLowSurrogate(text[limit]) ? limit - 1 : limit;
     }
 
     /// <summary>
