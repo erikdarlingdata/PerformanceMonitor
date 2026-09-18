@@ -340,18 +340,20 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            declares no state and its host runs no state query. A collector appearing here is a real design
            decision — both hosts must load and persist its keys — not a silent addition.
 
-           ONE declares state now: default_trace_events stores the trace FILE it last read (#1962). #3153
+           TWO declare state now. default_trace_events stores the trace FILE it last read (#1962). #3153
            had added pg_index_bloat's per-database rotation cursor -- whose absence is what made the
            collector re-measure its largest index every cycle forever while labelling the rest as merely
            deferred -- and #3234 retired it, because the statistics estimate covers every index in one
-           statement and there is no position to resume from. Ordered by name so this reads as a set
-           rather than as an accident of catalog order. */
+           statement and there is no position to resume from. pg_wait_sampling joined in #3604: the arm it
+           ran (its instrument token) and, on the service-sampler arm, the cumulative tally the next cycle
+           adds to -- which the table holds only as its last written value per key, so a MAX() cannot
+           recover it. Ordered by name so this reads as a set rather than as an accident of catalog order. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "default_trace_events" }, declaring);
+        Assert.Equal(new[] { "default_trace_events", "pg_wait_sampling" }, declaring);
     }
 
     [Fact]
