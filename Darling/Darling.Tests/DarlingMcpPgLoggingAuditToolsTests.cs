@@ -44,8 +44,8 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
     private static DarlingPgLoggingAuditReader.PgLoggingSettingRow Row(
         string name, string? setting, string? unit = null, string context = "sighup",
-        string source = "default", string? boot = null, DateTime? at = null) =>
-        new(name, setting, unit, context, source, boot ?? setting, false, at ?? Stamp);
+        string source = "default", string? boot = null, DateTime? at = null, bool pendingRestart = false) =>
+        new(name, setting, unit, context, source, boot ?? setting, pendingRestart, at ?? Stamp);
 
     /// <summary>A PostgreSQL 14 with nothing turned on: every judged setting at its pre-15 default.</summary>
     private static List<DarlingPgLoggingAuditReader.PgLoggingSettingRow> AllOff() => new()
@@ -205,6 +205,15 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
         Assert.Equal(DarlingPgLoggingAudit.Partial, deliberate.Verdict);
         Assert.DoesNotContain("own default since 15", deliberate.CostNote, StringComparison.Ordinal);
         Assert.Contains("300000", deliberate.CostNote, StringComparison.Ordinal);
+
+        /* Review's case: an administrator who WRITES 600000 into postgresql.conf has made a choice that
+           happens to equal the boot value. PostgreSQL says source = 'configuration file', and so does this -
+           a text comparison against boot_val would have called the choice inaction, the anti-pattern
+           DarlingPgServerConfigReader.CurrentConfigSql documents avoiding. */
+        Replace(rows, Row("log_autovacuum_min_duration", "600000", "ms", source: "configuration file", boot: "600000"));
+        var explicitDefault = FacetOf(DarlingPgLoggingAudit.Audit(rows), "log_autovacuum_min_duration");
+        Assert.Equal(DarlingPgLoggingAudit.Partial, explicitDefault.Verdict);
+        Assert.DoesNotContain("own default since 15", explicitDefault.CostNote, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -261,18 +270,62 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
     }
 
     /// <summary>
-    /// A value the parse cannot read is <c>unknown</c> too, rather than a guess in either direction.
+    /// A value the parse cannot read is <c>unknown</c> too, rather than a guess in either direction — and
+    /// its message says the row IS in the snapshot with an unreadable value, which is a different fact from
+    /// the row being absent and must not be reported as it (review on #3643). Close to unreachable, since
+    /// <c>pg_settings</c> renders well-formed values, which is exactly why the message is pinned: nothing
+    /// else would ever exercise it.
     /// </summary>
     [Fact]
-    public void AnUnparseableValue_IsUnknown()
+    public void AnUnparseableValue_IsUnknown_AndSaysItIsInTheSnapshot()
     {
         var rows = AllOff();
         Replace(rows, Row("log_temp_files", "lots", "kB", "superuser"));
         Replace(rows, Row("log_checkpoints", "maybe"));
 
         var audit = DarlingPgLoggingAudit.Audit(rows);
-        Assert.Equal(DarlingPgLoggingAudit.Unknown, FacetOf(audit, "log_temp_files").Verdict);
-        Assert.Equal(DarlingPgLoggingAudit.Unknown, FacetOf(audit, "log_checkpoints").Verdict);
+        foreach (var facet in new[] { FacetOf(audit, "log_temp_files"), FacetOf(audit, "log_checkpoints") })
+        {
+            Assert.Equal(DarlingPgLoggingAudit.Unknown, facet.Verdict);
+            Assert.Contains("IS in the stored snapshot", facet.CostNote, StringComparison.Ordinal);
+            Assert.Contains("'" + facet.Value + "'", facet.CostNote, StringComparison.Ordinal);
+            Assert.DoesNotContain("not in the stored snapshot", facet.CostNote, StringComparison.Ordinal);
+            Assert.Contains("could not read", facet.Remedy, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// <c>pending_restart</c> reaches the row and the summary (review on #3643). It is the one case where the
+    /// value judged is provably not the value the server will have: the file already holds another and the
+    /// running server has not restarted, so the remedy is written against a value that changes at the next
+    /// restart. <c>get_pg_server_config</c> reports it loudly for the same reason; dropping it here would
+    /// have left the audit's own remedy unqualified on exactly the row where it needs qualifying.
+    /// </summary>
+    [Fact]
+    public void APendingRestart_IsCarriedOnTheRow_AndNamedInTheSummary()
+    {
+        var rows = AllOff();
+        Replace(rows, Row("log_lock_waits", "off", context: "superuser", source: "configuration file", pendingRestart: true));
+
+        var audit = DarlingPgLoggingAudit.Audit(rows);
+        var pending = FacetOf(audit, "log_lock_waits");
+        Assert.True(pending.PendingRestart);
+        Assert.Contains("pending_restart is TRUE", pending.RestartNote, StringComparison.Ordinal);
+        Assert.Contains("RUNNING one", pending.RestartNote, StringComparison.Ordinal);
+        Assert.Contains("does not carry the file's value", pending.RestartNote, StringComparison.Ordinal);
+
+        var plain = FacetOf(audit, "log_checkpoints");
+        Assert.False(plain.PendingRestart);
+        Assert.Null(plain.RestartNote);
+
+        using var doc = JsonDocument.Parse(DarlingMcpPgLoggingAuditTools.BuildAuditJson("srv", audit));
+        var root = doc.RootElement;
+        Assert.Equal(1, root.GetProperty("pending_restart_count").GetInt32());
+        Assert.Equal(new[] { "log_lock_waits" }, root.GetProperty("pending_restart_settings").EnumerateArray().Select(e => e.GetString()).ToArray());
+        var row = root.GetProperty("facets").EnumerateArray().Single(f => f.GetProperty("setting").GetString() == "log_lock_waits");
+        Assert.True(row.GetProperty("pending_restart").GetBoolean());
+        Assert.False(string.IsNullOrWhiteSpace(row.GetProperty("restart_note").GetString()));
+        Assert.Contains("restart_note", root.GetProperty("note").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -483,7 +536,11 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
             Assert.True(facet.TryGetProperty("value", out _));
             Assert.True(facet.TryGetProperty("source", out _));
             Assert.True(facet.TryGetProperty("scope_note", out _));
+            Assert.True(facet.TryGetProperty("pending_restart", out _));
+            Assert.True(facet.TryGetProperty("restart_note", out _));
         }
+
+        Assert.Equal(0, root.GetProperty("pending_restart_count").GetInt32());
     }
 
     /// <summary>
@@ -642,7 +699,7 @@ public sealed class DarlingMcpPgLoggingAuditLivePostgresTests
             await SeedAsync(connection, ct, ManagedId, ManagedName, newest, "log_autovacuum_min_duration", "-1", "ms", "sighup", "configuration file", "600000");
             await SeedAsync(connection, ct, ManagedId, ManagedName, newest, "log_checkpoints", "on", null, "sighup", "default", "on");
             await SeedAsync(connection, ct, ManagedId, ManagedName, newest, "log_connections", "on", null, "superuser-backend", "configuration file", "");
-            await SeedAsync(connection, ct, ManagedId, ManagedName, newest, "log_disconnections", "on", null, "superuser-backend", "configuration file", "off");
+            await SeedAsync(connection, ct, ManagedId, ManagedName, newest, "log_disconnections", "on", null, "superuser-backend", "configuration file", "off", pendingRestart: true);
 
             /* ── self-hosted ── */
             var self = JsonDocument.Parse(await DarlingMcpPgLoggingAuditTools.GetPgLoggingAudit(postgres, SelfHostedName)).RootElement;
@@ -694,6 +751,11 @@ public sealed class DarlingMcpPgLoggingAuditLivePostgresTests
                 managed.GetProperty("off_settings").EnumerateArray().Select(e => e.GetString()).ToArray());
             /* deadlock_timeout was not seeded for this server, and the row says so rather than quoting 1000. */
             Assert.Contains("not in the snapshot", managedFacets["log_lock_waits"].GetProperty("unlocks").GetString(), StringComparison.Ordinal);
+            /* The one pending_restart row travelled from the store to the wire and into the summary. */
+            Assert.True(managedFacets["log_disconnections"].GetProperty("pending_restart").GetBoolean());
+            Assert.Equal(new[] { "log_disconnections" },
+                managed.GetProperty("pending_restart_settings").EnumerateArray().Select(e => e.GetString()).ToArray());
+            Assert.False(managedFacets["log_lock_waits"].GetProperty("pending_restart").GetBoolean());
 
             /* ── no snapshot at all ── */
             var empty = JsonDocument.Parse(await DarlingMcpPgLoggingAuditTools.GetPgLoggingAudit(postgres, EmptyName)).RootElement;
@@ -711,7 +773,7 @@ public sealed class DarlingMcpPgLoggingAuditLivePostgresTests
 
     private static Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime collectionTime,
-        string name, string? setting, string? unit, string context, string source, string? bootVal) =>
+        string name, string? setting, string? unit, string context, string source, string? bootVal, bool pendingRestart = false) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO pg_server_config
     (collection_id, collection_time, server_id, server_name, name, setting, unit, category, context, vartype,
@@ -719,7 +781,7 @@ INSERT INTO pg_server_config
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
             CollectionIdGenerator.Next(), collectionTime, serverId, serverName, name, setting, unit,
             "Reporting and Logging / What to Log", context, unit is null ? "bool" : "integer",
-            source, bootVal, setting, null, 0, false, null);
+            source, bootVal, setting, null, 0, pendingRestart, null);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

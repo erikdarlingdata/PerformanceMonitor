@@ -97,6 +97,10 @@ public static class DarlingPgLoggingAudit
     /// <param name="Remedy">The change, in the syntax this server's hosting flavour needs — or why none is needed.</param>
     /// <param name="ScopeNote">Set when the value came from a per-role or per-database override the monitoring
     /// connection resolved, so the server-wide value may differ.</param>
+    /// <param name="PendingRestart">The file and the running server disagree about this setting, so the value
+    /// judged here is the RUNNING one and changes at the next restart.</param>
+    /// <param name="RestartNote">The consequence of <paramref name="PendingRestart"/>, spelled out on the row;
+    /// null when the two agree.</param>
     public sealed record Facet(
         string Setting,
         string? Value,
@@ -110,7 +114,9 @@ public static class DarlingPgLoggingAudit
         string Recommended,
         string CostNote,
         string Remedy,
-        string? ScopeNote);
+        string? ScopeNote,
+        bool PendingRestart,
+        string? RestartNote);
 
     /// <summary>A plan-capture setting shown as observed, with the readiness facet that judges it.</summary>
     public sealed record ReadinessSetting(string Setting, string? Value, string? Source, string ReadinessFacet);
@@ -247,7 +253,7 @@ public static class DarlingPgLoggingAudit
                 "Off costs nothing and records nothing: a 40-second statement cancelled by its client leaves "
                 + "no trace anywhere but this log line. A threshold sized to the workload - well above the "
                 + "normal statement time, so that only the outliers write - costs one line per outlier.",
-            _ => NotInSnapshot,
+            _ => UnknownNote(row),
         };
 
         return new Facet(
@@ -270,7 +276,9 @@ public static class DarlingPgLoggingAudit
                          + ReadinessTool + ".",
             CostNote: cost,
             Remedy: Remedy(Setting, "1000", row, managed, verdict, alreadyRight: verdict == Partial),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet LockWaits(
@@ -296,13 +304,15 @@ public static class DarlingPgLoggingAudit
                       + "classify. get_pg_blocking is the sampled read that exists today, and its own response "
                       + "says how many samples its 'no blocking' rests on.",
             Recommended: "on.",
-            CostNote: verdict == Unknown ? NotInSnapshot
+            CostNote: verdict == Unknown ? UnknownNote(row)
                 : "One line per wait longer than deadlock_timeout - negligible on a workload that is not "
                       + "already lock-bound, and on one that is, the volume is itself the finding. Do NOT lower "
                       + "deadlock_timeout to make this fire sooner: that is also how often the deadlock "
                       + "detector runs, and it is a lock-heavy operation in its own right.",
             Remedy: Remedy(Setting, "on", row, managed, verdict, alreadyRight: verdict == Instrumented),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet TempFiles(
@@ -333,7 +343,7 @@ public static class DarlingPgLoggingAudit
                 "Off records nothing: the counters say a database spilled 4 GB in an hour and the log says "
                 + "nothing about which statement did it or when. 0 costs one line per temp file; on a workload "
                 + "that spills constantly a kilobyte threshold bounds it.",
-            _ => NotInSnapshot,
+            _ => UnknownNote(row),
         };
 
         return new Facet(
@@ -353,7 +363,9 @@ public static class DarlingPgLoggingAudit
             Recommended: "0 (every spill), or a kilobyte threshold on a workload that spills small files constantly.",
             CostNote: cost,
             Remedy: Remedy(Setting, "0", row, managed, verdict, alreadyRight: verdict is Instrumented or Partial),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet AutovacuumMinDuration(
@@ -369,11 +381,14 @@ public static class DarlingPgLoggingAudit
             : threshold == 0 ? Instrumented
             : Partial;
 
-        /* PostgreSQL 15 moved the default from -1 to 600000 (ten minutes). A server reporting exactly its
-           own boot value at a positive threshold is on that default, and the default is the shape worth
-           naming: it sees only the outlier runs. */
+        /* PostgreSQL 15 moved the default from -1 to 600000 (ten minutes). A server sitting on that default
+           at a positive threshold is the shape worth naming: it sees only the outlier runs. The judgment is
+           PostgreSQL's OWN - source = 'default' is the server saying nobody set it - and not a text
+           comparison against boot_val, for the reason DarlingPgServerConfigReader.CurrentConfigSql gives:
+           an administrator who writes 600000 into postgresql.conf has made a choice that happens to equal
+           the boot value, and calling that choice a default would attribute it to inaction. */
         var atDefault = row is not null && threshold > 0
-            && string.Equals(row.Setting, row.BootValue, StringComparison.Ordinal);
+            && string.Equals(row.Source, "default", StringComparison.Ordinal);
 
         var cost = verdict switch
         {
@@ -395,7 +410,7 @@ public static class DarlingPgLoggingAudit
                 "Off records nothing about what any run cost. 0 costs one line per run, and the run rate is "
                 + "bounded by the worker count, so the volume is small on all but a server with thousands of "
                 + "tiny tables.",
-            _ => NotInSnapshot,
+            _ => UnknownNote(row),
         };
 
         return new Facet(
@@ -413,7 +428,9 @@ public static class DarlingPgLoggingAudit
             Recommended: "0 (every run).",
             CostNote: cost,
             Remedy: Remedy(Setting, "0", row, managed, verdict, alreadyRight: verdict == Instrumented),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet Checkpoints(
@@ -436,13 +453,15 @@ public static class DarlingPgLoggingAudit
                      + "duration of one checkpoint.",
             Consumer: "PLANNED - #3601's log pipeline. get_pg_write_stats reads the checkpoint counters today.",
             Recommended: "on - PostgreSQL 15 made it the default.",
-            CostNote: verdict == Unknown ? NotInSnapshot
+            CostNote: verdict == Unknown ? UnknownNote(row)
                 : "One or two lines per checkpoint, and a checkpoint happens at most every "
                       + "checkpoint_timeout (five minutes by default) unless something requests one - "
                       + "negligible. A server reporting off has it set that way in a file or parameter group, "
                       + "or is on a major before 15 where off was the default.",
             Remedy: Remedy(Setting, "on", row, managed, verdict, alreadyRight: verdict == Instrumented),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet Connections(
@@ -470,13 +489,15 @@ public static class DarlingPgLoggingAudit
                      + "arrived in the minute before the incident.",
             Consumer: "PLANNED - #3601 names connection churn among the log pipeline's families.",
             Recommended: "on (PostgreSQL 18: 'all', or a list such as receipt,authentication).",
-            CostNote: verdict == Unknown ? NotInSnapshot
+            CostNote: verdict == Unknown ? UnknownNote(row)
                 : "On a POOLED workload connections are rare and this costs nothing. On an unpooled one - a "
                       + "connection per request - it is a line per request, and that volume is itself the "
                       + "finding: the pool that is missing. On 18 the list form narrows the lines to the "
                       + "stages you want.",
             Remedy: Remedy(Setting, "on", row, managed, verdict, alreadyRight: verdict == Instrumented),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     private static Facet Disconnections(
@@ -497,11 +518,13 @@ public static class DarlingPgLoggingAudit
                      + "two-second sessions rather than as a connection count that looks stable.",
             Consumer: "PLANNED - #3601, beside log_connections.",
             Recommended: "on, together with log_connections.",
-            CostNote: verdict == Unknown ? NotInSnapshot
+            CostNote: verdict == Unknown ? UnknownNote(row)
                 : "The same profile as log_connections: one line per session end, nothing on a pooled "
                       + "workload, a line per request on an unpooled one.",
             Remedy: Remedy(Setting, "on", row, managed, verdict, alreadyRight: verdict == Instrumented),
-            ScopeNote: ScopeNote(row));
+            ScopeNote: ScopeNote(row),
+            PendingRestart: row?.PendingRestart ?? false,
+            RestartNote: RestartNote(row));
     }
 
     /* ───────────────────────── shared pieces ───────────────────────── */
@@ -509,6 +532,21 @@ public static class DarlingPgLoggingAudit
     private const string NotInSnapshot =
         "This setting is not in the stored snapshot, so nothing is claimed about it - not inferred from the "
         + "default, not inferred from the major version. get_pg_server_config shows what the snapshot holds.";
+
+    /// <summary>
+    /// The two ways a verdict is <c>unknown</c>, told apart on the row: the setting is not in the snapshot at
+    /// all, or it is there with a value this audit cannot read as the boolean or integer PostgreSQL renders
+    /// for it. The second is close to unreachable — <c>pg_settings</c> renders well-formed values — but a
+    /// message that said "not in the snapshot" about a row that is plainly in it would be false, and the
+    /// contract this type's header states ("unknown means the setting is not in the stored snapshot") is
+    /// what the first sentence below keeps true by naming the exception.
+    /// </summary>
+    private static string UnknownNote(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row) => row is null
+        ? NotInSnapshot
+        : $"This setting IS in the stored snapshot but its value '{row.Setting}' is not one this audit can read "
+          + "as the boolean or integer PostgreSQL renders for it, so nothing is claimed about it. "
+          + "get_pg_server_config shows the raw row; if this recurs, the collector's rendering has changed "
+          + "and the audit's parse needs to learn it.";
 
     private static DarlingPgLoggingAuditReader.PgLoggingSettingRow? Find(
         IReadOnlyDictionary<string, DarlingPgLoggingAuditReader.PgLoggingSettingRow> byName, string name) =>
@@ -620,6 +658,31 @@ public static class DarlingPgLoggingAudit
     };
 
     /// <summary>
+    /// <c>pending_restart</c> is the one row where the value judged is provably NOT the value the server will
+    /// have: postgresql.conf (or ALTER SYSTEM's file) already holds something else and the running server
+    /// has not restarted. get_pg_server_config reports it loudly for the same reason; here it matters twice
+    /// over, because the remedy is written against the running value and a restart may deliver the change,
+    /// or a different one, with no deployment to explain it. Which value the file holds is not in the
+    /// snapshot - pg_settings does not carry it - so the note says the disagreement exists and where to look,
+    /// and does not guess the direction.
+    /// </summary>
+    private static string? RestartNote(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row)
+    {
+        /* A block body for the reason Threshold has one: a `{ }` property pattern reads as the member's
+           body to TsqlConventionGuardTests' scan. */
+        if (row is null || !row.PendingRestart)
+        {
+            return null;
+        }
+
+        return "pending_restart is TRUE: the configuration file already holds a different value for this setting "
+               + "and the running server has not restarted, so the value judged here is the RUNNING one and it "
+               + "changes at the next restart with no deployment to explain it. pg_settings does not carry the "
+               + "file's value, so which way it changes is not knowable from here - read the file, or "
+               + "get_pg_server_config's pending_restart_settings, before acting on this row's remedy.";
+    }
+
+    /// <summary>
     /// The change in the hosting flavour's own syntax, or the reason none is needed. <c>alreadyRight</c> is
     /// the caller's judgment that the current value is the recommended posture — which for a threshold
     /// setting can be a <c>partial</c> verdict — so the remedy does not tell somebody to change a value that
@@ -631,8 +694,11 @@ public static class DarlingPgLoggingAudit
     {
         if (verdict == Unknown)
         {
-            return "No remedy is offered for a setting the snapshot does not hold: check get_pg_server_config, "
-                   + "and if the collector is running, the next hourly snapshot will carry it.";
+            return row is null
+                ? "No remedy is offered for a setting the snapshot does not hold: check get_pg_server_config, "
+                  + "and if the collector is running, the next hourly snapshot will carry it."
+                : "No remedy is offered for a value this audit could not read: get_pg_server_config shows the "
+                  + "raw row, and the remedy depends on what it actually says.";
         }
 
         if (alreadyRight)

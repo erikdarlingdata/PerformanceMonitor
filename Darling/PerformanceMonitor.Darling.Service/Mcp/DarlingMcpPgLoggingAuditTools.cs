@@ -71,6 +71,16 @@ public sealed class DarlingMcpPgLoggingAuditTools
         }
         catch (Exception ex)
         {
+            /* The engine gate again, inside the catch, the way the plan tools do it: a read that throws on a
+               store where this collector never runs should still answer not_collected rather than a raw
+               error, because the gate is the more specific fact and the exception is its symptom. */
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                postgres, resolved.ServerId, resolved.ServerName, "pg_server_config");
+            if (gated != null)
+            {
+                return gated;
+            }
+
             return McpHelpers.Status("error", $"Reading the PostgreSQL logging audit failed: {ex.Message}");
         }
     }
@@ -89,6 +99,9 @@ public sealed class DarlingMcpPgLoggingAuditTools
            listed as a to-do because for two settings it is the recommendation. */
         var off = facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToArray();
         var unknown = facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToArray();
+        /* Named at the top for the reason get_pg_server_config names them: a judged value that the next
+           restart will change is the one row whose remedy should not be acted on from this response alone. */
+        var pendingRestart = facets.Where(f => f.PendingRestart).Select(f => f.Setting).ToArray();
 
         return JsonSerializer.Serialize(new
         {
@@ -107,13 +120,17 @@ public sealed class DarlingMcpPgLoggingAuditTools
             unknown_count = unknown.Length,
             off_settings = off,
             unknown_settings = unknown,
+            pending_restart_count = pendingRestart.Length,
+            pending_restart_settings = pendingRestart,
             note = "One facet per logging setting, in the order an operator reaches for them - statements, "
                  + "locks, spills, maintenance, checkpoints, connections - not a causal order; nothing here "
                  + "gates anything else. verdict describes the LINES: instrumented writes every line the "
                  + "setting can, partial has a threshold filtering and the row says what falls below it, off "
                  + "writes nothing, unknown is not in the snapshot and nothing is inferred. partial is the "
                  + "recommended posture for log_min_duration_statement and can be for log_temp_files - read "
-                 + "cost_note before changing a partial row. consumer names the Darling family that reads the "
+                 + "cost_note before changing a partial row. A row with pending_restart true is judged on the "
+                 + "RUNNING value while the file already holds another - read restart_note before acting on its "
+                 + "remedy. consumer names the Darling family that reads the "
                  + "lines and says PLANNED where it does not ship yet; the setting is still worth turning on "
                  + "first, because the log it fills is the one somebody opens at incident time. remedy is "
                  + "worded for this server's hosting (see hosting_evidence). judged_by_readiness lists plan "
@@ -136,6 +153,10 @@ public sealed class DarlingMcpPgLoggingAuditTools
                 cost_note = f.CostNote,
                 remedy = f.Remedy,
                 scope_note = f.ScopeNote,
+                /* The file and the running server disagree: the value above is the running one and the
+                   remedy is written against it. restart_note says what that means and where to look. */
+                pending_restart = f.PendingRestart,
+                restart_note = f.RestartNote,
             }),
             judged_by_readiness = new
             {
