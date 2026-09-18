@@ -157,11 +157,18 @@ public sealed class AlertEngineTests
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
 
-        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
-           make the file-growth gate fire inside an unrelated scenario. */
+        /* #2349: EMPTY by default. These tests mostly exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario; the #3539 A8c pins below plant rows
+           and read back the lookback the engine asked for. */
+        public List<DatabaseFileGrowthInfo> Files { get; } = new();
+        public int? FileGrowthLookbackAsked { get; private set; }
+
         public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
-            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<DatabaseFileGrowthInfo>());
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+        {
+            FileGrowthLookbackAsked = lookbackMinutes;
+            return Task.FromResult(new List<DatabaseFileGrowthInfo>(Files));
+        }
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
@@ -2107,6 +2114,64 @@ public sealed class AlertEngineTests
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- database file growth (#2349; #3539 A8c: the rise is MB per HOUR) ---------------- */
+
+    private static DatabaseFileGrowthInfo GrowingFile(double growthMb, double windowMinutes) => new()
+    {
+        DatabaseName = "tempdb", FileName = "tempdev", PhysicalName = @"D:\data\tempdev.mdf", FileTypeDesc = "ROWS",
+        TotalSizeMb = 90_000, GrowthMb = growthMb, GrowthWindowMinutes = windowMinutes,
+        VolumeMountPoint = @"D:\", VolumeTotalMb = 4_000_000, VolumeFreeMb = 3_000_000,
+    };
+
+    /// <summary>
+    /// Through the ENGINE: the same growth rate pages on a five-minute lookback and on a one-day lookback, and
+    /// the threshold line on what fired names the rate, the window it was averaged over, and the megabytes
+    /// that rate amounts to inside the window — in the unit phrase both Settings windows use. The lookback the
+    /// engine hands the read is the configured one, so the store read and the bar cannot disagree about the
+    /// window.
+    /// </summary>
+    [Theory]
+    [InlineData(5, 853.34, "rise ≥ 10240 MB/hr averaged over 5 min (≥ 853 MB in the window) or file ≥ 60% of volume")]
+    [InlineData(1440, 245_760, "rise ≥ 10240 MB/hr averaged over 1440 min (≥ 245760 MB in the window) or file ≥ 60% of volume")]
+    public async Task FileGrowth_TheRiseIsPerHour_SoTheSameRatePagesOnAnyLookback_AndTheThresholdSaysSo(
+        int lookbackMinutes, double growthMb, string expectedThreshold)
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.FileGrowthLookbackMinutes = lookbackMinutes;
+        Assert.Equal(10_240, h.Settings.FileGrowthRiseMb);
+        var engine = h.Build();
+
+        h.Adapter.Files.Add(GrowingFile(growthMb, lookbackMinutes));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(lookbackMinutes, h.Adapter.FileGrowthLookbackAsked);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database File Growth", fired.MetricName);
+        Assert.Equal(expectedThreshold, fired.ThresholdValue);
+        Assert.Contains(AlertContextBuilders.FileGrowthRiseUnit, fired.ThresholdValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other half of the same property: a rate a tenth under the bar is silent on both lookbacks — including
+    /// the day-long one, where the per-window reading paged on 12 GB in a day because 12,288 is more than 10,240.
+    /// </summary>
+    [Theory]
+    [InlineData(5, 768)]
+    [InlineData(1440, 12_288)]
+    public async Task FileGrowth_ARateUnderTheBar_IsSilentOnAnyLookback(int lookbackMinutes, double growthMb)
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.FileGrowthLookbackMinutes = lookbackMinutes;
+        var engine = h.Build();
+
+        h.Adapter.Files.Add(GrowingFile(growthMb, lookbackMinutes));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     /* ---------------- persistent version store (#1984) ---------------- */

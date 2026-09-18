@@ -1738,8 +1738,11 @@ public sealed class AlertEngine
                 key, _settings.FileGrowthLookbackMinutes, ct);
             readClock.Restart();
 
+            /* #3539 A8c: the rise knob is MB per HOUR and the lookback is the window that rate is averaged over,
+               so the builder scales the bar to the window rather than comparing the raw in-window delta against
+               a number whose meaning would otherwise change with the other knob. */
             var breached = AlertContextBuilders.GetBreachedFiles(
-                files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent);
+                files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent, _settings.FileGrowthLookbackMinutes);
 
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
@@ -1768,10 +1771,19 @@ public sealed class AlertEngine
                         + $"({worst.VolumePercent:F0}% of {worst.VolumeMountPoint}), "
                         + $"grew {worst.GrowthGb:F1} GB in {worst.GrowthWindowMinutes:F0} min";
 
+                    /* The threshold line states the rate AND the window it was averaged over, in the same unit
+                       phrase the Settings windows and the card use (#3539 A8c) — and the megabytes that rate
+                       amounts to inside the window, which is the number the card's "Growth" figure was held to.
+                       The card's own rate is over the MEASURED span, which can be narrower than the window on a
+                       server that started collecting recently; naming the in-window bar is what lets the two be
+                       compared without knowing that. */
+                    var riseBarMb = AlertContextBuilders.FileGrowthRiseBarMb(
+                        _settings.FileGrowthRiseMb, _settings.FileGrowthLookbackMinutes);
                     await FireAsync(new AlertOutcome(
                         key, serverName, "Database File Growth",
                         headline,
-                        $"rise ≥ {_settings.FileGrowthRiseMb} MB or file ≥ {_settings.FileGrowthVolumePercent}% of volume",
+                        $"rise ≥ {_settings.FileGrowthRiseMb} {AlertContextBuilders.FileGrowthRiseUnit} averaged over {_settings.FileGrowthLookbackMinutes} min "
+                        + $"(≥ {riseBarMb:F0} MB in the window) or file ≥ {_settings.FileGrowthVolumePercent}% of volume",
                         context, detailText,
                         NumericCurrentValue: worst.VolumePercent,
                         NumericThresholdValue: _settings.FileGrowthVolumePercent,

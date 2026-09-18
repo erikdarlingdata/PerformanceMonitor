@@ -481,10 +481,10 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
-                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file grew over" VerticalAlignment="Center"
+                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file growing over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                    <TextBlock Text="MB within" VerticalAlignment="Center" Margin="2,0,0,0"
+                    <TextBlock Text="MB/hr averaged over" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min, or is over" VerticalAlignment="Center" Margin="2,0,0,0"

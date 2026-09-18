@@ -338,22 +338,62 @@ public static class AlertContextBuilders
     }
 
     /// <summary>
+    /// The unit phrase every surface that shows the file-growth rise threshold uses (#3539 A8c). Both Settings
+    /// windows, the alert body's threshold line and the card spell the knob's unit with THIS string (the MCP tool
+    /// descriptions, which are prose, write it out as "megabytes per HOUR"), and a census test holds each of
+    /// them to it — the knob meant "per lookback" from the day it shipped because nothing held the surfaces to
+    /// one phrase.
+    /// </summary>
+    public const string FileGrowthRiseUnit = "MB/hr";
+
+    /// <summary>
+    /// The rise bar, in megabytes over the lookback window, for a threshold expressed in MB per HOUR (#3539 A8c).
+    ///
+    /// <para><b>What the knob means.</b> <see cref="IAlertEngineSettings.FileGrowthRiseMb"/> is a RATE — megabytes
+    /// per hour — and <see cref="IAlertEngineSettings.FileGrowthLookbackMinutes"/> is the window that rate is
+    /// averaged over. Before this, the stored number was compared against the raw growth inside the window, so
+    /// the same 10,240 meant "10 GB in five minutes" on a store whose operator had shortened the lookback and
+    /// "10 GB in a day" on one who had lengthened it: two knobs, one of which silently rescaled the other by up
+    /// to 288×. Now 10,240 is 10 GB/hr everywhere; a 5-minute window asks for 853 MB inside it, a 24-hour
+    /// window for 240 GB, and both are the same sustained rate.</para>
+    ///
+    /// <para><b>Why the bar is scaled to the CONFIGURED window rather than the rate read off the MEASURED one.</b>
+    /// <see cref="DatabaseFileGrowthInfo.GrowthMbPerHour"/> divides by the width the samples actually span,
+    /// which on a server that started collecting five minutes ago — or just came out of a collection gap — is
+    /// five minutes: one 1 GB autogrowth in that span reads as 12 GB/hr, fires the default bar, and resolves at
+    /// the next sample when the span widens. Holding the growth to <c>rate × configured window</c> instead counts
+    /// unobserved time as no growth, the same conservative reading a single-sample window already gets ("no rise
+    /// observed", not "the whole file appeared"). It also makes the change byte-identical for every store on the
+    /// shipped 60-minute lookback: <c>rate × 60 / 60</c> is the number that was always compared.</para>
+    /// </summary>
+    public static double FileGrowthRiseBarMb(int riseMbPerHour, int lookbackMinutes) =>
+        /* Product first, one division: the product of two ints is exact in a double for any value the knobs'
+           clamps allow (the write bound is int.MaxValue on the rate, so it is widened before multiplying), and
+           dividing once keeps "rate × 60 / 60" equal to the rate to the last bit on the shipped lookback. */
+        (double)riseMbPerHour * Math.Max(1, lookbackMinutes) / 60.0;
+
+    /// <summary>
     /// #2349: the files breaching either gate, worst first. Both gates are applied HERE rather than in the
     /// engine so the render path, the observation path and the decision can never disagree about which files
     /// are involved.
+    ///
+    /// <para>The rise gate compares the growth inside the window against <see cref="FileGrowthRiseBarMb"/> — the
+    /// MB-per-hour threshold scaled to the window it is averaged over (#3539 A8c), so the same rate gives the
+    /// same verdict whatever the lookback is set to.</para>
     ///
     /// <para>Ordered by how much of its volume the file occupies, because that is the one number that says how
     /// close this is to becoming a <c>Volume Free Space</c> page — a 40 GB rise on a 4 TB volume is less urgent
     /// than a 10 GB file that is now 80% of a small one.</para>
     /// </summary>
     public static List<DatabaseFileGrowthInfo> GetBreachedFiles(
-        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMb, int volumePercent)
+        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMbPerHour, int volumePercent, int lookbackMinutes)
     {
         if (files is null || files.Count == 0) return new List<DatabaseFileGrowthInfo>();
 
+        var riseBarMb = FileGrowthRiseBarMb(riseMbPerHour, lookbackMinutes);
         var breached = files
             .Where(f =>
-                (riseMb > 0 && f.GrowthMb >= riseMb)
+                (riseMbPerHour > 0 && f.GrowthMb >= riseBarMb)
                 || (volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent))
             .OrderByDescending(f => f.VolumePercent)
             .ThenByDescending(f => f.GrowthMb)
@@ -382,7 +422,10 @@ public static class AlertContextBuilders
                 ("File", f.FileName),
                 ("Physical Name", f.PhysicalName),
                 ("Size", $"{f.TotalSizeGb:F1} GB"),
-                ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} MB/hr)"),
+                /* The rate here is over the MEASURED span (what the samples actually show); the threshold line
+                   on the alert says what bar it was held to and over what window. Same unit phrase as the
+                   threshold, so the two numbers read as comparable (#3539 A8c). */
+                ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} {FileGrowthRiseUnit})"),
                 ("Volume", string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint),
                 ("Volume Free", $"{f.VolumeFreeMb / 1024.0:F1} GB"),
                 ("File % of Volume", $"{f.VolumePercent:F0}%"),
