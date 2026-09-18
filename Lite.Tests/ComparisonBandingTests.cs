@@ -1,0 +1,503 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// #3538 A3: the arithmetic behind <c>compare_analysis</c>'s verdicts, pinned on the shared
+/// <see cref="ComparisonBanding"/> both SKUs serialize. Every fact here is scored by the REAL
+/// <see cref="FactScorer"/> before it is compared, so the ladder positions the absolute rule reads are the
+/// scorer's own and a threshold change upstream moves these pins with it rather than past them. The
+/// scenarios are the review's: the flat ±0.1 severity dead-band read a saturated doubling as "stable" and a
+/// trace-to-trace wobble as "worse"; the same value delta banded by a tight and a loose baseline must
+/// land on different sides; one I/O stall must be one family row; a plan-cache hash swap must be churn.
+/// </summary>
+public sealed class ComparisonBandingTests
+{
+    private static readonly IReadOnlyDictionary<string, BaselineBucket> NoDispersion = new Dictionary<string, BaselineBucket>();
+
+    /* ── the distortion the dead-band produced ── */
+
+    /// <summary>
+    /// PAGEIOLATCH_SH's ladder saturates at 25% of observed time (<c>(0.25, null)</c>), so 30% and 60% both
+    /// score 1.0 and the old band called a DOUBLING of I/O latch time "stable" (severity delta 0.0). The
+    /// value moved by half of the larger side and the key sits at the top of its ladder: worse.
+    /// </summary>
+    [Fact]
+    public void ASaturatedLadderDoubling_IsWorse_NotStable()
+    {
+        var (baseline, comparison) = Scored(
+            [Wait("PAGEIOLATCH_SH", 0.30)],
+            [Wait("PAGEIOLATCH_SH", 0.60)]);
+        Assert.Equal(1.0, baseline[0].Severity, precision: 6);
+        Assert.Equal(1.0, comparison[0].Severity, precision: 6);
+
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+
+        Assert.Equal(0.0, row.SeverityDelta, precision: 6);      // what the old band read
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status); // what the value says
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, row.BandSource);
+        Assert.Equal(0.5, row.RelativeMove!.Value, precision: 6);
+        Assert.Equal(1.0, row.LadderPosition, precision: 6);
+    }
+
+    /// <summary>
+    /// The RESOURCE_SEMAPHORE-vs-CPU distortion. RESOURCE_SEMAPHORE's ramp is <c>(0.01, 0.10)</c>, so a trace
+    /// doubling from 0.2% to 0.45% of observed time (7 s/hr → 16 s/hr of grant queueing) moved severity
+    /// +0.125 — over the old dead-band, "worse". A 24-point CPU rise from 50% to 74% moved severity +0.16
+    /// on the <c>(75, 95)</c> ramp — nearly the same number for an incomparably larger physical change. The
+    /// absolute rule reads each on its own ladder: the trace never climbed a quarter of the way up its
+    /// ladder (0.225), so it is stable; CPU did (0.493), and moved a third of the larger side, so it is
+    /// worse. Ordering follows the value's relative move, not the formula's slope.
+    /// </summary>
+    [Fact]
+    public void ATraceDoubling_IsStable_WhileARealCpuRise_IsWorse_WhateverTheSeverityDeltasSaid()
+    {
+        var (baseline, comparison) = Scored(
+            [Wait("RESOURCE_SEMAPHORE", 0.002), Cpu(50)],
+            [Wait("RESOURCE_SEMAPHORE", 0.0045), Cpu(74)]);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        var rs = result.Rows.Single(r => r.Key == "RESOURCE_SEMAPHORE");
+        var cpu = result.Rows.Single(r => r.Key == "CPU_SQL_PERCENT");
+
+        /* The formula's slopes — the numbers the old band decided on. */
+        Assert.Equal(0.125, rs.SeverityDelta, precision: 3);
+        Assert.Equal(0.16, cpu.SeverityDelta, precision: 2);
+
+        Assert.Equal(ComparisonBanding.StatusStable, rs.Status);
+        Assert.InRange(rs.LadderPosition, 0.22, 0.23);
+        Assert.InRange(rs.RelativeMove!.Value, 0.55, 0.56); // a big RELATIVE move alone is not a verdict
+
+        Assert.Equal(ComparisonBanding.StatusWorse, cpu.Status);
+        Assert.InRange(cpu.LadderPosition, 0.49, 0.50);
+        Assert.InRange(cpu.RelativeMove!.Value, 0.32, 0.33);
+
+        Assert.Equal("CPU_SQL_PERCENT", result.Rows[0].Key); // changed rows first
+        Assert.Equal(1, result.Worse);
+        Assert.Equal(1, result.Stable);
+    }
+
+    /// <summary>The absolute rule refuses a 1% wobble on a key that is otherwise high on its ladder.</summary>
+    [Fact]
+    public void AOnePercentWobble_IsStable_HoweverHighTheKeySits()
+    {
+        var (baseline, comparison) = Scored([Cpu(80)], [Cpu(80.8)]);
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+
+        Assert.Equal(ComparisonBanding.StatusStable, row.Status);
+        Assert.InRange(row.LadderPosition, 0.6, 0.7);      // well up the ladder …
+        Assert.InRange(row.RelativeMove!.Value, 0.0, 0.011); // … but it did not move
+    }
+
+    /// <summary>
+    /// Both arms are required. Read latency doubling from 4 ms to 8 ms is a 50% relative move between two
+    /// values the scorer grades as healthy (base 0.2 at 8 ms on the <c>(20, 50)</c> ramp): stable. Doubling
+    /// from 12 ms to 24 ms crosses the concerning bar: worse.
+    /// </summary>
+    [Fact]
+    public void ADoublingBetweenTwoHealthyValues_IsStable_ADoublingIntoConcerning_IsWorse()
+    {
+        var (b1, c1) = Scored([Io(4)], [Io(8)]);
+        var healthy = Assert.Single(ComparisonBanding.Compare(b1, c1, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusStable, healthy.Status);
+        Assert.Equal(0.2, healthy.LadderPosition, precision: 6);
+
+        var (b2, c2) = Scored([Io(12)], [Io(24)]);
+        var concerning = Assert.Single(ComparisonBanding.Compare(b2, c2, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusWorse, concerning.Status);
+        Assert.InRange(concerning.LadderPosition, 0.56, 0.57);
+    }
+
+    /// <summary>A fall is "better" by the same two arms, and the direction comes from the scorer's ladder.</summary>
+    [Fact]
+    public void AFallByBothArms_IsBetter()
+    {
+        var (baseline, comparison) = Scored([Cpu(90)], [Cpu(45)]);
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusBetter, row.Status);
+        Assert.Equal(0.5, row.RelativeMove!.Value, precision: 6);
+    }
+
+    /// <summary>
+    /// DISK_SPACE is the free fraction and the scorer inverts it. With both sides saturated (under 5% free
+    /// scores 1.0 on either side) the value has to decide, and less free space must still read worse.
+    /// </summary>
+    [Fact]
+    public void FreeSpaceFalling_OnASaturatedLadder_IsWorse()
+    {
+        var (baseline, comparison) = Scored(
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.04 }],
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.02 }]);
+        Assert.Equal(1.0, baseline[0].BaseSeverity, precision: 6);
+        Assert.Equal(1.0, comparison[0].BaseSeverity, precision: 6);
+
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
+    }
+
+    /* ── sigma banding ── */
+
+    /// <summary>
+    /// The same +10-point CPU delta, banded by two servers' own dispersion. A tight bucket (MAD 2 → robust
+    /// sigma 2.97, floored to the CPU model's 5-point absolute floor) reads it as 2σ: worse. A loose bucket
+    /// (MAD 10 → robust sigma 14.8) reads it as 0.67σ: stable. Neither verdict used the severity ladder,
+    /// and the baseline's confidence and tier travel with the row.
+    /// </summary>
+    [Fact]
+    public void TheSameDelta_BandsDifferently_ByTheServersOwnDispersion()
+    {
+        var (baseline, comparison) = Scored([Cpu(50)], [Cpu(60)]);
+
+        var tight = Compare(baseline, comparison, CpuBucket(median: 50, mad: 2));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, tight.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, tight.Status);
+        Assert.Equal(5.0, tight.BaselineSigma!.Value, precision: 4);   // the 5-point CPU floor, not 2.97
+        Assert.Equal(2.0, tight.DeltaSigma!.Value, precision: 2);
+        Assert.Equal(MetricNames.Cpu, tight.BaselineMetric);
+        Assert.Equal(nameof(BaselineTier.Full), tight.BaselineTier);
+        Assert.Equal(1.0, tight.BaselineConfidence!.Value, precision: 2); // 20 samples = 2x the Full floor
+        Assert.False(tight.BeyondAnomalyCutoff!.Value);                 // 2σ is under the 3.5σ robust cutoff
+
+        var loose = Compare(baseline, comparison, CpuBucket(median: 50, mad: 10));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, loose.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, loose.Status);
+        Assert.InRange(loose.BaselineSigma!.Value, 14.82, 14.83);
+        Assert.InRange(loose.DeltaSigma!.Value, 0.67, 0.68);
+    }
+
+    /// <summary>A move past the metric's own anomaly cutoff says so — and the display sigma is capped.</summary>
+    [Fact]
+    public void ABigSigmaMove_FlagsTheAnomalyCutoff_AndCapsTheDisplay()
+    {
+        var (baseline, comparison) = Scored([Cpu(20)], [Cpu(95)]);
+        var row = Compare(baseline, comparison, CpuBucket(median: 20, mad: 0.5));
+
+        Assert.Equal(5.0, row.BaselineSigma!.Value, precision: 4); // floored
+        Assert.Equal(15.0, row.DeltaSigma!.Value, precision: 2);
+        Assert.True(row.BeyondAnomalyCutoff!.Value);
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
+
+        /* A session bucket has no absolute floor: MAD 0 floors at 1% of the median = 1.0 connection, so a
+           +75 move is 75σ raw — decided on the raw value, displayed at the detectors' 25σ cap. */
+        var (sb, sc) = Scored([Sessions(100)], [Sessions(175)]);
+        var sessions = Compare(sb, sc, SessionsBucket(median: 100, mad: 0.0));
+        Assert.Equal(1.0, sessions.BaselineSigma!.Value, precision: 4);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, sessions.DeltaSigma!.Value, precision: 2);
+        Assert.True(sessions.BeyondAnomalyCutoff!.Value);
+        Assert.Equal(ComparisonBanding.StatusWorse, sessions.Status);
+    }
+
+    /// <summary>
+    /// The never-blind rule: an untrustworthy bucket (too few distinct days) routes the key to the
+    /// absolute rule with <c>band_source: "absolute"</c> rather than to a sigma nobody should trust — and
+    /// a key with no baseline metric at all never looks one up.
+    /// </summary>
+    [Fact]
+    public void AnUntrustworthyBaseline_FallsBackToTheAbsoluteRule()
+    {
+        var (baseline, comparison) = Scored([Cpu(50)], [Cpu(60)]);
+        var thin = new BaselineBucket
+        {
+            HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
+            Mean = 50, StdDev = 5, Median = 50, Mad = 2, SampleCount = 20, DistinctDays = 1,
+            AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.Cpu)
+        };
+        Assert.False(thin.IsTrustworthy);
+
+        var row = Compare(baseline, comparison, thin);
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, row.BandSource);
+        Assert.Null(row.DeltaSigma);
+        Assert.Equal(MetricNames.Cpu, row.BaselineMetric); // the row still says which baseline WOULD apply
+        Assert.Equal(ComparisonBanding.StatusStable, row.Status); // +10 on 60 is a 17% move: under the quarter
+
+        Assert.Null(ComparisonBanding.BaselinedMetricFor("PAGEIOLATCH_SH"));
+        Assert.Null(ComparisonBanding.BaselinedMetricFor("BLOCKING_EVENTS"));
+        Assert.Null(ComparisonBanding.BaselinedMetricFor("IO_WRITE_LATENCY_MS"));
+    }
+
+    [Fact]
+    public void DispersionMetrics_AreOnlyTheOnesSomePresentKeyIsMeasuredIn()
+    {
+        var baseline = new List<Fact> { Wait("CXPACKET", 0.1), Io(5) };
+        var comparison = new List<Fact> { Cpu(40), Wait("CXPACKET", 0.2) };
+        Assert.Equal(new[] { MetricNames.Cpu, MetricNames.IoLatency }, ComparisonBanding.DispersionMetricsFor(baseline, comparison));
+        Assert.Empty(ComparisonBanding.DispersionMetricsFor([Wait("CXPACKET", 0.1)], [Wait("LCK", 0.1)]));
+    }
+
+    /* ── families ── */
+
+    /// <summary>
+    /// One I/O stall: PAGEIOLATCH_SH and PAGEIOLATCH_EX up, read latency up. Three worse rows, ONE worse
+    /// family, whose worst member is the one that moved most and whose members are all three named.
+    /// </summary>
+    [Fact]
+    public void OneIoStall_IsOneFamilyRow_WithThreeMembers()
+    {
+        var (baseline, comparison) = Scored(
+            [Wait("PAGEIOLATCH_SH", 0.10), Wait("PAGEIOLATCH_EX", 0.05), Io(12), Wait("CXPACKET", 0.10)],
+            [Wait("PAGEIOLATCH_SH", 0.30), Wait("PAGEIOLATCH_EX", 0.20), Io(30), Wait("CXPACKET", 0.10)]);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+
+        Assert.Equal(3, result.Worse);
+        Assert.Equal(1, result.FamiliesWorse);
+        Assert.Equal(1, result.FamiliesStable);
+
+        var io = Assert.Single(result.Families, f => f.Family == "io_pressure");
+        Assert.Equal(ComparisonBanding.StatusWorse, io.Status);
+        Assert.Equal("PAGEIOLATCH_EX", io.WorstKey); // 0.05 → 0.20 is the largest relative move (0.75)
+        Assert.Equal(new[] { "PAGEIOLATCH_EX", "PAGEIOLATCH_SH", "IO_READ_LATENCY_MS" }, io.Members);
+        Assert.Equal(3, io.Worse);
+        Assert.Equal(0, io.Stable);
+
+        Assert.Equal("io_pressure", result.Families[0].Family); // changed families first
+        Assert.Equal("parallelism", result.Families[1].Family);
+        Assert.All(result.Rows.Where(r => r.Family == "io_pressure"), r => Assert.Equal(ComparisonBanding.StatusWorse, r.Status));
+    }
+
+    /// <summary>
+    /// A family with members moving in BOTH directions: BLOCKING_EVENTS falls 60% (better, the larger
+    /// move) while LCK_M_S rises to a scored level (worse, the smaller move). The regression is the
+    /// family's worst member and the family counts in families_worse — direction outranks magnitude, so
+    /// a large improvement in a sibling symptom cannot hide a real degradation in the same cause. The
+    /// review's catch on the first head; ordered rows read worse, then better, then stable.
+    /// </summary>
+    [Fact]
+    public void AMixedDirectionFamily_IsWorse_WhenAnyMemberIs_WhateverTheLargerMoveDid()
+    {
+        var (baseline, comparison) = Scored(
+            [Blocking(50), Wait("LCK_M_S", 0.02), Wait("CXPACKET", 0.10)],
+            [Blocking(20), Wait("LCK_M_S", 0.03), Wait("CXPACKET", 0.10)]);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+
+        var blocking = result.Rows.Single(r => r.Key == "BLOCKING_EVENTS");
+        var lck = result.Rows.Single(r => r.Key == "LCK_M_S");
+        Assert.Equal(ComparisonBanding.StatusBetter, blocking.Status);
+        Assert.Equal(0.6, blocking.RelativeMove!.Value, precision: 6);
+        Assert.Equal(ComparisonBanding.StatusWorse, lck.Status);
+        Assert.InRange(lck.RelativeMove!.Value, 0.33, 0.34);
+
+        var family = Assert.Single(result.Families, f => f.Family == "lock_contention");
+        Assert.Equal(ComparisonBanding.StatusWorse, family.Status);
+        Assert.Equal("LCK_M_S", family.WorstKey);
+        Assert.Equal(new[] { "LCK_M_S", "BLOCKING_EVENTS" }, family.Members);
+        Assert.Equal(1, family.Worse);
+        Assert.Equal(1, family.Better);
+        Assert.Equal(1, result.FamiliesWorse);
+        Assert.Equal(0, result.FamiliesBetter);
+
+        Assert.Equal(new[] { "LCK_M_S", "BLOCKING_EVENTS", "CXPACKET" }, result.Rows.Select(r => r.Key));
+        Assert.Equal("lock_contention", result.Families[0].Family);
+    }
+
+    /// <summary>
+    /// The family map mirrors the collector's wait grouping and the reconciler's symptom families: every
+    /// regular key the reconciler folds an anomaly into shares a family with its siblings; a raw CX* or
+    /// general lock mode lands where the collector would have grouped it; a key with no family is its own.
+    /// </summary>
+    [Fact]
+    public void Families_FollowTheCollectorGrouping_AndTheReconcilersSymptomFamilies()
+    {
+        /* AnomalyIncidentReconciler.AnomalyToFamilies: CPU_SPIKE → {CPU_SQL_PERCENT, CPU_SPIKE}. */
+        Assert.Equal(ComparisonBanding.FamilyFor("CPU_SQL_PERCENT"), ComparisonBanding.FamilyFor("CPU_SPIKE"));
+        Assert.Equal("cpu_pressure", ComparisonBanding.FamilyFor("SOS_SCHEDULER_YIELD"));
+        Assert.Equal("io_pressure", ComparisonBanding.FamilyFor("IO_READ_LATENCY_MS"));
+        Assert.Equal("log_io", ComparisonBanding.FamilyFor("IO_WRITE_LATENCY_MS"));
+        Assert.Equal("log_io", ComparisonBanding.FamilyFor("WRITELOG"));
+        Assert.Equal("log_io", ComparisonBanding.FamilyFor("HADR_SYNC_COMMIT"));
+        Assert.Equal("memory_grants", ComparisonBanding.FamilyFor("RESOURCE_SEMAPHORE"));
+        Assert.Equal("memory_grants", ComparisonBanding.FamilyFor("MEMORY_GRANT_PENDING"));
+        Assert.Equal("lock_contention", ComparisonBanding.FamilyFor("BLOCKING_EVENTS"));
+        Assert.Equal("lock_contention", ComparisonBanding.FamilyFor("LCK_M_S"));
+        Assert.Equal("lock_contention", ComparisonBanding.FamilyFor("LCK_M_RS_U"));
+        Assert.Equal("deadlocking", ComparisonBanding.FamilyFor("DEADLOCKS")); // kept apart, as the reconciler keeps it
+
+        /* FactCollectorHelpers.WaitFamilyKey applied first. */
+        Assert.Equal("parallelism", ComparisonBanding.FamilyFor("CXCONSUMER"));
+        Assert.Equal("lock_contention", ComparisonBanding.FamilyFor("LCK_M_IX"));
+        Assert.Equal("latch_contention", ComparisonBanding.FamilyFor("PAGELATCH_UP"));
+
+        /* Its own family. */
+        Assert.Equal("THREADPOOL", ComparisonBanding.FamilyFor("THREADPOOL"));
+        Assert.Equal("TEMPDB_USAGE", ComparisonBanding.FamilyFor("TEMPDB_USAGE"));
+        Assert.Equal("CONFIG_MAXDOP", ComparisonBanding.FamilyFor("CONFIG_MAXDOP"));
+        Assert.Equal("bad_actor", ComparisonBanding.FamilyFor("BAD_ACTOR_0x1234"));
+    }
+
+    /* ── plan-cache churn and presence ── */
+
+    /// <summary>
+    /// A hash swap: the same statement under a recompiled plan is BAD_ACTOR_0xA yesterday and
+    /// BAD_ACTOR_0xB today. Key-set arithmetic called that one new issue and one resolved issue; it is
+    /// churn, counted nowhere in the issue counters. A hash present on both sides compares normally.
+    /// A non-bad-actor key that appears at a scored level IS a new issue; one that appears at a trace is not.
+    /// </summary>
+    [Fact]
+    public void ABadActorHashSwap_IsChurn_NotANewAndAResolvedIssue()
+    {
+        var (baseline, comparison) = Scored(
+            [BadActor("0xA", avgCpuMs: 500), BadActor("0xC", avgCpuMs: 100), Wait("CXPACKET", 0.10)],
+            [BadActor("0xB", avgCpuMs: 500), BadActor("0xC", avgCpuMs: 110), Wait("CXPACKET", 0.10), Wait("PAGEIOLATCH_SH", 0.20), Wait("LCK_M_IS", 0.001)]);
+        Assert.True(baseline[0].Severity > 0 && comparison[0].Severity > 0);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+
+        Assert.Equal(new[] { "BAD_ACTOR_0xB" }, result.Churn.Appeared.Select(e => e.Key));
+        Assert.Equal(new[] { "BAD_ACTOR_0xA" }, result.Churn.Disappeared.Select(e => e.Key));
+        Assert.Equal(1, result.Churn.PresentInBoth);
+        Assert.Equal(500, result.Churn.Appeared[0].Value);
+        Assert.DoesNotContain(result.Rows, r => r.Key is "BAD_ACTOR_0xA" or "BAD_ACTOR_0xB");
+
+        var shared = Assert.Single(result.Rows, r => r.Key == "BAD_ACTOR_0xC");
+        Assert.Equal(ComparisonBanding.PresenceBoth, shared.Presence);
+        Assert.Equal(ComparisonBanding.StatusStable, shared.Status); // 100 → 110 is under the quarter
+
+        /* PAGEIOLATCH_SH appeared at 0.20 (base 0.8): a new issue. LCK_M_IS appeared at a trace (base 0.02): stable, not counted. */
+        var pageio = Assert.Single(result.Rows, r => r.Key == "PAGEIOLATCH_SH");
+        Assert.Equal(ComparisonBanding.PresenceComparisonOnly, pageio.Presence);
+        Assert.Equal(ComparisonBanding.BandSourcePresence, pageio.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, pageio.Status);
+        Assert.Null(pageio.BaselineValue);
+        Assert.Null(pageio.ValueDelta);
+
+        var trace = Assert.Single(result.Rows, r => r.Key == "LCK_M_IS");
+        Assert.Equal(ComparisonBanding.StatusStable, trace.Status);
+
+        Assert.Equal(1, result.NewIssues);
+        Assert.Equal(0, result.ResolvedIssues);
+        Assert.Equal(1, result.Worse);
+    }
+
+    /// <summary>A disappearance at a scored level is a resolved issue; the baseline-only row reads better.</summary>
+    [Fact]
+    public void AScoredKeyThatDisappeared_IsAResolvedIssue()
+    {
+        var (baseline, comparison) = Scored([Wait("WRITELOG", 0.30), Cpu(40)], [Cpu(40)]);
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+
+        var writelog = Assert.Single(result.Rows, r => r.Key == "WRITELOG");
+        Assert.Equal(ComparisonBanding.PresenceBaselineOnly, writelog.Presence);
+        Assert.Equal(ComparisonBanding.StatusBetter, writelog.Status);
+        Assert.Equal(1, result.ResolvedIssues);
+        Assert.Equal(0, result.NewIssues);
+    }
+
+    /* ── coverage and emptiness ── */
+
+    [Fact]
+    public void TheCoverageCaveat_RidesOnEveryVerdictRow_AndFamily_AndTheSummary()
+    {
+        var (baseline, comparison) = Scored([Cpu(50), Wait("CXPACKET", 0.1)], [Cpu(74), Wait("CXPACKET", 0.1)]);
+
+        var caveated = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true);
+        Assert.All(caveated.Rows, r => Assert.True(r.CoverageCaveat));
+        Assert.All(caveated.Families, f => Assert.True(f.CoverageCaveat));
+        Assert.True(caveated.CoverageCaveat);
+
+        var clean = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        Assert.All(clean.Rows, r => Assert.False(r.CoverageCaveat));
+    }
+
+    [Fact]
+    public void NothingOnEitherSide_IsEmpty_ButChurnAloneIsNot()
+    {
+        Assert.True(ComparisonBanding.Compare([], [], NoDispersion, coverageCaveat: false).IsEmpty);
+
+        var (baseline, comparison) = Scored([], [BadActor("0xB", avgCpuMs: 500)]);
+        var churnOnly = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        Assert.False(churnOnly.IsEmpty);
+        Assert.Empty(churnOnly.Rows);
+        Assert.Single(churnOnly.Churn.Appeared);
+    }
+
+    /// <summary>The rules the payload states name the constants they rest on, so a change to one moves the other.</summary>
+    [Fact]
+    public void TheStatedRules_NameTheConstants()
+    {
+        /* Parsed, not raw: System.Text.Json escapes ± and σ as \uXXXX in the serialized text. */
+        using var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(ComparisonBanding.BandRulesPayload));
+        var baselineRule = doc.RootElement.GetProperty("baseline").GetString()!;
+        var absoluteRule = doc.RootElement.GetProperty("absolute").GetString()!;
+        var presenceRule = doc.RootElement.GetProperty("presence").GetString()!;
+        Assert.Contains("±1σ", baselineRule, StringComparison.Ordinal);
+        Assert.Contains("beyond_anomaly_cutoff", baselineRule, StringComparison.Ordinal);
+        Assert.Contains("25%", absoluteRule, StringComparison.Ordinal);
+        Assert.Contains("0.25", absoluteRule, StringComparison.Ordinal);
+        Assert.Contains("0.25", presenceRule, StringComparison.Ordinal);
+        Assert.Contains("plan_cache_churn", presenceRule, StringComparison.Ordinal);
+        Assert.Equal(1.0, ComparisonBanding.StableWithinRobustSigmas);
+        Assert.Equal(0.25, ComparisonBanding.MinimumRelativeMove);
+        Assert.Equal(0.25, ComparisonBanding.MinimumLadderPosition);
+    }
+
+    /* ── helpers ── */
+
+    private static Fact Wait(string type, double fraction) => new()
+    {
+        Source = "waits", Key = type, Value = fraction,
+        Metadata = new Dictionary<string, double> { ["wait_time_ms"] = fraction * 14_400_000, ["period_duration_ms"] = 14_400_000 }
+    };
+
+    private static Fact Cpu(double avgPercent) => new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = avgPercent };
+
+    private static Fact Blocking(double eventsPerHour) => new()
+    {
+        Source = "blocking", Key = "BLOCKING_EVENTS", Value = eventsPerHour,
+        Metadata = new Dictionary<string, double> { ["event_count"] = eventsPerHour * 4, ["period_hours"] = 4, ["observed_hours"] = 4 }
+    };
+
+    private static Fact Io(double avgReadMs) => new() { Source = "io", Key = "IO_READ_LATENCY_MS", Value = avgReadMs };
+
+    private static Fact Sessions(double total) => new() { Source = "sessions", Key = "SESSION_STATS", Value = total };
+
+    private static Fact BadActor(string hash, double avgCpuMs) => new()
+    {
+        Source = "bad_actor", Key = $"BAD_ACTOR_{hash}", Value = avgCpuMs, DatabaseName = "db",
+        Metadata = new Dictionary<string, double> { ["execution_count"] = 5_000, ["avg_cpu_ms"] = avgCpuMs, ["avg_reads"] = 100 }
+    };
+
+    /// <summary>Scores both lists with the real scorer — the ladder positions are the scorer's, never hand-set.</summary>
+    private static (List<Fact>, List<Fact>) Scored(List<Fact> baseline, List<Fact> comparison)
+    {
+        var scorer = new FactScorer();
+        scorer.ScoreAll(baseline);
+        scorer.ScoreAll(comparison);
+        return (baseline, comparison);
+    }
+
+    private static ComparisonRow Compare(List<Fact> baseline, List<Fact> comparison, BaselineBucket bucket)
+    {
+        var metric = ComparisonBanding.BaselinedMetricFor(comparison[0].Key)!;
+        var dispersion = new Dictionary<string, BaselineBucket> { [metric] = bucket };
+        return Assert.Single(ComparisonBanding.Compare(baseline, comparison, dispersion, coverageCaveat: false).Rows);
+    }
+
+    /// <summary>A trustworthy Full-tier CPU bucket: 20 samples over 5 distinct days (2x the tier's sample floor).</summary>
+    private static BaselineBucket CpuBucket(double median, double mad) => new()
+    {
+        HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
+        Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
+        AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.Cpu)
+    };
+
+    private static BaselineBucket SessionsBucket(double median, double mad) => new()
+    {
+        HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
+        Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
+        AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.SessionCount)
+    };
+}

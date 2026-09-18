@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -511,8 +512,20 @@ public sealed class DarlingAnalysisService
     /// window's observed coverage (#3538 A2) so the caller can say when one side was only partly
     /// collected — the case the empty-window caveats never reached, where a half-collected window
     /// produces confident numbers with nothing to flag them.
+    ///
+    /// <para>#3538 A3: also returns the stored per-server dispersion for the baselined metrics some
+    /// compared key is measured in (<see cref="ComparisonBanding.DispersionMetricsFor"/>), keyed by metric
+    /// name, so <c>compare_analysis</c> can band a CPU or read-latency delta in the server's own robust
+    /// sigma instead of on a flat severity dead-band. The bucket is the comparison window's START hour
+    /// × day-of-week — the same coordinate the anomaly detectors read for a pass over that window
+    /// (<c>PgAnomalyDetector</c> passes <c>context.TimeRangeStart</c>), so the default same-hour-yesterday
+    /// call reuses the pass's cached buckets and an anchored one recomputes them the way an anchored
+    /// <c>analyze_server</c> does. The lookups are fenced separately from collection: a baseline read
+    /// that fails must not cost the caller the comparison it was only meant to refine, so it degrades
+    /// to an empty map and every key takes the absolute rule — the never-blind fallback the anomaly
+    /// gate follows.</para>
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd)
@@ -541,14 +554,39 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage);
+            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
+
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
         catch (Exception ex)
         {
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return ([], [], null, null);
+            return ([], [], null, null, new Dictionary<string, BaselineBucket>());
         }
+    }
+
+    /// <summary>
+    /// The baseline buckets <see cref="ComparePeriodsAsync"/> hands to the comparison, one per metric some
+    /// compared key is measured in. Its own try: see the summary above for why a failed baseline read
+    /// degrades to "no dispersion" rather than failing the comparison.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(
+        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
+    {
+        var dispersion = new Dictionary<string, BaselineBucket>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var metric in ComparisonBanding.DispersionMetricsFor(baselineFacts, comparisonFacts))
+                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("[DarlingAnalysisService] Baseline dispersion lookup failed for {Server}; compare_analysis bands every key by the absolute rule: {Message}",
+                serverName, ex.Message);
+            dispersion.Clear();
+        }
+        return dispersion;
     }
 
     /// <summary>
