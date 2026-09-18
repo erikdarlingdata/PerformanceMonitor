@@ -488,6 +488,48 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
+    /// How many STORED findings currently carry <paramref name="storyPathHash"/> — for one server, or across
+    /// every server when <paramref name="serverId"/> is null or the all-servers sentinel 0 — so the MCP mute verb
+    /// can say what it matched at the moment it registered the mute (#3541 A14).
+    ///
+    /// <para><b>A disclosure, not a gate.</b> <c>analysis_muted</c> is a PATTERN registry: no row references a
+    /// finding, and the filter phase consults it by hash on every future pass. A hash matching nothing today is
+    /// therefore a legitimate registration (the pattern may return after retention purged its history) AND the
+    /// most likely shape of a mistyped hash — which is why the count is reported beside the write rather than
+    /// used to refuse it. Two statements rather than a nullable parameter so the all-servers form is a plain
+    /// equality on <c>idx_analysis_findings_hash</c>. Matches the Darling twin's PgFindingStore.</para>
+    ///
+    /// <para>A READ under the read lock, like the other read-backs: the only exclusion it needs is against
+    /// maintenance (CHECKPOINT, archive DELETEs, compaction), which takes the exclusive lock — see the class note
+    /// (#2455). Takes the caller's token through the lock wait and every store call: the MCP passes none, but the
+    /// method is written the way every tokened read here is so the pass-token census needs no exemption for it.</para>
+    /// </summary>
+    public async Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default)
+    {
+        /* Scoped unless null or the all-servers sentinel 0 — and ONLY those two: a server_id is an FNV hash cast
+           to int, so roughly half of all real ids are negative and a `> 0` test here would silently count half the
+           fleet's scoped mutes fleet-wide. */
+        var scoped = serverId is not (null or 0);
+
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = scoped
+            ? "SELECT count(*) FROM analysis_findings WHERE story_path_hash = $1 AND server_id = $2"
+            : "SELECT count(*) FROM analysis_findings WHERE story_path_hash = $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
+        if (scoped)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId!.Value });
+        }
+
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result is long count ? count : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Cleans up old findings beyond the retention period.
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the

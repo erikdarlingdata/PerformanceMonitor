@@ -185,6 +185,18 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     public const string UnmuteStorySql = "DELETE FROM analysis_muted WHERE mute_id = $1";
 
+    /* #3541 A14: how many STORED findings a mute's story_path_hash matches right now, so the mute verb can
+       report what it matched rather than only that it wrote. Two statements rather than one with a nullable
+       parameter, so the all-servers form is a plain equality on the hash index (idx_analysis_findings_hash)
+       and the scoped form is that plus server_id, both sub-second by shape on the retained population. */
+    public const string CountFindingsWithHashSql = @"
+SELECT count(*) FROM analysis_findings
+WHERE story_path_hash = $1";
+
+    public const string CountFindingsWithHashForServerSql = @"
+SELECT count(*) FROM analysis_findings
+WHERE story_path_hash = $1 AND server_id = $2";
+
     public const string CleanupOldFindingsSql = "DELETE FROM analysis_findings WHERE analysis_time < $1";
 
     /// <summary>
@@ -477,14 +489,20 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs. Returns <c>true</c> when the registry
+    /// row was written and <c>false</c> when the INSERT failed (logged, as every read-back surface here logs).
+    ///
+    /// <para>The return value is #3541 A14: this method swallowed its failure and returned <c>Task</c>, so the
+    /// MCP mute verb above it reported <c>status: "muted"</c> whether or not a row exists — a write that
+    /// reported what it intended, not what happened. The swallow stays (the viewer's mute button has no better
+    /// answer than a logged line), but the caller now learns which of the two things occurred.</para>
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist.</para>
     /// </summary>
-    public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
+    public async Task<bool> MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
         try
         {
@@ -500,11 +518,47 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)reason ?? DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogError("[PgFindingStore] MuteStoryAsync failed: {Message}", ex.Message);
+            return false;
         }
+    }
+
+    /// <summary>
+    /// How many STORED findings currently carry <paramref name="storyPathHash"/> — for one server, or across
+    /// the fleet when <paramref name="serverId"/> is null or the all-servers sentinel 0 — so a mute can say what
+    /// it matched at the moment it was registered (#3541 A14).
+    ///
+    /// <para><b>This is a disclosure, not a gate.</b> The mute registry is a PATTERN registry: nothing in it
+    /// references a finding row, and <see cref="FilterMutedFindingsAsync"/> consults it by hash on every future
+    /// pass. A hash that matches nothing today is therefore a legitimate registration (the pattern may return
+    /// after the retention sweep has purged its history) AND the most likely shape of a mistyped hash, which is
+    /// why the count is reported beside the write rather than used to refuse it. Throws on a store failure —
+    /// the MCP caller owns the error envelope; a count that silently read as 0 would be the very
+    /// zero-vs-unknown confusion the payload contract forbids.</para>
+    /// </summary>
+    public async Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default)
+    {
+        /* Scoped unless null or the all-servers sentinel 0 — and ONLY those two: a server_id is an FNV hash cast
+           to int, so roughly half of all real ids are negative and a `> 0` test here would silently count half the
+           fleet's scoped mutes fleet-wide. */
+        var scoped = serverId is not (null or 0);
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(scoped ? CountFindingsWithHashForServerSql : CountFindingsWithHashSql, connection)
+        {
+            CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds,
+        };
+        command.Parameters.AddWithValue(storyPathHash);
+        if (scoped)
+        {
+            command.Parameters.AddWithValue(serverId!.Value);
+        }
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is long count ? count : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>

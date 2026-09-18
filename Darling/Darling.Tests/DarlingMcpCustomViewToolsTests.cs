@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -183,6 +184,92 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
     }
 
+    /* ---------------- #3541 A14: one write vocabulary for an optional text field ---------------- */
+
+    /// <summary>
+    /// The rule itself, as a truth table: omitted (null) keeps the current value — including a current null —
+    /// an empty or whitespace-only string clears, and text replaces. The helper is the alert-rule tool's, and
+    /// the census below pins that the view tool calls the same one.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "kept", "kept")]
+    [InlineData(null, null, null)]
+    [InlineData("", "kept", null)]
+    [InlineData("   ", "kept", null)]
+    [InlineData("new", "kept", "new")]
+    [InlineData("new", null, "new")]
+    public void ResolveOptionalText_OmittedKeeps_EmptyClears_TextReplaces(string? sent, string? current, string? expected)
+    {
+        Assert.Equal(expected, DarlingMcpCustomAlertTools.ResolveOptionalText(sent, current));
+    }
+
+    /// <summary>
+    /// Both update tools route their optional description through the ONE helper — the cross-tool census the
+    /// contract asks for. Before this, the two tools disagreed (the view tool wrote an omitted description as
+    /// NULL; the rule tool kept it), and a reader of either description had no way to know which rule the other
+    /// followed. Read off the stripped source so a comment naming the helper cannot satisfy it; each tool's
+    /// UpdateAsync call must pass the helper's result where its description argument goes.
+    /// </summary>
+    [Fact]
+    public void BothUpdateTools_RouteDescriptionThroughTheSharedVocabulary()
+    {
+        var viewSource = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"));
+        var ruleSource = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomAlertTools.cs"));
+
+        /* The view tool: reads the row first (there is no "current" to keep without it), then passes the
+           helper's result — never the bare parameter — to the store. */
+        var viewUpdate = viewSource[viewSource.IndexOf("UpdateCustomView(", StringComparison.Ordinal)..];
+        viewUpdate = viewUpdate[..viewUpdate.IndexOf("DeleteCustomView(", StringComparison.Ordinal)];
+        Assert.Contains("store.GetAsync(view_id)", viewUpdate, StringComparison.Ordinal);
+        Assert.Contains("DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description)", viewUpdate, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"UpdateAsync\(\s*view_id,\s*name,\s*description,", viewUpdate);
+
+        /* The rule tool: the same helper over its own current row. */
+        var ruleUpdate = ruleSource[ruleSource.IndexOf("UpdateCustomAlertRule(", StringComparison.Ordinal)..];
+        ruleUpdate = ruleUpdate[..ruleUpdate.IndexOf("DeleteCustomAlertRule(", StringComparison.Ordinal)];
+        Assert.Contains("ResolveOptionalText(description, row.Description)", ruleUpdate, StringComparison.Ordinal);
+        Assert.DoesNotContain("description ?? row.Description", ruleUpdate, StringComparison.Ordinal);
+
+        /* And the helper is declared exactly once, in the rule tool (the newer contract's home). */
+        Assert.Single(Regex.Matches(ruleSource, @"internal static string\? ResolveOptionalText\("));
+        Assert.Empty(Regex.Matches(viewSource, @"static string\? ResolveOptionalText\("));
+    }
+
+    /// <summary>The two descriptions and their two `description` parameter descriptions tell the SAME story, in
+    /// the words a caller will search for. A vocabulary shared in code and not in prose is shared with nobody.</summary>
+    [Fact]
+    public void BothUpdateTools_DescribeTheSameDescriptionVocabulary()
+    {
+        static (string Tool, string Param) Prose<T>(string toolName)
+        {
+            var method = typeof(T)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName);
+            var tool = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            var param = method.GetParameters().Single(p => p.Name == "description").GetCustomAttribute<DescriptionAttribute>()!.Description;
+            return (tool, param);
+        }
+
+        var view = Prose<DarlingMcpCustomViewTools>("update_custom_view");
+        var rule = Prose<DarlingMcpCustomAlertTools>("update_custom_alert_rule");
+
+        foreach (var (tool, param) in new[] { view, rule })
+        {
+            Assert.Contains("write vocabulary", tool, StringComparison.Ordinal);
+            Assert.Contains("Omit to keep the current description; send an empty string \"\" to clear it.", param, StringComparison.Ordinal);
+        }
+
+        /* Each names the other, so a reader of one is pointed at the shared rule. */
+        Assert.Contains("update_custom_alert_rule", view.Tool, StringComparison.Ordinal);
+        Assert.Contains("update_custom_view", rule.Tool, StringComparison.Ordinal);
+
+        /* The release-old denial is gone: the rule tool no longer says the description cannot be cleared. */
+        Assert.DoesNotContain("cannot clear it", rule.Param, StringComparison.Ordinal);
+        Assert.DoesNotContain("full replacement of name/description/definition", view.Tool, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RunCustomViewPanel_BadJson_ReturnsInvalid_WithoutTouchingTheStore()
     {
@@ -321,6 +408,23 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
                 await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 1, "edited over MCP")))
             {
                 Assert.Equal(2, updated.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal("edited over MCP", updated.RootElement.GetProperty("description").GetString());
+            }
+
+            /* #3541 A14: an OMITTED description is unchanged — this exact call used to write NULL. Version 3. */
+            using (var kept = JsonDocument.Parse(
+                await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 2)))
+            {
+                Assert.Equal(3, kept.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal("edited over MCP", kept.RootElement.GetProperty("description").GetString());
+            }
+
+            /* ... and an EMPTY string is the explicit clear. Version 4. */
+            using (var cleared = JsonDocument.Parse(
+                await DarlingMcpCustomViewTools.UpdateCustomView(postgres, id, name, GoodDashboardV2, 3, "")))
+            {
+                Assert.Equal(4, cleared.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal(JsonValueKind.Null, cleared.RootElement.GetProperty("description").ValueKind);
             }
 
             /* stale update (still presenting version 1) — conflict, not a silent clobber. */

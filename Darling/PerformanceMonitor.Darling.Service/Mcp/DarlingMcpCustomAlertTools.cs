@@ -177,7 +177,9 @@ public sealed class DarlingMcpCustomAlertTools
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
         "Updates an existing custom alert rule in place - a PARTIAL update: send only the fields you want to " +
         "change (name, description, definition, enabled), and every field you omit keeps its current value " +
-        "(omitting description does NOT clear it). Provide at least one field. A new definition is VALIDATED " +
+        "(omitting description does NOT clear it). To CLEAR the description, send it as an empty string \"\" - " +
+        "the one write vocabulary shared with update_custom_view: omitted = unchanged, empty = cleared. Provide at " +
+        "least one field. A new definition is VALIDATED " +
         "first; an invalid one returns {status:\"invalid\", ...} and changes nothing. Pass the 'version' you " +
         "last read via get_custom_alert_rule - if someone else changed the rule since, this returns " +
         "{status:\"conflict\", ...} rather than silently overwriting their edit (reload and re-apply). A " +
@@ -189,7 +191,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("The version you last read from get_custom_alert_rule (optimistic concurrency; a mismatch is a conflict, not an overwrite).")] int version,
         [Description("New rule name (unique, max 200 characters). Omit to keep the current name.")] string? name = null,
         [Description("New rule definition JSON. Validate it with validate_custom_alert_rule first. Omit to keep the current definition.")] string? definition = null,
-        [Description("New human-readable description. Omit to keep the current description (this cannot clear it).")] string? description = null,
+        [Description("New human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null,
         [Description("Whether the rule is active. Omit to keep the current enabled state; false pauses it, true resumes it.")] bool? enabled = null)
     {
         try
@@ -223,7 +225,7 @@ public sealed class DarlingMcpCustomAlertTools
             var result = await store.UpdateAsync(
                 rule_id,
                 name ?? row.Name,
-                description ?? row.Description,
+                ResolveOptionalText(description, row.Description),
                 definition ?? row.DefinitionJson,
                 enabled ?? row.Enabled,
                 version,
@@ -426,6 +428,34 @@ public sealed class DarlingMcpCustomAlertTools
         }
 
         return Task.FromResult(new JsonObject { ["templates"] = templates }.ToJsonString(McpHelpers.JsonOptions));
+    }
+
+    /// <summary>
+    /// The ONE vocabulary for an optional text field on a partial update, shared by every Darling MCP update tool
+    /// that has one (this rule's <c>description</c>, and <c>update_custom_view</c>'s): <b>omitted (null) means
+    /// unchanged; an empty or whitespace-only string means cleared (stored as NULL); anything else is the new
+    /// value.</b>
+    ///
+    /// <para>Why this shape. Over MCP an omitted argument and an explicit JSON <c>null</c> both arrive as a C#
+    /// <c>null</c>, so null cannot carry two meanings and "unchanged" is the one it must carry - a caller who
+    /// sends <c>{enabled: false}</c> to pause a rule is not asking to lose its description. That leaves the
+    /// empty string as the only in-band way to say "clear", and an empty description is not a value anyone
+    /// stores on purpose, so nothing is lost by taking it. Before #3541 A14 the two update tools disagreed -
+    /// <c>update_custom_alert_rule</c> preserved an omitted description while <c>update_custom_view</c> treated
+    /// the same omission as a clear - and neither offered a clear at all, which is a contract that cannot be
+    /// honored on one side and a silent data loss on the other.</para>
+    ///
+    /// <para>Internal (not private) so the view tool calls this exact method rather than restating the rule; a
+    /// census test pins both call sites to it.</para>
+    /// </summary>
+    internal static string? ResolveOptionalText(string? sent, string? current)
+    {
+        if (sent is null)
+        {
+            return current;
+        }
+
+        return string.IsNullOrWhiteSpace(sent) ? null : sent;
     }
 
     /// <summary>A small <c>{status, message}</c> envelope for a non-data write outcome (conflict / invalid /

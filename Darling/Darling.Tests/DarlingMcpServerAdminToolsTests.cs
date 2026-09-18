@@ -7,10 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -161,8 +164,289 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         using var doc = JsonDocument.Parse(result);
         Assert.Equal(0, doc.RootElement.GetProperty("added").GetInt32());
         Assert.Equal(0, doc.RootElement.GetProperty("skipped").GetInt32());
+        Assert.Equal(0, doc.RootElement.GetProperty("collided").GetInt32());
         Assert.Equal(1, doc.RootElement.GetProperty("failed").GetInt32());
+        Assert.Equal(1, doc.RootElement.GetProperty("requested").GetInt32());
         Assert.Equal("invalid", doc.RootElement.GetProperty("results")[0].GetProperty("status").GetString());
+    }
+
+    /* ---------------- #3541 A14: writes report what happened — every status lands in exactly one counter ---------------- */
+
+    /// <summary>Every per-row status the tool can produce, read off the constants class rather than restated
+    /// here, so a sixth status added there is in this census the moment it exists.</summary>
+    private static string[] AllAddStatuses() => typeof(DarlingMcpServerAdminTools.AddStatus)
+        .GetFields(BindingFlags.Public | BindingFlags.Static)
+        .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+        .Select(f => (string)f.GetRawConstantValue()!)
+        .OrderBy(s => s, StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>
+    /// The whole of the summary contract: the status set and the counter map's key set are the SAME set, and
+    /// every counter the map names is one the envelope carries. This is what makes "the four counters sum to
+    /// requested" a property of the code rather than of the batches anyone happened to test: a status without
+    /// a counter is what <c>collides</c> was for the months between #2280 and this — present in every result row,
+    /// absent from every summary number.
+    /// </summary>
+    [Fact]
+    public void EveryAddStatus_HasExactlyOneSummaryCounter_AndNoCounterIsUnnamed()
+    {
+        var statuses = AllAddStatuses();
+        Assert.Equal(5, statuses.Length);
+        Assert.Contains("collides", statuses);
+
+        var mapped = DarlingMcpServerAdminTools.CounterOfStatus.Keys.OrderBy(s => s, StringComparer.Ordinal).ToArray();
+        Assert.Equal(statuses, mapped);
+
+        var counters = new[] { "added", "skipped", "collided", "failed" };
+        Assert.All(DarlingMcpServerAdminTools.CounterOfStatus.Values, c => Assert.Contains(c, counters));
+
+        /* And the one status that was missing has its OWN counter, not a seat inside failed: a collided entry
+           must not be retried as sent, which is exactly what a failed entry invites. */
+        Assert.Equal("collided", DarlingMcpServerAdminTools.CounterOfStatus["collides"]);
+        Assert.Equal("skipped", DarlingMcpServerAdminTools.CounterOfStatus["duplicate"]);
+    }
+
+    /// <summary>
+    /// The envelope over a batch that exercises EVERY status at once: requested is the input count, each
+    /// counter is the number of rows with the statuses mapped to it, and the four sum to requested. Two of
+    /// each so a counter that merely tested "any" would read wrong.
+    /// </summary>
+    [Fact]
+    public void Aggregate_CountsEveryResultOnce_AndTheCountersSumToRequested()
+    {
+        var results = new List<DarlingMcpServerAdminTools.ServerResult>
+        {
+            new(0, "a", DarlingMcpServerAdminTools.AddStatus.Added, "Connected"),
+            new(1, "b", DarlingMcpServerAdminTools.AddStatus.Collides, "lands elsewhere"),
+            new(2, "c", DarlingMcpServerAdminTools.AddStatus.Duplicate, "seen"),
+            new(3, "d", DarlingMcpServerAdminTools.AddStatus.ConnectionFailed, "no route"),
+            new(4, "e", DarlingMcpServerAdminTools.AddStatus.Invalid, "bad field"),
+            new(5, "f", DarlingMcpServerAdminTools.AddStatus.Added, "Connected"),
+            new(6, "g", DarlingMcpServerAdminTools.AddStatus.Collides, "lands elsewhere"),
+            new(7, "h", DarlingMcpServerAdminTools.AddStatus.Duplicate, "seen"),
+            new(8, "i", DarlingMcpServerAdminTools.AddStatus.ConnectionFailed, "no route"),
+            new(9, "j", DarlingMcpServerAdminTools.AddStatus.Invalid, "bad field"),
+        };
+
+        using var doc = JsonDocument.Parse(DarlingMcpServerAdminTools.Aggregate(results));
+        var root = doc.RootElement;
+
+        Assert.Equal(10, root.GetProperty("requested").GetInt32());
+        Assert.Equal(2, root.GetProperty("added").GetInt32());
+        Assert.Equal(2, root.GetProperty("skipped").GetInt32());
+        Assert.Equal(2, root.GetProperty("collided").GetInt32());
+        Assert.Equal(4, root.GetProperty("failed").GetInt32());
+
+        var sum = root.GetProperty("added").GetInt32() + root.GetProperty("skipped").GetInt32()
+                + root.GetProperty("collided").GetInt32() + root.GetProperty("failed").GetInt32();
+        Assert.Equal(root.GetProperty("requested").GetInt32(), sum);
+
+        /* Results echo input order and carry the per-row status the counters were derived from. */
+        var statuses = root.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("status").GetString()).ToArray();
+        Assert.Equal(results.Select(r => r.Status).ToArray(), statuses);
+    }
+
+    /// <summary>A status the map does not know is a LOUD failure, never a row that quietly counts toward
+    /// nothing — the failure shape the old three-filter summary had.</summary>
+    [Fact]
+    public void Aggregate_RefusesAStatusNoCounterAccountsFor()
+    {
+        var results = new List<DarlingMcpServerAdminTools.ServerResult>
+        {
+            new(0, "a", DarlingMcpServerAdminTools.AddStatus.Added, "Connected"),
+            new(1, "b", "quarantined", "a status nobody mapped"),
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingMcpServerAdminTools.Aggregate(results));
+        Assert.Contains("quarantined", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every result-construction site in the tool names its status through <c>AddStatus</c>, never as a bare
+    /// literal — the guard that keeps the census above complete. A literal at a new site would compile, be
+    /// absent from the constants class, and so be absent from this file's reflection; this pin is what turns
+    /// that into a red run instead of a green one over an incomplete set.
+    /// </summary>
+    [Fact]
+    public void EveryServerResultConstruction_NamesItsStatusThroughAddStatus()
+    {
+        var source = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpServerAdminTools.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+
+        /* Both construction spellings: the explicit `new ServerResult(` and the target-typed `=> new(` inside
+           the local Invalid() factory. The record DECLARATION is a `ServerResult(` too and is excluded by its
+           parameter list. */
+        var sites = Regex.Matches(code, @"(?<new>new)\s+ServerResult\s*\(|ServerResult\s+Invalid\s*\([^)]*\)\s*=>\s*(?<new>new)\s*\(")
+            .Select(m => CSharpSourceWalker.ConstructionSpanFrom(code, m.Groups["new"].Index))
+            .ToList();
+
+        Assert.True(sites.Count >= 5, $"expected the five result-construction sites, found {sites.Count} — the scan is broken");
+        Assert.All(sites, span => Assert.Contains("AddStatus.", span, StringComparison.Ordinal));
+    }
+
+    /// <summary>The tool description promises the counters and the sum; a caller reads the description, not the
+    /// code.</summary>
+    [Fact]
+    public void AddServersDescription_NamesEveryCounter_TheSumRule_AndTheCollidesStatus()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "add_servers");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        foreach (var token in new[] { "requested:N", "added:N", "skipped:N", "collided:N", "failed:N", "SUM", "\"collides\"" })
+        {
+            Assert.Contains(token, description, StringComparison.Ordinal);
+        }
+
+        /* And the instruction table agrees with the description — the two surfaces an agent reads. */
+        Assert.Contains("`{requested, added, skipped, collided, failed, results:[{server, status, detail}]}`", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.Contains("is `collides`", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3484 accepted the two non-interactive Entra modes; the instruction table went on saying
+    /// "Entra/MFA/Service-Principal/Managed-Identity auth is `invalid` (Windows/SQL only)" for a release. The
+    /// accepted set is read off the parser — the authority — and the table is held to it.
+    /// </summary>
+    [Fact]
+    public void InstructionsTable_MatchesTheAuthModesTheParserAccepts()
+    {
+        /* The parser is the authority: these two are accepted (they parse to an entry) ... */
+        foreach (var accepted in new[] { "ServicePrincipal", "ManagedIdentity" })
+        {
+            var json = accepted == "ManagedIdentity"
+                ? "[{\"host\":\"x\",\"auth\":\"ManagedIdentity\"}]"
+                : "[{\"host\":\"x\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"s\"}]";
+            var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(json);
+            Assert.Null(wholeError);
+            Assert.Empty(invalid);
+            Assert.Single(entries);
+        }
+
+        /* ... and these are refused. */
+        foreach (var refused in new[] { "EntraMFA", "EntraDeviceCodeAuth", "EntraDefaultCredential" })
+        {
+            var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest($"[{{\"host\":\"x\",\"auth\":\"{refused}\"}}]");
+            Assert.Empty(entries);
+            Assert.Single(invalid);
+        }
+
+        /* The table says the same: the accepted pair is named as accepted, the interactive trio as invalid, and
+           the release-old denial is gone in both of its spellings. */
+        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `add_servers` |", StringComparison.Ordinal));
+        Assert.Contains("`ServicePrincipal` / `ManagedIdentity`", row, StringComparison.Ordinal);
+        Assert.Contains("INTERACTIVE Entra modes (MFA / device-code / default-credential) are `invalid`", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("Windows/SQL only", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("Service-Principal/Managed-Identity auth is `invalid`", row, StringComparison.Ordinal);
+
+        /* And the tool description — the other surface an agent reads — agrees. */
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "add_servers");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("\"ServicePrincipal\"", description, StringComparison.Ordinal);
+        Assert.Contains("\"ManagedIdentity\"", description, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #3541 A14: remove_server refuses what it cannot honor ---------------- */
+
+    private static DarlingServerResolver.RegisteredServer Row(int id, string name, string? display = null) => new(id, name, display);
+
+    [Fact]
+    public void ResolveForRemoval_ExactStorageOrDisplayName_IsOneCandidate_MatchedExact()
+    {
+        var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "Ledger") };
+
+        var byStorage = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "SQL-02");
+        Assert.Equal("exact", byStorage.MatchedBy);
+        Assert.Equal(2, Assert.Single(byStorage.Candidates).ServerId);
+
+        var byDisplay = DarlingMcpServerAdminTools.ResolveForRemoval(servers, " payments ");
+        Assert.Equal("exact", byDisplay.MatchedBy);
+        Assert.Equal(1, Assert.Single(byDisplay.Candidates).ServerId);
+    }
+
+    /// <summary>THE defect: a fragment two siblings contain. The read resolver returns the first by storage-name
+    /// order; a delete must return both and choose neither.</summary>
+    [Fact]
+    public void ResolveForRemoval_FragmentSeveralServersContain_IsEveryCandidate_NotTheFirst()
+    {
+        var servers = new[] { Row(1, "sql-01"), Row(2, "sql-02"), Row(3, "pg-01") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-");
+
+        Assert.Equal("partial", target.MatchedBy);
+        Assert.Equal(new[] { 1, 2 }, target.Candidates.Select(c => c.ServerId).OrderBy(i => i).ToArray());
+    }
+
+    /// <summary>A partial that only ONE server contains is honored — the documented convenience survives where it
+    /// is unambiguous.</summary>
+    [Fact]
+    public void ResolveForRemoval_UniquePartial_IsOneCandidate_MatchedPartial()
+    {
+        var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "Ledger") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "ledg");
+
+        Assert.Equal("partial", target.MatchedBy);
+        Assert.Equal(2, Assert.Single(target.Candidates).ServerId);
+    }
+
+    /// <summary>An exact match wins over the partials that would otherwise also match it: "sql-01" against
+    /// "sql-01" and "sql-010" is one server, not two.</summary>
+    [Fact]
+    public void ResolveForRemoval_ExactBeatsPartial_EvenWhenThePartialWouldBeAmbiguous()
+    {
+        var servers = new[] { Row(1, "sql-01"), Row(2, "sql-010") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+    }
+
+    /// <summary>display_name is not unique; two registrations sharing one exactly are ambiguous too, reported as
+    /// such rather than resolved to whichever the registry returned first.</summary>
+    [Fact]
+    public void ResolveForRemoval_SharedDisplayName_IsAmbiguousExact()
+    {
+        var servers = new[] { Row(1, "sql-01", "Prod"), Row(2, "sql-01:AppDb", "Prod") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "Prod");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(2, target.Candidates.Count);
+    }
+
+    [Theory]
+    [InlineData("nothing-like-it")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ResolveForRemoval_NoMatch_IsZeroCandidates(string name)
+    {
+        var servers = new[] { Row(1, "sql-01"), Row(2, "sql-02") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name);
+
+        Assert.Empty(target.Candidates);
+        Assert.Equal("none", target.MatchedBy);
+    }
+
+    /// <summary>The description tells the caller what an ambiguous name does (nothing) and what comes back; the
+    /// instruction table says the same.</summary>
+    [Fact]
+    public void RemoveServerDescription_PromisesTheAmbiguousRefusal()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "remove_server");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.Contains("status:\"ambiguous\"", description, StringComparison.Ordinal);
+        Assert.Contains("NOTHING is deleted", description, StringComparison.Ordinal);
+        Assert.Contains("ONLY when exactly one", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("resolved the same way the read tools resolve", description, StringComparison.Ordinal);
+
+        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `remove_server` |", StringComparison.Ordinal));
+        Assert.Contains("status:\"ambiguous\"", row, StringComparison.Ordinal);
+        Assert.Contains("deletes NOTHING", row, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -299,9 +583,11 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 /// probe is STUBBED to success (no live SQL Server), so this exercises the STORE side: add_servers INSERTs the
 /// config_monitored_servers rows (SQL-auth password DPAPI-encrypted at rest, Windows-auth server secret-free),
 /// the case-folded duplicate is skipped, the write self-bumps config_version (the reload beacon) via the existing
-/// trigger, and remove_server resolves + DELETEs. Own-scoped per the shared-store doctrine (GUID-suffixed hosts +
-/// a finally cleanup). No live SQL Server connection is made in CI — the real end-to-end probe is what the human
-/// dogfoods (remove sql2016, re-add via MCP).
+/// trigger, a #2280 collision is refused and COUNTED (#3541 A14: <c>collided</c>, with the four counters summing
+/// to <c>requested</c>), and remove_server refuses an ambiguous fragment with both candidates named, honors a unique
+/// partial, and DELETEs on an exact name. Own-scoped per the shared-store doctrine (GUID-suffixed hosts + a finally
+/// cleanup). No live SQL Server connection is made in CI — the real end-to-end probe is what the human dogfoods
+/// (remove sql2016, re-add via MCP).
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingMcpServerAdminToolsLivePostgresTests
@@ -313,6 +599,15 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         (_, _) => Task.FromResult(new ConnectionProbeResult(
             Success: true, MajorVersion: 15, EngineEdition: 3, EngineEditionDescription: "Enterprise",
             IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null));
+
+    /// <summary>The same healthy box, but the probe REPORTS which database the connection reached — the #2280
+    /// input. Every entry in a batch probed through this lands in <paramref name="connectedDatabase"/>, whatever
+    /// database it declared.</summary>
+    private static DarlingMcpServerAdminTools.ServerProbe ProbeReaching(string connectedDatabase) =>
+        (_, _) => Task.FromResult(new ConnectionProbeResult(
+            Success: true, MajorVersion: 15, EngineEdition: 3, EngineEditionDescription: "Enterprise",
+            IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null,
+            ConnectedDatabase: connectedDatabase));
 
     [Fact]
     public async Task AddServers_InsertsEncryptsDedupesBumpsVersion_ThenRemoveServer_AgainstDevPostgres()
@@ -337,11 +632,16 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         var suffix = Guid.NewGuid().ToString("N")[..12];
         var sqlHost = "mcp-add-sql-" + suffix;
         var winHost = "mcp-add-win-" + suffix;
+        var dbHost = "mcp-add-db-" + suffix;
         var sqlId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(sqlHost, null, false));
         var winId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(winHost, null, false));
+        /* #3541 A14: the collision batch's two identities — the one that lands (dbHost:AppDb) and the one that
+           must NOT (dbHost:Decoy), listed for cleanup so a regression that inserted it does not leak a row. */
+        var dbAppId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(dbHost, "AppDb", false));
+        var dbDecoyId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(dbHost, "Decoy", false));
         var password = "P@ss-" + Guid.NewGuid().ToString("N");
 
-        await CleanupAsync(connection, ct, sqlId, winId);
+        await CleanupAsync(connection, ct, sqlId, winId, dbAppId, dbDecoyId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
         var bodySucceeded = false;
@@ -358,8 +658,10 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             var added = await DarlingMcpServerAdminTools.AddServersAsync(postgres, json, SuccessProbe, ct);
             using (var doc = JsonDocument.Parse(added))
             {
+                Assert.Equal(3, doc.RootElement.GetProperty("requested").GetInt32());
                 Assert.Equal(2, doc.RootElement.GetProperty("added").GetInt32());
                 Assert.Equal(1, doc.RootElement.GetProperty("skipped").GetInt32());
+                Assert.Equal(0, doc.RootElement.GetProperty("collided").GetInt32());
                 Assert.Equal(0, doc.RootElement.GetProperty("failed").GetInt32());
             }
 
@@ -389,12 +691,71 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             {
                 Assert.Equal(0, doc.RootElement.GetProperty("added").GetInt32());
                 Assert.Equal(2, doc.RootElement.GetProperty("skipped").GetInt32());
+                Assert.Equal(2, doc.RootElement.GetProperty("requested").GetInt32());
             }
 
-            /* remove_server resolves against the servers registry, so register the SQL host there (same server_id
-               config_monitored_servers keys on), then remove — the config row is deleted. */
+            /* #3541 A14 — the batch that used to summarise as a clean run. Three entries on one host, probed
+               through a stub that reports every connection landing in AppDb: the first names AppDb and is added;
+               the second names Decoy but lands in AppDb, which the first now claims → collides, NOT inserted;
+               the third is a case-variant duplicate of the first → skipped. The old envelope read
+               {added: 1, skipped: 1, failed: 0} for this — one entry unaccounted for, and it was the one not
+               being monitored. */
+            var collisionBatch = await DarlingMcpServerAdminTools.AddServersAsync(
+                postgres,
+                $"[{{\"host\":\"{dbHost}\",\"database\":\"AppDb\"}}," +
+                $"{{\"host\":\"{dbHost}\",\"database\":\"Decoy\"}}," +
+                $"{{\"host\":\"{dbHost}\",\"database\":\"appdb\"}}]",
+                ProbeReaching("AppDb"), ct);
+            using (var doc = JsonDocument.Parse(collisionBatch))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(3, root.GetProperty("requested").GetInt32());
+                Assert.Equal(1, root.GetProperty("added").GetInt32());
+                Assert.Equal(1, root.GetProperty("skipped").GetInt32());
+                Assert.Equal(1, root.GetProperty("collided").GetInt32());
+                Assert.Equal(0, root.GetProperty("failed").GetInt32());
+
+                var statuses = root.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("status").GetString()).ToArray();
+                Assert.Equal(new[] { "added", "collides", "duplicate" }, statuses);
+            }
+
+            /* And the store agrees with the counters: the AppDb identity exists, the Decoy identity does not. */
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbAppId}")));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbDecoyId}")));
+
+            /* remove_server resolves against the servers registry, so register BOTH hosts there (same server_id
+               config_monitored_servers keys on). */
             await DarlingMcpTestData.RegisterServerAsync(connection, sqlId, sqlHost, ct);
-            Assert.Equal("removed", DarlingMcpTestData.StatusOf(await DarlingMcpServerAdminTools.RemoveServer(postgres, sqlHost)));
+            await DarlingMcpTestData.RegisterServerAsync(connection, winId, winHost, ct);
+
+            /* #3541 A14: the GUID suffix is a fragment BOTH registered names contain. The read resolver would
+               hand back whichever sorts first; the delete must refuse, name both, and remove neither. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, suffix)))
+            {
+                Assert.Equal("ambiguous", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
+                var candidates = doc.RootElement.GetProperty("candidates").EnumerateArray()
+                    .Select(c => c.GetProperty("server").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+                Assert.Equal(new[] { sqlHost, winHost }.OrderBy(n => n, StringComparer.Ordinal).ToArray(), candidates);
+            }
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sqlId}")));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
+
+            /* A partial that only ONE registered name contains is honored, and says so. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, "add-win-" + suffix)))
+            {
+                Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal(winHost, doc.RootElement.GetProperty("server").GetString());
+                Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
+            }
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
+
+            /* The exact name removes the SQL host — the config row is deleted. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, sqlHost)))
+            {
+                Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal("exact", doc.RootElement.GetProperty("matched_by").GetString());
+            }
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sqlId}")));
 
             /* Remove again: the servers-registry row still resolves, but the config row is gone → not_found. */
@@ -408,7 +769,7 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         finally
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
-                await CleanupAsync(cleanup, cleanupCt, sqlId, winId));
+                await CleanupAsync(cleanup, cleanupCt, sqlId, winId, dbAppId, dbDecoyId));
         }
     }
 
@@ -418,9 +779,10 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         return await command.ExecuteScalarAsync(ct);
     }
 
-    private static async Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct, int sqlId, int winId)
+    private static async Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct, params int[] serverIds)
     {
-        await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM config_monitored_servers WHERE server_id IN ({sqlId}, {winId})");
-        await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM servers WHERE server_id IN ({sqlId}, {winId})");
+        var list = string.Join(", ", serverIds);
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM config_monitored_servers WHERE server_id IN ({list})");
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM servers WHERE server_id IN ({list})");
     }
 }

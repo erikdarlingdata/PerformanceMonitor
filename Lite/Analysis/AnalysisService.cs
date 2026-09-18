@@ -479,6 +479,15 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// How many stored findings carry <paramref name="storyPathHash"/> for one server (or every server when
+    /// <paramref name="serverId"/> is null / the all-servers sentinel 0) — the MCP mute verb's <c>matched_now</c>
+    /// disclosure (#3541 A14). A pass-through to <see cref="FindingStore.CountStoredFindingsAsync"/>; see its
+    /// note for why this is reported beside the mute and not used to refuse it. Matches the Darling twin.
+    /// </summary>
+    public Task<long> CountStoredFindingsAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default) =>
+        _findingStore.CountStoredFindingsAsync(serverId, storyPathHash, cancellationToken);
+
+    /// <summary>
     /// Cleans up old findings beyond the retention period. Defaults to the shared horizon
     /// (<see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/>) so this wrapper and the
     /// store method it forwards to cannot disagree about the window when a caller names none —

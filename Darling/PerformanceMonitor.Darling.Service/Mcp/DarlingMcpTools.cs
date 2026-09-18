@@ -848,7 +848,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether the mute row was stored, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is registered AND matched_now is at least 1; \"muted_unmatched\" when it is registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"error\" when the row could not be written (nothing is muted).")]
     public static async Task<string> MuteAnalysisFinding(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -858,6 +858,11 @@ public sealed class DarlingMcpTools
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(story_path_hash))
+            {
+                return JsonSerializer.Serialize(new { status = "invalid", message = "story_path_hash is required." }, McpHelpers.JsonOptions);
+            }
+
             int? serverId = null;
             if (server_name != null)
             {
@@ -873,14 +878,39 @@ public sealed class DarlingMcpTools
                 StoryPath = story_path_hash
             };
 
-            await analysisService.MuteFindingAsync(finding, reason);
+            /* #3541 A14: report what happened, not what was asked. Before this the verb returned "muted" for any
+               hash — a mistyped one, a hash from another store, one whose INSERT the store swallowed — and the
+               agent walked away believing a pattern was silenced. Now: registered is the store's own answer,
+               and matched_now is counted AFTER the write so the two are read against the same moment. The
+               registry is a pattern registry (no row references a finding), so an unmatched hash is still
+               stored — legitimately, when a pattern's history has been purged — and the status names that case
+               instead of folding it into success. See PgFindingStore.CountStoredFindingsAsync. */
+            var registered = await analysisService.MuteFindingAsync(finding, reason);
+            if (!registered)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "error",
+                    message = "The mute could not be written to the monitoring store (see the service log); nothing is muted.",
+                    story_path_hash,
+                    server = server_name ?? "(all servers)",
+                    registered = false,
+                }, McpHelpers.JsonOptions);
+            }
+
+            var matchedNow = await analysisService.CountStoredFindingsAsync(serverId, story_path_hash);
 
             return JsonSerializer.Serialize(new
             {
-                status = "muted",
+                status = matchedNow > 0 ? "muted" : "muted_unmatched",
                 story_path_hash,
                 server = server_name ?? "(all servers)",
-                reason
+                reason,
+                registered = true,
+                matched_now = matchedNow,
+                note = matchedNow > 0
+                    ? $"The mute is registered; {matchedNow} stored finding(s) in this scope carry the hash and the pattern will be dropped from future analysis runs."
+                    : "The mute is registered, but no stored finding in this scope carries this story_path_hash. If you copied it from analyze_server or get_analysis_findings it is still valid (the pattern will be dropped if it recurs); a hash from anywhere else may be mistyped and would mute nothing.",
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

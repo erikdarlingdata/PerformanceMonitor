@@ -155,7 +155,10 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "update_custom_view"), Description(
-        "Updates an existing custom view in place (a full replacement of name/description/definition). The " +
+        "Updates an existing custom view in place: name and definition are REQUIRED and replace the stored ones; " +
+        "description is optional and follows the one write vocabulary shared with update_custom_alert_rule - " +
+        "OMITTED means UNCHANGED (the stored description is kept), an EMPTY string \"\" means CLEARED, any other " +
+        "text replaces it. The " +
         "definition is VALIDATED first; an invalid one returns {status:\"invalid\", ...} and changes nothing. Pass " +
         "the 'version' you last read via get_custom_view — if someone else changed the view since, this returns " +
         "{status:\"conflict\", ...} rather than silently overwriting their edit (reload and re-apply). A missing id " +
@@ -167,7 +170,7 @@ public sealed class DarlingMcpCustomViewTools
         [Description("The view name (unique, max 200 characters).")] string name,
         [Description("The full replacement view definition JSON. Validate it with validate_custom_view first.")] string definition,
         [Description("The version you last read from get_custom_view (optimistic concurrency; a mismatch is a conflict, not an overwrite).")] int version,
-        [Description("Optional human-readable description.")] string? description = null)
+        [Description("Optional human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null)
     {
         try
         {
@@ -178,8 +181,23 @@ public sealed class DarlingMcpCustomViewTools
             }
 
             var store = new CustomViewStore(postgres);
+
+            /* #3541 A14: read the row first so an OMITTED description is carried forward rather than written as
+               NULL. The store's UpdateAsync is a full replacement (right for the web editor, which always sends
+               the whole form); over MCP an omitted argument arrives as null, and before this a rename or a
+               definition edit that did not restate the description silently erased it - while the sibling
+               update_custom_alert_rule kept it. Same rule, same helper, on both tools now: omitted = unchanged,
+               empty = cleared (see DarlingMcpCustomAlertTools.ResolveOptionalText). The extra read is one
+               indexed primary-key SELECT before a write the caller has already paid a round trip for. */
+            var current = await store.GetAsync(view_id);
+            if (current is not CustomViewResult.Ok currentOk || currentOk.View is null)
+            {
+                return Outcome("not_found", $"No custom view with id {view_id}.");
+            }
+
             var result = await store.UpdateAsync(
-                view_id, name, description, definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
+                view_id, name, DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description),
+                definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
