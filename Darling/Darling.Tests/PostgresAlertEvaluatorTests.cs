@@ -224,7 +224,10 @@ public class PostgresAlertEvaluatorTests
 
     /// <summary>
     /// The persistence gate is what keeps this from firing on every long-running report. Same age, same
-    /// holder — only the persistence differs, and only the chronic one alerts.
+    /// holder — only the persistence differs, and only the chronic one alerts. The chronic case is the
+    /// classic single-pid incident, and it still fires through the IDENTITY arm with the holder as the
+    /// subject and the original "in N of M observations" wording — truthful now that the floor guarantees
+    /// M is a real sample.
     /// </summary>
     [Fact]
     public void XminFiresOnlyForAChronicHolderNotALongQuery()
@@ -232,8 +235,104 @@ public class PostgresAlertEvaluatorTests
         var chronic = new PostgresXminHorizonAlertInfo("session", "12345", 100_000_000, 30, 40, "idle in transaction");
         var transient = new PostgresXminHorizonAlertInfo("session", "12345", 100_000_000, 2, 40, "running");
 
-        Assert.NotNull(PostgresAlertEvaluator.EvaluateXmin(chronic));
+        var finding = PostgresAlertEvaluator.EvaluateXmin(chronic);
+        Assert.NotNull(finding);
+        Assert.Equal("session:12345", finding!.Subject);
+        Assert.Contains("in 30 of 40 observations", finding.ShortMessage, StringComparison.Ordinal);
+
         Assert.Null(PostgresAlertEvaluator.EvaluateXmin(transient));
+    }
+
+    /// <summary>
+    /// #3537 edge 1: the identity denominator counts only holder-bearing collections, so the first holder
+    /// after quiet hours arrived as 1 win in 1 observation — 100%, "chronic", off a single sample. The
+    /// observation floor closes every denominator too small for its majority to mean anything.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(4, 4)]
+    [InlineData(3, 4)]
+    public void XminDoesNotFireBeneathTheObservationFloorHoweverTotalTheFraction(int held, int total)
+    {
+        Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo("session", "1", 900_000_000, held, total, null)));
+    }
+
+    /// <summary>The floor is a floor, not a fudge: at exactly the minimum, a majority still fires.</summary>
+    [Fact]
+    public void XminIdentityArmFiresAtExactlyTheObservationFloor()
+    {
+        Assert.NotNull(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo(
+                "session", "1", 900_000_000,
+                PostgresAlertEvaluator.XminMinimumObservations,
+                PostgresAlertEvaluator.XminMinimumObservations,
+                null)));
+    }
+
+    /// <summary>
+    /// #3537 edge 2: a horizon continuously pinned past the threshold by a PARADE of distinct holders never
+    /// accumulates any single holder's identity fraction, and the old gate never fired while the alert's own
+    /// claim was true the whole time. The horizon arm fires on the horizon's persistence across the window's
+    /// real captures, names the rotating pattern, still carries the latest holder's remedy — and subjects
+    /// the stable sentinel, not the latest member, so the host's per-subject cooldown holds across
+    /// rotations.
+    /// </summary>
+    [Fact]
+    public void XminRotatingHoldersFireTheHorizonArmUnderTheStableSubject()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "9101", 80_000_000, ObservationsHeld: 1, ObservationsTotal: 60,
+            "state=idle in transaction", ObservationsAboveThreshold: 70, CapturesInWindow: 120));
+
+        Assert.NotNull(finding);
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+        Assert.Equal(PostgresAlertEvaluator.XminRotatingHoldersSubject, finding.Subject);
+        Assert.Contains("succession of different holders", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("session:9101", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("70 of the window's 120 collections", finding.ShortMessage, StringComparison.Ordinal);
+        /* The remedy names the latest holder's cause — the one actionable thing either way. */
+        Assert.Contains("idle in transaction", finding.ShortMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The horizon arm's own boundaries: a majority of the window's real captures fires, one capture short
+    /// of it does not, and a window with fewer captures than the floor cannot fire at any fraction — which
+    /// is also what keeps the compat default (no capture data supplied) silent.
+    /// </summary>
+    [Theory]
+    [InlineData(60, 120, true)]   // exactly the majority
+    [InlineData(59, 120, false)]  // one capture short
+    [InlineData(4, 4, false)]     // 100%, but beneath the capture floor
+    [InlineData(0, 0, false)]     // no capture data supplied — the compat default
+    public void XminHorizonArmNeedsAMajorityOfAtLeastTheFloorsWorthOfCaptures(
+        int above, int captures, bool fires)
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "1", 80_000_000, ObservationsHeld: 1, ObservationsTotal: 60, null,
+            ObservationsAboveThreshold: above, CapturesInWindow: captures));
+
+        Assert.Equal(fires, finding is not null);
+    }
+
+    /// <summary>
+    /// The overlap case, told apart by the identity FRACTION alone: a service restarted into an incident
+    /// already underway sees a stable holder through a window still too young for the identity floor. The
+    /// horizon arm supplies the persistence evidence, but the wording must not claim a "succession" and
+    /// the subject stays the holder — there is exactly one, and it is the thing to kill.
+    /// </summary>
+    [Fact]
+    public void XminStableHolderInAYoungWindowKeepsTheHolderSubjectOnAHorizonArmFire()
+    {
+        var finding = PostgresAlertEvaluator.EvaluateXmin(new PostgresXminHorizonAlertInfo(
+            "session", "77", 80_000_000, ObservationsHeld: 3, ObservationsTotal: 3, null,
+            ObservationsAboveThreshold: 3, CapturesInWindow: 6));
+
+        Assert.NotNull(finding);
+        Assert.Equal("session:77", finding!.Subject);
+        Assert.DoesNotContain("succession", finding.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("3 of the window's 6 collections", finding.ShortMessage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -241,6 +340,13 @@ public class PostgresAlertEvaluatorTests
     {
         Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
             new PostgresXminHorizonAlertInfo("session", "1", 1_000_000, 40, 40, null)));
+
+        /* Both arms saturated, current age below the bar: the age gate answers first. The latest reading
+           is what the alert would quote as "current", so a horizon that has already come back under the
+           threshold must not page off its own history. */
+        Assert.Null(PostgresAlertEvaluator.EvaluateXmin(
+            new PostgresXminHorizonAlertInfo("session", "1", 1_000_000, 40, 40, null,
+                ObservationsAboveThreshold: 120, CapturesInWindow: 120)));
     }
 
     /// <summary>A zero denominator must not divide — it means nothing was observed, so nothing fires.</summary>
