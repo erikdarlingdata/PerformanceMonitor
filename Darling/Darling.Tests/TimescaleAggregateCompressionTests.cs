@@ -447,11 +447,13 @@ public sealed class TimescaleAggregateCompressionTests
     /// so. The raw compression converge, run afterwards, moves nothing — the family is excluded rather than
     /// retuned to the hourly tick — and #1778's activity read sees the jobs at their own delay.
     ///
-    /// <para>Deliberately NO teardown: compression enabled on the aggregates with a once-a-day policy each is
-    /// the service's real end state on this fixture, the same reasoning the raw tick test gives for leaving its
-    /// policies. The policies' first runs are anchored to tomorrow at the earliest, so nothing compresses
-    /// during the run; a class that drops and recreates an aggregate drops its policy with it, as TimescaleDB
-    /// does for every job on a dropped aggregate (measured), and the next ensure re-adds it.</para>
+    /// <para>Restores the fixture's shape (#1873): the aggregates this test creates are dropped afterwards
+    /// through <see cref="LiveCleanupBatch.DropContinuousAggregatesAsync"/>, and their compression policies go
+    /// with them — TimescaleDB removes every job on a dropped aggregate (measured on 2.28.1: zero jobs remain
+    /// for a dropped, compression-enabled aggregate). Nothing compresses during the run: the policies' first
+    /// runs are anchored to the next UTC midnight at the earliest, and the fixture holds no chunk two days
+    /// old. Snapshot what already exists and drop only what this test created, the TimescaleSupportTests
+    /// idiom.</para>
     /// </summary>
     [Fact]
     public async Task EndToEnd_AggregateCompression_EnablesEveryAggregate_AttachesOneDailyPolicyEach_AndTheRawConvergeLeavesThemAlone_AgainstDevPostgres()
@@ -468,91 +470,105 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
 
-        /* The aggregates have to exist, over hypertables, before anything can be compressed on them — the same
-           ordering the worker's TimescaleDB block runs. */
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
-        var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, created);
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
 
-        var firstLog = new CapturingTestLogger();
-        var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);
-        Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, first);
-
-        /* Every aggregate: compression enabled, exactly one compression job, at its tier's window, on the daily
-           cadence, on a fixed schedule at its hour and the band's minute. Read back from the catalog, not from
-           the ensure's return value. */
-        foreach (var (_, view, hourly) in TimescaleSupport.AggregateCompressionTargets)
+        var bodySucceeded = false;
+        try
         {
-            using var read = new NpgsqlCommand(@"
-SELECT
-    ca.compression_enabled,
-    count(j.job_id),
-    min(EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint),
-    min(EXTRACT(EPOCH FROM j.schedule_interval)::bigint),
-    bool_and(j.fixed_schedule),
-    min(EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int),
-    min(EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int)
-FROM timescaledb_information.continuous_aggregates AS ca
-LEFT JOIN timescaledb_information.jobs AS j
-  ON  j.proc_name LIKE '%compression%'
-  AND j.hypertable_schema = ca.view_schema
-  AND j.hypertable_name = ca.view_name
-WHERE ca.view_schema = 'collect' AND ca.view_name = $1
-GROUP BY ca.compression_enabled", connection);
-            read.Parameters.AddWithValue(view);
-            using var reader = await read.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct), $"{view} is not a continuous aggregate on the fixture");
+            /* The aggregates have to exist, over hypertables, before anything can be compressed on them — the same
+               ordering the worker's TimescaleDB block runs. */
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
+            var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, created);
 
-            Assert.True(reader.GetBoolean(0), $"{view} is not compression-enabled");
-            Assert.Equal(1L, reader.GetInt64(1));
-            Assert.Equal((long)(hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan : TimescaleSupport.DailyAggregateCompressAfterSpan).TotalSeconds, reader.GetInt64(2));
-            Assert.Equal((long)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, reader.GetInt64(3));
-            Assert.True(reader.GetBoolean(4), $"{view}'s compression job is not on a fixed schedule");
-            Assert.Equal(TimescaleSupport.AggregateCompressionBandHourFor(view), reader.GetInt32(5));
-            Assert.Equal(TimescaleSupport.AggregateCompressionBandMinute, reader.GetInt32(6));
+            var firstLog = new CapturingTestLogger();
+            var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);
+            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, first);
+
+            /* Every aggregate: compression enabled, exactly one compression job, at its tier's window, on the daily
+               cadence, on a fixed schedule at its hour and the band's minute. Read back from the catalog, not from
+               the ensure's return value. */
+            foreach (var (_, view, hourly) in TimescaleSupport.AggregateCompressionTargets)
+            {
+                using var read = new NpgsqlCommand(@"
+    SELECT
+        ca.compression_enabled,
+        count(j.job_id),
+        min(EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint),
+        min(EXTRACT(EPOCH FROM j.schedule_interval)::bigint),
+        bool_and(j.fixed_schedule),
+        min(EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int),
+        min(EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int)
+    FROM timescaledb_information.continuous_aggregates AS ca
+    LEFT JOIN timescaledb_information.jobs AS j
+      ON  j.proc_name LIKE '%compression%'
+      AND j.hypertable_schema = ca.view_schema
+      AND j.hypertable_name = ca.view_name
+    WHERE ca.view_schema = 'collect' AND ca.view_name = $1
+    GROUP BY ca.compression_enabled", connection);
+                read.Parameters.AddWithValue(view);
+                using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct), $"{view} is not a continuous aggregate on the fixture");
+
+                Assert.True(reader.GetBoolean(0), $"{view} is not compression-enabled");
+                Assert.Equal(1L, reader.GetInt64(1));
+                Assert.Equal((long)(hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan : TimescaleSupport.DailyAggregateCompressAfterSpan).TotalSeconds, reader.GetInt64(2));
+                Assert.Equal((long)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, reader.GetInt64(3));
+                Assert.True(reader.GetBoolean(4), $"{view}'s compression job is not on a fixed schedule");
+                Assert.Equal(TimescaleSupport.AggregateCompressionBandHourFor(view), reader.GetInt32(5));
+                Assert.Equal(TimescaleSupport.AggregateCompressionBandMinute, reader.GetInt32(6));
+            }
+
+            /* The summary line names both windows and the band, and is rendered — a placeholder/argument
+               mismatch renders wrong with no error anywhere, which no return-value assertion can catch. */
+            Assert.Contains("continuous-aggregate compression on 20/20 aggregates", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"compress_after {TimescaleSupport.HourlyAggregateCompressAfter} for the hourly-refreshed tier", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"{TimescaleSupport.DailyAggregateCompressAfter} for the daily tier", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"minute :{TimescaleSupport.AggregateCompressionBandMinute:00}Z, from hour {TimescaleSupport.AggregateCompressionBandFirstHour:00}Z", firstLog.Joined, StringComparison.Ordinal);
+
+            /* Idempotent: the settled store adds nothing, converges nothing, and still reports the full ladder. */
+            var secondLog = new CapturingTestLogger();
+            var second = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, secondLog, ct);
+            Assert.Equal(first, second);
+            Assert.Contains("(0 added this start, 0 converged", secondLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("gets a once-a-day compression policy", secondLog.Joined, StringComparison.Ordinal);
+
+            /* THE EXCLUSION: the raw compression converge sees these once-a-day jobs in its unscoped read and must
+               leave every one of them on the daily cadence. Asserted on the catalog after the converge, not only on
+               its count — a count of zero is also what a converge that read nothing returns. */
+            var rawConvergeLog = new CapturingTestLogger();
+            await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, rawConvergeLog, ct);
+            Assert.DoesNotContain("retuned query_stats_hourly's compression policy", rawConvergeLog.Joined, StringComparison.Ordinal);
+
+            using (var cadences = new NpgsqlCommand(@"
+    SELECT count(*)
+    FROM timescaledb_information.jobs AS j
+    JOIN timescaledb_information.continuous_aggregates AS ca
+      ON ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name
+    WHERE j.proc_name LIKE '%compression%'
+    AND   ca.view_schema = 'collect'
+    AND   j.schedule_interval = INTERVAL '1 day'", connection))
+            {
+                Assert.Equal((long)TimescaleSupport.AggregateCompressionTargets.Count, (long)(await cadences.ExecuteScalarAsync(ct))!);
+            }
+
+            /* #1778's activity read covers the family at its own delay. */
+            var activity = await TimescaleSupport.ReadCompressionActivityAsync(connection, null, ct);
+            var aggregateActivity = activity.Where(a => TimescaleSupport.IsAggregateCompressionTarget(a.HypertableName)).ToArray();
+            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, aggregateActivity.Length);
+            foreach (var item in aggregateActivity)
+            {
+                Assert.Equal(TimescaleSupport.AggregateCompressAfterSpanFor(item.HypertableName!), item.CompressAfter);
+            }
+
+            bodySucceeded = true;
         }
-
-        /* The summary line names both windows and the band, and is rendered — a placeholder/argument
-           mismatch renders wrong with no error anywhere, which no return-value assertion can catch. */
-        Assert.Contains("continuous-aggregate compression on 20/20 aggregates", firstLog.Joined, StringComparison.Ordinal);
-        Assert.Contains($"compress_after {TimescaleSupport.HourlyAggregateCompressAfter} for the hourly-refreshed tier", firstLog.Joined, StringComparison.Ordinal);
-        Assert.Contains($"{TimescaleSupport.DailyAggregateCompressAfter} for the daily tier", firstLog.Joined, StringComparison.Ordinal);
-        Assert.Contains($"minute :{TimescaleSupport.AggregateCompressionBandMinute:00}Z, from hour {TimescaleSupport.AggregateCompressionBandFirstHour:00}Z", firstLog.Joined, StringComparison.Ordinal);
-
-        /* Idempotent: the settled store adds nothing, converges nothing, and still reports the full ladder. */
-        var secondLog = new CapturingTestLogger();
-        var second = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, secondLog, ct);
-        Assert.Equal(first, second);
-        Assert.Contains("(0 added this start, 0 converged", secondLog.Joined, StringComparison.Ordinal);
-        Assert.DoesNotContain("gets a once-a-day compression policy", secondLog.Joined, StringComparison.Ordinal);
-
-        /* THE EXCLUSION: the raw compression converge sees these once-a-day jobs in its unscoped read and must
-           leave every one of them on the daily cadence. Asserted on the catalog after the converge, not only on
-           its count — a count of zero is also what a converge that read nothing returns. */
-        var rawConvergeLog = new CapturingTestLogger();
-        await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, rawConvergeLog, ct);
-        Assert.DoesNotContain("retuned query_stats_hourly's compression policy", rawConvergeLog.Joined, StringComparison.Ordinal);
-
-        using (var cadences = new NpgsqlCommand(@"
-SELECT count(*)
-FROM timescaledb_information.jobs AS j
-JOIN timescaledb_information.continuous_aggregates AS ca
-  ON ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name
-WHERE j.proc_name LIKE '%compression%'
-AND   ca.view_schema = 'collect'
-AND   j.schedule_interval = INTERVAL '1 day'", connection))
+        finally
         {
-            Assert.Equal((long)TimescaleSupport.AggregateCompressionTargets.Count, (long)(await cadences.ExecuteScalarAsync(ct))!);
-        }
-
-        /* #1778's activity read covers the family at its own delay. */
-        var activity = await TimescaleSupport.ReadCompressionActivityAsync(connection, null, ct);
-        var aggregateActivity = activity.Where(a => TimescaleSupport.IsAggregateCompressionTarget(a.HypertableName)).ToArray();
-        Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, aggregateActivity.Length);
-        foreach (var item in aggregateActivity)
-        {
-            Assert.Equal(TimescaleSupport.AggregateCompressAfterSpanFor(item.HypertableName!), item.CompressAfter);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
         }
     }
 
@@ -576,55 +592,85 @@ AND   j.schedule_interval = INTERVAL '1 day'", connection))
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
 
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
 
-        var view = TimescaleSupport.ProcedureStatsHourlyView;
-
-        /* Drift one policy the way an older build would have left it: the raw tier's window and tick, an
-           anchor off the band. */
-        using (var drift = new NpgsqlCommand($@"
-SELECT alter_job(
-    j.job_id,
-    schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}',
-    config => jsonb_set(j.config, '{{compress_after}}', to_jsonb('{TimescaleSupport.CompressAfterDays} days'::text)),
-    fixed_schedule => false)
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect' AND j.hypertable_name = '{view}'", connection))
+        var bodySucceeded = false;
+        try
         {
-            Assert.NotNull(await drift.ExecuteScalarAsync(ct));
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
+
+            var view = TimescaleSupport.ProcedureStatsHourlyView;
+
+            /* Drift one policy the way an older build would have left it: the raw tier's window and tick, an
+               anchor off the band. */
+            using (var drift = new NpgsqlCommand($@"
+    SELECT alter_job(
+        j.job_id,
+        schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}',
+        config => jsonb_set(j.config, '{{compress_after}}', to_jsonb('{TimescaleSupport.CompressAfterDays} days'::text)),
+        fixed_schedule => false)
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect' AND j.hypertable_name = '{view}'", connection))
+            {
+                Assert.NotNull(await drift.ExecuteScalarAsync(ct));
+            }
+
+            var convergeLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureAggregateCompressionAsync(connection, convergeLog, ct);
+            Assert.Contains($"moved {view}'s compression policy", convergeLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("1 converged", convergeLog.Joined, StringComparison.Ordinal);
+
+            using (var read = new NpgsqlCommand($@"
+    SELECT
+        EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint,
+        EXTRACT(EPOCH FROM j.schedule_interval)::bigint,
+        j.fixed_schedule,
+        EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int,
+        EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect' AND j.hypertable_name = '{view}'", connection))
+            {
+                using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal((long)TimescaleSupport.HourlyAggregateCompressAfterSpan.TotalSeconds, reader.GetInt64(0));
+                Assert.Equal((long)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, reader.GetInt64(1));
+                Assert.True(reader.GetBoolean(2));
+                Assert.Equal(TimescaleSupport.AggregateCompressionBandHourFor(view), reader.GetInt32(3));
+                Assert.Equal(TimescaleSupport.AggregateCompressionBandMinute, reader.GetInt32(4));
+            }
+
+            var settledLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureAggregateCompressionAsync(connection, settledLog, ct);
+            Assert.Contains("0 converged", settledLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("moved ", settledLog.Joined, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
+    }
+
+    /// <summary>The continuous aggregates standing in <c>collect</c> right now — the snapshot the restore
+    /// diffs against, so a test drops only what it created (the TimescaleSupportTests idiom).</summary>
+    private static async Task<string[]> ExistingCaggsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var names = new List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
         }
 
-        var convergeLog = new CapturingTestLogger();
-        await TimescaleSupport.EnsureAggregateCompressionAsync(connection, convergeLog, ct);
-        Assert.Contains($"moved {view}'s compression policy", convergeLog.Joined, StringComparison.Ordinal);
-        Assert.Contains("1 converged", convergeLog.Joined, StringComparison.Ordinal);
-
-        using (var read = new NpgsqlCommand($@"
-SELECT
-    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint,
-    EXTRACT(EPOCH FROM j.schedule_interval)::bigint,
-    j.fixed_schedule,
-    EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int,
-    EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect' AND j.hypertable_name = '{view}'", connection))
-        {
-            using var reader = await read.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal((long)TimescaleSupport.HourlyAggregateCompressAfterSpan.TotalSeconds, reader.GetInt64(0));
-            Assert.Equal((long)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, reader.GetInt64(1));
-            Assert.True(reader.GetBoolean(2));
-            Assert.Equal(TimescaleSupport.AggregateCompressionBandHourFor(view), reader.GetInt32(3));
-            Assert.Equal(TimescaleSupport.AggregateCompressionBandMinute, reader.GetInt32(4));
-        }
-
-        var settledLog = new CapturingTestLogger();
-        await TimescaleSupport.EnsureAggregateCompressionAsync(connection, settledLog, ct);
-        Assert.Contains("0 converged", settledLog.Joined, StringComparison.Ordinal);
-        Assert.DoesNotContain("moved ", settledLog.Joined, StringComparison.Ordinal);
+        return names.ToArray();
     }
 
     private static TimeSpan ParseDays(string interval)
