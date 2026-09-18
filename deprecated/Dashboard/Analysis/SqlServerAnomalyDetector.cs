@@ -832,6 +832,24 @@ AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0);";
         }
     }
 
+    // Batch-request window: per-second rate per sample (#3527) — cntr_value_delta spans one collection
+    // interval, so divide by the row's MEASURED sample_interval_seconds. Interval <= 0 marks an
+    // unknowable delta (first sighting/reset/gap) and the row is skipped, never read as 0. Keeps the
+    // window statistic in the same requests/sec unit as the baseline and the
+    // BatchRequestFloor/Fallback thresholds.
+    public const string BatchRequestWindowSql = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    AVG(cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
+    MAX(cntr_value_delta * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
+    COUNT(*) AS sample_count
+FROM collect.perfmon_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   counter_name = 'Batch Requests/sec'
+AND   cntr_value_delta >= 0
+AND   sample_interval_seconds > 0;";
+
     /// <summary>
     /// Detects batch requests/sec anomalies using z-score against time-bucketed baseline.
     /// </summary>
@@ -849,17 +867,7 @@ AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0);";
             await connection.OpenAsync();
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT
-    AVG(cntr_value_delta) AS avg_batch,
-    MAX(cntr_value_delta) AS peak_batch,
-    COUNT(*) AS sample_count
-FROM collect.perfmon_stats
-WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
-AND   counter_name = 'Batch Requests/sec'
-AND   cntr_value_delta >= 0;";
+            cmd.CommandText = BatchRequestWindowSql;
 
             cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));

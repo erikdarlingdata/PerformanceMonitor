@@ -197,9 +197,35 @@ AND   collection_time <= @endTime";
         }
     }
 
+    // #3527: cntr_value_delta spans one COLLECTION INTERVAL, not one second — at a 60s cadence
+    // the raw delta is 60x the true rate. The honest rate divides by the row's MEASURED
+    // sample_interval_seconds; interval <= 0 marks an unknowable delta (first sighting, counter
+    // reset, gap), so those rows are filtered rather than emitted as 0 — rn = 1 lands on the
+    // newest row a rate can honestly be derived from.
+    public const string PerfmonSql = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+;WITH latest AS (
+    SELECT
+        counter_name,
+        cntr_value,
+        cntr_value_delta,
+        sample_interval_seconds,
+        ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
+    FROM collect.perfmon_stats
+    WHERE collection_time >= @startTime
+    AND   collection_time <= @endTime
+    AND   counter_name IN ('Batch Requests/sec', 'SQL Compilations/sec', 'SQL Re-Compilations/sec')
+    AND   sample_interval_seconds > 0
+)
+SELECT counter_name, cntr_value, cntr_value_delta, sample_interval_seconds
+FROM latest WHERE rn = 1";
+
     /// <summary>
     /// Collects key perfmon throughput counters: Batch Requests/sec, compilations, recompilations.
     /// Unscored context that distinguishes a busy server from a sick one (used by the AI surfaces).
+    /// Fact values are per-second rates: the per-interval delta divided by the row's measured
+    /// sample_interval_seconds (#3527); the raw delta and the divisor ride the metadata.
     /// </summary>
     private async Task CollectPerfmonFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -209,22 +235,7 @@ AND   collection_time <= @endTime";
             await connection.OpenAsync();
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-;WITH latest AS (
-    SELECT
-        counter_name,
-        cntr_value,
-        cntr_value_delta,
-        ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
-    FROM collect.perfmon_stats
-    WHERE collection_time >= @startTime
-    AND   collection_time <= @endTime
-    AND   counter_name IN ('Batch Requests/sec', 'SQL Compilations/sec', 'SQL Re-Compilations/sec')
-)
-SELECT counter_name, cntr_value, cntr_value_delta
-FROM latest WHERE rn = 1";
+            cmd.CommandText = PerfmonSql;
 
             cmd.Parameters.Add(new SqlParameter("@startTime", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
@@ -235,6 +246,7 @@ FROM latest WHERE rn = 1";
                 var counterName = reader.GetString(0);
                 var cntrValue = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
                 var deltaValue = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+                var intervalSeconds = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
 
                 var (factKey, source) = counterName switch
                 {
@@ -246,8 +258,11 @@ FROM latest WHERE rn = 1";
 
                 if (factKey == null) continue;
 
-                // All remaining counters are per-second rates — use the delta.
-                var value = (double)deltaValue;
+                // The delta spans one collection interval — divide by the measured interval for the
+                // per-second rate (#3527). The SQL already filters interval <= 0 (unknowable delta);
+                // this guard keeps a raw or zero value from ever escaping if that filter regresses.
+                if (intervalSeconds <= 0) continue;
+                var value = deltaValue / (double)intervalSeconds;
 
                 facts.Add(new Fact
                 {
@@ -258,7 +273,8 @@ FROM latest WHERE rn = 1";
                     Metadata = new Dictionary<string, double>
                     {
                         ["cntr_value"] = cntrValue,
-                        ["delta_cntr_value"] = deltaValue
+                        ["delta_cntr_value"] = deltaValue,
+                        ["sample_interval_seconds"] = intervalSeconds
                     }
                 });
             }
