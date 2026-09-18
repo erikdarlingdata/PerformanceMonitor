@@ -296,7 +296,7 @@ public sealed class DarlingMcpStoreMetricsTools
                         /* #3582: on the two catch-all rows chunk_count is the RELATION count the sum spans
                            (the column-mapping paragraph on StoreSelfMetrics); surfaced under its own name
                            so a reader is not left inferring it. Null on every other kind. */
-                        relation_count = r.ObjectKind is StoreSelfMetrics.OtherObjectKind or StoreSelfMetrics.SystemObjectKind
+                        relation_count = r.ObjectKind == StoreSelfMetrics.OtherObjectKind || r.ObjectKind == StoreSelfMetrics.SystemObjectKind
                             ? r.ChunkCount
                             : null,
                         row_count = r.RowCount,
@@ -447,7 +447,7 @@ public sealed class DarlingMcpStoreMetricsTools
         }
 
         var hasTimescaleRows = latest.Any(r =>
-            r.ObjectKind is StoreSelfMetrics.HypertableObjectKind or StoreSelfMetrics.ContinuousAggregateObjectKind);
+            r.ObjectKind == StoreSelfMetrics.HypertableObjectKind || r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind);
         if (!hasTimescaleRows)
         {
             sb.Append(" No hypertable or continuous-aggregate rows were recorded (a plain-PostgreSQL store, or TimescaleDB ")

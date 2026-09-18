@@ -419,16 +419,23 @@ AND   NOT c.relisshared";
 
     /// <summary>
     /// The relations some NAMED row already sizes, every store shape (#3582): the two payload dimensions
-    /// and the three named plain tables, by <c>(schema, relation)</c>. A relation matched here is never in
-    /// a catch-all row, or the reconciliation would count it twice. Names are the same compile-time
-    /// constants the INSERT arms interpolate, so the census and the rows it excludes cannot drift apart.
+    /// and the three named plain tables. A relation matched here is never in a catch-all row, or the
+    /// reconciliation would count it twice. Every name is the SAME compile-time constant the INSERT arm
+    /// interpolates — the dims through <see cref="PayloadDimensions"/>, the tables through their
+    /// schema-qualified owners' constants — so the census and the rows it excludes cannot drift apart. That
+    /// is why the comparison is on the concatenated <c>schema.relation</c> rather than on a
+    /// <c>(schema, relation)</c> tuple: the table constants are compound (<c>"collect.query_store_text"</c>)
+    /// and cannot be split at compile time, and a hand-typed tuple beside them would be exactly the copy
+    /// this constant exists not to have (review catch on the first cut, which had three). No product
+    /// relation name contains a dot, so the concatenation is unambiguous. Aliases <c>c</c> and <c>n</c> as
+    /// on <see cref="CensusRelationPredicateSql"/>.
     /// </summary>
-    public const string NamedRelationPredicateSql = $@"(n.nspname, c.relname) IN (
-        ('collect', '{PayloadDimensions.QueryTextDimTable}'),
-        ('collect', '{PayloadDimensions.QueryPlanDimTable}'),
-        ('collect', 'query_store_text'),
-        ('collect', 'query_store_plan_map'),
-        ('config', 'config_alert_log'))";
+    public const string NamedRelationPredicateSql = $@"(n.nspname || '.' || c.relname) IN (
+        'collect.{PayloadDimensions.QueryTextDimTable}',
+        'collect.{PayloadDimensions.QueryPlanDimTable}',
+        '{QueryStoreTextStore.TableName}',
+        '{QueryStorePlanMap.TableName}',
+        '{AlertLogTable}')";
 
     /// <summary>
     /// The relations the TimescaleDB rows already size, as a fragment (#3582): every hypertable root the

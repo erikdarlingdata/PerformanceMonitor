@@ -282,14 +282,22 @@ public sealed class StoreSelfMetricsTests
             /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
             Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
 
-            /* The census names the same table by its two halves. */
-            var dot = table.IndexOf('.', StringComparison.Ordinal);
-            Assert.Contains($"('{table[..dot]}', '{table[(dot + 1)..]}')", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+            /* The census names the same table by the same compound constant, compared against the
+               concatenated schema.relation — no hand-typed (schema, relation) tuple to drift (review catch). */
+            Assert.Contains($"'{table}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
         }
 
+        Assert.Contains("(n.nspname || '.' || c.relname) IN (", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
         /* The two payload dimensions are in the same predicate, so they leave the catch-all too. */
-        Assert.Contains($"('collect', '{PayloadDimensions.QueryTextDimTable}')", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
-        Assert.Contains($"('collect', '{PayloadDimensions.QueryPlanDimTable}')", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        Assert.Contains($"'collect.{PayloadDimensions.QueryTextDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        Assert.Contains($"'collect.{PayloadDimensions.QueryPlanDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
+        /* Exactly five names, and none of them typed by hand: every quoted name in the predicate is one of
+           the five constants. */
+        var quoted = System.Text.RegularExpressions.Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'").Select(m => m.Groups[1].Value).ToArray();
+        Assert.Equal(6, quoted.Length); /* five names plus the '.' separator literal */
+        Assert.Equal(
+            new[] { $"collect.{PayloadDimensions.QueryTextDimTable}", $"collect.{PayloadDimensions.QueryPlanDimTable}" }.Concat(qualified).OrderBy(x => x, StringComparer.Ordinal),
+            quoted.Where(q => q != ".").OrderBy(x => x, StringComparer.Ordinal));
         Assert.Equal(3, sql.Split("UNION ALL").Length);
         Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
     }
