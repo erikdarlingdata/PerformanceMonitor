@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpConfigTools
 {
-    [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings right now (unlike get_server_config_changes, which shows only what changed between connect snapshots).")]
+    [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings right now (unlike get_server_config_changes, which shows only what changed between connect snapshots). LATEST IS A TIME: configuration is captured when the collector CONNECTS, not on a schedule, so 'current' here means 'as of the last capture' - captured_at is that instant, and a value can be days old on a server the monitor has stayed connected to.")]
     public static async Task<string> GetServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -42,8 +42,8 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestServerConfigAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingCurrentConfigReader.GetLatestServerConfigAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config")
                     ?? McpHelpers.Status(
                         "unavailable",
@@ -52,8 +52,10 @@ public sealed class DarlingMcpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                setting_count = rows.Count,
-                settings = rows.Select(r => new
+                /* #3541 A10: the connect-time capture this "current" configuration is as of. */
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
+                setting_count = snapshot.Count,
+                settings = snapshot.Rows.Select(r => new
                 {
                     name = r.ConfigurationName,
                     value_configured = r.ValueConfigured,
@@ -70,7 +72,7 @@ public sealed class DarlingMcpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases.")]
+    [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of, and a database created or altered since is not reflected until the next connect.")]
     public static async Task<string> GetDatabaseConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -81,14 +83,14 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
 
-            IEnumerable<DarlingCurrentConfigReader.DatabaseConfigReadRow> filtered = rows;
+            IEnumerable<DarlingCurrentConfigReader.DatabaseConfigReadRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
@@ -119,6 +121,7 @@ public sealed class DarlingMcpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
@@ -129,7 +132,7 @@ public sealed class DarlingMcpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped.")]
+    [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]
     public static async Task<string> GetTraceFlags(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -139,16 +142,17 @@ public sealed class DarlingMcpConfigTools
 
         try
         {
-            var rows = await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags")
                     ?? McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                trace_flag_count = rows.Count,
-                trace_flags = rows.Select(r => new
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
+                trace_flag_count = snapshot.Count,
+                trace_flags = snapshot.Rows.Select(r => new
                 {
                     trace_flag = r.TraceFlag,
                     enabled = r.Status,

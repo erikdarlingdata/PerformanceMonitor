@@ -22,19 +22,38 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// The plan-cache + CPU-scheduler snapshot MCP tools — get_plan_cache_bloat, get_cpu_scheduler_pressure —
 /// served over Darling's Postgres store. Each tool body mirrors the Dashboard's <c>McpDiagnosticTools</c> /
-/// <c>McpSchedulerTools</c> field-for-field (Lite exposes neither, so the Dashboard is the only reference).
+/// <c>McpSchedulerTools</c> field-for-field; Lite has since ported both names (<c>Lite/Mcp/McpPlanCacheSchedulerTools</c>),
+/// and the two SKUs now share one parameter contract (below).
 /// Reads flow through <see cref="DarlingPlanCacheSchedulerReader"/> — STORED reads of the latest snapshot, no
 /// live monitored-server hit. The Dashboard's <c>bloat_level</c> (#1410) and <c>pressure_level</c> /
 /// <c>recommendation</c> (#1410) classifications are reproduced from the reporting-view CASE logic.
+///
+/// <para><b>#3541 A10 — one contract on both SKUs, and the snapshot says when.</b> Both tools take
+/// <c>(server_name, hours_back, as_of)</c> with the SAME parameter descriptions as Lite's
+/// <c>McpPlanCacheSchedulerTools</c>: <c>hours_back</c> is the span SEARCHED for the newest snapshot, not a
+/// span aggregated, and the description says so in those words. get_cpu_scheduler_pressure used to take
+/// <c>server_name</c> alone here and <c>(server_name, hours_back, as_of)</c> on Lite — the same tool name
+/// with two parameter surfaces, on the one tool whose answer is a CRITICAL/HIGH/MEDIUM/NORMAL verdict. Every
+/// payload publishes <c>captured_at</c> (the snapshot's own <c>collection_time</c>) and <c>age_seconds</c>
+/// against the window's end, so a verdict computed from a stale row cannot pass as current.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPlanCacheSchedulerTools
 {
-    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads'.")]
+    /// <summary>
+    /// get_cpu_scheduler_pressure's description, VERBATIM the text Lite's twin carries (#3541 A10): the same
+    /// tool name described two ways on two servers was half of the drift this lane closed, and a shared const
+    /// cannot be shared across the two assemblies, so the cross-SKU description census pins the two strings
+    /// equal instead. Change one, change both.
+    /// </summary>
+    internal const string CpuSchedulerPressureDescription =
+        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current.";
+
+    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads'. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
     public static async Task<string> GetPlanCacheBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -61,7 +80,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
+                captured_at = rows[0].CollectionTime.ToString("o"),
+                age_seconds = LatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, now),
                 summary = new
                 {
                     total_plans = totalPlans,
@@ -93,20 +113,27 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
         }
     }
 
-    [McpServerTool(Name = "get_cpu_scheduler_pressure"), Description("Gets CPU scheduler pressure: runnable task queue depth, worker thread utilization, and pressure warnings. Shows whether the server has enough worker threads and if tasks are queuing for CPU time.")]
+    [McpServerTool(Name = "get_cpu_scheduler_pressure"), Description(CpuSchedulerPressureDescription)]
     public static async Task<string> GetCpuSchedulerPressure(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+
         try
         {
-            var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(postgres, resolved.ServerId);
+            var now = windowEnd;
+            var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (item == null)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_scheduler_stats")
-                    ?? McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
+                    ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back.");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)
@@ -119,7 +146,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = item.CollectionTime.ToString("o"),
+                captured_at = item.CollectionTime.ToString("o"),
+                age_seconds = LatestSnapshotStamp.AgeSeconds(item.CollectionTime, now),
                 schedulers = item.SchedulerCount,
                 runnable_tasks = item.TotalRunnableTasksCount,
                 avg_runnable_per_scheduler = item.AvgRunnableTasksCount,

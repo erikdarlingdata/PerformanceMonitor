@@ -22,8 +22,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// The latch / spinlock contention MCP tools — get_latch_stats, get_spinlock_stats — served over Darling's
 /// Postgres store. Each tool body mirrors the Dashboard's <c>McpLatchSpinlockTools</c> field-for-field (Lite
-/// exposes neither tool, so the Dashboard is the only reference; there is no divergent Lite shape to follow).
-/// Reads flow through <see cref="DarlingLatchSpinlockReader"/> — STORED reads (no live monitored-server hit),
+/// has since ported both names as LATEST-SNAPSHOT reads over its own store — <c>McpLatchSpinlockTools</c> in
+/// <c>Lite/Mcp</c> — so the two SKUs share the names but not the shape: Darling aggregates the window, Lite
+/// serves the newest snapshot in it). Reads flow through <see cref="DarlingLatchSpinlockReader"/> — STORED reads (no live monitored-server hit),
 /// windowed on <c>hours_back</c>.
 ///
 /// <para>
@@ -37,7 +38,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpLatchSpinlockTools
 {
-    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE indicates TempDB allocation contention.")]
+    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE indicates TempDB allocation contention. TWO CLOCKS PER ROW, NAMED: total_delta_* SUM every collection in the window; severity, waits_per_second and wait_ms_per_second are banded/derived from the LATEST interval only - the severity_banded_from block names that interval (its delta wait, the seconds it accrued over, and the collection it ended at, which is also latest_collection_time). A LOW severity beside a large window total is a class that was hot earlier in the window and is quiet now, not a contradiction.")]
     public static async Task<string> GetLatchStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -74,6 +75,15 @@ public sealed class DarlingMcpLatchSpinlockTools
                 waits_per_second = r.WaitsPerSecond is double waits ? Math.Round(waits, 2) : (double?)null,
                 wait_ms_per_second = r.WaitMsPerSecond is double waitMs ? Math.Round(waitMs, 2) : (double?)null,
                 severity = DarlingLatchSpinlockReader.LatchSeverity(r.LatestDeltaWaitTimeMs),
+                /* #3541 A10: the band above is a function of ONE interval's delta, published beside window
+                   totals it is not a function of. Naming the interval — its delta, its length, its end — is
+                   what lets a reader tell "LOW now, 40 s of waits over the day" from "LOW all day". */
+                severity_banded_from = new
+                {
+                    delta_wait_time_ms = r.LatestDeltaWaitTimeMs,
+                    interval_seconds = r.LatestIntervalSeconds is double seconds ? Math.Round(seconds, 0) : (double?)null,
+                    captured_at = r.LatestCollectionTime.ToString("o")
+                },
                 description = DarlingLatchSpinlockReader.LatchDescription(r.LatchClass),
                 recommendation = DarlingLatchSpinlockReader.LatchRecommendation(r.LatchClass),
                 latest_collection_time = r.LatestCollectionTime.ToString("o")

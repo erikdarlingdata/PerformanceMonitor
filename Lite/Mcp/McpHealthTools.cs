@@ -12,7 +12,17 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpHealthTools
 {
-    [McpServerTool(Name = "get_server_summary"), Description("Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas.")]
+    /// <summary>get_server_summary's description, VERBATIM Darling's (#3541 A10); the cross-SKU census pins them
+    /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
+    internal const string ServerSummaryDescription =
+        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
+
+    /// <summary>The span <c>GetServerSummaryAsync</c>'s blocking and deadlock counts cover (its two
+    /// <c>UtcNow.AddHours(-1)</c> bounds), published so "recent" has a number. Darling's twin is
+    /// <c>DarlingHealthReader.ServerSummaryCountsWindowHours</c>.</summary>
+    internal const int ServerSummaryCountsWindowHours = 1;
+
+    [McpServerTool(Name = "get_server_summary"), Description(ServerSummaryDescription)]
     public static async Task<string> GetServerSummary(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -35,9 +45,15 @@ public sealed class McpHealthTools
             {
                 server = resolved.ServerName,
                 cpu_percent = summary.CpuPercent,
+                /* #3541 A10: each latest figure carries ITS OWN clock. last_collection below is the newest
+                   collection of ANY collector — a live collection log beside a dead CPU collector made a
+                   day-old cpu_percent read as current, because the only stamp on the payload was fresh. */
+                cpu_captured_at = summary.CpuCollectionTime?.ToString("o"),
                 memory_mb = summary.MemoryMb,
+                memory_captured_at = summary.MemoryCollectionTime?.ToString("o"),
                 blocking_count = summary.BlockingCount,
                 deadlock_count = summary.DeadlockCount,
+                counts_window_hours = ServerSummaryCountsWindowHours,
                 last_collection = summary.LastCollectionTime?.ToString("o")
             }, McpHelpers.JsonOptions);
         }

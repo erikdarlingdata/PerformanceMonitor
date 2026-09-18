@@ -43,10 +43,13 @@ internal static class DarlingLatchSpinlockReader
     /* ─────────────────────────── result rows ─────────────────────────── */
 
     /// <summary>One latch class aggregated over the window: the summed deltas plus the latest interval's
-    /// per-second rate and last delta wait (the severity input).</summary>
+    /// per-second rate and last delta wait (the severity input). <see cref="LatestIntervalSeconds"/> is the
+    /// span that last delta accrued over (#3541 A10 — the interval the severity band was computed from, published
+    /// beside the window totals so the two are distinguishable); null when the interval was unknowable.</summary>
     public sealed record LatchStatRow(
         string LatchClass, long TotalDeltaWaitTimeMs, long TotalDeltaWaitingRequests,
-        double? WaitsPerSecond, double? WaitMsPerSecond, long LatestDeltaWaitTimeMs, DateTime LatestCollectionTime);
+        double? WaitsPerSecond, double? WaitMsPerSecond, long LatestDeltaWaitTimeMs, DateTime LatestCollectionTime,
+        double? LatestIntervalSeconds);
 
     /// <summary>One spinlock aggregated over the window: the summed deltas plus the latest interval's
     /// per-second collision/spin rates.</summary>
@@ -101,7 +104,10 @@ internal static class DarlingLatchSpinlockReader
                 latch_class,
                 delta_wait_time_ms AS latest_delta_wait_time_ms,
                 CASE WHEN interval_seconds > 0 THEN CAST(delta_waiting_requests_count AS double precision) / interval_seconds END AS waits_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_ms_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_ms_per_second,
+                /* #3541 A10: the span the severity-banded delta accrued over, so the tool can publish the
+                   interval the band came from beside the window totals it does NOT come from. */
+                CASE WHEN interval_seconds > 0 THEN CAST(interval_seconds AS double precision) END AS latest_interval_seconds
             FROM windowed
             ORDER BY latch_class, collection_time DESC
         )
@@ -112,7 +118,8 @@ internal static class DarlingLatchSpinlockReader
             l.waits_per_second,
             l.wait_ms_per_second,
             l.latest_delta_wait_time_ms,
-            a.latest_collection_time
+            a.latest_collection_time,
+            l.latest_interval_seconds
         FROM agg AS a
         JOIN latest AS l ON l.latch_class = a.latch_class
         ORDER BY a.total_delta_wait_time_ms DESC
@@ -137,7 +144,8 @@ internal static class DarlingLatchSpinlockReader
                 reader.IsDBNull(3) ? null : reader.GetDouble(3),
                 reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.GetDateTime(6)));
+                reader.GetDateTime(6),
+                reader.IsDBNull(7) ? null : reader.GetDouble(7)));
         }
 
         return rows;

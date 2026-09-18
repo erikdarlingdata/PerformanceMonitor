@@ -73,12 +73,16 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.All(p, x => Assert.True(x.Optional));
     }
 
+    /// <summary>#3541 A10: the same (server_name, hours_back, as_of) surface Lite's twin has always had. The
+    /// tool took server_name alone here — two parameter surfaces under one tool name, on the one tool whose
+    /// answer is a CRITICAL/HIGH/MEDIUM/NORMAL verdict. <c>McpLatestSnapshotStampTests</c> pins the two SKUs'
+    /// descriptions equal; this pins the shape.</summary>
     [Fact]
-    public void ParamContract_CpuSchedulerPressure_ServerNameOnly()
+    public void ParamContract_CpuSchedulerPressure_ServerHoursAsOf_MatchesLite()
     {
         var p = McpParams("get_cpu_scheduler_pressure");
-        Assert.Equal(new[] { "server_name" }, p.Select(x => x.Name).ToArray());
-        Assert.True(p.Single().Optional);
+        Assert.Equal(new[] { "server_name", "hours_back", "as_of" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional));
     }
 
     [Fact]
@@ -103,6 +107,9 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("worker_thread_exhaustion_warning", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #3541 A10: the newest row IN THE WINDOW, as Lite reads it — not the newest row the store ever held. */
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
     [Theory]

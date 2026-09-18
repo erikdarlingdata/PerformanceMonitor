@@ -187,7 +187,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings.")]
+    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
     public static async Task<string> GetDatabaseScopedConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -198,14 +198,14 @@ public sealed class DarlingMcpConfigHistoryTools
 
         try
         {
-            var rows = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_scoped_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
 
-            IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = rows;
+            IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
@@ -225,6 +225,8 @@ public sealed class DarlingMcpConfigHistoryTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: the connect-time capture these settings are as of. */
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = grouped.Count,
                 databases = grouped
             }, McpHelpers.JsonOptions);
@@ -235,7 +237,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off).")]
+    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static async Task<string> GetQueryStoreHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -246,14 +248,14 @@ public sealed class DarlingMcpConfigHistoryTools
 
         try
         {
-            var rows = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_health")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
-            IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = rows;
+            IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
@@ -278,6 +280,7 @@ public sealed class DarlingMcpConfigHistoryTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);

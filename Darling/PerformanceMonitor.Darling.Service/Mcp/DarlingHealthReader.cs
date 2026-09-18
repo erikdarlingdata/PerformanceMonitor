@@ -43,6 +43,16 @@ internal static class DarlingHealthReader
     public sealed record ServerSummaryReadResult(
         double? CpuPercent, double? MemoryMb, int BlockingCount, int DeadlockCount, DateTime? LastCollectionTime)
     {
+        /// <summary>The <c>collection_time</c> of the CPU snapshot <see cref="CpuPercent"/> came from (#3541 A10)
+        /// — its own clock, distinct from <see cref="LastCollectionTime"/>, which is the newest collection of
+        /// ANY collector for the server. <c>init</c> rather than positional so the positional shape existing
+        /// callers construct is unchanged. Null when there is no CPU row.</summary>
+        public DateTime? CpuCapturedAt { get; init; }
+
+        /// <summary>The <c>collection_time</c> of the memory snapshot <see cref="MemoryMb"/> came from (#3541
+        /// A10). Null when there is no memory row.</summary>
+        public DateTime? MemoryCapturedAt { get; init; }
+
         /// <summary>True when the server has no collected data at all (no CPU/memory snapshot and no collection
         /// log) — the tool surfaces the #1224 "unavailable" miss instead of an all-zero card.</summary>
         public bool HasNoData =>
@@ -55,15 +65,16 @@ internal static class DarlingHealthReader
     /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
     /// the monitored server's local wall clock.</summary>
     public const string ServerSummaryCpuSql = @"
-SELECT sqlserver_cpu_utilization
+SELECT sqlserver_cpu_utilization, collection_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
-    /// <summary>Latest total server memory (MB) for one server. $1 server_id.</summary>
+    /// <summary>Latest total server memory (MB) for one server, with the snapshot's own <c>collection_time</c>
+    /// (#3541 A10). $1 server_id.</summary>
     public const string ServerSummaryMemorySql = @"
-SELECT CAST(total_server_memory_mb AS double precision)
+SELECT CAST(total_server_memory_mb AS double precision), collection_time
 FROM v_memory_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -84,18 +95,27 @@ SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2";
     public const string ServerSummaryLastCollectionSql = @"
 SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
+    /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
+    /// Published by the tool so "recent" has a number.</summary>
+    public const int ServerSummaryCountsWindowHours = 1;
+
     /// <summary>
     /// One server's one-shot health summary — the viewer's <c>GetServerSummaryAsync</c> reduced to the subset
     /// the same-named Lite tool serves. Blocking / deadlock counts use a one-hour window (Lite's window); CPU
-    /// and memory take the newest snapshot.
+    /// and memory take the newest snapshot, each carrying its own <c>collection_time</c> (#3541 A10) — the
+    /// payload used to publish ONE clock (<c>last_collection</c>, the newest collection of ANY collector) beside
+    /// two figures it did not stamp, so a CPU row from a collector that died yesterday read as current
+    /// because the collection log was fresh from the collectors still running.
     /// </summary>
     public static async Task<ServerSummaryReadResult> GetServerSummaryAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
-        var windowStart = DateTime.UtcNow.AddHours(-1);
+        var windowStart = DateTime.UtcNow.AddHours(-ServerSummaryCountsWindowHours);
 
         double? cpuPercent = null;
+        DateTime? cpuCapturedAt = null;
         double? memoryMb = null;
+        DateTime? memoryCapturedAt = null;
         var blockingCount = 0;
         var deadlockCount = 0;
         DateTime? lastCollection = null;
@@ -108,6 +128,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 cpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
+                cpuCapturedAt = reader.GetDateTime(1);
             }
         }
 
@@ -119,6 +140,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 memoryMb = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
+                memoryCapturedAt = reader.GetDateTime(1);
             }
         }
 
@@ -160,7 +182,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             }
         }
 
-        return new ServerSummaryReadResult(cpuPercent, memoryMb, blockingCount, deadlockCount, lastCollection);
+        return new ServerSummaryReadResult(cpuPercent, memoryMb, blockingCount, deadlockCount, lastCollection)
+        {
+            CpuCapturedAt = cpuCapturedAt,
+            MemoryCapturedAt = memoryCapturedAt,
+        };
     }
 
     /* ═══════════════════════════ daily summary ═══════════════════════════ */

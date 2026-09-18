@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpIoTools
 {
-    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0.")]
+    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
     public static async Task<string> GetFileIoStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -52,6 +52,8 @@ public sealed class McpIoTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: every file row shares this stamp (the read is every file at MAX(collection_time)). */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 files = result
             }, McpHelpers.JsonOptions);
         }

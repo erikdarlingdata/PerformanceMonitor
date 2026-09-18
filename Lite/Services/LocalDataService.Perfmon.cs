@@ -27,7 +27,8 @@ SELECT
     counter_name,
     instance_name,
     cntr_value,
-    delta_cntr_value
+    delta_cntr_value,
+    collection_time
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -44,7 +45,8 @@ ORDER BY counter_name";
                 CounterName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 InstanceName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3)
+                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                CollectionTime = reader.GetDateTime(4)
             });
         }
 
@@ -189,6 +191,8 @@ ORDER BY counter_name, collection_time";
 
 public class PerfmonRow
 {
+    /// <summary>The snapshot this counter row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CollectionTime { get; set; }
     public string CounterName { get; set; } = "";
     public string InstanceName { get; set; } = "";
     public long Value { get; set; }

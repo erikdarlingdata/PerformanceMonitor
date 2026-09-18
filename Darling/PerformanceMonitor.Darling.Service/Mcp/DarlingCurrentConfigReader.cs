@@ -37,20 +37,23 @@ internal static class DarlingCurrentConfigReader
         public bool ValuesMatch => ValueConfigured == ValueInUse;
     }
 
-    /// <summary>Latest sys.configurations snapshot for one server — the viewer's <c>ServerConfigSql</c>.
+    /// <summary>Latest sys.configurations snapshot for one server — the viewer's <c>ServerConfigSql</c> plus
+    /// the trailing <c>capture_time</c> (#3541 A10): config is captured ON CONNECT, so the "current" value this
+    /// read serves can be as old as the last successful connect, and the tool must be able to say so.
     /// $1 server_id.</summary>
     public const string ServerConfigSql = """
-        SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
+        SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced, capture_time
         FROM v_server_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
         ORDER BY configuration_name
         """;
 
-    public static async Task<List<ServerConfigReadRow>> GetLatestServerConfigAsync(
+    public static async Task<LatestSnapshot<ServerConfigReadRow>> GetLatestServerConfigAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<ServerConfigReadRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(ServerConfigSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -63,9 +66,10 @@ internal static class DarlingCurrentConfigReader
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 !reader.IsDBNull(3) && reader.GetBoolean(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4)));
+            capturedAt ??= reader.GetDateTime(5);
         }
 
-        return rows;
+        return new LatestSnapshot<ServerConfigReadRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── database config (sys.databases) ─────────────────────────── */
@@ -80,7 +84,8 @@ internal static class DarlingCurrentConfigReader
         bool IsMemoryOptimizedEnabled, bool IsOptimizedLockingOn);
 
     /* 28 columns in the viewer's / Lite's exact SELECT order — the reader below maps them by incrementing
-       ordinal, so this list's order is load-bearing and must stay byte-identical. */
+       ordinal, so this list's order is load-bearing and must stay byte-identical. capture_time is APPENDED
+       as a 29th column (#3541 A10) and read by explicit ordinal 28, so the 28-column mapping is untouched. */
     public const string DatabaseConfigSql = """
         SELECT database_name, state_desc, compatibility_level, collation_name, recovery_model,
                is_read_only, is_auto_close_on, is_auto_shrink_on,
@@ -89,17 +94,23 @@ internal static class DarlingCurrentConfigReader
                is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
                is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on,
                log_reuse_wait_desc, page_verify_option, target_recovery_time_seconds, delayed_durability,
-               is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on
+               is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on,
+               capture_time
         FROM v_database_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
         ORDER BY database_name
         """;
 
-    public static async Task<List<DatabaseConfigReadRow>> GetLatestDatabaseConfigAsync(
+    /// <summary>The ordinal of the appended <c>capture_time</c> column in <see cref="DatabaseConfigSql"/> — one
+    /// past the 28-column block the incrementing mapping consumes.</summary>
+    private const int DatabaseConfigCaptureTimeOrdinal = 28;
+
+    public static async Task<LatestSnapshot<DatabaseConfigReadRow>> GetLatestDatabaseConfigAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseConfigReadRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(DatabaseConfigSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -138,29 +149,32 @@ internal static class DarlingCurrentConfigReader
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal)));
+            capturedAt ??= reader.GetDateTime(DatabaseConfigCaptureTimeOrdinal);
         }
 
-        return rows;
+        return new LatestSnapshot<DatabaseConfigReadRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── trace flags (DBCC TRACESTATUS) ─────────────────────────── */
 
     public sealed record TraceFlagReadRow(int TraceFlag, bool Status, bool IsGlobal, bool IsSession);
 
-    /// <summary>Latest trace-flags snapshot for one server — the viewer's <c>TraceFlagsSql</c>. $1 server_id.
-    /// A row exists only while a flag is enabled, so an empty result means no active flags at the last capture.</summary>
+    /// <summary>Latest trace-flags snapshot for one server — the viewer's <c>TraceFlagsSql</c> plus the trailing
+    /// <c>capture_time</c> (#3541 A10). $1 server_id. A row exists only while a flag is enabled, so an empty
+    /// result means no active flags at the last capture — and, having no row, no stamp either.</summary>
     public const string TraceFlagsSql = """
-        SELECT trace_flag, status, is_global, is_session
+        SELECT trace_flag, status, is_global, is_session, capture_time
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
         ORDER BY trace_flag
         """;
 
-    public static async Task<List<TraceFlagReadRow>> GetLatestTraceFlagsAsync(
+    public static async Task<LatestSnapshot<TraceFlagReadRow>> GetLatestTraceFlagsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<TraceFlagReadRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(TraceFlagsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -172,8 +186,9 @@ internal static class DarlingCurrentConfigReader
                 !reader.IsDBNull(1) && reader.GetBoolean(1),
                 !reader.IsDBNull(2) && reader.GetBoolean(2),
                 !reader.IsDBNull(3) && reader.GetBoolean(3)));
+            capturedAt ??= reader.GetDateTime(4);
         }
 
-        return rows;
+        return new LatestSnapshot<TraceFlagReadRow>(capturedAt, rows);
     }
 }

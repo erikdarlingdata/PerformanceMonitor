@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// / <c>get_cpu_scheduler_pressure</c> and the viewer's <c>ViewerDataService.PlanCache</c> /
 /// <c>ViewerDataService.CpuScheduler</c> read. Both are point-in-time snapshot collectors (one/many rows per
 /// collection, no deltas), so each read is the LATEST snapshot: plan-cache = every (cacheobjtype, objtype)
-/// group at the newest collection in the window; cpu-scheduler = the single newest row for the server. STORED
+/// group at the newest collection in the window; cpu-scheduler = the single newest row in the window. STORED
 /// reads, no live monitored-server hit, on the <c>v_plan_cache_stats</c> / <c>v_cpu_scheduler_stats</c> views.
 ///
 /// <para>
@@ -135,9 +135,14 @@ internal static class DarlingPlanCacheSchedulerReader
     /* ─────────────────────────── cpu scheduler (latest snapshot) ─────────────────────────── */
 
     /// <summary>
-    /// The single most recent CPU-scheduler snapshot for the server — the Dashboard's
-    /// <c>get_cpu_scheduler_pressure</c> point-in-time read (the Dashboard tool takes no window, reading
-    /// <c>report.cpu_scheduler_pressure</c>'s TOP 1). $1 server_id.
+    /// The single most recent CPU-scheduler snapshot for the server IN THE WINDOW — the Dashboard's
+    /// <c>get_cpu_scheduler_pressure</c> point-in-time read (<c>report.cpu_scheduler_pressure</c>'s TOP 1),
+    /// bounded the way Lite's <c>GetCpuSchedulerSnapshotAsync</c> bounds it (#3541 A10): the Dashboard tool took
+    /// no window and served the newest row a store ever held, so a server whose scheduler collector died a week
+    /// ago answered "NORMAL" with a week-old row and nothing in the payload to say so. The window is a SEARCH
+    /// bound for the newest snapshot, not an aggregate — the tool's <c>hours_back</c> description says exactly
+    /// that — and the anchor makes "what did the scheduler look like at 03:00 Tuesday" answerable.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string CpuSchedulerPressureSql = """
         SELECT
@@ -157,16 +162,18 @@ internal static class DarlingPlanCacheSchedulerReader
             physical_memory_pressure_warning
         FROM v_cpu_scheduler_stats
         WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY collection_time DESC
         LIMIT 1
         """;
 
     public static async Task<CpuSchedulerRow?> GetCpuSchedulerPressureAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(CpuSchedulerPressureSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {

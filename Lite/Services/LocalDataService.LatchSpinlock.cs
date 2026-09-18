@@ -124,7 +124,8 @@ SELECT
     wait_time_ms,
     max_wait_time_ms,
     delta_waiting_requests_count,
-    delta_wait_time_ms
+    delta_wait_time_ms,
+    collection_time
 FROM v_latch_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
@@ -146,7 +147,8 @@ LIMIT 20";
                 WaitTimeMs = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 MaxWaitTimeMs = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 DeltaWaitingRequestsCount = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                DeltaWaitTimeMs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
+                DeltaWaitTimeMs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                CollectionTime = reader.GetDateTime(6)
             });
         }
 
@@ -257,7 +259,8 @@ SELECT
     sleep_time,
     backoffs,
     delta_collisions,
-    delta_spins
+    delta_spins,
+    collection_time
 FROM v_spinlock_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
@@ -281,7 +284,8 @@ LIMIT 20";
                 SleepTime = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 Backoffs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 DeltaCollisions = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                DeltaSpins = reader.IsDBNull(7) ? 0 : reader.GetInt64(7)
+                DeltaSpins = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                CollectionTime = reader.GetDateTime(8)
             });
         }
 
@@ -302,6 +306,8 @@ public class LatchStatsTrendPoint
 /// deltas for one latch class at the most recent collection in the window.</summary>
 public class LatchStatsSnapshotRow
 {
+    /// <summary>The snapshot this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CollectionTime { get; set; }
     public string LatchClass { get; set; } = "";
     public long WaitingRequestsCount { get; set; }
     public long WaitTimeMs { get; set; }
@@ -323,6 +329,8 @@ public class SpinlockStatsTrendPoint
 /// interval's deltas for one spinlock at the most recent collection in the window.</summary>
 public class SpinlockStatsSnapshotRow
 {
+    /// <summary>The snapshot this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CollectionTime { get; set; }
     public string SpinlockName { get; set; } = "";
     public long Collisions { get; set; }
     public long Spins { get; set; }

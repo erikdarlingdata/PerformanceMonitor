@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpConfigTools
 {
-    [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings.")]
+    [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings right now (unlike get_server_config_changes, which shows only what changed between connect snapshots). LATEST IS A TIME: configuration is captured when the collector CONNECTS, not on a schedule, so 'current' here means 'as of the last capture' - captured_at is that instant, and a value can be days old on a server the monitor has stayed connected to.")]
     public static async Task<string> GetServerConfig(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -30,6 +30,8 @@ public sealed class McpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: the connect-time capture this "current" configuration is as of. */
+                captured_at = rows[0].CaptureTime.ToString("o"),
                 setting_count = rows.Count,
                 settings = rows.Select(r => new
                 {
@@ -48,7 +50,7 @@ public sealed class McpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases.")]
+    [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of, and a database created or altered since is not reflected until the next connect.")]
     public static async Task<string> GetDatabaseConfig(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -70,6 +72,9 @@ public sealed class McpConfigTools
             IEnumerable<DatabaseConfigRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+
+            /* Taken from the unfiltered snapshot, so a database_name that matches nothing still says when. */
+            var capturedAt = rows[0].CaptureTime;
 
             var result = filtered.Select(r => new
             {
@@ -98,6 +103,7 @@ public sealed class McpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = capturedAt.ToString("o"),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
@@ -108,7 +114,7 @@ public sealed class McpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings.")]
+    [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
     public static async Task<string> GetDatabaseScopedConfig(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -131,6 +137,8 @@ public sealed class McpConfigTools
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
+            var capturedAt = rows[0].CaptureTime;
+
             var grouped = filtered
                 .GroupBy(r => r.DatabaseName)
                 .Select(g => new
@@ -147,6 +155,7 @@ public sealed class McpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = capturedAt.ToString("o"),
                 database_count = grouped.Count,
                 databases = grouped
             }, McpHelpers.JsonOptions);
@@ -157,7 +166,7 @@ public sealed class McpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off).")]
+    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static async Task<string> GetQueryStoreHealth(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -180,6 +189,8 @@ public sealed class McpConfigTools
             if (!string.IsNullOrEmpty(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
+            var capturedAt = rows[0].CaptureTime;
+
             var result = filtered.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -201,6 +212,7 @@ public sealed class McpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = capturedAt.ToString("o"),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);
@@ -211,7 +223,7 @@ public sealed class McpConfigTools
         }
     }
 
-    [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped.")]
+    [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]
     public static async Task<string> GetTraceFlags(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -230,6 +242,7 @@ public sealed class McpConfigTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = rows[0].CaptureTime.ToString("o"),
                 trace_flag_count = rows.Count,
                 trace_flags = rows.Select(r => new
                 {

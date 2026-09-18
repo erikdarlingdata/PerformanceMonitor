@@ -15,6 +15,11 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /* #3541 A10: every latest-snapshot read here carries capture_time on the row (the SAME statement as the
+       values, never a second MAX() read that could stamp the next capture), so the MCP tools can publish
+       captured_at. Config is captured ON CONNECT, not on a schedule — the "current" value this family
+       serves is as old as the last successful connect, and the stamp is what says so. */
+
     /// <summary>
     /// Gets the latest server configuration snapshot (sys.configurations).
     /// </summary>
@@ -23,7 +28,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
+SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced, capture_time
 FROM v_server_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
@@ -41,7 +46,8 @@ ORDER BY configuration_name";
                 ValueConfigured = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
                 ValueInUse = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
                 IsDynamic = !reader.IsDBNull(3) && reader.GetBoolean(3),
-                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4)
+                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4),
+                CaptureTime = reader.GetDateTime(5)
             });
         }
 
@@ -64,7 +70,8 @@ SELECT database_name, state_desc, compatibility_level, collation_name, recovery_
        is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
        is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on,
        log_reuse_wait_desc, page_verify_option, target_recovery_time_seconds, delayed_durability,
-       is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on
+       is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on,
+       capture_time
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)" + dbClause + @"
@@ -109,6 +116,10 @@ ORDER BY database_name";
                 IsAcceleratedDatabaseRecoveryOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsMemoryOptimizedEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsOptimizedLockingOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                /* Appended as the 29th column and read one past the 28-column block the incrementing
+                   mapping above consumes, so that mapping — shared byte-for-byte with the Darling
+                   viewer and reader — is untouched. */
+                CaptureTime = reader.GetDateTime(++ordinal),
             });
         }
 
@@ -125,7 +136,7 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = @"
-SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, capture_time
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
@@ -151,6 +162,7 @@ ORDER BY database_name";
                 StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
                 MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+                CaptureTime = reader.GetDateTime(10),
             });
         }
 
@@ -166,7 +178,7 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = @"
-SELECT database_name, configuration_name, value, value_for_secondary
+SELECT database_name, configuration_name, value, value_for_secondary, capture_time
 FROM v_database_scoped_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)" + dbClause + @"
@@ -185,7 +197,8 @@ ORDER BY database_name, configuration_name";
                 DatabaseName = reader.GetString(0),
                 ConfigurationName = reader.GetString(1),
                 Value = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -200,7 +213,7 @@ ORDER BY database_name, configuration_name";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT trace_flag, status, is_global, is_session
+SELECT trace_flag, status, is_global, is_session, capture_time
 FROM v_trace_flags
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
@@ -217,7 +230,8 @@ ORDER BY trace_flag";
                 TraceFlag = reader.GetInt32(0),
                 Status = !reader.IsDBNull(1) && reader.GetBoolean(1),
                 IsGlobal = !reader.IsDBNull(2) && reader.GetBoolean(2),
-                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3)
+                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -227,6 +241,8 @@ ORDER BY trace_flag";
 
 public class ServerConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CaptureTime { get; set; }
     public string ConfigurationName { get; set; } = "";
     public long ValueConfigured { get; set; }
     public long ValueInUse { get; set; }
@@ -239,6 +255,8 @@ public class ServerConfigRow
 
 public class DatabaseConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string StateDesc { get; set; } = "";
     public int CompatibilityLevel { get; set; }
@@ -300,6 +318,8 @@ public class DatabaseConfigRow
 /// </summary>
 public class QueryStoreHealthRow
 {
+    /// <summary>The hourly capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";
@@ -326,6 +346,8 @@ public class QueryStoreHealthRow
 
 public class DatabaseScopedConfigRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string ConfigurationName { get; set; } = "";
     public string Value { get; set; } = "";
@@ -334,6 +356,8 @@ public class DatabaseScopedConfigRow
 
 public class TraceFlagRow
 {
+    /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
+    public DateTime CaptureTime { get; set; }
     public int TraceFlag { get; set; }
     public bool Status { get; set; }
     public bool IsGlobal { get; set; }

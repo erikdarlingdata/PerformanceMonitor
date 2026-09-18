@@ -1990,7 +1990,7 @@ public static class DarlingWebEndpoints
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
-            ["get_cpu_scheduler_pressure"] = R(CatPlanCache, "CPU scheduler pressure indicators.", PServer()),
+            ["get_cpu_scheduler_pressure"] = R(CatPlanCache, "CPU scheduler pressure indicators from the newest snapshot within the window.", PServer(), PHours(24), PAsOf()),
             ["get_plan_cache_bloat"] = R(CatPlanCache, "Plan-cache bloat / single-use plan indicators.", PServer(), PHours(24), PAsOf()),
 
             /* ── jobs (DarlingMcpJobTools) ── */
@@ -2696,7 +2696,7 @@ public static class DarlingWebEndpoints
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c)),
 
             /* ── plan cache / scheduler ── */
-            ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c)),
+            ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_plan_cache_bloat"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetPlanCacheBloat(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
 
             /* ── jobs ── */

@@ -116,6 +116,10 @@ public sealed class RepoFileAdoptionTests
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
+        /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
+           collection_time inside a Select is indented deeper and must not match), and its tool-body slicing
+           keys on attribute text either side of one. */
+        "McpLatestSnapshotStampTests.cs",
         /* #3541 A3: its Lite-description anchor spans the line break between `Description(` and the
            string on get_plan_corrections, and its tool-body slicing keys on attribute text either side of
            one. */
