@@ -1627,6 +1627,20 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(0.0, BaseOf(WaitFact("PAGELATCH_UP", 0.01, new() { ["wait_time_ms"] = 10_000 })), precision: 4);
     }
 
+    // A coverage_fraction of exactly 0 (WindowCoverage.Unobserved's stamp) reads as the NOMINAL window, not
+    // as a near-zero divisor: no shipped collector emits a wait fact for an unobserved window, so the branch
+    // only defends 0/0 — and if a fact like that ever arrived, dividing by ~0 would fire on the artifact.
+    // 12,000 ms over a nominal 4 h is 3 s/hr → 0, the pre-#3538 reading; pinned so the choice cannot flip.
+    [Fact]
+    public void Score_PerHourGates_ReadZeroCoverageAsTheNominalWindow_NotAsNearZero()
+    {
+        var fact = WaitFact("PAGELATCH_UP", 0.01, new()
+        {
+            ["wait_time_ms"] = 12_000, ["period_duration_ms"] = FourHoursMs, ["coverage_fraction"] = 0.0
+        });
+        Assert.Equal(0.0, BaseOf(fact), precision: 6);
+    }
+
     // Lineage census (source-text pin): every entry in GetWaitThresholds is preceded by a comment that
     // names either a measured figure (a percentile, a max, "measured") or says "unmeasured". A new entry
     // added without its lineage — the pre-#3538 shape of the whole table — fails here. Entries that share

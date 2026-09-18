@@ -193,6 +193,14 @@ public class FactScorer
     /// stamps the period, so only a hand-built fact lacks it; reading it as one hour makes the per-hour
     /// bars read as plain totals (10 s of PAGELATCH_UP, 15 min of THREADPOOL), which is the one reading a
     /// fact with no window can honestly have.</para>
+    ///
+    /// <para>A <c>coverage_fraction</c> of exactly 0 (what <c>WindowCoverage.Unobserved</c> stamps) falls back
+    /// to the NOMINAL window rather than to a near-zero divisor. That branch defends the arithmetic against
+    /// 0/0 and should be moot: both collectors emit no wait fact at all when <c>ObservedDurationMs &lt;= 0</c>,
+    /// so a fact carrying zero coverage and a non-zero wait total is a fact no shipped collector produces. If
+    /// one ever did, dividing by ~0 would turn any trace into an enormous hourly rate and fire on the
+    /// artifact; the nominal reading is the pre-#3538 form — the least-sensitive honest one — and is pinned
+    /// so the choice cannot silently flip.</para>
     /// </summary>
     private static double ObservedHours(Fact fact)
     {
