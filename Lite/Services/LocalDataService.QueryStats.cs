@@ -1128,7 +1128,20 @@ LEFT JOIN LATERAL (
     }
 
     /// <summary>
-    /// Gets query duration trend — total elapsed time per collection snapshot.
+    /// Gets query duration trend — elapsed ms per second per collection snapshot, the summed
+    /// <c>delta_elapsed_time</c> divided by the seconds since the PREVIOUS collection (the LAG epoch idiom).
+    /// <para><b>The first collection in the window has no rate (#3541 A12, #3540 A8).</b> Its LAG is NULL —
+    /// no previous collection inside the window to difference against — so its rate is unknowable, and the
+    /// <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0: every trend chart
+    /// and every MCP duration series began with a fabricated quiet instant. Contract rule 5 — zero is a
+    /// measurement — so the CASE has no ELSE and the rate columns are NULL for that row (and for the
+    /// two-collections-in-one-second case, whose denominator is 0 and whose rate is equally undefined). The
+    /// row is KEPT rather than filtered: the collection happened, the MCP payload's <c>effective_start</c> is
+    /// truthfully its instant, and a window holding exactly one collection is "one collection, no rate yet"
+    /// rather than an empty series. <see cref="QueryTrendPoint"/> carries the nulls; the MCP tool publishes
+    /// them with the reason and the charts skip them (a chart has nowhere to draw "unknown"). The three
+    /// sibling trends in this file and <c>GetQueryStoreDurationTrendAsync</c> apply the same rule; Darling's
+    /// <c>DarlingTrendReader</c> raw reads and its Query Store rollup builder are the twins.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -1154,8 +1167,10 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    /* No ELSE: the first collection's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+       fabricated 0 (#3541 A12). */
+    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
 ORDER BY collection_time";
 
@@ -1169,12 +1184,14 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* NULL stays NULL (#3541 A12): no rate for the window's first collection, and coercing that to 0
+               here would be the fabricated quiet the SQL stopped producing. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
             });
         }
         return items;
@@ -1211,10 +1228,11 @@ LIMIT 1";
     /// over the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150)
     /// readmission) carries 0 beside its siblings' real interval and contributes 0 to the sums; MAX is 0
     /// only when EVERY row was unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the
-    /// rates are NULL and the point is dropped rather than rendered as 0.00 ms/sec. NULL (a pre-v61
-    /// collection that never recorded one) falls back to the LAG over collection_time this read always
-    /// used, so history renders exactly as it did. No <c>ELSE 0</c>: the first row of a pre-v61 series is
-    /// absent rather than a fabricated 0.0, the same correction v60 made for the wait trends.</para>
+    /// rates are NULL — an UNRATED point, kept rather than rendered as 0.00 ms/sec (#3541 A12: see
+    /// <see cref="GetQueryDurationTrendAsync"/> for why the row stays). NULL (a pre-v61 collection that never
+    /// recorded one) falls back to the LAG over collection_time this read always used, so history renders
+    /// exactly as it did. No <c>ELSE 0</c>: the first row of a pre-v61 series carries NULL rates rather than a
+    /// fabricated 0.0.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -1243,6 +1261,8 @@ WITH raw AS
 )
 SELECT
     collection_time,
+    /* No ELSE: the first collection's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+       fabricated 0 (#3541 A12). */
     CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
@@ -1258,25 +1278,23 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* A NULL rate is an unknowable interval (#3540, v61): the point is dropped, not read as 0. */
-            if (reader.IsDBNull(1))
-            {
-                continue;
-            }
-
+            /* NULL stays NULL (#3541 A12): no rate for the window's first collection, or for a collection whose
+               stored interval was unknowable (a restart pass, #3540 v61) — either way the point is kept as
+               UNRATED rather than coerced to the fabricated quiet the SQL stopped producing. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
             });
         }
         return items;
     }
 
     /// <summary>
-    /// Gets execution count trend — executions per second per collection snapshot from query_stats.
+    /// Gets execution count trend — executions per second per collection snapshot from query_stats. The first
+    /// collection in the window carries a NULL rate, not 0 — see <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetExecutionCountTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
@@ -1301,7 +1319,9 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    /* No ELSE: the first collection's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+       fabricated 0 (#3541 A12). */
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
 ORDER BY collection_time";
 
@@ -1315,10 +1335,11 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1))
+                Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1))
             });
         }
         return items;
@@ -1491,11 +1512,17 @@ public class HeatmapResult
     public HeatmapCell[,] CellDetails { get; set; } = new HeatmapCell[0, 0];
 }
 
+/// <summary>
+/// One point of a per-collection rate series. The rates are NULLABLE (#3541 A12): the window's first
+/// collection has no previous one to difference against, so it has no rate — <see cref="HasRate"/> is false
+/// and the three rate members are null, never 0. The MCP tool publishes such a point with the reason; the
+/// charts skip it. Darling's twin is <c>DarlingTrendReader.QueryDurationTrendPoint</c>.
+/// </summary>
 public class QueryTrendPoint
 {
     public DateTime CollectionTime { get; set; }
-    public double Value { get; set; }
-    public long ExecutionCount { get; set; }
+    public double? Value { get; set; }
+    public long? ExecutionCount { get; set; }
 
     /// <summary>
     /// The SAME quantity as <see cref="ExecutionCount"/> - executions per second - without the truncation.
@@ -1504,7 +1531,11 @@ public class QueryTrendPoint
     /// as an idle server rather than a slow one. Kept alongside rather than replacing it so nothing reading
     /// the long breaks. Darling's twin is <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.</para>
     /// </summary>
-    public double ExecutionsPerSecond { get; set; }
+    public double? ExecutionsPerSecond { get; set; }
+
+    /// <summary>Whether this point carries a rate at all — false for the window's first differenced
+    /// collection and for one landing in the same second as its predecessor (no denominator).</summary>
+    public bool HasRate => Value.HasValue;
 }
 
 public class QueryStatsRow

@@ -897,6 +897,8 @@ OPTION(RECOMPILE);',
     /// no row is counted twice and none is dropped. A window spanning the upgrade therefore renders a
     /// corrected recent section and an un-corrected older one, each behaving as its own generation
     /// always did, and the mixture resolves itself as the pre-upgrade rows age out of retention.</para>
+    /// <para>The first placed interval in the window carries NULL rates, not 0 — see
+    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -972,8 +974,10 @@ raw AS
 )
 SELECT
     point_time AS collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    /* No ELSE: the first placed interval's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+       fabricated 0 (#3541 A12). */
+    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
 ORDER BY point_time";
 
@@ -987,12 +991,13 @@ ORDER BY point_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
             });
         }
         return items;

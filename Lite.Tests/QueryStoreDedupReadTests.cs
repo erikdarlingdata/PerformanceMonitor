@@ -320,14 +320,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(h0, points[0].CollectionTime);
         Assert.Equal(h1, points[1].CollectionTime);
 
-        /* The first point has no predecessor, so its rate is 0 — the same convention the query_stats and
-           procedure_stats trends have always used, not a Query Store quirk. */
-        Assert.Equal(0d, points[0].Value);
+        /* The first point has no predecessor, so its rate is UNKNOWABLE — null, not the 0 the query_stats and
+           procedure_stats trends (and this one) used to fabricate (#3541 A12). The point itself is kept:
+           the interval ran, only its rate is undefined. */
+        Assert.False(points[0].HasRate);
+        Assert.Null(points[0].Value);
+        Assert.Null(points[0].ExecutionsPerSecond);
 
         /* Interval 2's FINAL snapshot only: 9 executions x 2,000us = 18 ms of work, over the 3,600s
            between interval starts. Un-deduped this point would also carry interval 2's earlier 3x1,000us
            restatement AND interval 1's rows that were collected in this hour. */
-        Assert.Equal(18.0 / 3600.0, points[1].Value, precision: 9);
+        Assert.Equal(18.0 / 3600.0, points[1].Value!.Value, precision: 9);
     }
 
     [Fact]

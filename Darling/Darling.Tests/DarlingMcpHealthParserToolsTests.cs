@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -113,27 +114,44 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// #2484: the probe that lets an empty parse-on-read answer say WHICH nothing it found must read the
-    /// SAME source the read itself reads. A probe on the base table would report a server as captured for
-    /// rows the view-backed read can never return -- picking the wrong branch in precisely the case the
-    /// probe exists to get right. It is also scoped to the event_type, and windowless by design.
+    /// #2484 → #3541 A12: the probes that let an empty parse-on-read answer say WHICH nothing it found must
+    /// read the SAME source the read itself reads. A probe on the base table would report a server as
+    /// captured for rows the view-backed read can never return -- picking the wrong branch in precisely the
+    /// case the probe exists to get right. Both are windowless by design (a time bound would make them
+    /// answer the same question the read just did) and both are a MAX over <c>collection_time</c>, so they
+    /// say WHEN as well as whether — the message needs the when. The type-scoped one is scoped to
+    /// event_type; the source witness deliberately is not, because it answers "has this server's ring
+    /// buffer ever been read into the store", which is about the session, not the category. Neither is
+    /// <c>collection_log</c>: the log records a SUCCESS for a run that read a dead session and stored
+    /// nothing, which is exactly the shape being mis-reported.
     /// </summary>
     [Fact]
-    public void HasAnyEventOfTypeSql_ProbesTheSameView_ScopedToType_AndIgnoresTheWindow()
+    public void TheWitnessProbes_ReadTheSameView_AreWindowless_AndSayWhen()
     {
-        var sql = DarlingSystemHealthReader.HasAnyEventOfTypeSql;
-        Assert.Contains("FROM v_system_health_events", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("event_type = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        /* Windowless: a time bound here would make the probe answer the same question the read just did. */
-        Assert.DoesNotContain("event_time", sql, StringComparison.Ordinal);
+        var source = DarlingSystemHealthReader.LastCaptureSql;
+        Assert.Contains("SELECT MAX(collection_time)", source, StringComparison.Ordinal);
+        Assert.Contains("FROM v_system_health_events", source, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", source, StringComparison.Ordinal);
+        Assert.Contains("event_xml IS NOT NULL", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_type", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_time", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", source, StringComparison.Ordinal);
+
+        var ofType = DarlingSystemHealthReader.LastCaptureOfTypeSql;
+        Assert.Contains("SELECT MAX(collection_time)", ofType, StringComparison.Ordinal);
+        Assert.Contains("FROM v_system_health_events", ofType, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", ofType, StringComparison.Ordinal);
+        Assert.Contains("event_type = $2", ofType, StringComparison.Ordinal);
+        Assert.Contains("event_xml IS NOT NULL", ofType, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_time", ofType, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", ofType, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(nameof(DarlingSystemHealthReader.SystemHealthEventsByTypeSql))]
     [InlineData(nameof(DarlingSystemHealthReader.DatabaseNameMapSql))]
-    [InlineData(nameof(DarlingSystemHealthReader.HasAnyEventOfTypeSql))]
+    [InlineData(nameof(DarlingSystemHealthReader.LastCaptureSql))]
+    [InlineData(nameof(DarlingSystemHealthReader.LastCaptureOfTypeSql))]
     public void Reads_ArePostgresDialect_PositionalParams(string sqlName)
     {
         var sql = (string)typeof(DarlingSystemHealthReader).GetField(sqlName)!.GetValue(null)!;
@@ -342,8 +360,8 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 /// <summary>
 /// Gated (DARLING_TEST_PG) live round-trip for the health-parser tools. Plants raw system_health_events rows
 /// (real captured-event fixtures) across the categories + a database_size_stats mapping row, then asserts each
-/// tool shreds + gates + resolves and returns its data-bearing envelope; an empty store returns the "empty"
-/// miss.
+/// tool shreds + gates + resolves and returns its data-bearing envelope with the source witness; a category
+/// never captured on a live session is the healthy "empty"; an empty store is "unavailable" (#3541 A12).
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingMcpHealthParserToolsLivePostgresTests
@@ -403,16 +421,42 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetIOIssues(postgres, ServerName), ServerName, "issues");
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetMemoryNodeOOM(postgres, ServerName), ServerName, "events");
 
-            /* memory_conditions / memory_broker have no planted LOW rows → the "empty" miss (not a throw). */
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetMemoryConditions(postgres, ServerName)));
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)));
+            /* memory_conditions has planted sp_server_diagnostics rows and none is LOW → rung 1 of the
+               #3541 A12 ladder: "empty", captured and gated out, with the witness saying the source was
+               observed. memory_broker's event type was never planted while OTHER types were → rung 3:
+               still "empty" (the session IS being read; the engine recorded no broker event), never
+               "unavailable". Both are the healthy answer and both must say so with the witness attached. */
+            var conditions = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryConditions(postgres, ServerName)).RootElement;
+            Assert.Equal("empty", conditions.GetProperty("status").GetString());
+            Assert.True(conditions.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(t.ToString("o"), conditions.GetProperty("last_captured_at").GetString());
+            Assert.True(conditions.GetProperty("events_in_window").GetInt32() > 0);
+            Assert.Contains("Events ARE being captured", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            var broker = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)).RootElement;
+            Assert.Equal("empty", broker.GetProperty("status").GetString());
+            Assert.True(broker.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(0, broker.GetProperty("events_in_window").GetInt32());
+            Assert.Equal(JsonValueKind.Null, broker.GetProperty("last_captured_of_type_at").ValueKind);
+            Assert.Contains("the absence is a measurement", broker.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /* The data envelope carries the same witness pair. */
+            var scheduler = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)).RootElement;
+            Assert.True(scheduler.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(t.ToString("o"), scheduler.GetProperty("last_captured_at").GetString());
 
             /* an unknown server resolves to the listing error. */
             Assert.StartsWith("Could not resolve server.", await DarlingMcpHealthParserTools.GetSystemHealth(postgres, "darling-no-such-server"), StringComparison.Ordinal);
 
-            /* an empty store returns the miss. */
+            /* An empty store is rung 4: nothing of any type was ever captured, so this is NOT a clean bill —
+               "unavailable" with source_observed false (#3541 A12). It used to answer "empty", the same word
+               the healthy branches above earn, which is the defect. */
             await DeleteRowsAsync(connection, ct, keepServer: true);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)));
+            var dead = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName)).RootElement;
+            Assert.Equal("unavailable", dead.GetProperty("status").GetString());
+            Assert.False(dead.GetProperty("source_observed").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, dead.GetProperty("last_captured_at").ValueKind);
+            Assert.Contains("NOT an all-clear", dead.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

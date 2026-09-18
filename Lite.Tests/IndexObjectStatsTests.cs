@@ -115,8 +115,19 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         var big = rows.FirstOrDefault(r => r.TableName == "BigTable");
         Assert.NotNull(big);
         Assert.Equal(600m, big!.CurrentReservedMb);
-        Assert.Equal(400m, big.Growth30dMb);
-        Assert.True(big.GrowthPct30d >= 199 && big.GrowthPct30d <= 201);
+
+        /* #3541 A12: one day of history. The 400 MB / 200% this used to assert as Growth30dMb was growth over
+           ONE day labelled thirty — the store has no 30-day (or 7-day) snapshot, so those figures are null,
+           and the same delta carries its own name and its real span. */
+        Assert.Null(big.Snapshot7dTime);
+        Assert.Null(big.Snapshot30dTime);
+        Assert.Null(big.Growth7dMb);
+        Assert.Null(big.Growth30dMb);
+        Assert.Null(big.GrowthPct30d);
+        Assert.Equal(1, big.DaysOfData);
+        Assert.Equal(400m, big.GrowthOverAvailableHistoryMb);
+        Assert.Equal(200m, big.GrowthOverAvailableHistoryPct);
+        Assert.Equal(400m, big.DailyGrowthRateMb);
     }
 
     [Fact]

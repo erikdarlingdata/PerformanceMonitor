@@ -46,8 +46,9 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
 
     /// <summary>
     /// The procedure duration trend, both copies (the viewer's read and the MCP's SQL, which the pin in
-    /// DarlingMcpTrendToolsTests proves are one string): t1/t2 pre-V128 (NULL) — t1 no prior, no point; t2 the
-    /// LAG's 300 s. t3 a restart — every row 0 — absent. t4 a steady pass with a readmitted plan (its row 0)
+    /// DarlingMcpTrendToolsTests proves are one string): t1/t2 pre-V128 (NULL) — t1 no prior, no rate (the
+    /// viewer drops it, the MCP keeps it unrated); t2 the LAG's 300 s. t3 a restart — every row 0 — no rate
+    /// either. t4 a steady pass with a readmitted plan (its row 0)
     /// beside a measured 120 s row: MAX 120 wins over the LAG's 300, and the readmitted plan adds 0.
     /// </summary>
     [Fact]
@@ -100,7 +101,8 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
                         reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
                 }
 
-                /* The SQL returns all four collections; t1 and t3 carry NULL rates, which the shared reader drops. */
+                /* The SQL returns all four collections; t1 and t3 carry NULL rates — the viewer's chart reader drops
+                   those (above), the MCP reader keeps them as unrated points (#3541 A12). */
                 Assert.Equal(new[] { t1, t2, t3, t4 }, mcp.Select(m => m.At).ToArray());
                 Assert.Null(mcp[0].Rate);
                 Assert.Equal(2.0, mcp[1].Rate!.Value, precision: 6);

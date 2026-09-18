@@ -136,10 +136,11 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var service = new LocalDataService(_duckDb);
 
         /* Two snapshots five minutes apart, two executions between them: 0.0067/sec. The rows carry no
-           sample_interval_seconds (the pre-v61 shape), so the read LAG-derives the interval — and since v61
-           (#3540) the FIRST snapshot, which has nothing to LAG against, is absent rather than a fabricated
-           0.0 point (the correction v60 made for the wait trends). One point comes back: the second snapshot,
-           whose rate is the thing under test. */
+           sample_interval_seconds (the pre-v61 shape), so the read LAG-derives the interval — and the FIRST
+           snapshot, which has nothing to LAG against, is UNRATED: two points come back, the first with null
+           rates (#3541 A12 — kept rather than dropped, so a lone collection is never an empty series and
+           effective_start is the first collection the store held; never the fabricated 0.0 it was before
+           #3540), the envelope counting it and saying why, and the second carrying the rate under test. */
         var baseNow = Truncate(DateTime.UtcNow);
         await SeedProcedureAsync(baseNow.AddMinutes(-20), executions: 0, elapsedUs: 0);
         await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 2, elapsedUs: 600_000);
@@ -147,9 +148,19 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var hit = await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4);
         var root = JsonDocument.Parse(hit).RootElement;
         var trend = root.GetProperty("trend");
-        Assert.Equal(1, trend.GetArrayLength());
+        Assert.Equal(2, trend.GetArrayLength());
 
-        var second = trend[0];
+        /* #3541 A12: the first snapshot has nothing to difference against, so its rates are null — not the
+           0 this series used to fabricate — and the envelope counts it and says why. Same keys as Darling. */
+        var first = trend[0];
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("value").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("elapsed_ms_per_second").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
+        Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());
+        Assert.Contains("no previous one inside the window", root.GetProperty("unrated_note").GetString()!, StringComparison.Ordinal);
+
+        var second = trend[1];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
 
         /* The shipped integer field rounds this to an idle server. The double is why it is here. */
@@ -164,10 +175,10 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
 
         /*
             #3541 A2: the disclosure block, with Lite's truth. One tier (raw, per-collection, no aggregate
-            note), and the series the read SERVED begins at its first point — the 15-minutes-ago seed, since
-            v61 dropped the prior-less first snapshot — effective_start says so, and because that head sits
-            three-plus hours past the requested 4-hour start, `truncated` is true. The label describes the
-            data, not the request; that is the whole contract.
+            note), and the series the store held begins at the 20-minutes-ago seed — the unrated first
+            collection, kept since #3541 A12 exactly so effective_start can say so — and because that head
+            sits three-plus hours past the requested 4-hour start, `truncated` is true. The label describes
+            the data, not the request; that is the whole contract.
         */
         AssertDisclosureBlock(root);
         Assert.Equal("raw", root.GetProperty("source").GetString());
@@ -197,9 +208,11 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
 
         var root = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 1)).RootElement;
 
-        /* One point, not two: these pre-v61 rows LAG-derive, and the prior-less first snapshot is absent since
-           v61 (#3540). The head is the 50-minutes-ago point, inside the slack — the property under test. */
-        Assert.Equal(1, root.GetProperty("trend").GetArrayLength());
+        /* Two points: these pre-v61 rows LAG-derive, and the prior-less first snapshot is present but UNRATED
+           (#3541 A12), so the head is the 55-minutes-ago collection — inside the slack, the property under
+           test — and effective_start names the first collection the store held rather than the first rate. */
+        Assert.Equal(2, root.GetProperty("trend").GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("trend")[0].GetProperty("value").ValueKind);
         Assert.False(root.GetProperty("truncated").GetBoolean());
         Assert.Equal(root.GetProperty("trend")[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.8, 1.0);
@@ -227,6 +240,8 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var trend = JsonDocument.Parse(hit).RootElement.GetProperty("trend");
 
         Assert.Equal(2, trend.GetArrayLength());
+        /* The first interval has no predecessor: null rates, not 0 (#3541 A12). */
+        Assert.Equal(JsonValueKind.Null, trend[0].GetProperty("executions_per_second").ValueKind);
 
         /*
             The surviving snapshot is the FINAL one (25 executions over the 3600 seconds between the two

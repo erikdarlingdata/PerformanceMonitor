@@ -93,35 +93,78 @@ internal static class DarlingSystemHealthReader
     }
 
     /// <summary>
-    /// Whether this server has EVER recorded a system_health event of one type, ignoring any window.
-    /// <para>Lets an empty parse-on-read result say WHICH kind of nothing it found. Zero significant rows
-    /// is true both of a healthy window and of a server whose system_health events were never collected,
-    /// and the two want opposite responses -- widen the window, versus go find out why nothing is being
-    /// captured. Probes <c>v_system_health_events</c>, the SAME source
-    /// <see cref="SystemHealthEventsByTypeSql"/> reads, so it cannot report a server as captured for rows
-    /// the read itself can never see. Scoped to the event_type because that is the granularity the caller
-    /// asked about: a server capturing sp_server_diagnostics but no wait_info has not been sampled for
-    /// waits, whatever its other categories hold. LIMIT 1, so it stops at the first row.
-    /// $1 server_id, $2 event_type.</para>
+    /// The newest <c>collection_time</c> at which the system_health collector stored ANY event for this
+    /// server — the source witness every one of the nine parse-on-read tools publishes (#3541 A12, contract
+    /// rule 5: zero is a measurement).
+    /// <para>Eight of the nine tools answered a dead <c>system_health</c> session, or a collector that had
+    /// never run, with the same <c>empty</c> a healthy quiet window earns, and "no severe errors" from a
+    /// server nothing was ever read from is a clean bill of health nobody issued. The witness is the
+    /// events view itself, NOT <c>collection_log</c>: the log records a SUCCESS for a run that read a dead
+    /// session and stored nothing, which is exactly the shape being mis-reported, whereas a stored event is
+    /// proof the session was alive and the collector reached it. Windowless and type-less on purpose — it
+    /// answers "has this server's ring buffer ever been read into the store", which is the question a
+    /// category with no rows in the window needs answered first; the type-scoped question is
+    /// <see cref="LastCaptureOfTypeSql"/>. Reads the SAME view the tools read, for the #2484 reason: a
+    /// probe on another relation could report a source as observed for rows the read itself can never
+    /// see.</para>
+    /// <para>Cheap by shape: <c>MAX(collection_time)</c> under <c>server_id = $1</c> is a backward walk of the
+    /// <c>(server_id, collection_time)</c> index that stops at the first row, so it rides on the data path
+    /// of every call and not only on the empty one. Anchored by construction — it names no clock; it is a
+    /// fact about the store, and a caller anchored in the past receives the store's newest capture,
+    /// which may be later than its window and is labelled as the collector's, not the window's.</para>
+    /// <para>$1 server_id.</para>
     /// </summary>
-    public const string HasAnyEventOfTypeSql = """
-        SELECT 1
+    public const string LastCaptureSql = """
+        SELECT MAX(collection_time)
+        FROM v_system_health_events
+        WHERE server_id = $1
+        AND   event_xml IS NOT NULL
+        """;
+
+    /// <summary>
+    /// The newest <c>collection_time</c> at which an event of ONE type was stored for this server — the
+    /// type-scoped half of the witness, run only when a window came back with no events of that type.
+    /// <para>Separates "this category has fired before, the window is quiet" (widen) from "this category
+    /// has never fired here while the session IS being read" — which for a rare category (a memory-node
+    /// OOM, a severe error) is the healthy measurement, not a blind spot. Same view as the read, same
+    /// <c>event_xml IS NOT NULL</c> guard, same backward index walk with a type filter — it stops at the
+    /// first match for a type that exists and walks the server's rows for one that never did, the cost the
+    /// #2484 <c>HasAnyEventOfTypeSql</c> probe this replaces already paid on the same path (that probe
+    /// answered only yes/no; this one also says WHEN, which is what the message needs).</para>
+    /// <para>$1 server_id, $2 event_type.</para>
+    /// </summary>
+    public const string LastCaptureOfTypeSql = """
+        SELECT MAX(collection_time)
         FROM v_system_health_events
         WHERE server_id = $1
         AND   event_type = $2
         AND   event_xml IS NOT NULL
-        LIMIT 1
         """;
 
-    /// <summary>Runs <see cref="HasAnyEventOfTypeSql"/>.</summary>
-    public static async Task<bool> HasAnyEventOfTypeAsync(
+    /// <summary>Runs <see cref="LastCaptureSql"/>: null when no system_health event of any type has ever
+    /// been stored for the server.</summary>
+    public static Task<DateTime?> GetLastCaptureAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => ReadNullableTimestampAsync(postgres, LastCaptureSql, serverId, eventType: null, cancellationToken);
+
+    /// <summary>Runs <see cref="LastCaptureOfTypeSql"/>: null when no event of <paramref name="eventType"/>
+    /// has ever been stored for the server.</summary>
+    public static Task<DateTime?> GetLastCaptureOfTypeAsync(
         NpgsqlDataSource postgres, int serverId, string eventType, CancellationToken cancellationToken = default)
+        => ReadNullableTimestampAsync(postgres, LastCaptureOfTypeSql, serverId, eventType, cancellationToken);
+
+    private static async Task<DateTime?> ReadNullableTimestampAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, string? eventType, CancellationToken cancellationToken)
     {
-        await using var command = postgres.CreateCommand(HasAnyEventOfTypeSql);
+        await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddText(command, eventType);
-        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+        if (eventType is not null)
+            DarlingMcpReadParameters.AddText(command, eventType);
+        /* MAX over zero rows is one row holding SQL NULL, which Npgsql surfaces as DBNull — the aggregate
+           never returns no rows, so the null check is on the value rather than on the row. */
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime stamp ? stamp : null;
     }
 
     /// <summary>Loads the server's latest database_id → database_name map for Severe Errors DB resolution.</summary>

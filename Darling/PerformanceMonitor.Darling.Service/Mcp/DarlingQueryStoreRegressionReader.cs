@@ -38,19 +38,26 @@ internal static class DarlingQueryStoreRegressionReader
 {
     /// <summary>One regression row - the viewer's <c>ViewerQueryStoreRegressionRow</c>, without the
     /// display-formatting members. Durations and CPU are ms (converted from the stored microseconds);
-    /// reads are raw pages; the percents are plain deltas.</summary>
+    /// reads are raw pages; the percents are plain deltas.
+    /// <para>The three percents are NULLABLE (#3541 A12, contract rule 5). Each divides through
+    /// <c>NULLIF(baseline, 0)</c>, so a query whose baseline side is 0 — no logical reads in every capture
+    /// before the window, then 50,000 per execution inside it — has no ratio: the SQL returns NULL, and the
+    /// reader used to coerce it to 0, which published the most dramatic possible I/O regression as
+    /// <c>io_regression_percent: 0</c>, "no change". NULL stays NULL here and the tool says why. The CPU
+    /// percent cannot actually arrive NULL (the WHERE gate <c>&gt; 25</c> drops a NULL comparison), but it is
+    /// typed like its siblings so the three cannot drift in how they treat a missing denominator.</para></summary>
     public sealed record RegressionRow(
         string DatabaseName,
         long QueryId,
         double BaselineDurationMs,
         double RecentDurationMs,
-        double DurationRegressionPercent,
+        double? DurationRegressionPercent,
         double BaselineCpuMs,
         double RecentCpuMs,
-        double CpuRegressionPercent,
+        double? CpuRegressionPercent,
         double BaselineReads,
         double RecentReads,
-        double IoRegressionPercent,
+        double? IoRegressionPercent,
         double AdditionalDurationMs,
         long BaselineExecCount,
         long RecentExecCount,
@@ -233,13 +240,13 @@ internal static class DarlingQueryStoreRegressionReader
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
                 reader.IsDBNull(3) ? 0 : Convert.ToDouble(reader.GetValue(3)),
-                reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
                 reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
                 reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
-                reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7)),
+                reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)),
                 reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
                 reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
                 reader.IsDBNull(11) ? 0 : Convert.ToDouble(reader.GetValue(11)),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
                 reader.IsDBNull(13) ? 0 : reader.GetInt64(13),

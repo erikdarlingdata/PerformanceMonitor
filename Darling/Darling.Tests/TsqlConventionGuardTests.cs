@@ -1444,6 +1444,14 @@ public sealed class TsqlConventionGuardTests
            Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
+        /* #3541 A12: four expression-bodied derivations on the growth row, each `Baseline is { } b ? … : null`
+           — the property pattern's braces are where the walk stops. Every one is arithmetic over the row's
+           own fields and strands NO string literal at all, so no census reads a site of that kind here. The
+           Lite twin (LocalDataService.FinOps.IndexObjects.cs, below) derives the same four the same way. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs DailyGrowthRateMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs Growth30dMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs Growth7dMb",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs GrowthOverAvailableHistoryMb",
         "Darling/PerformanceMonitor.Darling.Service/Targets/PostgresTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
@@ -1460,6 +1468,12 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
+        /* #3541 A12: the Lite twin of the four DarlingObjectStatsReader growth derivations above — the same
+           `is { } b ? … : null` shape, the same absence of any string literal. */
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs DailyGrowthRateMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
+        "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */

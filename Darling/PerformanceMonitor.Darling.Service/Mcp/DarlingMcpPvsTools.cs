@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of.")]
+        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent, with pct_of_database_reason saying which.")]
     public static async Task<string> GetPvsStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -62,10 +62,17 @@ public sealed class DarlingMcpPvsTools
                 database_name = r.DatabaseName,
                 is_adr_on = r.IsAdrOn,
                 pvs_size_mb = r.PvsSizeMb,
-                /* The SAME denominator the FinOps grid and the pressure alert use, so no surface disagrees. */
-                pct_of_database = r.PvsSizeMb is > 0 && r.DatabaseDataSizeMb is > 0
-                    ? Math.Round(r.PvsSizeMb.Value / r.DatabaseDataSizeMb.Value * 100.0, 2)
+                /* Whether the DMV reported a size at all (#3541 A12, contract rule 5). A measured 0 MB — the
+                   healthy, fully-cleaned state — used to be indistinguishable from a NULL the collector
+                   could not read: both fell through to pct_of_database = null. */
+                pvs_measured = r.PvsSizeMb.HasValue,
+                /* The SAME denominator the FinOps grid and the pressure alert use, so no surface disagrees.
+                   Any MEASURED size divides — 0 MB of a 100 GB database is 0.00%, a measurement — and only an
+                   unmeasured numerator or an absent/zero denominator yields null, with the reason beside it. */
+                pct_of_database = r.PvsSizeMb is { } pvsMb && r.DatabaseDataSizeMb is > 0
+                    ? Math.Round(pvsMb / r.DatabaseDataSizeMb.Value * 100.0, 2)
                     : (double?)null,
+                pct_of_database_reason = PctReason(r.PvsSizeMb.HasValue, r.DatabaseDataSizeMb),
                 online_index_version_store_mb = r.OnlineIndexVersionStoreMb,
                 database_data_size_mb = r.DatabaseDataSizeMb,
                 aborted_transaction_count = r.AbortedTransactionCount,
@@ -115,5 +122,21 @@ public sealed class DarlingMcpPvsTools
         {
             return McpHelpers.FormatError("get_pvs_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// Why <c>pct_of_database</c> is null, when it is (#3541 A12): the numerator was not measured, or the
+    /// denominator was absent or zero. Null when the percent is defined — including a defined 0.00 — so the
+    /// healthy row carries no note. Lite's twin words it identically.
+    /// </summary>
+    internal static string? PctReason(bool pvsMeasured, double? databaseDataSizeMb)
+    {
+        if (!pvsMeasured)
+            return "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.";
+        if (databaseDataSizeMb is null)
+            return "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.";
+        if (databaseDataSizeMb <= 0)
+            return "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.";
+        return null;
     }
 }

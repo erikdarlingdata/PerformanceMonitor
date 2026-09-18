@@ -188,6 +188,28 @@ public sealed class McpMissMessageParityPinTests
         "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
         ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
         ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+
+        /* #3541 A12 — the health-parser family's four-rung empty ladder, now one EmptyAsync per SKU that all
+           nine reads climb. The rung sentences sit between interpolation holes (server, hours, event type,
+           stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
+           "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
+        ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
+        "), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+        " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+        "No system_health events of ANY type have EVER been captured for ",
+        ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+
+        /* #3541 A12 — get_query_store_regressions' per-percent reason (a 0 baseline has no ratio), the
+           trend trio's unrated-point note, get_pvs_stats' three share reasons, and get_table_index_sizes'
+           history note. Each is emitted by a helper or envelope builder that lives once per SKU. */
+        " is null: no_baseline — ",
+        " is 0, so the ratio has no denominator; this is NOT 0% change. Compare ",
+        " point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.",
+        "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.",
+        "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.",
+        "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.",
+        " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_* — it spans exactly growth_window_days.",
+        "the store holds a single day of snapshots for this server, so no growth is knowable yet — every growth figure is null, not 0",
     };
 
     [Theory]

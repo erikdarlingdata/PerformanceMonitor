@@ -241,13 +241,15 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
     /// <summary>
     /// #3540 (v61): the procedure duration trend, the read that LAG-divided procedure_stats' fabricated
     /// zero into a confident 0.00 ms/sec. Four collections five minutes apart: t1/t2 are pre-v61 collections
-    /// (NULL interval) — t1 has no prior and is not a point, t2 divides by the LAG's 300 s. t3 is a restart:
-    /// every row stores 0, so MAX is 0 and the collection is absent. t4 is a steady pass with a plan the
-    /// TOP (150) just readmitted (its row stores 0 beside a 0 delta) beside a measured row (120 s), so MAX is
-    /// 120 — the stored interval wins over the LAG's 300 — and the readmitted plan adds nothing to the sums.
+    /// (NULL interval) — t1 has no prior and is UNRATED (a point with null rates, #3541 A12: kept rather than
+    /// dropped so a lone collection is never an empty series and the MCP payload's effective_start is the
+    /// first collection the store held), t2 divides by the LAG's 300 s. t3 is a restart: every row stores 0,
+    /// so MAX is 0 and the collection is likewise unrated — never 0.00 ms/sec. t4 is a steady pass with a plan
+    /// the TOP (150) just readmitted (its row stores 0 beside a 0 delta) beside a measured row (120 s), so MAX
+    /// is 120 — the stored interval wins over the LAG's 300 — and the readmitted plan adds nothing to the sums.
     /// </summary>
     [Fact]
-    public async Task ProcedureDurationTrend_DropsTheUnknowableCollection_PrefersTheStoredInterval_KeepsPreV61History()
+    public async Task ProcedureDurationTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
     {
         var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
         var t2 = t1.AddMinutes(5);
@@ -262,15 +264,23 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 3);
 
-        Assert.Equal(new[] { t2, t4 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Equal(new[] { t1, t2, t3, t4 }, points.Select(p => p.CollectionTime).ToArray());
+
+        /* t1 (no prior) and t3 (restart marker): present, unrated — null, never 0. */
+        Assert.False(points[0].HasRate);
+        Assert.Null(points[0].Value);
+        Assert.Null(points[0].ExecutionsPerSecond);
+        Assert.False(points[2].HasRate);
+        Assert.Null(points[2].Value);
+        Assert.Null(points[2].ExecutionCount);
 
         /* t2 (pre-v61): 600 ms / 300 s = 2.0 ms/sec; 30 / 300 = 0.1 executions/sec. */
-        Assert.Equal(2.0, points[0].Value, precision: 6);
-        Assert.Equal(0.1, points[0].ExecutionsPerSecond, precision: 6);
+        Assert.Equal(2.0, points[1].Value!.Value, precision: 6);
+        Assert.Equal(0.1, points[1].ExecutionsPerSecond!.Value, precision: 6);
 
         /* t4: the STORED 120 s — 1200 / 120 = 10.0, not the LAG's 1200 / 300 = 4.0; 24 / 120 = 0.2. */
-        Assert.Equal(10.0, points[1].Value, precision: 6);
-        Assert.Equal(0.2, points[1].ExecutionsPerSecond, precision: 6);
+        Assert.Equal(10.0, points[3].Value!.Value, precision: 6);
+        Assert.Equal(0.2, points[3].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     /// <summary>

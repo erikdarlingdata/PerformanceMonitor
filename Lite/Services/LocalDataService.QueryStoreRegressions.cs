@@ -15,20 +15,27 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>One Query Store regression row — the DuckDB twin of Darling's
 /// <c>DarlingQueryStoreRegressionReader.RegressionRow</c>. Durations and CPU are ms (converted from the
-/// stored microseconds); reads are raw pages; the percents are plain deltas.</summary>
+/// stored microseconds); reads are raw pages; the percents are plain deltas.
+/// <para>The three percents are NULLABLE (#3541 A12, contract rule 5). Each divides through
+/// <c>NULLIF(baseline, 0)</c>, so a query whose baseline side is 0 — no logical reads in every capture before
+/// the window, then 50,000 per execution inside it — has no ratio: the SQL returns NULL, and the reader used
+/// to coerce it to 0, which published the most dramatic possible I/O regression as
+/// <c>io_regression_percent: 0</c>, "no change". NULL stays NULL here and the tool says why. The CPU percent
+/// cannot actually arrive NULL (the WHERE gate <c>&gt; 25</c> drops a NULL comparison), but it is typed like
+/// its siblings so the three cannot drift in how they treat a missing denominator.</para></summary>
 public sealed class QueryStoreRegressionRow
 {
     public string DatabaseName { get; set; } = "";
     public long QueryId { get; set; }
     public double BaselineDurationMs { get; set; }
     public double RecentDurationMs { get; set; }
-    public double DurationRegressionPercent { get; set; }
+    public double? DurationRegressionPercent { get; set; }
     public double BaselineCpuMs { get; set; }
     public double RecentCpuMs { get; set; }
-    public double CpuRegressionPercent { get; set; }
+    public double? CpuRegressionPercent { get; set; }
     public double BaselineReads { get; set; }
     public double RecentReads { get; set; }
-    public double IoRegressionPercent { get; set; }
+    public double? IoRegressionPercent { get; set; }
     public double AdditionalDurationMs { get; set; }
     public long BaselineExecCount { get; set; }
     public long RecentExecCount { get; set; }
@@ -193,13 +200,13 @@ LIMIT $" + limitIndex;
                 QueryId = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 BaselineDurationMs = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 RecentDurationMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                DurationRegressionPercent = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                DurationRegressionPercent = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 BaselineCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 RecentCpuMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                CpuRegressionPercent = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                CpuRegressionPercent = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
                 BaselineReads = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
                 RecentReads = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                IoRegressionPercent = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                IoRegressionPercent = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
                 AdditionalDurationMs = reader.IsDBNull(11) ? 0 : ToDouble(reader.GetValue(11)),
                 BaselineExecCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
                 RecentExecCount = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),

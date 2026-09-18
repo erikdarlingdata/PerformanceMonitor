@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -33,7 +34,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpQueryStoreRegressionTools
 {
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -87,7 +88,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 {
                     database_name = r.DatabaseName,
                     query_id = r.QueryId,
-                    severity = r.Severity,
+                    /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
+                       row with NO duration ratio is a verdict about a number that does not exist. Null there
+                       (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
+                    severity = r.DurationRegressionPercent is null ? null : r.Severity,
                     baseline_duration_ms = r.BaselineDurationMs,
                     recent_duration_ms = r.RecentDurationMs,
                     duration_regression_percent = r.DurationRegressionPercent,
@@ -97,8 +101,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     baseline_reads = r.BaselineReads,
                     recent_reads = r.RecentReads,
                     io_regression_percent = r.IoRegressionPercent,
+                    /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
+                       publish that as 0 — "no change" — for the row that changed the most. */
+                    undefined_percents = UndefinedPercentNotes(r),
                     /* The ranking key, and the one number that says whether this regression MATTERS: a
-                       5 ms regression executed a million times outranks a 5-second one executed twice. */
+                       5 ms regression executed a million times outranks a 5-second one executed twice. It is
+                       an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
                     additional_duration_ms = r.AdditionalDurationMs,
                     baseline_exec_count = r.BaselineExecCount,
                     recent_exec_count = r.RecentExecCount,
@@ -115,6 +123,27 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         {
             return McpHelpers.FormatError("get_query_store_regressions", ex);
         }
+    }
+
+
+    /// <summary>
+    /// Which of a row's three regression percents are undefined, and why (#3541 A12, contract rule 5). Each
+    /// percent divides through <c>NULLIF(baseline, 0)</c>, so a NULL means the baseline side was 0 — there is
+    /// no denominator, not no change — and the caller is pointed at the absolute pair it can still compare.
+    /// Null when every percent is defined, so the common row carries no noise. Lite's twin builds the same
+    /// sentences.
+    /// </summary>
+    private static List<string>? UndefinedPercentNotes(DarlingQueryStoreRegressionReader.RegressionRow r)
+    {
+        List<string>? notes = null;
+        void Note(string field, string baseline, string recent)
+            => (notes ??= new List<string>()).Add(
+                $"{field} is null: no_baseline — {baseline} is 0, so the ratio has no denominator; this is NOT 0% change. Compare {baseline} to {recent} directly.");
+
+        if (r.DurationRegressionPercent is null) Note("duration_regression_percent", "baseline_duration_ms", "recent_duration_ms");
+        if (r.CpuRegressionPercent is null) Note("cpu_regression_percent", "baseline_cpu_ms", "recent_cpu_ms");
+        if (r.IoRegressionPercent is null) Note("io_regression_percent", "baseline_reads", "recent_reads");
+        return notes;
     }
 
     /// <summary>

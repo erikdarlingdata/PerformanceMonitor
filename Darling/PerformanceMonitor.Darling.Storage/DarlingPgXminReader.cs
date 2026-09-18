@@ -78,6 +78,52 @@ public static class DarlingPgXminReader
         ORDER BY l.xmin_age DESC
         """;
 
+    /// <summary>
+    /// How many times the xmin collector actually CAPTURED in the window — the honest denominator for
+    /// "what share of the window was this source winning" (#3541 A12, contract rule 5).
+    /// <para><see cref="PgXminHorizonSql"/>'s <c>samples</c> counts a source's OWN rows, and the collector
+    /// writes a row only when something holds the horizon — an unheld capture stores nothing. So a source
+    /// that held the horizon in 2 of the window's 288 captures had <c>samples = 2</c>,
+    /// <c>samples_as_winner = 2</c>, and read as winning 100% of the window: a two-minute query rendered as
+    /// a chronic holder. The denominator has to be every time the collector LOOKED, and only
+    /// <c>collection_log</c> has that: one row per run INCLUDING the zero-row (healthy, unheld) runs, behind
+    /// its <c>(server_id, collection_time)</c> index, counting the exact collector whose captures are being
+    /// fractioned. Runs that stored nothing because they could not look (ERROR / ABANDONED / PERMISSIONS /
+    /// YIELDED) are excluded: a cycle that did not look is not evidence the horizon was clear.</para>
+    /// <para>This is the SAME denominator the alert evaluator's horizon arm uses
+    /// (<c>DarlingPostgresAlertReadAdapter.XminSql</c>'s <c>captures</c> CTE, #3537): same table, same
+    /// collector name, same SUCCESS filter — pinned equal by DarlingPgXminReaderTests so the MCP payload and
+    /// the alert can never fraction the same window over different denominators. A separate statement rather
+    /// than a CROSS JOIN onto the holder rows because the viewer renders <see cref="PgXminRow"/> field for
+    /// field and this is a window fact, not a row fact. The log write is failure-isolated and can skip a
+    /// row, so the count may UNDERCOUNT — the payload says so rather than clamping the share.</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string XminCapturesInWindowSql = """
+        SELECT COUNT(*) AS captures_in_window
+        FROM collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'pg_xmin_horizon'
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   status = 'SUCCESS'
+        """;
+
+    /// <summary>Runs <see cref="XminCapturesInWindowSql"/>.</summary>
+    public static async Task<long> GetXminCapturesInWindowAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(XminCapturesInWindowSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* Kind-Unspecified at the bind, for the reason GetPgXminHorizonAsync states. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is long count ? count : Convert.ToInt64(value);
+    }
+
     public static async Task<List<PgXminRow>> GetPgXminHorizonAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         CancellationToken cancellationToken = default)

@@ -132,9 +132,14 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
 
         var data = JsonDocument.Parse(payload).RootElement;
         Assert.Equal(data.GetProperty("trend")[0].GetProperty("time").GetString(), data.GetProperty("effective_start").GetString());
-        Assert.Equal(
-            data.GetProperty("trend")[0].GetProperty("value").GetDouble(),
-            data.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").GetDouble());
+        /* #3541 A12: one collection inside the 4-hour window (the other seed is 48 hours back) — a lone
+           collection has nothing to difference against, so the point is present but UNRATED: `value` and its
+           named twin are both null (this assertion used to compare two fabricated zeros), the envelope says
+           so, and the data branch is still a data branch rather than an empty one. */
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("trend")[0].GetProperty("value").ValueKind);
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").ValueKind);
+        Assert.Equal(1, data.GetProperty("unrated_points").GetInt32());
+        Assert.False(data.TryGetProperty("status", out _));
 
         /* And get_query_trend over the same seeded query carries the block too — the last tool where the two
            SKUs' envelopes disagreed (Darling's has had it since #2353). */

@@ -56,7 +56,7 @@ public sealed class DarlingMcpPgXminTools
         _ => "Unrecognized holder source.",
     };
 
-    [McpServerTool(Name = "get_pg_xmin_horizon"), Description("Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target.")]
+    [McpServerTool(Name = "get_pg_xmin_horizon"), Description("Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long: pct_of_window_winning is the share of EVERY capture in the window (captures_in_window, from the collector's own log - unheld captures included, the same denominator the vacuum-horizon alert uses), not the share of the captures that happened to record this source. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target. Zero holders is reported as no_holder only when the collector captured in the window; no holders AND no captures is unavailable, not an all-clear.")]
     public static async Task<string> GetPgXminHorizon(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -74,6 +74,8 @@ public sealed class DarlingMcpPgXminTools
             var now = windowEnd;
             var rows = await DarlingPgXminReader.GetPgXminHorizonAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var capturesInWindow = await DarlingPgXminReader.GetXminCapturesInWindowAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             /* Nothing holding the horizon is the HEALTHY answer, and saying so plainly matters more here
                than for most tools: an operator arrives at this tool BECAUSE bloat is growing, so "no
@@ -90,12 +92,29 @@ public sealed class DarlingMcpPgXminTools
                     return gated;
                 }
 
+                /* Zero holders is a measurement only if the collector looked (#3541 A12): the collector
+                   stores nothing on an unheld capture, so an empty holder table is ALSO what a collector
+                   that never ran in this window leaves behind. The capture count is the witness. */
+                if (capturesInWindow == 0)
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        hours_back,
+                        status = "unavailable",
+                        captures_in_window = 0,
+                        message = $"No holder rows AND no successful pg_xmin_horizon captures are logged for {resolved.ServerName} in the last {hours_back} hour(s), so this is NOT a report that nothing holds the horizon — the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
+                    }, McpHelpers.JsonOptions);
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
                     status = "no_holder",
-                    finding = "Nothing is holding back the xmin horizon in this window. Vacuum is free to "
+                    captures_in_window = capturesInWindow,
+                    finding = $"Nothing is holding back the xmin horizon in this window: the collector captured "
+                            + $"{capturesInWindow} time(s) and recorded no holder. Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
                             + "counts) rather than at whether it is being blocked.",
@@ -114,10 +133,18 @@ public sealed class DarlingMcpPgXminTools
                 /* Persistence, not just presence. A source that won nearly every sample is a standing
                    problem someone must own; one that won twice was a query that ran long and finished. */
                 samples_as_winner = r.SamplesAsWinner,
-                samples = r.Samples,
-                pct_of_window_winning = r.Samples > 0
-                    ? Math.Round((double)r.SamplesAsWinner / r.Samples * 100, 1)
-                    : 0,
+                /* Captures in which THIS source recorded a holder — its own rows, not the window. Named so it
+                   cannot be read as the window's capture count, which is captures_in_window above. */
+                captures_recording_this_source = r.Samples,
+                /* Over EVERY capture in the window (#3541 A12), not over this source's own rows: the collector
+                   stores nothing on an unheld capture, so dividing by the source's rows made 2 wins in 2 rows
+                   out of 288 captures read as 100% chronic. The same denominator the alert evaluator's
+                   horizon arm fractions over (DarlingPostgresAlertReadAdapter.XminSql). Null, never 0, when
+                   the log holds no captures to divide by; unclamped, so an undercounting log (a skipped
+                   failure-isolated write) shows as a share above 100 rather than being rounded into a lie. */
+                pct_of_window_winning = capturesInWindow > 0
+                    ? Math.Round((double)r.SamplesAsWinner / capturesInWindow * 100, 1)
+                    : (double?)null,
                 remedy = RemedyFor(r.Source),
             }).ToList();
 
@@ -128,6 +155,12 @@ public sealed class DarlingMcpPgXminTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "holder_present",
+                /* The window's denominator: successful pg_xmin_horizon runs logged in the window, from
+                   collection_log — every time the collector LOOKED, held or not. */
+                captures_in_window = capturesInWindow,
+                pct_denominator = capturesInWindow > 0
+                    ? "pct_of_window_winning = samples_as_winner / captures_in_window; captures_in_window counts the collector's SUCCESS rows in collection_log for this window, so it includes captures that found no holder. It can undercount if a log write was skipped, in which case a share can exceed 100 — it is not clamped."
+                    : "pct_of_window_winning is null: collection_log holds no successful pg_xmin_horizon capture in this window to divide by, though holder rows exist — read samples_as_winner as a count, not a share.",
                 /* Lead with the actionable pair: which cause, and what to do about that cause. */
                 winning_source = winner.source,
                 winning_holder = winner.holder,

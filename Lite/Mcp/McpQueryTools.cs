@@ -304,7 +304,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -354,7 +354,10 @@ public sealed class McpQueryTools
                 {
                     database_name = r.DatabaseName,
                     query_id = r.QueryId,
-                    severity = r.Severity,
+                    /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
+                       row with NO duration ratio is a verdict about a number that does not exist. Null there
+                       (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
+                    severity = r.DurationRegressionPercent is null ? null : r.Severity,
                     baseline_duration_ms = r.BaselineDurationMs,
                     recent_duration_ms = r.RecentDurationMs,
                     duration_regression_percent = r.DurationRegressionPercent,
@@ -364,7 +367,11 @@ public sealed class McpQueryTools
                     baseline_reads = r.BaselineReads,
                     recent_reads = r.RecentReads,
                     io_regression_percent = r.IoRegressionPercent,
-                    /* The ranking key, and the one number that says whether this regression MATTERS. */
+                    /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
+                       publish that as 0 — "no change" — for the row that changed the most. */
+                    undefined_percents = UndefinedPercentNotes(r),
+                    /* The ranking key, and the one number that says whether this regression MATTERS. It is
+                       an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
                     additional_duration_ms = r.AdditionalDurationMs,
                     baseline_exec_count = r.BaselineExecCount,
                     recent_exec_count = r.RecentExecCount,
@@ -381,6 +388,26 @@ public sealed class McpQueryTools
         {
             return McpHelpers.FormatError("get_query_store_regressions", ex);
         }
+    }
+
+    /// <summary>
+    /// Which of a row's three regression percents are undefined, and why (#3541 A12, contract rule 5). Each
+    /// percent divides through <c>NULLIF(baseline, 0)</c>, so a NULL means the baseline side was 0 — there is
+    /// no denominator, not no change — and the caller is pointed at the absolute pair it can still compare.
+    /// Null when every percent is defined, so the common row carries no noise. Darling's twin builds the same
+    /// sentences.
+    /// </summary>
+    private static List<string>? UndefinedPercentNotes(QueryStoreRegressionRow r)
+    {
+        List<string>? notes = null;
+        void Note(string field, string baseline, string recent)
+            => (notes ??= new List<string>()).Add(
+                $"{field} is null: no_baseline — {baseline} is 0, so the ratio has no denominator; this is NOT 0% change. Compare {baseline} to {recent} directly.");
+
+        if (r.DurationRegressionPercent is null) Note("duration_regression_percent", "baseline_duration_ms", "recent_duration_ms");
+        if (r.CpuRegressionPercent is null) Note("cpu_regression_percent", "baseline_cpu_ms", "recent_cpu_ms");
+        if (r.IoRegressionPercent is null) Note("io_regression_percent", "baseline_reads", "recent_reads");
+        return notes;
     }
 
     /// <summary>
@@ -601,7 +628,7 @@ public sealed class McpQueryTools
     private static string InvalidHeatmapMetric(string metric) =>
         $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries.")]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -652,7 +679,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression.")]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
     public static async Task<string> GetProcedureDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -693,7 +720,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran.")]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
     public static async Task<string> GetQueryStoreDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -800,6 +827,14 @@ public sealed class McpQueryTools
             ["hours_back"] = hours_back,
         };
         WriteDisclosure(envelope, points.Count > 0 ? points[0].CollectionTime : null, startUtc, windowEndUtc, bucket);
+        /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
+           and why — the window's first collection has no previous one to difference against. Same keys and
+           the same sentence as Darling's twin. */
+        var unrated = points.Count(p => !p.HasRate);
+        envelope["unrated_points"] = unrated;
+        envelope["unrated_note"] = unrated == 0
+            ? null
+            : $"{unrated} point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),

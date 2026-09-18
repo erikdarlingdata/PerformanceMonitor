@@ -108,8 +108,13 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("not_collected", StatusOf(azureTrace));
         Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
-        /* ── The box, same empty store: every one of them keeps the answer it gave before. ── */
-        Assert.Equal("empty", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
+        /* ── The box, same empty store: every one of them keeps its own miss — the ENGINE answer must not
+              have become a blanket rule. For the health-parser family that own miss is "unavailable" since
+              #3541 A12 (a server whose system_health session has never been read into the store is not a
+              clean bill), the answer significant_waits alone used to give and the other eight now share. ── */
+        var boxHealth = await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName);
+        Assert.Equal("unavailable", StatusOf(boxHealth));
+        Assert.Contains("system_health session is started", boxHealth, StringComparison.Ordinal);
 
         var boxWaits = await McpHealthParserTools.GetSignificantWaits(service, _serverManager, BoxServerName);
         Assert.Equal("unavailable", StatusOf(boxWaits));
@@ -136,7 +141,9 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
 
         var service = new LocalDataService(_duckDb);
 
-        Assert.Equal("empty", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
+        /* "Old miss" is each family's own: for the health parsers a never-read session is "unavailable"
+           (#3541 A12), and the point here is that it is NOT "not_collected" — unknown is not never. */
+        Assert.Equal("unavailable", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
     }
@@ -152,7 +159,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         var service = new LocalDataService(_duckDb);
 
         Assert.Equal(CollectorEngineCapability.UnknownEngineEdition, await service.GetSqlEngineEditionAsync(_azureServerId));
-        Assert.Equal("empty", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, AzureServerName)));
+        Assert.Equal("unavailable", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, AzureServerName)));
     }
 
     private static string StatusOf(string json) =>

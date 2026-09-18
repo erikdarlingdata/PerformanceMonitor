@@ -438,7 +438,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries.")]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route every point is a rate over the gap since the PREVIOUS collection, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no such point.")]
     public static async Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -499,7 +499,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression.")]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route every point is a rate over the gap since the PREVIOUS collection, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no such point.")]
     public static async Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -544,7 +544,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran.")]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point (interval start or rollup bucket), so the window's first point - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -757,6 +757,14 @@ public sealed class DarlingMcpTrendTools
             ["hours_back"] = hours_back,
         };
         disclosure.WriteTo(envelope);
+        /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
+           and why. On the raw route the window's first collection has no previous one to difference
+           against; the hourly route divides by the bucket width and produces none. */
+        var unrated = points.Count(p => !p.HasRate);
+        envelope["unrated_points"] = unrated;
+        envelope["unrated_note"] = unrated == 0
+            ? null
+            : $"{unrated} point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),

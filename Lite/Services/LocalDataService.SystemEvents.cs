@@ -469,31 +469,89 @@ ORDER BY event_time DESC";
     }
 
     /// <summary>
-    /// Whether this server has EVER captured a system_health event of one type, ignoring any window.
-    /// <para>Separates a quiet window from a blind one on the empty path. Reads
-    /// <c>v_system_health_events</c> - the SAME source <see cref="ReadSystemHealthEventXmlAsync"/> uses, so
-    /// it cannot report a server as captured for rows the read itself can never see - and is scoped to the
-    /// event_type, because a server capturing sp_server_diagnostics but no wait_info has not been sampled
-    /// for waits whatever its other categories hold. Darling twin:
-    /// <c>DarlingSystemHealthReader.HasAnyEventOfTypeAsync</c>; the two must stay in step so a user moving
+    /// The newest <c>collection_time</c> at which the system_health collector stored ANY event for this
+    /// server - the source witness every one of the nine parse-on-read MCP tools publishes (#3541 A12,
+    /// contract rule 5: zero is a measurement). Null when nothing has ever been stored.
+    /// <para>The witness is the events view itself, NOT <c>collection_log</c>: the log records a success for
+    /// a run that read a dead <c>system_health</c> session and stored nothing, which is exactly the shape
+    /// being mis-reported, whereas a stored event is proof the session was alive and the collector reached
+    /// it. Windowless and type-less on purpose - it answers "has this server's ring buffer ever been read
+    /// into the store"; the type-scoped question is <see cref="GetLastSystemHealthCaptureOfTypeAsync"/>.
+    /// Reads <c>v_system_health_events</c>, the SAME source <see cref="ReadSystemHealthEventXmlAsync"/>
+    /// uses, so it cannot report a source as observed for rows the read itself can never see. Darling twin:
+    /// <c>DarlingSystemHealthReader.GetLastCaptureAsync</c>; the two must stay in step so a user moving
     /// between the SKUs is not told a different story about the same state.</para>
     /// </summary>
-    public async Task<bool> HasAnySystemHealthEventOfTypeAsync(int serverId, string eventType)
+    public async Task<DateTime?> GetLastSystemHealthCaptureAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         command.CommandText = @"
-SELECT 1
+SELECT MAX(collection_time)
+FROM v_system_health_events
+WHERE server_id = $1
+AND   event_xml IS NOT NULL";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is DateTime stamp ? stamp : null;
+    }
+
+    /// <summary>
+    /// The newest <c>collection_time</c> at which an event of ONE type was stored for this server - the
+    /// type-scoped half of the witness, run only when a window came back with no events of that type.
+    /// <para>Separates "this category has fired before, the window is quiet" (widen) from "this category
+    /// has never fired here while the session IS being read" - which for a rare category (a memory-node
+    /// OOM, a severe error) is the healthy measurement rather than a blind spot. Succeeds the #2484
+    /// <c>HasAnySystemHealthEventOfTypeAsync</c> yes/no probe, which could not say WHEN. Darling twin:
+    /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>.</para>
+    /// </summary>
+    public async Task<DateTime?> GetLastSystemHealthCaptureOfTypeAsync(int serverId, string eventType)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT MAX(collection_time)
 FROM v_system_health_events
 WHERE server_id = $1
 AND   event_type = $2
-AND   event_xml IS NOT NULL
-LIMIT 1";
+AND   event_xml IS NOT NULL";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = eventType });
-        return await command.ExecuteScalarAsync() is not null and not DBNull;
+        return await command.ExecuteScalarAsync() is DateTime stamp ? stamp : null;
+    }
+
+    /// <summary>
+    /// How many raw events of one type the window held BEFORE any shred or significance gate - the count that
+    /// lets a zero-row answer say "captured and gated out" (healthy) rather than "nothing here" (#3541 A12).
+    /// <para>Run only on the empty path, and over the SAME window arithmetic the typed readers use
+    /// (<see cref="GetTimeRange"/> with the MCP anchor), so the count describes the rows the read just
+    /// looked at and not a neighbouring window. Darling gets this number for free from its shared collect
+    /// step; Lite's typed readers return only the surviving rows, so the count is a second, bounded read.</para>
+    /// </summary>
+    public async Task<int> CountSystemHealthEventsAsync(int serverId, string eventType, int hoursBack = 24, DateTime? asOfUtc = null)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate: null, toDate: null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT COUNT(*)
+FROM v_system_health_events
+WHERE server_id = $1
+AND   event_time >= $2
+AND   event_time <= $3
+AND   event_type = $4
+AND   event_xml IS NOT NULL";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = eventType });
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
 
     // ── CPU Tasks ──
