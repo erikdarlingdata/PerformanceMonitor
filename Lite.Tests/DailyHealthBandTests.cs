@@ -20,9 +20,13 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public class DailyHealthBandTests
 {
+    private static readonly TimeSpan Day = TimeSpan.FromHours(24);
+    private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
+
     private static DailyHealthSignals Signals(
         bool hasData = true, long deadlocks = 0, long collectionErrors = 0, long highCpu = 0,
-        long blocking = 0, long memPressure = 0, long memCritical = 0, long alerts = 0) => new()
+        long blocking = 0, long memPressure = 0, long memCritical = 0, long alerts = 0,
+        TimeSpan window = default) => new()
     {
         HasData = hasData,
         Deadlocks = deadlocks,
@@ -32,6 +36,7 @@ public class DailyHealthBandTests
         MemoryPressureEvents = memPressure,
         MemoryCriticalEvents = memCritical,
         AlertCount = alerts,
+        Window = window,
     };
 
     [Fact]
@@ -49,15 +54,104 @@ public class DailyHealthBandTests
     }
 
     [Theory]
-    [InlineData("deadlock", 1, 0, 0, 0, 0, 0)]
-    [InlineData("collection-error", 0, 1, 0, 0, 0, 0)]
-    [InlineData("memory-critical", 0, 0, 0, 0, 1, 0)]
-    [InlineData("sustained-cpu", 0, 0, 6, 0, 0, 0)]
-    [InlineData("heavy-blocking", 0, 0, 0, 11, 0, 0)]
-    public void CriticalTriggers_EachAloneIsCritical(string _, long deadlocks, long collErrors, long highCpu, long blocking, long memCritical, long alerts)
+    [InlineData("collection-error", 1, 0, 0, 0, 0)]
+    [InlineData("memory-critical", 0, 0, 0, 1, 0)]
+    [InlineData("sustained-cpu", 0, 6, 0, 0, 0)]
+    [InlineData("heavy-blocking", 0, 0, 11, 0, 0)]
+    public void CriticalTriggers_EachAloneIsCritical(string _, long collErrors, long highCpu, long blocking, long memCritical, long alerts)
     {
-        var s = Signals(deadlocks: deadlocks, collectionErrors: collErrors, highCpu: highCpu, blocking: blocking, memCritical: memCritical, alerts: alerts);
+        var s = Signals(collectionErrors: collErrors, highCpu: highCpu, blocking: blocking, memCritical: memCritical, alerts: alerts);
         Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(s));
+    }
+
+    /* ── the deadlock RATE trigger (#3525 — #3368's twin, routed through the card band's tiers) ── */
+
+    [Fact]
+    public void ACriticalDeadlockRate_AloneIsCritical()
+    {
+        // 480 over 24h = 20.0/hr, the Critical tier — the same pair the Overview card's dot bands on.
+        Assert.Equal(
+            DailyHealthBand.Critical,
+            DailyHealthBandCalculator.Classify(Signals(deadlocks: 480, window: Day)));
+    }
+
+    /// <summary>
+    /// The defect #3525 was filed on: one deadlock in a 24-hour day banded the WHOLE day Critical — the
+    /// count trigger #3368 removed from the card, still shipping in this classifier. Measured on the same
+    /// 43-server fleet, count &gt; 0 read 87.9% of 24-hour windows Critical, so ~7 of 8 calendar cells
+    /// painted red from deadlocks alone. At 0.04/hr the day is Healthy; the deadlock stays countable — the
+    /// tooltip lists it and the drill is offered — the BAND just stops claiming a crisis.
+    /// </summary>
+    [Fact]
+    public void ASingleDeadlockInADay_IsNoLongerCritical()
+    {
+        var s = Signals(deadlocks: 1, window: Day);
+        Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(s));
+
+        Assert.Contains(DayDrillTarget.Deadlocks, DailyHealthBandCalculator.AvailableDrills(s));
+        Assert.Contains("1 deadlock", DailyHealthBandCalculator.Describe(s));
+    }
+
+    /// <summary>
+    /// The two-window proof, on the DAY classifier — the same per-hour rate bands the day identically over
+    /// a 1-hour window (a fleet-sweep span at the cadence ceiling's scale) and a 24-hour one (a calendar
+    /// day). Counts are integer-rate-times-whole-hours so the asserted rate is exactly the one the band
+    /// sees (the DeadlockRateBandTests discipline).
+    /// </summary>
+    [Theory]
+    [InlineData(4, DailyHealthBand.Healthy)]
+    [InlineData(5, DailyHealthBand.Warning)]
+    [InlineData(19, DailyHealthBand.Warning)]
+    [InlineData(20, DailyHealthBand.Critical)]
+    [InlineData(50, DailyHealthBand.Critical)]
+    public void TheSameDeadlockRate_BandsTheDayTheSame_OverAnHourAndADay(long ratePerHour, DailyHealthBand expected)
+    {
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(deadlocks: ratePerHour, window: Hour)));
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(deadlocks: ratePerHour * 24, window: Day)));
+    }
+
+    /// <summary>
+    /// And the discriminating converse: the same COUNT over the two windows bands differently, which a
+    /// count trigger cannot do at all — the pin that goes red on any revert to counting.
+    /// </summary>
+    [Fact]
+    public void TheSameDeadlockCount_OverTwoWindows_BandsDifferently()
+    {
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(deadlocks: 30, window: Hour)));
+        Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(Signals(deadlocks: 30, window: Day)));
+    }
+
+    /// <summary>
+    /// A sub-hour window — a fleet sweep at any cadence under an hour — is not rate-banded (#3368's own
+    /// arm): a non-zero count reads Warning (deadlocks demonstrably happened; no rate supports Critical,
+    /// and 1 deadlock in 15 minutes is 4/hr arithmetically but the hour was not observed), and a zero
+    /// count stays out of the deadlock trigger entirely rather than claiming anything. An undeclared
+    /// window — <c>default(TimeSpan)</c>, a producer that declared nothing — takes the same arm, so no
+    /// path can rate-multiply or restore count-is-Critical by omission.
+    /// </summary>
+    [Fact]
+    public void ASubHourOrUndeclaredWindow_FallsToWarning_NeverCritical()
+    {
+        foreach (var window in new[] { default, TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(59) })
+        {
+            Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(deadlocks: 1, window: window)));
+            Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(deadlocks: 10_000, window: window)));
+            Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(Signals(deadlocks: 0, window: window)));
+        }
+    }
+
+    /// <summary>
+    /// The day bands on the tiers it is handed — the store-backed pair (#3368, V120) travels through
+    /// <see cref="DailyHealthThresholds.DeadlockRates"/>. Lite has no store knobs for these, so it bands
+    /// on the shipped defaults, but the seam is the shared one and must honour a handed pair identically.
+    /// </summary>
+    [Fact]
+    public void TheDeadlockRateTiers_AreOverridable()
+    {
+        var raised = new DailyHealthThresholds { DeadlockRates = new DeadlockRateThresholds(100.0, 500.0) };
+        var s = Signals(deadlocks: 480, window: Day); // 20/hr: Critical on the shipped pair
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(s));
+        Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(s, raised));
     }
 
     [Theory]
@@ -74,8 +168,8 @@ public class DailyHealthBandTests
     [Fact]
     public void CriticalBeatsWarning_WhenBothPresent()
     {
-        // A deadlock (critical) plus moderate CPU + alerts (warning) still bands Critical.
-        var s = Signals(deadlocks: 1, highCpu: 3, alerts: 4);
+        // A critical deadlock rate (480/24h = 20/hr) plus moderate CPU + alerts (warning) still bands Critical.
+        var s = Signals(deadlocks: 480, highCpu: 3, alerts: 4, window: Day);
         Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(s));
     }
 
@@ -178,6 +272,33 @@ public class DailyHealthBandTests
         Assert.DoesNotContain(reasons, r => r.Contains("peak block", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The deadlock line carries the per-hour rate the band evaluated (#3525) — the card reason's own
+    /// disclosure rule: "120 deadlocks" against an amber cell cannot say which tier was crossed, because
+    /// 120 in an hour and 120 in a day are the same string. The count stays (the countable fact); the rate
+    /// is added (the banded one). Shared by the tooltip and the day-detail reasons, so both surfaces say it.
+    /// </summary>
+    [Fact]
+    public void DeadlockLine_CarriesTheRate_WhenTheWindowIsRateable()
+    {
+        var day = Signals(deadlocks: 120, window: Day); // 5.0/hr — the Warning tier exactly
+        Assert.Contains("120 deadlocks (5.0/hr)", DailyHealthBandCalculator.Describe(day));
+        Assert.Contains("120 deadlocks (5.0/hr)", DailyHealthBandCalculator.BuildReasons(day));
+
+        // A single deadlock still reads singular, rate beside it.
+        Assert.Contains("1 deadlock (0.0/hr)", DailyHealthBandCalculator.Describe(Signals(deadlocks: 1, window: Day)));
+    }
+
+    [Fact]
+    public void DeadlockLine_PrintsTheCountAlone_OnAnUnrateableWindow()
+    {
+        // No declared window: no rate is computable, and printing one would claim a measurement nobody
+        // took — the count alone is exactly what the band had to go on.
+        var described = DailyHealthBandCalculator.Describe(Signals(deadlocks: 2));
+        Assert.Contains("2 deadlocks", described);
+        Assert.DoesNotContain("/hr", described);
+    }
+
     [Fact]
     public void AvailableDrills_NoData_OffersNothing()
     {
@@ -229,5 +350,56 @@ public class DailyHealthBandTests
         var line = DailyHealthBandCalculator.BuildKeyMetricsLine(null, 0, 1200m, 0);
         Assert.Contains("Top wait: none", line);
         Assert.Contains("Total wait: 20.0 min", line); // 1200s / 60
+    }
+
+    /* ─────────── #3525 review: the still-forming day clamps to its elapsed portion ─────────── */
+
+    [Fact]
+    public void CalendarDayWindow_FinishedDay_IsTwentyFourHours()
+    {
+        var day = new DateTime(2026, 7, 8);
+        Assert.Equal(TimeSpan.FromDays(1), DailyHealthBandCalculator.CalendarDayWindow(day, new DateTime(2026, 7, 9)));
+        Assert.Equal(TimeSpan.FromDays(1), DailyHealthBandCalculator.CalendarDayWindow(day, new DateTime(2026, 9, 1, 12, 0, 0)));
+    }
+
+    [Fact]
+    public void CalendarDayWindow_TodayClampsToElapsed_AndFutureIsZero()
+    {
+        var day = new DateTime(2026, 7, 8);
+        Assert.Equal(TimeSpan.FromHours(1), DailyHealthBandCalculator.CalendarDayWindow(day, day.AddHours(1)));
+        Assert.Equal(TimeSpan.FromMinutes(30), DailyHealthBandCalculator.CalendarDayWindow(day, day.AddMinutes(30)));
+        Assert.Equal(TimeSpan.Zero, DailyHealthBandCalculator.CalendarDayWindow(day, day.AddDays(-1)));
+    }
+
+    [Fact]
+    public void TodayCell_ActiveStorm_IsNotDilutedByUnelapsedHours()
+    {
+        /* The review's own numbers: 60 deadlocks in the first hour of the still-forming day. Banded over
+           a full 24h the rate reads 2.5/hr (below the 5/hr Warning tier) and the crisis paints Healthy;
+           over the elapsed hour it is 60/hr — past the 20/hr Critical tier. The clamp is what keeps an
+           in-progress storm red on the calendar. The same 60 over a genuinely FINISHED day is honestly
+           2.5/hr, and stays sub-Warning by design. */
+        var day = new DateTime(2026, 7, 8);
+        var stormWindow = DailyHealthBandCalculator.CalendarDayWindow(day, day.AddHours(1));
+        Assert.Equal(
+            DailyHealthBand.Critical,
+            DailyHealthBandCalculator.Classify(Signals(deadlocks: 60, window: stormWindow)));
+
+        var finishedWindow = DailyHealthBandCalculator.CalendarDayWindow(day, day.AddDays(2));
+        Assert.Equal(
+            DailyHealthBand.Healthy,
+            DailyHealthBandCalculator.Classify(Signals(deadlocks: 60, window: finishedWindow)));
+    }
+
+    [Fact]
+    public void TodayCell_MinutesOld_FallsToTheUnrateableArm()
+    {
+        /* Sub-hour elapsed lands in DeadlockSeverity's unrateable arm (#3368's Warning-not-rate rule):
+           minutes into the day a single deadlock reads Warning, never a fabricated multiplied rate. */
+        var window = DailyHealthBandCalculator.CalendarDayWindow(
+            new DateTime(2026, 7, 8), new DateTime(2026, 7, 8, 0, 10, 0));
+        Assert.Equal(
+            DailyHealthBand.Warning,
+            DailyHealthBandCalculator.Classify(Signals(deadlocks: 1, window: window)));
     }
 }

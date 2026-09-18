@@ -158,10 +158,20 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     {
         var date = new DateTime(2026, 7, 9, 0, 0, 0, DateTimeKind.Unspecified);
 
-        /* A deadlock day is Critical (the shared calculator's rule). */
-        var critical = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 1, 0, 0, 0, 0, 0, 0, 0, HasData: true);
+        /* A day at a critical deadlock RATE is Critical (#3525): 480 over the row's 24-hour window is
+           20/hr, the card band's Critical tier. One deadlock in a day is 0.04/hr and no longer paints the
+           cell red — the count trigger this replaced read 87.9% of production days Critical. */
+        var critical = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 480, 0, 0, 0, 0, 0, 0, 0, HasData: true);
         Assert.Equal(DailyHealthBand.Critical, critical.HealthBand);
         Assert.Equal("Critical", critical.OverallHealth);
+
+        var oneDeadlock = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 1, 0, 0, 0, 0, 0, 0, 0, HasData: true);
+        Assert.Equal(DailyHealthBand.Healthy, oneDeadlock.HealthBand);
+
+        /* And the band honours the tiers the read stamped from the store (#3368's knobs): the same 20/hr
+           day under raised tiers is not Critical. */
+        var raised = critical with { RateTiers = new DeadlockRateThresholds(100.0, 500.0) };
+        Assert.Equal(DailyHealthBand.Healthy, raised.HealthBand);
 
         /* A collected-but-quiet day is Healthy. */
         var healthy = new Reader.DailySummaryReadRow(date, 12m, "CXPACKET", 3, 0, 0, 0, 0, 0, 0, 0, 0, HasData: true);
@@ -271,7 +281,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 postgres, ServerName, boundary.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
 
             DarlingMcpTestData.AssertEnvelope(onItsOwnDay, ServerName, "overall_health");
-            Assert.Contains("Critical", onItsOwnDay, StringComparison.Ordinal);
+            /* #3525: deadlocks band as a per-hour RATE through the card band's tiers now, so one deadlock
+               across a 24h day (0.04/hr, far below the measured Warning tier of 5/hr) is a Healthy day —
+               the old any-deadlock-is-Critical reading is gone by design. The row's VISIBILITY to the
+               explicit-date read is what this test pins, so assert the evidence and the honest band. */
+            Assert.Contains("\"deadlock_count\":1", onItsOwnDay, StringComparison.Ordinal);
+            Assert.Contains("Healthy", onItsOwnDay, StringComparison.Ordinal);
             Assert.Contains("2026-07-20", onItsOwnDay, StringComparison.Ordinal);
 
             /* The bug: the same rows are invisible to an implicit "today", which is what the sibling test
@@ -352,7 +367,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var daily = await DarlingMcpHealthTools.GetDailySummary(
                 postgres, ServerName, when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
             DarlingMcpTestData.AssertEnvelope(daily, ServerName, "overall_health");
-            Assert.Contains("Critical", daily, StringComparison.Ordinal);   /* the deadlock makes the day Critical */
+            /* #3525: one deadlock is 0.04/hr against a 24h day — below the rate tiers, so it no longer
+               makes the day Critical. The 85% CPU sample trips the HighCpuWarningSamples=1 tier, so the
+               day reads Warning, and the planted deadlock stays visible as evidence. */
+            Assert.Contains("\"deadlock_count\":1", daily, StringComparison.Ordinal);
+            Assert.Contains("Warning", daily, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

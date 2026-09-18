@@ -162,8 +162,10 @@ public sealed class DarlingMcpHealthTools
             var fromDate = lastDay.AddDays(-(days_back - 1));
             var toDate = lastDay.AddDays(1);
 
+            /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
+               a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
             var rows = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate);
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd);
 
             if (rows.Count == 0)
             {

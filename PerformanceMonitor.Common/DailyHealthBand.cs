@@ -29,8 +29,8 @@ namespace PerformanceMonitor.Common
         /// <summary>Elevated but not critical (moderate CPU, some blocking, memory pressure, or alerts) — amber.</summary>
         Warning = 2,
 
-        /// <summary>A serious day (deadlocks, collection failures, sustained high CPU, heavy blocking, or
-        /// severe memory pressure) — red.</summary>
+        /// <summary>A serious day (a critical deadlock rate, collection failures, sustained high CPU, heavy
+        /// blocking, or severe memory pressure) — red.</summary>
         Critical = 3,
     }
 
@@ -64,8 +64,22 @@ namespace PerformanceMonitor.Common
         /// <summary>True when any collection ran that day. When false the band is always <see cref="DailyHealthBand.NoData"/>.</summary>
         public bool HasData { get; init; }
 
-        /// <summary>Deadlocks captured that day. Any (&gt; 0) is Critical.</summary>
+        /// <summary>Deadlocks captured in the window. Banded as a RATE over <see cref="Window"/> through the
+        /// card band's own tiers (#3525) — see <see cref="DailyHealthBandCalculator.Classify"/>.</summary>
         public long Deadlocks { get; init; }
+
+        /// <summary>
+        /// How long the window these counts cover (#3525) — the denominator the deadlock rate is computed
+        /// over. A calendar day is 24 hours; a fleet-sweep span is previous-sweep-to-now (sub-day).
+        ///
+        /// <para><b>A measurement property, so its <c>default</c> has to be unusable</b> — the
+        /// <see cref="ServerHealthMetrics.DeadlockWindow"/> discipline, verbatim: <see cref="TimeSpan.Zero"/>
+        /// means no window was declared, and the deadlock band then declines to compute a rate rather than
+        /// dividing by zero. An undeclared (or sub-hour) window fails away from Healthy, never into
+        /// Critical: a non-zero count reads Warning, a zero count simply stays out of the deadlock
+        /// trigger.</para>
+        /// </summary>
+        public TimeSpan Window { get; init; }
 
         /// <summary>Collector runs that ended in ERROR that day. Any (&gt; 0) is Critical — a monitoring blind spot is itself serious.</summary>
         public long CollectionErrors { get; init; }
@@ -115,6 +129,16 @@ namespace PerformanceMonitor.Common
         /// <summary>Actionable alerts at or above which the day is at least Warning. Default 1 (any alert).</summary>
         public int AlertWarningCount { get; init; } = 1;
 
+        /// <summary>
+        /// The deadlock RATE tiers the day bands with (#3525) — the SAME store-backed pair the Overview
+        /// card's deadlock dot reads (#3368, V120), so a day cell and the card cannot disagree about what a
+        /// deadlock count over a window means. Defaults to the shipped pair
+        /// (<see cref="DeadlockRateThresholds.Default"/>); a Darling caller with a store hands the
+        /// <c>config_alert_settings</c> pair in, and Lite — which has no such knobs — bands on the
+        /// default, which is its store's own future value should it ever grow them.
+        /// </summary>
+        public DeadlockRateThresholds DeadlockRates { get; init; } = DeadlockRateThresholds.Default;
+
         /// <summary>The shipped defaults. Use this everywhere unless a caller has an explicit reason to override.</summary>
         public static DailyHealthThresholds Default { get; } = new();
     }
@@ -141,9 +165,23 @@ namespace PerformanceMonitor.Common
 
             var t = thresholds ?? DailyHealthThresholds.Default;
 
-            // Critical: anything that makes the day genuinely serious. Deadlocks, a monitoring gap
-            // (collection errors), severe memory pressure, sustained high CPU, or heavy blocking.
-            if (signals.Deadlocks > 0
+            /* Deadlocks band as a RATE over the window, through the SAME band the Overview card's deadlock
+               dot reads (#3525) — not the "any deadlock is Critical" count trigger this replaced, #3368's
+               un-fixed twin. Measured on the same 43-server fleet: count > 0 read 13.4% of 1-hour windows
+               Critical and 87.9% of 24-hour windows Critical, and the calendar IS a 24-hour window, so ~7 of
+               8 day cells painted red from deadlocks alone and the label stopped discriminating. Delegating
+               to DeadlockSeverity (rather than re-stating its ladder) is what keeps the day cell, the card
+               dot and the fleet sweep one banding: Critical/Warning fold into the day's matching tier, and
+               its unrateable-window arm (a sub-hour or undeclared span) is exactly the fallback this
+               classifier wants — a non-zero count reads Warning, a zero count (Unknown) stays out of the
+               deadlock trigger entirely. */
+            var deadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
+                signals.Deadlocks, signals.Window, t.DeadlockRates);
+
+            // Critical: anything that makes the day genuinely serious. A critical deadlock rate, a
+            // monitoring gap (collection errors), severe memory pressure, sustained high CPU, or heavy
+            // blocking.
+            if (deadlockSeverity == HealthSeverity.Critical
                 || signals.CollectionErrors > 0
                 || signals.MemoryCriticalEvents > 0
                 || signals.HighCpuEvents >= t.HighCpuCriticalSamples
@@ -152,9 +190,10 @@ namespace PerformanceMonitor.Common
                 return DailyHealthBand.Critical;
             }
 
-            // Warning: elevated but not critical — moderate CPU, some blocking, (non-severe) memory
-            // pressure, or any actionable alert fired that day.
-            if (signals.HighCpuEvents >= t.HighCpuWarningSamples
+            // Warning: elevated but not critical — an elevated deadlock rate, moderate CPU, some blocking,
+            // (non-severe) memory pressure, or any actionable alert fired that day.
+            if (deadlockSeverity == HealthSeverity.Warning
+                || signals.HighCpuEvents >= t.HighCpuWarningSamples
                 || signals.BlockingEvents >= t.BlockingWarningEvents
                 || signals.MemoryPressureEvents > 0
                 || signals.AlertCount >= t.AlertWarningCount)
@@ -163,6 +202,28 @@ namespace PerformanceMonitor.Common
             }
 
             return DailyHealthBand.Healthy;
+        }
+
+        /// <summary>
+        /// The window a CALENDAR-DAY cell bands its counts over: a finished day is its full 24 hours, but
+        /// the still-forming day is only the portion that has elapsed — otherwise an active storm dilutes
+        /// against hours that have not happened yet (60 deadlocks in the last hour ÷ 24h reads 2.5/hr and
+        /// Healthy while the true in-progress rate is 60/hr; the pre-#3525 any-deadlock trigger could not
+        /// under-read this way, so the clamp is part of the rate change, per its review). The reference
+        /// clock is the CALLER's: an anchored (as_of) read hands its window end so a backdated read clamps
+        /// against its own "now", and the live calendars hand the wall clock. An elapsed portion under an
+        /// hour lands in <see cref="ServerHealthClassifier.DeadlockSeverity"/>'s unrateable-window arm
+        /// (Warning-not-rate), which is exactly right for a day cell minutes old; a reference before the
+        /// day starts (a future cell) returns zero for the same reason.
+        /// </summary>
+        public static TimeSpan CalendarDayWindow(DateTime summaryDate, DateTime referenceUtc)
+        {
+            var dayStart = summaryDate.Date;
+            if (referenceUtc >= dayStart.AddDays(1))
+                return TimeSpan.FromDays(1);
+
+            var elapsed = referenceUtc - dayStart;
+            return elapsed > TimeSpan.Zero ? elapsed : TimeSpan.Zero;
         }
 
         /// <summary>A short human label for the band ("No Data" / "Healthy" / "Warning" / "Critical").</summary>
@@ -275,7 +336,7 @@ namespace PerformanceMonitor.Common
         private static List<string> BuildSignalLines(in DailyHealthSignals signals, long peakBlockMs)
         {
             var lines = new List<string>();
-            AppendCount(lines, signals.Deadlocks, "deadlock", "deadlocks");
+            AppendDeadlocks(lines, signals);
             AppendCount(lines, signals.CollectionErrors, "collection error", "collection errors");
             AppendCount(lines, signals.HighCpuEvents, "high-CPU sample", "high-CPU samples");
             AppendBlocking(lines, signals.BlockingEvents, peakBlockMs);
@@ -295,6 +356,24 @@ namespace PerformanceMonitor.Common
 
             var noun = count == 1 ? singular : plural;
             lines.Add(count.ToString("N0", CultureInfo.InvariantCulture) + " " + noun);
+        }
+
+        /// <summary>The deadlock line — like <see cref="AppendCount"/> but appends the per-hour rate the
+        /// band evaluated when the window is rateable, e.g. "120 deadlocks (5.0/hr)" — the card reason's own
+        /// format (#3368/#3525): the count is the countable fact, the rate is the banded one, and a line
+        /// that shows only the count cannot say which tier was crossed. An unrateable window prints the
+        /// count alone, which is exactly what the band had to go on.</summary>
+        private static void AppendDeadlocks(List<string> lines, in DailyHealthSignals signals)
+        {
+            if (signals.Deadlocks <= 0)
+                return;
+
+            var noun = signals.Deadlocks == 1 ? "deadlock" : "deadlocks";
+            var line = signals.Deadlocks.ToString("N0", CultureInfo.InvariantCulture) + " " + noun;
+            var rate = ServerHealthClassifier.DeadlockRatePerHour(signals.Deadlocks, signals.Window);
+            if (rate.HasValue)
+                line += " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)";
+            lines.Add(line);
         }
 
         /// <summary>The blocking line — like <see cref="AppendCount"/> but appends the day's peak block

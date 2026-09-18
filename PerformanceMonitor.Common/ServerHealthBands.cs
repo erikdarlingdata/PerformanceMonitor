@@ -697,8 +697,11 @@ namespace PerformanceMonitor.Common
         /// <para>Public because both cards REPORT the rate beside the count: a card that bands on a figure
         /// it does not show leaves an operator reading "Deadlocks 3" against a Critical dot with no way to
         /// see which number crossed which tier.</para>
+        ///
+        /// <para>The count is a <c>long</c> because the daily classifier's signals carry day-scale
+        /// roll-ups as longs (#3525); every <c>int</c> caller widens implicitly.</para>
         /// </summary>
-        public static double? DeadlockRatePerHour(int deadlockCount, TimeSpan window) =>
+        public static double? DeadlockRatePerHour(long deadlockCount, TimeSpan window) =>
             window >= ServerHealthThresholds.DeadlockRateMinimumWindow
                 ? deadlockCount / window.TotalHours
                 : null;
@@ -743,7 +746,10 @@ namespace PerformanceMonitor.Common
         /// keeps reading healthy; that reasoning is untouched here. A PostgreSQL target has no
         /// SQL-Server-deadlock reading at any rate, so it bands off none.</para></summary>
         /// <param name="deadlockCount">Deadlocks counted in the window, or null where the engine has no
-        /// source behind the reading.</param>
+        /// source behind the reading. A <c>long</c> for <see cref="DeadlockRatePerHour"/>'s reason (#3525):
+        /// the shared daily classifier routes its day-scale <c>Deadlocks</c> roll-up through this same band,
+        /// so the calendar, <c>get_daily_summary</c>, the fleet sweep and the Overview card cannot disagree
+        /// about what the same count over the same window means.</param>
         /// <param name="window">How long that count covers. Required rather than defaulted, for the reason
         /// <see cref="CpuSeverity"/>'s source is: a caller that kept the old single-argument call would
         /// compile and silently band a bare count again, which is the entire defect.</param>
@@ -751,7 +757,7 @@ namespace PerformanceMonitor.Common
         /// would let a surface band on the shipped pair while <c>get_alert_settings</c> reported the
         /// store's.</param>
         public static HealthSeverity DeadlockSeverity(
-            int? deadlockCount,
+            long? deadlockCount,
             TimeSpan window,
             DeadlockRateThresholds thresholds)
         {

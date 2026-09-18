@@ -175,12 +175,20 @@ public static class FleetSweepEngine
         FleetSweepRun? previousRun,
         IReadOnlyList<FleetSweepServerVerdict> previousVerdicts,
         IReadOnlyList<FleetSweepWatchItem> activeWatchItems,
-        FleetSweepInstrumentCounters instruments)
+        FleetSweepInstrumentCounters instruments,
+        DeadlockRateThresholds deadlockRateTiers)
     {
         ArgumentNullException.ThrowIfNull(readings);
         ArgumentNullException.ThrowIfNull(previousVerdicts);
         ArgumentNullException.ThrowIfNull(activeWatchItems);
         ArgumentNullException.ThrowIfNull(instruments);
+
+        /* #3525: the deadlock-rate tiers travel INTO the shared scorer, so the sweep's verdicts band on the
+           pair get_alert_settings reports — required rather than defaulted, the DeadlockSeverity discipline:
+           a caller that kept the old call would compile and silently band on the shipped pair while the
+           Overview card used the store's. Built once, because the banding thresholds must be one
+           configuration for the whole sweep. */
+        var banding = new DailyHealthThresholds { DeadlockRates = deadlockRateTiers };
 
         var sweepId = nowUtc.Ticks;
         var inSettleWindow = nowUtc - instruments.ServiceStartedUtc < PostRestartSettleWindow;
@@ -209,7 +217,7 @@ public static class FleetSweepEngine
             }
             else
             {
-                var classified = DailyHealthBandCalculator.Classify(reading.Signals);
+                var classified = DailyHealthBandCalculator.Classify(reading.Signals, banding);
                 band = DailyHealthBandCalculator.Label(classified);
                 reason = classified switch
                 {
@@ -246,12 +254,12 @@ public static class FleetSweepEngine
         {
             foreach (var reading in readings.Where(r => r.ReadFault is null))
             {
-                if (DailyHealthBandCalculator.Classify(reading.Signals) != DailyHealthBand.Critical)
+                if (DailyHealthBandCalculator.Classify(reading.Signals, banding) != DailyHealthBand.Critical)
                 {
                     continue;
                 }
 
-                foreach (var (family, evidence) in DecomposeCriticalTriggers(reading))
+                foreach (var (family, evidence) in DecomposeCriticalTriggers(reading, banding))
                 {
                     wouldHavePaged.Add(new FleetSweepWouldHavePagedEntry(reading.ServerId, family, evidence));
                 }
@@ -693,14 +701,23 @@ public static class FleetSweepEngine
     /// decided. Each row carries the trigger, the measured figure and the threshold it crossed, so an
     /// operator auditing a mute reads evidence rather than an assertion.
     /// </summary>
-    private static IEnumerable<(string Family, string Evidence)> DecomposeCriticalTriggers(FleetSweepServerReading reading)
+    private static IEnumerable<(string Family, string Evidence)> DecomposeCriticalTriggers(
+        FleetSweepServerReading reading, DailyHealthThresholds thresholds)
     {
-        var thresholds = DailyHealthThresholds.Default;
         var signals = reading.Signals;
 
-        if (signals.Deadlocks > 0)
+        /* #3525: the deadlock family fires on the RATE the scorer banded Critical with, never on a bare
+           count — the same DeadlockSeverity call Classify makes, so the ledger cannot page on a trigger the
+           verdict did not band. A sub-hour span's unrateable arm maxes out at Warning, so it can never
+           reach this. */
+        if (ServerHealthClassifier.DeadlockSeverity(signals.Deadlocks, signals.Window, thresholds.DeadlockRates)
+            == HealthSeverity.Critical)
         {
-            yield return (FamilyDeadlocks, Evidence("deadlocks in span", signals.Deadlocks, 1));
+            /* Critical implies a rateable window (the unrateable arm returns Warning or Unknown), so the
+               rate is present by construction. */
+            var ratePerHour = ServerHealthClassifier.DeadlockRatePerHour(signals.Deadlocks, signals.Window)!.Value;
+            yield return (FamilyDeadlocks, DeadlockRateEvidence(
+                ratePerHour, thresholds.DeadlockRates.CriticalPerHour, signals.Deadlocks));
         }
 
         if (signals.CollectionErrors > 0)
@@ -733,10 +750,30 @@ public static class FleetSweepEngine
             threshold,
         });
 
+    /// <summary>The deadlock family's evidence (#3525): the shared shape with the RATE as the value —
+    /// because the rate is what banded — plus the raw count as its own member, because the count is the
+    /// countable fact an operator reconciles against the deadlock grid.</summary>
+    private static string DeadlockRateEvidence(double ratePerHour, double criticalPerHour, long count) =>
+        JsonSerializer.Serialize(new
+        {
+            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            trigger = "deadlocks per hour over the sweep span",
+            value = ratePerHour,
+            threshold = criticalPerHour,
+            deadlock_count = count,
+        });
+
     private static string SerializeSignals(FleetSweepServerReading reading) =>
         JsonSerializer.Serialize(new
         {
             deadlocks = reading.Signals.Deadlocks,
+            /* #3525: the rate the deadlock signal banded on, beside the count it was derived from (null on
+               an unrateable span) — the card's own disclosure rule: evidence a reader can disagree with has
+               to include the figure the band read. Additive members on NEW rows only; stored verdicts are
+               immutable and their readers key on the members that were always here. */
+            deadlock_rate_per_hour = ServerHealthClassifier.DeadlockRatePerHour(
+                reading.Signals.Deadlocks, reading.Signals.Window),
+            window_minutes = reading.Signals.Window.TotalMinutes,
             collection_errors = reading.Signals.CollectionErrors,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
@@ -781,6 +818,11 @@ public static class FleetSweepEngine
                 : await FleetSweepStore.GetServerVerdictsForEngineAsync(postgres, previousRun.SweepId, cancellationToken).ConfigureAwait(false);
             var activeItems = await FleetSweepStore.GetActiveWatchItemsAsync(postgres, cancellationToken).ConfigureAwait(false);
 
+            /* #3525: the deadlock-rate tiers, read once per sweep off the fleet reader's own published SQL
+               — an engine-seam read, so a fault here loudly costs this sweep slot rather than quietly
+               banding the fleet on the shipped pair. */
+            var deadlockRateTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken).ConfigureAwait(false);
+
             var nowUtc = DateTime.UtcNow;
             var spanStartUtc = ComputeSpanStart(nowUtc, interval, previousRun);
 
@@ -796,7 +838,7 @@ public static class FleetSweepEngine
 
             var composition = Compose(
                 nowUtc, spanStartUtc, alertsEnabled, servers.Count, readings,
-                previousRun, previousVerdicts, activeItems, ReadInstrumentCounters());
+                previousRun, previousVerdicts, activeItems, ReadInstrumentCounters(), deadlockRateTiers);
 
             await FleetSweepStore.RecordSweepAsync(
                 postgres, composition.Run, composition.Verdicts,
@@ -850,6 +892,10 @@ public static class FleetSweepEngine
                 MemoryPressureEvents = rows.Sum(r => r.MemoryPressureEvents),
                 MemoryCriticalEvents = rows.Sum(r => r.MemoryCriticalEvents),
                 AlertCount = rows.Sum(r => r.AlertCount),
+                /* #3525: the sweep's own span, NOT a calendar day — the denominator the deadlock rate
+                   bands on. At the floor cadence (15 min) this is sub-hour and the band's unrateable arm
+                   applies: deadlocks read Warning, never a rate-multiplied Critical. */
+                Window = spanEndUtc - spanStartUtc,
             };
 
             var peakBlock = rows.Count == 0 ? 0L : rows.Max(r => r.MaxBlockDurationMs);
@@ -864,6 +910,24 @@ public static class FleetSweepEngine
         {
             return new FleetSweepServerReading(serverId, serverName, default, 0L, ex.Message);
         }
+    }
+
+    /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120) — the
+    /// fleet reader's read, off its own published SQL, hoisted here once per sweep (#3525). A store with
+    /// no row yet bands on the shipped pair, which is what such a store would seed anyway; values come
+    /// back RAW and <see cref="DeadlockRateThresholds"/> clamps on read.</summary>
+    private static async Task<DeadlockRateThresholds> ReadDeadlockRateThresholdsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(DarlingFleetReader.FleetDeadlockRateThresholdSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1));
+        }
+
+        return DeadlockRateThresholds.Default;
     }
 
     /// <summary>The in-process instrument counters, read at compose time: the process-global alert

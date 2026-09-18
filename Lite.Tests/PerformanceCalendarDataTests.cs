@@ -114,11 +114,20 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
     [Fact]
     public async Task GetDailySummaryRange_BucketsEachDay_AndBandsViaSharedCalculator()
     {
-        // 07-02 Critical: a deadlock, plus waits (CXPACKET should win the top-wait ranking).
+        // 07-02 Healthy despite one deadlock (#3525): deadlocks band as a RATE over the 24-hour day
+        // through the card band's tiers, and 1/day is 0.04/hr — far under the 5/hr Warning tier. The
+        // count still lands in the row (the drill and tooltip keep it); waits decide the top-wait ranking
+        // (CXPACKET should win) but never the band.
         await SeedCollectionRunAsync(Day(2));
         await SeedWaitAsync(Day(2), "CXPACKET", 100_000);
         await SeedWaitAsync(Day(2), "PAGEIOLATCH_SH", 50_000);
         await SeedDeadlockAsync(Day(2));
+
+        // 07-03 Critical: a deadlock STORM — 480 over the day is 20/hr, the Critical tier, proving the
+        // rate path end-to-end through the live aggregate rather than through a hand-built signals struct.
+        await SeedCollectionRunAsync(Day(3));
+        for (var i = 0; i < 480; i++)
+            await SeedDeadlockAsync(Day(3));
 
         // 07-05 Critical: 6 sustained high-CPU samples (>= threshold).
         await SeedCollectionRunAsync(Day(5));
@@ -157,17 +166,20 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
         var rows = await _dataService.GetDailySummaryRangeAsync(ServerId, MonthStart, MonthEnd);
         var byDate = rows.ToDictionary(r => r.SummaryDate.Date);
 
-        // Exactly the eight seeded days appear; unseeded days are absent (calendar renders them No-Data).
-        Assert.Equal(8, rows.Count);
+        // Exactly the nine seeded days appear; unseeded days are absent (calendar renders them No-Data).
+        Assert.Equal(9, rows.Count);
         Assert.False(byDate.ContainsKey(Day(20)));
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(22)].HealthBand);
         Assert.Equal(1, byDate[Day(22)].AlertCount);
 
-        Assert.Equal(DailyHealthBand.Critical, byDate[Day(2)].HealthBand);
+        Assert.Equal(DailyHealthBand.Healthy, byDate[Day(2)].HealthBand);
         Assert.Equal(1, byDate[Day(2)].DeadlockCount);
         Assert.Equal("CXPACKET", byDate[Day(2)].TopWaitType);
         Assert.Equal(150m, byDate[Day(2)].TotalWaitTimeSec);
+
+        Assert.Equal(DailyHealthBand.Critical, byDate[Day(3)].HealthBand);
+        Assert.Equal(480, byDate[Day(3)].DeadlockCount);
 
         Assert.Equal(DailyHealthBand.Critical, byDate[Day(5)].HealthBand);
         Assert.Equal(6, byDate[Day(5)].HighCpuEvents);
@@ -216,8 +228,11 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
         var seeded = await _dataService.GetDailySummaryAsync(ServerId, Day(2));
         Assert.NotNull(seeded);
         Assert.True(seeded!.HasData);
-        Assert.Equal(DailyHealthBand.Critical, seeded.HealthBand);
-        Assert.Equal("Critical", seeded.OverallHealth);
+        /* One deadlock in a day is 0.04/hr — Healthy under the rate band (#3525); the count still rides
+           the row, which is what distinguishes this from the No-Data arm below. */
+        Assert.Equal(1, seeded.DeadlockCount);
+        Assert.Equal(DailyHealthBand.Healthy, seeded.HealthBand);
+        Assert.Equal("Healthy", seeded.OverallHealth);
 
         var empty = await _dataService.GetDailySummaryAsync(ServerId, Day(25));
         Assert.NotNull(empty);

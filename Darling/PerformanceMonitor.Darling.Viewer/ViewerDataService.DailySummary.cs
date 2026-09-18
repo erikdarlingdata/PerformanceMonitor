@@ -57,6 +57,15 @@ public sealed partial class ViewerDataService
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
+        /* #3525: the deadlock-rate tiers the day band evaluates, read ONCE per range rather than per row —
+           the fleet roll-up's own hoist argument: a settings save mid-read must not band some days on the
+           old pair and the rest on the new one. One read per month navigation, off the Overview's existing
+           settings-row read. */
+        var banding = new DailyHealthThresholds
+        {
+            DeadlockRates = await GetDeadlockRateThresholdsAsync(cancellationToken),
+        };
+
         await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -67,7 +76,7 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            results.Add(ReadDailySummaryRow(reader));
+            results.Add(ReadDailySummaryRow(reader, banding));
         }
 
         return results;
@@ -87,7 +96,7 @@ public sealed partial class ViewerDataService
             : new DailySummaryRow { SummaryDate = targetDate, HasData = false, HealthBand = DailyHealthBand.NoData };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(DbDataReader reader)
+    private static DailySummaryRow ReadDailySummaryRow(DbDataReader reader, DailyHealthThresholds banding)
     {
         var row = new DailySummaryRow
         {
@@ -105,7 +114,7 @@ public sealed partial class ViewerDataService
             MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
             HasData = true,
         };
-        row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals());
+        row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals(), banding);
         return row;
     }
 }
@@ -117,6 +126,10 @@ public sealed partial class ViewerDataService
 public class DailySummaryRow
 {
     public DateTime SummaryDate { get; set; }
+
+    /// <summary>The clock the still-forming day's window clamps against (#3525 review). The viewer's
+    /// calendar reads are always live, so the wall-clock default is the correct reference.</summary>
+    public DateTime ReferenceUtc { get; set; } = DateTime.UtcNow;
     public decimal TotalWaitTimeSec { get; set; }
     public string TopWaitType { get; set; } = "";
     public long UniqueQueries { get; set; }
@@ -160,5 +173,9 @@ public class DailySummaryRow
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,
+        /* #3525: a finished calendar day bands over its full 24 hours; the still-forming day clamps to
+           its elapsed portion so an active storm is not diluted by hours that have not happened yet
+           (review finding on #3525). The viewer's reads are live, so the wall clock is the reference. */
+        Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc),
     };
 }

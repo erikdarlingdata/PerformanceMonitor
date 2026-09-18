@@ -150,7 +150,7 @@ ORDER BY s.d";
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (dates normalized to their date component). Powers the Performance Calendar month grid.
     /// </summary>
-    public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(int serverId, DateTime fromDate, DateTime toDate)
+    public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(int serverId, DateTime fromDate, DateTime toDate, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetDailySummaryRangeAsync", "daily summary range aggregation");
         using var connection = await OpenConnectionAsync();
@@ -161,11 +161,16 @@ ORDER BY s.d";
         command.Parameters.Add(new DuckDBParameter { Value = fromDate.Date });
         command.Parameters.Add(new DuckDBParameter { Value = toDate.Date });
 
+        /* #3525 review: the still-forming day's window clamps against the read's own clock — the anchored
+           MCP read hands its resolved window end so a backdated as_of never clamps against the process
+           clock; the live calendar read leaves this null. */
+        var referenceUtc = asOfUtc ?? DateTime.UtcNow;
+
         var results = new List<DailySummaryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add(ReadDailySummaryRow(reader));
+            results.Add(ReadDailySummaryRow(reader, referenceUtc));
         }
 
         return results;
@@ -185,10 +190,11 @@ ORDER BY s.d";
             : new DailySummaryRow { SummaryDate = targetDate, HasData = false, HealthBand = DailyHealthBand.NoData };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader)
+    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc)
     {
         var row = new DailySummaryRow
         {
+            ReferenceUtc = referenceUtc,
             SummaryDate = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
             TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
             TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
@@ -211,6 +217,11 @@ ORDER BY s.d";
 public class DailySummaryRow
 {
     public DateTime SummaryDate { get; set; }
+
+    /// <summary>The clock the still-forming day's window clamps against (#3525 review): the anchored
+    /// MCP range read hands its resolved window end so a backdated as_of clamps against its own "now";
+    /// the live calendar read leaves the wall-clock default.</summary>
+    public DateTime ReferenceUtc { get; set; } = DateTime.UtcNow;
     public decimal TotalWaitTimeSec { get; set; }
     public string TopWaitType { get; set; } = "";
     public long UniqueQueries { get; set; }
@@ -254,5 +265,9 @@ public class DailySummaryRow
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,
+        /* #3525: a finished calendar day bands over its full 24 hours; the still-forming day clamps to
+           its elapsed portion so an active storm is not diluted by hours that have not happened yet
+           (review finding on #3525). Anchored MCP reads hand their window end; the calendar is live. */
+        Window = DailyHealthBandCalculator.CalendarDayWindow(SummaryDate, ReferenceUtc),
     };
 }
