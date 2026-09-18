@@ -313,16 +313,32 @@ public static class ForcePlanBotPolicy
     /// <summary>The blocker names, in order, for <see cref="Evaluate"/>'s <c>policyBlockers</c> — and
     /// the journal's <c>reasons</c> column. The evidence travels separately (<see cref="Evidence"/>) so
     /// the names stay the comma-joinable consumer API they have always been.</summary>
-    public static IReadOnlyList<string> Names(IReadOnlyList<ForcePlanBlocker> blockers) =>
-        blockers is { Count: > 0 } ? blockers.Select(b => b.Name).ToList() : Array.Empty<string>();
+    public static IReadOnlyList<string> Names(IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        /* Block-bodied, not an expression body: the T-SQL convention guard's member walk mis-reads the
+           range of an expression-bodied member whose body holds a `{ }` property pattern (the #3607
+           precedent), and a member the walk reads short is a member no census can see into. */
+        if (blockers is not { Count: > 0 })
+        {
+            return Array.Empty<string>();
+        }
+
+        return blockers.Select(b => b.Name).ToList();
+    }
 
     /// <summary>The journal's <c>detail</c> for a blocked decision: one line per blocker,
     /// <c>name: evidence</c>, so the row can be read against the snapshot it was judged on without a
     /// second query. Null when there is nothing to quote.</summary>
-    public static string? Evidence(IReadOnlyList<ForcePlanBlocker> blockers) =>
-        blockers is { Count: > 0 }
-            ? string.Join("\n", blockers.Select(b => $"{b.Name}: {b.Evidence}"))
-            : null;
+    public static string? Evidence(IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        /* Block-bodied for the same reason as Names. */
+        if (blockers is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        return string.Join("\n", blockers.Select(b => $"{b.Name}: {b.Evidence}"));
+    }
 
     public static ForcePlanBotDecision Evaluate(
         ForcePlanTarget target,
