@@ -366,23 +366,19 @@ WITH clean AS (
 
             /* QUALIFY rewrite 1 of 4 — cumulative counter, restart exclusion.
                Excludes samples where the delta drops to 0 when the prior sample was > 1000
-               (restart signature for cumulative counters). Lite's DuckDB original:
+               (restart signature for cumulative counters). Lite's DuckDB original (#3527 unit:
+               v is delta / the row's measured sample_interval_seconds — a per-second rate):
 
-                   SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-                          EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-                          AVG(delta_cntr_value) AS mean_val,
-                          STDDEV_SAMP(delta_cntr_value) AS stddev_val,
-                          COUNT(*) AS sample_count
-                   FROM (
-                       SELECT collection_time, delta_cntr_value
+                   WITH clean AS (
+                       SELECT collection_time, delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) AS v
                        FROM v_perfmon_stats
                        WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
                        AND   counter_name = 'Batch Requests/sec'
                        AND   delta_cntr_value >= 0
+                       AND   sample_interval_seconds > 0
                        QUALIFY NOT (delta_cntr_value = 0
                            AND COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) > 1000)
                    )
-                   GROUP BY hour_of_day, day_of_week
 
                QUALIFY evaluates AFTER window computation: LAG runs over every WHERE-surviving
                row (including rows QUALIFY itself is about to drop), THEN the predicate prunes.
@@ -390,18 +386,32 @@ WITH clean AS (
                CTE and applies the IDENTICAL predicate in the outer WHERE — window-before-filter
                is preserved, so only the FIRST zero after a >1000 sample is dropped, and a zero
                following another zero keeps LAG = 0 and SURVIVES (genuine idle, not a restart).
-               Row selection is exactly the original's. */
+               Row selection is exactly the original's.
+
+               #3527 divisor: this arm reads the perfmon_baseline supply (the #1757 CAGG / fallback
+               view), which materializes only (collection_time, delta_cntr_value) — it does NOT carry
+               sample_interval_seconds, and a continuous aggregate cannot grow a column without a
+               drop-and-rebuild that would forfeit the 31 days of baseline history the 4-day raw tier
+               can no longer refill. So the interval is DERIVED from the gap between consecutive
+               collections — LAG(collection_time) over the collapsed series, byte-for-byte the
+               WaitMsPerSec arm's idiom (see CreateWaitStatsBaselineSql's note: the provider computes
+               interval_sec, nothing extra is stored). Same requests/sec unit as Lite and as the
+               detector's window read; the first row of the window has no prior (interval NULL) and is
+               skipped, exactly like WaitMsPerSec. The ::DOUBLE PRECISION cast is the io-arm rule:
+               STDDEV_SAMP over numeric can overflow System.Decimal at materialization. */
             MetricNames.BatchRequests => @"
 WITH windowed AS (
     SELECT collection_time, delta_cntr_value,
-           COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta
+           COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta,
+           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
     FROM perfmon_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 clean AS (
-    SELECT collection_time, delta_cntr_value AS v
+    SELECT collection_time, delta_cntr_value::DOUBLE PRECISION / interval_sec AS v
     FROM windowed
     WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)
+    AND   interval_sec > 0
 )," + RobustTierScaffold,
 
             /* QUALIFY rewrite 2 of 4 — cumulative counter, multiple rows per collection (per

@@ -341,6 +341,126 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
         }
     }
 
+    /* ---------------- #3527: perfmon facts are per-second rates ---------------- */
+
+    /// <summary>
+    /// #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — read raw, the
+    /// PERFMON_*_SEC facts overstate by the cadence (60x at 60s, 300x at 5min). The query must
+    /// select the row's measured sample_interval_seconds (#2234) for the division and filter
+    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so rn = 1 lands on
+    /// the newest row a rate can honestly be derived from.
+    /// </summary>
+    [Fact]
+    public void PerfmonSql_SelectsTheMeasuredInterval_AndFiltersUnknowableRows()
+    {
+        var sql = PgFactCollector.PerfmonSql;
+
+        Assert.Contains("delta_cntr_value, sample_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds > 0", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3527 live fixture: a 'Batch Requests/sec' row with delta 6000 over a measured 60s interval
+    /// must emit PERFMON_BATCH_REQ_SEC = 100 (not 6000), with the raw delta and the divisor in the
+    /// metadata. A NEWER interval-0 row (unknowable delta) must be skipped — the fact still comes
+    /// from the older usable row — and a counter with ONLY interval-0 rows emits no fact at all,
+    /// never a fact of 0.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_PerfmonFacts_DivideDeltaByMeasuredInterval_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live perfmon fact test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int perfmonServerId = TestServerId - 2; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM perfmon_stats WHERE server_id = {perfmonServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var collector = new PgFactCollector(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowStart = windowEnd.AddHours(-1);
+
+            async Task PlantAsync(long id, DateTime time, string counter, long delta, int intervalSeconds)
+            {
+                using var plant = new NpgsqlCommand(@"
+INSERT INTO perfmon_stats
+    (collection_id, collection_time, server_id, server_name,
+     object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
+                plant.Parameters.AddWithValue(id);
+                plant.Parameters.AddWithValue(time);
+                plant.Parameters.AddWithValue(perfmonServerId);
+                plant.Parameters.AddWithValue("perfmon-per-second-e2e");
+                plant.Parameters.AddWithValue("SQLServer:SQL Statistics");
+                plant.Parameters.AddWithValue(counter);
+                plant.Parameters.AddWithValue("");
+                plant.Parameters.AddWithValue(delta * 2);
+                plant.Parameters.AddWithValue(delta);
+                plant.Parameters.AddWithValue(intervalSeconds);
+                await plant.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Batch requests: an older USABLE row (delta 6000 / 60s = 100/sec), then a NEWER
+               interval-0 row that must not become the fact. */
+            await PlantAsync(1, windowStart.AddMinutes(20), "Batch Requests/sec", 6000, 60);
+            await PlantAsync(2, windowStart.AddMinutes(25), "Batch Requests/sec", 0, 0);
+
+            /* Compilations: one usable row, 300 / 60s = 5/sec. */
+            await PlantAsync(3, windowStart.AddMinutes(20), "SQL Compilations/sec", 300, 60);
+
+            /* Re-compilations: ONLY an interval-0 row — no rate is knowable, so no fact. */
+            await PlantAsync(4, windowStart.AddMinutes(20), "SQL Re-Compilations/sec", 0, 0);
+
+            var context = new AnalysisContext
+            {
+                ServerId = perfmonServerId,
+                ServerName = "perfmon-per-second-e2e",
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var facts = await collector.CollectFactsAsync(context);
+
+            var batch = Assert.Single(facts, f => f.Key == "PERFMON_BATCH_REQ_SEC");
+            Assert.Equal(100.0, batch.Value, precision: 10);
+            Assert.Equal(6000, batch.Metadata["delta_cntr_value"]);
+            Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+
+            var compilations = Assert.Single(facts, f => f.Key == "PERFMON_COMPILATIONS_SEC");
+            Assert.Equal(5.0, compilations.Value, precision: 10);
+
+            Assert.DoesNotContain(facts, f => f.Key == "PERFMON_RECOMPILATIONS_SEC");
+            Assert.Equal(2, facts.Count);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand(
+                    $"DELETE FROM perfmon_stats WHERE server_id = {perfmonServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
