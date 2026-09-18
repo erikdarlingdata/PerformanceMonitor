@@ -28,10 +28,10 @@
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{Binding SeverityGlyph}"
                                                FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                               Foreground="#1A1A1A" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource StatusForegroundBrush}" VerticalAlignment="Center"
                                                Margin="0,0,4,0"/>
                                     <TextBlock Text="{Binding SeverityLabel}" FontWeight="Bold"
-                                               FontSize="11" Foreground="#1A1A1A"
+                                               FontSize="11" Foreground="{DynamicResource StatusForegroundBrush}"
                                                VerticalAlignment="Center"/>
                                 </StackPanel>
                             </Border>

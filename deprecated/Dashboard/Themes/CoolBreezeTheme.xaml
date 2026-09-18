@@ -40,7 +40,8 @@
 
     <!-- Status Colors (Material Design 700 — visible against light backgrounds) -->
     <Color x:Key="SuccessColor">#2E7D32</Color>
-    <Color x:Key="WarningColor">#F57F17</Color>
+    <!-- #3609 (Lite parity): was #F57F17, 2.09:1 on BackgroundColor. Now 4.82:1 / 5.51:1 on the card. -->
+    <Color x:Key="WarningColor">#9E4A0B</Color>
     <Color x:Key="ErrorColor">#C62828</Color>
     <Color x:Key="InfoColor">#1E6FA8</Color>
 
@@ -90,6 +91,9 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#455A6E"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <!-- #3609 (Lite parity): ink for text ON a status fill — the Recommendations severity badge. White is
+         6.11:1 on WarningColor, 5.39:1 on InfoColor, 5.13:1 on SuccessColor, 5.62:1 on ErrorColor. -->
+    <SolidColorBrush x:Key="StatusForegroundBrush" Color="#FFFFFF"/>
 
     <!-- ============================================ -->
     <!-- Window Style                                 -->

@@ -43,7 +43,13 @@
 
     <!-- Status Colors (Material Design 700 — visible against light backgrounds) -->
     <Color x:Key="SuccessColor">#2E7D32</Color>
-    <Color x:Key="WarningColor">#F57F17</Color>
+    <!-- #3609: was #F57F17 — 2.09:1 on BackgroundColor and 2.39:1 on the BackgroundLightColor card, the worst
+         status pair in any theme, and WarningBrush is TEXT in places (the viewer's fleet counts, seat state,
+         coverage note). This page is a shade darker than Light's, so the amber goes one step deeper than
+         Light's #AE4F08 to clear the same bar: 4.82:1 on BackgroundColor, 5.51:1 on BackgroundLightColor;
+         4.41:1 on BackgroundDarkColor and 4.08:1 on AlternatingRowColor, where it is only ever a marker
+         (3:1). Still an amber, not a brown. Text ON it takes StatusForegroundBrush (below). -->
+    <Color x:Key="WarningColor">#9E4A0B</Color>
     <Color x:Key="ErrorColor">#C62828</Color>
     <Color x:Key="InfoColor">#1E6FA8</Color>
 
@@ -95,6 +101,13 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#455A6E"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <!-- Ink for text and glyphs that sit ON a status fill — the Recommendations severity badge, the viewer's
+         alert badges (#3609). The same structural answer #3577 gave the accent: a status color has to be dark
+         enough to be read AGAINST the page and light enough to be read UNDER dark text, and no single amber
+         does both. So the fill is tuned for the page and the ink is a theme key. White — already the ink on
+         this theme's accent — measures 6.11:1 on WarningColor, 5.39:1 on InfoColor, 5.13:1 on SuccessColor,
+         5.62:1 on ErrorColor; the badge's old hard-coded #1A1A1A was 3.10:1 on ErrorColor. -->
+    <SolidColorBrush x:Key="StatusForegroundBrush" Color="#FFFFFF"/>
 
     <!-- Row-mark tints for "Mark Done / To Do / Do Not Do" (#2645), painted by DataGridRowMarks. Theme keys
          since #3577 so Dark can carry its own values; these are the #2645 originals unchanged (20% of the

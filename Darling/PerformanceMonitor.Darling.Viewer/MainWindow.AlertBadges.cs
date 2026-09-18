@@ -97,7 +97,6 @@ public partial class MainWindow
             Cursor = Cursors.Hand,
             Child = new TextBlock
             {
-                Foreground = Brushes.White,
                 FontSize = 9,
                 FontWeight = FontWeights.Bold,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -105,6 +104,11 @@ public partial class MainWindow
             }
         };
         badge.SetResourceReference(Border.BackgroundProperty, "WarningBrush");
+        // #3609: the count's ink is the theme's StatusForegroundBrush, not a hard-coded White. The fill below is
+        // WarningBrush or ErrorBrush, and White measured 1.41:1 on Dark's amber (#FFD54F) - an unreadable count -
+        // while the light themes' new, deeper amber wants white. A DynamicResource reference, like the fill, so
+        // a theme switch re-inks the badge along with it.
+        ((TextBlock)badge.Child).SetResourceReference(TextBlock.ForegroundProperty, "StatusForegroundBrush");
 
         var acknowledgeItem = new MenuItem
         {
