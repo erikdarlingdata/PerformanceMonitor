@@ -32,8 +32,15 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
     private const string ServerName = "CalTestServer";
     private long _nextId = -1;
 
-    private static readonly DateTime MonthStart = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
-    private static readonly DateTime MonthEnd = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+    /* The fixture month is the calendar month TWO months before the current one, not a fixed month
+       (#3541 A9): the daily summary now judges each day against the store's retention horizon (Lite:
+       RetentionService.ArchiveRetentionMonths back from the wall clock), and a fixed July 2026 would have
+       drifted past that horizon within weeks of landing, turning every band below into No Data on a date
+       nobody changed. Two months back is always inside a three-month horizon and always a finished month,
+       so the still-forming-day clamp never applies; the day-number comments below ("07-10") read as
+       "day 10 of the fixture month". */
+    private static readonly DateTime MonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-2);
+    private static readonly DateTime MonthEnd = MonthStart.AddMonths(1);
 
     public PerformanceCalendarDataTests(SharedDuckDbFixture fixture)
     {
@@ -109,7 +116,7 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
             "INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, dismissed) VALUES ($1,$2,$3,$4,1.0,1.0,$5)",
             day.AddHours(1), ServerId, ServerName, metric, dismissed);
 
-    private static DateTime Day(int d) => new(2026, 7, d, 0, 0, 0, DateTimeKind.Utc);
+    private static DateTime Day(int d) => MonthStart.AddDays(d - 1);
 
     [Fact]
     public async Task GetDailySummaryRange_BucketsEachDay_AndBandsViaSharedCalculator()

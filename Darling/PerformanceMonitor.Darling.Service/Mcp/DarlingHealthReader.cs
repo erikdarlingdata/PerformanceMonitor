@@ -234,11 +234,12 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         public DailyHealthSignals ToSignals() => new()
         {
-            /* #3541 A9: a purged, past-horizon or run-record-less day is a NoData day to the band, whatever the spine still
-               holds for it — the COALESCEd zeros it carries are absences, and measured-zero-Healthy was the
+            /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still
+               holds for it — the COALESCEd zeros it carries may be absences, and measured-zero-Healthy was the
                lie. HasData alone said "a spine row exists", which the collection log's longer horizon made
-               true for a whole second month of purged signals. */
-            HasData = HasData && DataState == DailySummaryDataState.Collected,
+               true for a whole second month of purged signals. Inside retention (Collected, NoRunRecord) a
+               zero IS a measurement and the band stands. */
+            HasData = HasData && DataState is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
             Deadlocks = DeadlockCount,
             CollectionErrors = CollectionErrors,
             CollectionRuns = CollectionRuns,
@@ -271,13 +272,6 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// </summary>
     public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
-    /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
-    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
-    ///
-    /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
-    /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
-    /// report different query counts for the same day and there would be no way to tell which was right.</para>
-    /// </summary>
     /// <summary>The range read's rows plus the horizon they were judged against (#3541 A9).</summary>
     /// <param name="Rows">One row per day the spine holds, oldest first, each stamped with its <see cref="DailySummaryReadRow.DataState"/>.</param>
     /// <param name="RetentionHorizon">The oldest UTC day every signal source still holds — <see cref="DailySummaryRetention.HorizonFor"/>.</param>
@@ -358,6 +352,16 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         return overrides;
     }
 
+    /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
+    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
+    ///
+    /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
+    /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
+    /// report different query counts for the same day and there would be no way to tell which was right.</para>
+    ///
+    /// <para>#3541 A9: returns the rows AND the retention horizon they were judged against — see
+    /// <see cref="DailySummaryRangeReadResult"/> and the horizon note in the body.</para>
+    /// </summary>
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
         DateTime? referenceUtc = null, CancellationToken cancellationToken = default)

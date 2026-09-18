@@ -615,7 +615,7 @@ public class DailySummaryRetentionTests
     [InlineData("2026-08-19", 1, 0, DailySummaryDataState.Collected)]       /* the horizon day itself is held */
     [InlineData("2026-09-01", 1_440, 7, DailySummaryDataState.Collected)]
     [InlineData("2026-09-01", 1_440, 0, DailySummaryDataState.Collected)]   /* inside retention a quiet day needs no signal rows to be collected */
-    [InlineData("2026-09-01", 0, 3, DailySummaryDataState.NoRunRecord)]     /* inside retention, signals but no run recorded */
+    [InlineData("2026-09-01", 0, 3, DailySummaryDataState.NoRunRecord)]     /* inside retention, signals but no run recorded — a disclosure, the band stands */
     public void TheState_IsDecidedByTheHorizonAndPresenceFirst_ThenByTheRunCount(string day, long runs, int present, DailySummaryDataState expected)
     {
         var date = DateTime.ParseExact(day, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
@@ -653,19 +653,34 @@ public class DailySummaryRetentionTests
         Assert.StartsWith("PAST HORIZON", past, StringComparison.Ordinal);
         Assert.Contains("3 of 7 signal sources", past, StringComparison.Ordinal);
         Assert.Equal(7, DailySummaryRetention.SignalSourceCount);
-        Assert.StartsWith("NO RUN RECORD", DailySummaryRetention.Note(DailySummaryDataState.NoRunRecord, Horizon), StringComparison.Ordinal);
+        var noRun = DailySummaryRetention.Note(DailySummaryDataState.NoRunRecord, Horizon)!;
+        Assert.StartsWith("NO RUN RECORD", noRun, StringComparison.Ordinal);
+        Assert.Contains("the band stands", noRun, StringComparison.Ordinal);
     }
 
     /// <summary>The band's own contract, end to end: a signals projection with <c>HasData</c> folded from a
-    /// non-collected state is No Data even under a Critical count — the calendar's grey, never green or red.</summary>
+    /// past-horizon state is No Data even under a Critical count — the calendar's grey, never green or red.
+    /// The two inside-retention states keep the band, because inside retention a zero is a measurement.</summary>
     [Fact]
-    public void ANonCollectedDay_BandsNoData_WhateverItsCounts()
+    public void APastHorizonDay_BandsNoData_WhateverItsCounts_AndAnInsideRetentionDayKeepsItsBand()
     {
-        foreach (var state in new[] { DailySummaryDataState.Purged, DailySummaryDataState.PastHorizon, DailySummaryDataState.NoRunRecord })
+        foreach (var state in new[] { DailySummaryDataState.Collected, DailySummaryDataState.NoRunRecord })
         {
             var signals = new DailyHealthSignals
             {
-                HasData = state == DailySummaryDataState.Collected,
+                HasData = state is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                Deadlocks = 480,
+                CollectionRuns = 1_440,
+                Window = TimeSpan.FromDays(1),
+            };
+            Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(signals));
+        }
+
+        foreach (var state in new[] { DailySummaryDataState.Purged, DailySummaryDataState.PastHorizon })
+        {
+            var signals = new DailyHealthSignals
+            {
+                HasData = state is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
                 Deadlocks = 480,
                 CollectionRuns = 1_440,
                 Window = TimeSpan.FromDays(1),

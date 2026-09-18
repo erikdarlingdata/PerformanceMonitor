@@ -302,7 +302,7 @@ public class DailySummaryRow
     public long MaxBlockDurationMs { get; set; }
 
     /// <summary>True when the spine holds the day at all. Together with <see cref="DataState"/> this decides
-    /// the band's HasData: a held day that is purged, past the horizon or without a run record renders the calendar cell No-Data (grey)
+    /// the band's HasData: a held day that is purged or past the horizon renders the calendar cell No-Data (grey)
     /// exactly as an absent day does (#3541 A9).</summary>
     public bool HasData { get; set; }
 
@@ -336,9 +336,10 @@ public class DailySummaryRow
     /// <summary>Projects this row's counts into the shared banding input.</summary>
     public DailyHealthSignals ToSignals() => new()
     {
-        /* #3541 A9: a purged, past-horizon or run-record-less day is a NoData day to the band, whatever the spine still holds
-           for it — its COALESCEd zeros are absences, and measured-zero-Healthy was the lie. */
-        HasData = HasData && DataState == DailySummaryDataState.Collected,
+        /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still holds
+           for it — its COALESCEd zeros may be absences, and measured-zero-Healthy was the lie. Inside retention
+           (Collected, NoRunRecord) a zero IS a measurement and the band stands. */
+        HasData = HasData && DataState is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
         Deadlocks = DeadlockCount,
         CollectionErrors = CollectionErrors,
         CollectionRuns = CollectionRuns,

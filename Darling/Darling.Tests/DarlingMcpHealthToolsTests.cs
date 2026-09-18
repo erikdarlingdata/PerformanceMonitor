@@ -212,7 +212,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     /// is the ONLY thing that moved the verdict.
     /// </summary>
     [Fact]
-    public void DailySummaryRow_PurgedOrUncollected_IsNoData_NeverHealthy()
+    public void DailySummaryRow_PurgedOrPastHorizon_IsNoData_NeverHealthy()
     {
         var date = new DateTime(2026, 7, 9, 0, 0, 0, DateTimeKind.Unspecified);
         var shell = new Reader.DailySummaryReadRow(date, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: true) { CollectionRuns = 1_440 };
@@ -221,7 +221,10 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.Purged }).HealthBand);
         Assert.Equal("No Data", (shell with { DataState = DailySummaryDataState.Purged }).OverallHealth);
         Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.PastHorizon }).HealthBand);
-        Assert.Equal(DailyHealthBand.NoData, (shell with { DataState = DailySummaryDataState.NoRunRecord }).HealthBand);
+        /* Inside retention a zero is a measurement: a day with no run record keeps its band (an alert-only
+           day is Warning, as PerformanceCalendarDataTests has always pinned on Lite), with the caveat on the row. */
+        Assert.Equal(DailyHealthBand.Healthy, (shell with { DataState = DailySummaryDataState.NoRunRecord, CollectionRuns = 0 }).HealthBand);
+        Assert.Equal(DailyHealthBand.Warning, (shell with { DataState = DailySummaryDataState.NoRunRecord, CollectionRuns = 0, AlertCount = 1 }).HealthBand);
 
         /* A purged day with a real, surviving alert is STILL No Data: the composite band needs every input,
            and Warning-on-alerts-alone would understate a day whose deadlocks are gone. */
@@ -443,7 +446,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                THIS row — a fixed day two months back is before the store's 30-day retention horizon, and a
                deadlock row surviving there means the purge has not reached the day (data_state
                past_horizon: the row is real, the zeros beside it may not be, so No Data rather than a green
-               cell). A day with no run record inside the horizon would read no_run_record, likewise No Data. */
+               cell). A day with no run record INSIDE the horizon reads no_run_record and keeps its band. */
             Assert.Contains("\"deadlock_count\":1", onItsOwnDay, StringComparison.Ordinal);
             var judged = JsonDocument.Parse(onItsOwnDay).RootElement;
             Assert.Equal("past_horizon", judged.GetProperty("data_state").GetString());

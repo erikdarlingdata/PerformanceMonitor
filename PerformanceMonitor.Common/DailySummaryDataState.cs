@@ -40,11 +40,13 @@ namespace PerformanceMonitor.Common
         /// gone, so its zeros are absences and its band is <see cref="DailyHealthBand.NoData"/>.</summary>
         Purged = 1,
 
-        /// <summary>The day has NO collector run recorded for it: the spine has the day from a signal row
-        /// alone, so nothing records that collection happened and the error share has no denominator.
-        /// Banded <see cref="DailyHealthBand.NoData"/>; the counts are shown as read. (Named for the fact,
-        /// not for a claim: a deadlock row on such a day IS evidence of collection — what is missing is the
-        /// record.)</summary>
+        /// <summary>The day is inside retention but has NO collector run recorded for it: the spine has the
+        /// day from a signal row or an alert alone. Inside retention every zero is a measurement (the tables
+        /// hold whatever the day had), so the band STANDS — an alert-only day is Warning, as it always was —
+        /// and the state is a disclosure: the collection-error share has no denominator (the band's own arm
+        /// then fails away from Healthy on a non-zero error count), and nothing records that the day was
+        /// fully collected. Named for the fact, not for a claim: a deadlock row on such a day IS evidence of
+        /// collection — what is missing is the record.</summary>
         NoRunRecord = 2,
 
         /// <summary>The day is before the retention horizon yet SOME signal source still holds rows for it —
@@ -70,7 +72,9 @@ namespace PerformanceMonitor.Common
         public const int SignalSourceCount = 7;
 
         /// <summary>
-        /// The state of one returned day from the three facts that decide it.
+        /// The state of one returned day from the three facts that decide it. Only the two past-horizon states
+        /// withhold the band: inside retention a zero is a measurement, and a day the alert log alone names is
+        /// still a day an alert fired on.
         ///
         /// <para>The horizon test comes FIRST, so a purged day with a surviving run record (the collection
         /// log outlives the signals by design — its horizon is twice theirs so a failure's evidence outlives
@@ -150,7 +154,7 @@ namespace PerformanceMonitor.Common
                 + ") but " + signalSourcesPresent.ToString(CultureInfo.InvariantCulture) + " of " + SignalSourceCount.ToString(CultureInfo.InvariantCulture)
                 + " signal sources still hold rows for it — the purge has not reached it, or the sources' retentions differ. Non-zero counts are real; a zero may be a measurement or an absence, and the band cannot tell which, so no health verdict is given.",
             DailySummaryDataState.NoRunRecord =>
-                "NO RUN RECORD: no collector run is recorded for this day, so the collection-error share has no denominator and nothing records that the day was fully collected; the day appears because a signal table holds rows for it. The counts are as read, but the band declines to call the day Healthy on them.",
+                "NO RUN RECORD: no collector run is recorded for this day, so the collection-error share has no denominator and nothing records that the day was fully collected; the day appears because a signal table or the alert log holds rows for it. Inside retention its zeros are measurements, so the band stands on the counts as read.",
             _ => null,
         };
     }

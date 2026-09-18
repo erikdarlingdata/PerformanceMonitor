@@ -422,7 +422,7 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     /// <summary>
     /// Lite's one horizon is the archive retention (three months, every table together), so a day older than
     /// that which the spine still holds is a shell whatever its run count: <c>purged</c>, <c>NoData</c>, never
-    /// Healthy. A day inside the horizon with signal rows but no run record is <c>no_run_record</c>. Today's run
+    /// Healthy. A day inside the horizon with signal rows but no run record is <c>no_run_record</c> and keeps its band. Today's run
     /// is <c>collected</c> and Healthy beside them. The single-day read of a purged day refuses a verdict, and
     /// <c>summary_date</c> is exact ISO-8601.
     /// </summary>
@@ -455,9 +455,12 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal("No Data", ghost.GetProperty("overall_health").GetString());
         Assert.StartsWith("PURGED", ghost.GetProperty("data_note").GetString(), StringComparison.Ordinal);
 
+        /* Inside retention with signal rows and no run record: a disclosure, not a withheld verdict — the day
+           keeps its band (Healthy here; PerformanceCalendarDataTests pins an alert-only day as Warning). */
         var uncollected = Assert.Single(days, d => d.GetProperty("summary_date").GetString() == uncollectedDay.ToString("yyyy-MM-dd"));
         Assert.Equal("no_run_record", uncollected.GetProperty("data_state").GetString());
-        Assert.Equal("NoData", uncollected.GetProperty("health_band").GetString());
+        Assert.Equal("Healthy", uncollected.GetProperty("health_band").GetString());
+        Assert.StartsWith("NO RUN RECORD", uncollected.GetProperty("data_note").GetString(), StringComparison.Ordinal);
         Assert.Equal(0, uncollected.GetProperty("collection_runs").GetInt64());
         Assert.Equal("CXPACKET", uncollected.GetProperty("top_wait_type").GetString());
 
