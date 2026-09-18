@@ -84,6 +84,21 @@ namespace PerformanceMonitor.Ui
         /// <summary>The overrides currently loaded from <see cref="OverridesFilePath"/> — what the last Apply used.</summary>
         public static ThemeColorOverrideSet Overrides { get; private set; } = ThemeColorOverrideSet.Empty;
 
+        /// <summary>
+        /// How the watcher re-reads the file after an outside edit. <see cref="File.ReadAllText(string)"/> in
+        /// the app; replaceable so a test can make the read fail the way a real disk does
+        /// (<see cref="UnauthorizedAccessException"/>, <see cref="IOException"/>) and prove the failure is a
+        /// log line and not a crash. This is the only seam into the reload path.
+        /// </summary>
+        public static Func<string, string> OverridesFileReader { get; set; } = File.ReadAllText;
+
+        /// <summary>
+        /// How many consecutive <see cref="IOException"/>s the watcher treats as "the editor is still
+        /// writing" before it gives up on this change and says so. Each retry is another debounce interval
+        /// away; a file still locked after two seconds is a different problem from a save in progress.
+        /// </summary>
+        public const int MaxReloadRetries = 5;
+
         private static bool s_overridesLoaded;
         private static FileSystemWatcher? s_watcher;
         private static DispatcherTimer? s_reloadDebounce;
@@ -381,7 +396,8 @@ namespace PerformanceMonitor.Ui
             }
         }
 
-        private static void LoadOverrides()
+        /// <summary>Re-reads the file into <see cref="Overrides"/> without applying. Internal for the reload tests.</summary>
+        internal static void LoadOverrides()
         {
             s_overridesLoaded = true;
             Overrides = OverridesFilePath is null
@@ -423,7 +439,21 @@ namespace PerformanceMonitor.Ui
                 s_reloadDebounce.Tick += (_, _) =>
                 {
                     s_reloadDebounce.Stop();
-                    ReloadFromDiskIfChanged();
+
+                    /* The last line of defence. A Tick handler runs on the dispatcher with no caller of ours
+                       above it, so anything that escapes here is an unhandled exception on the UI thread —
+                       an app crash over a file watcher, which the class header promises cannot happen.
+                       ReloadFromDiskIfChanged catches its own read failures; this catch is for whatever
+                       nobody anticipated in the rest of the path (the fingerprint compare, the re-apply). */
+                    try
+                    {
+                        ReloadFromDiskIfChanged();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogWarning?.Invoke($"'{OverridesFilePath}' changed on disk but the {CurrentTheme} theme could not be re-applied " +
+                                           $"({ex.GetType().Name}: {ex.Message}); the theme stays as it was.");
+                    }
                 };
             }
 
@@ -431,11 +461,37 @@ namespace PerformanceMonitor.Ui
             s_reloadDebounce.Start();
         }
 
-        private static void ReloadFromDiskIfChanged()
+        /// <summary>What one pass of the watcher's reload did. Returned so a test can see it; the app ignores it.</summary>
+        internal enum ReloadOutcome
+        {
+            /// <summary>No file is configured.</summary>
+            NothingToDo,
+
+            /// <summary>The read failed with an <see cref="IOException"/> and another attempt is scheduled.</summary>
+            Retrying,
+
+            /// <summary>The read failed and will not be retried; a warning was logged and the theme is unchanged.</summary>
+            Failed,
+
+            /// <summary>The file's text is what is already loaded (our own write, or an edit that changed nothing).</summary>
+            Unchanged,
+
+            /// <summary>The file changed; the overrides were reloaded and the theme re-applied.</summary>
+            Reapplied,
+        }
+
+        /// <summary>
+        /// One pass of the watcher's reload: read the file, compare it to what is loaded, re-apply if it
+        /// differs. Never throws for a read that fails — the watcher is a convenience, the file still applies
+        /// on the next Apply or restart, and this runs on the dispatcher's timer with no caller to catch for
+        /// it. Internal so a test can drive it with a failing <see cref="OverridesFileReader"/> and no
+        /// watcher, no dispatcher and no window.
+        /// </summary>
+        internal static ReloadOutcome ReloadFromDiskIfChanged()
         {
             if (OverridesFilePath is null)
             {
-                return;
+                return ReloadOutcome.NothingToDo;
             }
 
             string? text = null;
@@ -443,30 +499,42 @@ namespace PerformanceMonitor.Ui
             {
                 try
                 {
-                    text = File.ReadAllText(OverridesFilePath);
+                    text = OverridesFileReader(OverridesFilePath);
                 }
-                catch (IOException)
+                catch (IOException) when (s_reloadRetries < MaxReloadRetries)
                 {
                     /* Mid-write: the editor still holds the file. Try again shortly rather than reporting a
                        file that is about to be fine — but not forever; a file held open for seconds is a
                        different problem, and the next real change will retry anyway. */
-                    if (s_reloadRetries++ < 5)
-                    {
-                        ScheduleReloadFromDisk();
-                    }
-
-                    return;
+                    s_reloadRetries++;
+                    ScheduleReloadFromDisk();
+                    return ReloadOutcome.Retrying;
+                }
+                catch (Exception ex)
+                {
+                    /* Retries exhausted, or a failure that is not a mid-write at all: an ACL that changed
+                       under us, an AV scan or a sync client holding the file in a way that surfaces as
+                       UnauthorizedAccessException rather than IOException. File.Exists said yes and the read
+                       said no, and the read is the one that knows. The watcher is a convenience — the file
+                       still applies on the next Apply or restart — so this is a log line and the theme stays
+                       exactly as it was. Every other read this class makes catches the same way; the
+                       narrower catch this used to be was the one path that could take the app down. */
+                    s_reloadRetries = 0;
+                    LogWarning?.Invoke($"'{OverridesFilePath}' changed on disk but could not be re-read ({ex.GetType().Name}: {ex.Message}); " +
+                                       $"the {CurrentTheme} theme stays as it was. It applies on the next Apply or restart.");
+                    return ReloadOutcome.Failed;
                 }
             }
 
             s_reloadRetries = 0;
             if (string.Equals(text, Overrides.SourceText, StringComparison.Ordinal))
             {
-                return; // our own write, or an edit that changed nothing
+                return ReloadOutcome.Unchanged; // our own write, or an edit that changed nothing
             }
 
             LogInfo?.Invoke($"'{OverridesFilePath}' changed on disk; re-applying the {CurrentTheme} theme.");
             ReloadOverridesAndApply();
+            return ReloadOutcome.Reapplied;
         }
     }
 }

@@ -276,6 +276,131 @@ public sealed class ThemeColorOverrideTests
     }
 
     /* ================================================================================================
+       The watcher's reload: a read that fails is a log line, never a throw
+       ================================================================================================ */
+
+    /// <summary>
+    /// The one path the first cut of this PR left narrow (review on #3606): the watcher's re-read of the
+    /// file caught only <see cref="IOException"/>, and it runs from a <c>DispatcherTimer.Tick</c> on the UI
+    /// thread with no caller to catch for it — so an <see cref="UnauthorizedAccessException"/> from an ACL
+    /// change, an AV scan or a sync client's lock would have been an app crash over a file watcher, against
+    /// the class header's own promise. The read is now behind <see cref="ThemeManager.OverridesFileReader"/>
+    /// so the failure can be made to happen here: no exception escapes, one warning names the exception,
+    /// and the overrides that were applied stay applied.
+    /// </summary>
+    [Fact]
+    public void ReloadFromDisk_WhenTheReadThrowsUnauthorizedAccess_LogsAWarningAndKeepsTheLoadedOverrides()
+    {
+        var path = TempFile("""{ "Dark": { "AccentColor": "#3A7BD5" } }""");
+        using var scope = new ThemeManagerScope(path);
+        ThemeManager.LoadOverrides();
+        var loaded = ThemeManager.Overrides;
+        Assert.Equal(Color.FromRgb(0x3A, 0x7B, 0xD5), loaded.For("Dark")["AccentColor"]);
+
+        ThemeManager.OverridesFileReader = _ => throw new UnauthorizedAccessException("Access to the path is denied.");
+
+        var outcome = ThemeManager.ReloadFromDiskIfChanged();
+
+        Assert.Equal(ThemeManager.ReloadOutcome.Failed, outcome);
+        Assert.Single(scope.Warnings);
+        Assert.Contains("UnauthorizedAccessException", scope.Warnings[0], StringComparison.Ordinal);
+        Assert.Contains("stays as it was", scope.Warnings[0], StringComparison.Ordinal);
+        Assert.Same(loaded, ThemeManager.Overrides);
+    }
+
+    /// <summary>
+    /// An <see cref="IOException"/> is the editor still writing: retried without a warning, up to the cap;
+    /// past the cap it is reported like any other failure and the theme is left alone. Whatever the
+    /// exception type, the outcome is a return value, never a throw.
+    /// </summary>
+    [Fact]
+    public void ReloadFromDisk_RetriesAnIoExceptionUpToTheCap_ThenWarnsAndStops()
+    {
+        var path = TempFile("{}");
+        using var scope = new ThemeManagerScope(path);
+        ThemeManager.LoadOverrides();
+        var loaded = ThemeManager.Overrides;
+
+        ThemeManager.OverridesFileReader = _ => throw new IOException("The process cannot access the file because it is being used by another process.");
+
+        for (var attempt = 0; attempt < ThemeManager.MaxReloadRetries; attempt++)
+        {
+            Assert.Equal(ThemeManager.ReloadOutcome.Retrying, ThemeManager.ReloadFromDiskIfChanged());
+        }
+
+        Assert.Empty(scope.Warnings);
+
+        Assert.Equal(ThemeManager.ReloadOutcome.Failed, ThemeManager.ReloadFromDiskIfChanged());
+        Assert.Single(scope.Warnings);
+        Assert.Contains("IOException", scope.Warnings[0], StringComparison.Ordinal);
+        Assert.Same(loaded, ThemeManager.Overrides);
+
+        /* The cap is per change, not per session: a later change starts a fresh count. */
+        Assert.Equal(ThemeManager.ReloadOutcome.Retrying, ThemeManager.ReloadFromDiskIfChanged());
+    }
+
+    /// <summary>The app's own save reloads and so refreshes the fingerprint; a write that reproduces it is not re-applied.</summary>
+    [Fact]
+    public void ReloadFromDisk_WhenTheTextIsWhatIsAlreadyLoaded_DoesNothing()
+    {
+        var path = TempFile("""{ "Dark": { "AccentColor": "#3A7BD5" } }""");
+        using var scope = new ThemeManagerScope(path);
+        ThemeManager.LoadOverrides();
+        var loaded = ThemeManager.Overrides;
+
+        Assert.Equal(ThemeManager.ReloadOutcome.Unchanged, ThemeManager.ReloadFromDiskIfChanged());
+        Assert.Same(loaded, ThemeManager.Overrides);
+        Assert.Empty(scope.Warnings);
+    }
+
+    [Fact]
+    public void ReloadFromDisk_WithNoFileConfigured_DoesNothing()
+    {
+        using var scope = new ThemeManagerScope(null);
+
+        Assert.Equal(ThemeManager.ReloadOutcome.NothingToDo, ThemeManager.ReloadFromDiskIfChanged());
+        Assert.Empty(scope.Warnings);
+    }
+
+    /// <summary>
+    /// <see cref="ThemeManager"/> is process-wide state. Each reload test points it at its own temp file,
+    /// captures its warnings, and puts every static back the way it found it — including the reader — so
+    /// the regeneration tests in this class (which run after or before, in either order) see the defaults.
+    /// </summary>
+    private sealed class ThemeManagerScope : IDisposable
+    {
+        private readonly string? _previousPath = ThemeManager.OverridesFilePath;
+        private readonly Action<string>? _previousWarn = ThemeManager.LogWarning;
+        private readonly Action<string>? _previousInfo = ThemeManager.LogInfo;
+        private readonly Func<string, string> _previousReader = ThemeManager.OverridesFileReader;
+        private readonly string? _path;
+
+        public List<string> Warnings { get; } = new();
+
+        public ThemeManagerScope(string? path)
+        {
+            _path = path;
+            ThemeManager.OverridesFilePath = path;
+            ThemeManager.LogWarning = Warnings.Add;
+            ThemeManager.LogInfo = null;
+        }
+
+        public void Dispose()
+        {
+            ThemeManager.OverridesFileReader = _previousReader;
+            ThemeManager.OverridesFilePath = _previousPath;
+            ThemeManager.LogWarning = _previousWarn;
+            ThemeManager.LogInfo = _previousInfo;
+            ThemeManager.LoadOverrides(); // back to whatever the restored path says (nothing, in the suite)
+
+            if (_path is not null && File.Exists(_path))
+            {
+                File.Delete(_path);
+            }
+        }
+    }
+
+    /* ================================================================================================
        Save / Reset
        ================================================================================================ */
 
