@@ -32,9 +32,10 @@ namespace Darling.Tests;
 /// same rows on any store small enough for a test, passes every behavioral assertion, and only shows up
 /// months later as tail-latency deadline breaches on the store whose retention has filled — exactly how
 /// the defect presented the first time. So the ORDER the statement asks for is pinned at the source,
-/// scoped to the one statement (the capture-down read's <c>ROW_NUMBER ... ORDER BY cl.log_id DESC</c> in
-/// the same file is a different shape — a window function cannot early-stop by ordering swap alone — and
-/// is deliberately not swept).</para>
+/// scoped to the one statement. The capture-down read in the same file was the different shape this pin
+/// originally left alone — <c>ROW_NUMBER ... ORDER BY cl.log_id DESC</c>, which no ordering swap could
+/// early-stop; #3597 reshaped it into one chunk-orderable <c>LIMIT 1</c> per collector, and
+/// <see cref="CaptureDownChunkOrderTests"/> pins that one.</para>
 /// </summary>
 public sealed class CollectionSignalsChunkOrderTests
 {

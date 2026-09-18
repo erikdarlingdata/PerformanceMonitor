@@ -4475,33 +4475,69 @@ SELECT
         return (lastSuccess, recentRuns, recentSuccess);
     }
 
+    /// <summary>The shipped capture-down statement, a constant so the #3597 pins and the gated plan test read
+    /// the text the method executes rather than a copy of it.</summary>
+    internal const string MissingCaptureSessionsSql = @"
+SELECT x.collector_name
+FROM
+(
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'deadlocks'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
+    UNION ALL
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'blocked_process_report'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
+) AS x
+WHERE x.status = 'SESSION_MISSING'
+ORDER BY x.collector_name";
+
     /// <summary>
     /// The blocking/deadlock XE collectors whose LATEST run logged <c>SESSION_MISSING</c> — the session is
     /// absent and couldn't be created, so capture is non-functional even though the tolerant reader "succeeds"
     /// with zero rows. The Darling twin of the Dashboard's <c>GetMissingCaptureSessionsAsync</c>, on Darling's
     /// collector names. Returns the friendly capture names ("Blocking" / "Deadlock").
+    ///
+    /// <para><b>#3597: one chunk-orderable <c>LIMIT 1</c> per collector, not a window function over the
+    /// server's whole history.</b> This read shipped as <c>ROW_NUMBER() OVER (PARTITION BY collector_name
+    /// ORDER BY log_id DESC)</c> over every <c>collection_log</c> row the server had for the two collectors —
+    /// the #3496 shape, which that fix named and deliberately left: a window function cannot early-stop by
+    /// reordering alone. <c>collection_log</c> is a hypertable partitioned on <c>collection_time</c> with no
+    /// index on <c>log_id</c>, so the window had exactly one legal plan: decompress EVERY chunk in the
+    /// retention horizon for the server, Merge Append them, and number 100 K rows to keep two. Measured on a
+    /// rig with 60 days of one server's log across 61 chunks (59 compressed): 9,573 buffers and every chunk
+    /// executed, per alert pass, every 30 seconds, per server — the largest read on the pass by two to three
+    /// orders of magnitude, and one of the issue's four sites that died at the 10 s deadline while the
+    /// interval-hourly refresh starved the store for I/O. The same question asked per collector as
+    /// <c>ORDER BY collection_time DESC LIMIT 1</c> lets ChunkAppend order the chunks newest-first and stop
+    /// at the first row: 14 buffers, the newest chunk only, 120 of 122 chunk scans never executed — and the
+    /// property is horizon-independent, so a longer retention cannot regress it. Two literal arms rather than
+    /// a LATERAL over a VALUES list because the collector names are a closed set the alert owns, and a plan
+    /// with a literal predicate is the one the gated test can pin.</para>
+    ///
+    /// <para><b>Why no <c>log_id</c> tiebreak here, when #3496 kept one.</b> The recent-N read orders across ALL
+    /// of a server's collectors, where many rows share a collection instant and the id decides among them.
+    /// Each arm here is ONE collector on ONE server, and a collector logs one row per run, stamped
+    /// <c>DateTime.UtcNow</c> at log time (<c>DarlingObservability.LogCollectionAsync</c>) — two runs of the
+    /// same collector on the same server cannot share a microsecond, so there is nothing for a tiebreak to
+    /// decide. What it would COST is measured: with <c>, log_id DESC</c> appended, the index on
+    /// <c>(server_id, collection_time)</c> cannot serve the second key, and each arm top-N-heapsorts the
+    /// server's whole newest chunk (1,158 buffers) instead of stopping at its first hit (5).</para>
     /// </summary>
+
     internal static async Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var missing = new List<string>();
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
-SELECT x.collector_name
-FROM
-(
-    SELECT
-        cl.collector_name,
-        cl.status,
-        ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.log_id DESC) AS n
-    FROM collection_log AS cl
-    WHERE cl.server_id = $1
-    AND   cl.collector_name IN ('deadlocks', 'blocked_process_report')
-) AS x
-WHERE x.n = 1
-AND   x.status = 'SESSION_MISSING'
-ORDER BY x.collector_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        using var command = new NpgsqlCommand(MissingCaptureSessionsSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

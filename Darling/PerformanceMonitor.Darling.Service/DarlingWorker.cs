@@ -1411,6 +1411,15 @@ public sealed class DarlingWorker : BackgroundService
 
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
 
+                /* #3597: AFTER the aggregates exist and BEFORE compression, take the eleven per-column group
+                   indexes off the interval-dedup materialization on any store whose aggregate predates
+                   create_group_indexes = false on its CREATE. Nothing reads them, and every hourly refresh paid
+                   twelve index inserts per re-materialized row for them — measured at 4.3x the WAL per bucket.
+                   Before compression so the nightly pass compresses a relation already without them. Its own
+                   catalog read, its own per-index isolation under a lock timeout that yields to a refresh in
+                   flight, its own summary line; a no-op on every start after the first. */
+                await TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(timescaleConnection, _logger, stoppingToken);
+
                 /* #3581: AFTER the aggregates exist, put their materializations on the compression ladder the raw
                    tier has been on since the archival tier existed — none of the twenty ever was, and on the
                    largest store they were 235 GiB of a 415 GiB database, larger than the 9x-compressed raw they
