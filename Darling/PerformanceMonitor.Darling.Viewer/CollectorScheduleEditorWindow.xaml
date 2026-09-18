@@ -91,7 +91,9 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <TextBlock Grid.Row="5" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
+        <!-- The delta cadence cap sentence is appended in code from the shared gap-policy constants, so the
+             shown numbers can't drift from what ValidateSchedule enforces (#3532). -->
+        <TextBlock Grid.Row="5" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
                    Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
 
         <DockPanel Grid.Row="6" Margin="0,12,0,0" LastChildFill="False">
