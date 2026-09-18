@@ -36,9 +36,19 @@ namespace PerformanceMonitorLite.Tests;
 /// and it goes through <see cref="FindingMessageFormatter.BuildContext"/> — the same call the notification
 /// service makes — so the items, their order and their field counts are the producer's, not a lookalike.
 /// The only knob is how many distinct query hashes the drill-downs surface, because the formatter derives
-/// one incident item per distinct hash and that is the count production varied on. Measured from source:
-/// ten fixed items cost 33 blocks, the head 2, the footer 2, each incident 2 — 37 + 2×incidents — so six
-/// incidents (49 blocks) is the last shape that fits and the seventh is the fifty-first block.</para>
+/// one incident item per distinct hash and that is the count production varied on. Measured from source
+/// at #3612: ten fixed items cost 33 blocks, the head 2, the footer 2, each incident 2 — 37 + 2×incidents —
+/// so six incidents (49 blocks) was the last shape that fit and the seventh the fifty-first block.</para>
+///
+/// <para><b>#3644 re-measured the fixed items.</b> Six of the seven drill-downs are arrays of rows, and each
+/// used to render as one field per attribute per row — three to five blocks each, 25 of the 33. They now
+/// render as record sections (one bold summary line over the row's SQL in a code block, packed into as few
+/// sections as fit the text ceiling: one apiece for every shape the producer emits), two blocks each, so
+/// the ten fixed items cost 20 and the message is 24 + 2×incidents: thirteen incidents (50 blocks) is the
+/// last shape that fits, the fourteenth is the fifty-second block, and the three production pages that
+/// #3612 could only deliver with five of their incidents now deliver whole. The fitting arms below pin the
+/// new numbers and the past-the-limit arms moved to fourteen and fifteen; the oracle gained a record arm.
+/// The engine alerts and every hand-built detail never carry records, and those pins did not move.</para>
 ///
 /// <para><b>The two hazards this suite is built around.</b> A budget is trivially satisfied by dropping
 /// things silently, so every over-budget arm asserts the omission item names the count AND every dropped
@@ -319,6 +329,12 @@ public class SlackDetailsSizeTests
     /// The pre-#3612 details loop, verbatim: divider, then a pointer section, a body section, or heading +
     /// fields in sections of ten. Serialized the way the builder serializes, this is the oracle every
     /// "fits" arm compares against — the bounding pass must not change a byte of a page that fits.
+    /// <para>#3644 added one arm, restated here independently of the builder: a detail carrying
+    /// <see cref="AlertDetailItem.Records"/> renders <c>*Heading*</c> and then one unit per record —
+    /// <c>*#N · summary*</c> over each text in a triple-backtick block, an italic label above the block only
+    /// when a record has several texts — appended to the current section while it stays inside the
+    /// text-object ceiling and opening a new section otherwise. No text in the fixture is anywhere near the
+    /// per-record cap, so the oracle states no cut; <see cref="RecordDetailRenderingTests"/> pins the cut.</para>
     /// </summary>
     private static string LegacyDetailBlocksJson(AlertContext context)
     {
@@ -335,6 +351,37 @@ public class SlackDetailsSizeTests
             if (!string.IsNullOrEmpty(detail.Body))
             {
                 blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
+                continue;
+            }
+
+            if (detail.Records.Count > 0)
+            {
+                var section = new StringBuilder($"*{detail.Heading}*");
+                foreach (var record in detail.Records)
+                {
+                    var unit = new StringBuilder(string.Create(CultureInfo.InvariantCulture, $"*#{record.Ordinal} · {record.Summary}*"));
+                    foreach (var (label, text) in record.Texts)
+                    {
+                        if (record.Texts.Count > 1)
+                        {
+                            unit.Append($"\n_{label}_");
+                        }
+
+                        unit.Append($"\n```\n{text}\n```");
+                    }
+
+                    if (section.Length + 1 + unit.Length > TextObjectLimit)
+                    {
+                        blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = section.ToString() } });
+                        section.Clear().Append(unit);
+                    }
+                    else
+                    {
+                        section.Append('\n').Append(unit);
+                    }
+                }
+
+                blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = section.ToString() } });
                 continue;
             }
 
@@ -361,14 +408,21 @@ public class SlackDetailsSizeTests
     /* ---------------- the shape that must not change ---------------- */
 
     /// <summary>
-    /// The regression pin, on the real producer: the lost story with three and with six distinct hashes
-    /// — six is the LAST count that fits (49 blocks) — renders its details exactly as the pre-#3612 loop
-    /// rendered them, byte for byte, with no omission item. Every analysis page that ever delivered lives
-    /// on this path, and so does every engine alert.
+    /// The regression pin, on the real producer: the lost story renders its details exactly as the oracle
+    /// renders them, byte for byte, with no omission item. Three and six distinct hashes are #3612's fitting
+    /// shapes (43 and 49 blocks then; 30 and 36 now that the six record-shaped drill-downs cost two blocks
+    /// each, #3644); nine, ten and eleven are the THREE PRODUCTION PAGES #3612 could deliver only by dropping
+    /// incidents from the sixth on, and they now deliver whole at 42, 44 and 46; thirteen is the LAST count
+    /// that fits, on exactly fifty. Every analysis page that ever delivered lives on this path, and so does
+    /// every engine alert.
     /// </summary>
     [Theory]
-    [InlineData(3, 13, 43)]
-    [InlineData(6, 16, 49)]
+    [InlineData(3, 13, 30)]
+    [InlineData(6, 16, 36)]
+    [InlineData(9, 19, 42)]
+    [InlineData(10, 20, 44)]
+    [InlineData(11, 21, 46)]
+    [InlineData(13, 23, 50)]
     public void AFiveFactStoryThatFits_RendersItsDetailsByteForByte_WithNoOmission(int distinctHashes, int expectedDetails, int expectedBlocks)
     {
         var finding = FiveFactPlanRegression(distinctHashes);
@@ -388,19 +442,16 @@ public class SlackDetailsSizeTests
     /* ---------------- the block budget and the stated omission ---------------- */
 
     /// <summary>
-    /// The live failure and the fix. Seven distinct hashes is the first shape past the line (51 blocks
-    /// under the old loop — the guard asserts it, so the arm can never pass vacuously); nine, ten and
-    /// eleven are the three production pages (19, 20 and 21 details); fifteen is the most the three
-    /// hash-bearing drill-downs can surface. Every one delivers inside every ceiling; the finding — the
-    /// Diagnosis, the advice, the T-SQL pointer and all seven drill-downs — is whole; the incidents kept
-    /// are the LEADING ones in order; and the omission item names how many were dropped and every one
-    /// of them by heading.
+    /// The live failure and the fix. At #3612 seven distinct hashes was the first shape past the line and
+    /// nine, ten and eleven were the three production pages; since #3644 halved the drill-downs' cost those
+    /// all fit (the arm above), and the line moved to fourteen — 52 blocks unbudgeted, the guard asserts it
+    /// so the arm can never pass vacuously — with fifteen the most the three hash-bearing drill-downs can
+    /// surface. Every one delivers inside every ceiling; the finding — the Diagnosis, the advice, the T-SQL
+    /// pointer and all seven drill-downs — is whole; the incidents kept are the LEADING ones in order; and
+    /// the omission item names how many were dropped and every one of them by heading.
     /// </summary>
     [Theory]
-    [InlineData(7, 17)]
-    [InlineData(9, 19)]
-    [InlineData(10, 20)]
-    [InlineData(11, 21)]
+    [InlineData(14, 24)]
     [InlineData(15, 25)]
     public void AFiveFactStoryPastTheBlockLimit_DeliversInsideFiftyBlocks_WithTheOmissionStated(int distinctHashes, int expectedDetails)
     {
@@ -408,9 +459,9 @@ public class SlackDetailsSizeTests
         var context = FindingMessageFormatter.BuildContext(finding, 1.5);
         Assert.Equal(expectedDetails, context.Details.Count);
 
-        /* Head (2) + footer (2) + the old loop's details must cross the limit, or this arm exercises nothing. */
+        /* Head (2) + footer (2) + the unbudgeted details must cross the limit, or this arm exercises nothing. */
         Assert.True(4 + LegacyBlockCount(context) > BlockLimit,
-            $"the pre-#3612 rendering is only {4 + LegacyBlockCount(context)} blocks — this arm no longer reproduces the failure");
+            $"the unbudgeted rendering is only {4 + LegacyBlockCount(context)} blocks — this arm no longer reproduces the failure");
 
         var payload = AnalysisPayload(finding, context);
         using var doc = JsonDocument.Parse(payload);

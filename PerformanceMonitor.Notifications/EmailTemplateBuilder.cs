@@ -266,6 +266,31 @@ internal static class EmailTemplateBuilder
                 }
                 sb.Append("</td></tr>");
             }
+            else if (item.Records.Count > 0)
+            {
+                /* #3644: a record-shaped item (a drill-down's top-N rows) as a compact list in the same
+                   table idiom as the fields below — one data row per record, labelled "#N", carrying the
+                   summary line; then one query row per text, labelled as the flat field is. Three rows
+                   with seven attributes are six table rows instead of twenty-one, and the row number a
+                   reader saw on Slack is the row number here. The plain-text body renders the same list. */
+                sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+                sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\" style=\"background-color:#333333;border-radius:4px;\">");
+
+                for (int i = 0; i < item.Records.Count; i++)
+                {
+                    var record = item.Records[i];
+                    bool lastRecord = i == item.Records.Count - 1;
+                    AppendDataRow(sb, $"#{record.Ordinal}", record.Summary, lastRecord && record.Texts.Count == 0);
+                    for (int t = 0; t < record.Texts.Count; t++)
+                    {
+                        var (label, text) = record.Texts[t];
+                        AppendQueryRow(sb, label, text, lastRecord && t == record.Texts.Count - 1);
+                    }
+                }
+
+                sb.Append("</table>");
+                sb.Append("</td></tr>");
+            }
             else
             {
                 /* Detail item fields */
@@ -361,6 +386,23 @@ internal static class EmailTemplateBuilder
                     foreach (var para in item.Body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
                     {
                         sb.Append($"  {para}\r\n");
+                    }
+                }
+                else if (item.Records.Count > 0)
+                {
+                    /* #3644: the HTML body's compact record list, in text — the summary on the "#N" line,
+                       each text indented under it, one line per line of the statement. */
+                    foreach (var record in item.Records)
+                    {
+                        sb.Append($"  #{record.Ordinal}: {record.Summary}\r\n");
+                        foreach (var (label, text) in record.Texts)
+                        {
+                            sb.Append($"    {label}:\r\n");
+                            foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+                            {
+                                sb.Append($"      {line}\r\n");
+                            }
+                        }
                     }
                 }
                 else

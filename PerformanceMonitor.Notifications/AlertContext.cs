@@ -188,6 +188,36 @@ public class AlertDetailItem
     public List<(string Label, string Value)> Fields { get; set; } = new();
 
     /// <summary>
+    /// The same content as <see cref="Fields"/>, regrouped by the record it came from (#3644) — populated
+    /// ONLY when the item was flattened from an array of objects (a drill-down's top-N rows: the High CPU
+    /// card's Top Cpu Queries, Queries At Spike, Top Spilling Queries, Parameter Sensitive Queries,
+    /// Regressed Queries, Tempdb Breakdown). Empty for every other item.
+    /// <para><b>Why a second projection of the same pairs, rather than a replacement.</b> The flat pairs are
+    /// correct on every surface that lays them out in ONE column: the persisted <c>context_json</c> and the
+    /// in-app Alert Details grid that reads it, <see cref="AlertDetailText.Flatten"/> (the persisted
+    /// <c>detail_text</c> and the redundancy oracle behind <c>ProseForDelivery</c>), the email table, the
+    /// Teams fact list, PagerDuty's <c>custom_details</c> dictionary, the generic webhook's parts, and the
+    /// incident-roster match in <c>IncidentDeliveryFilter</c>. Every one of those reads <c>#1 Database</c>,
+    /// <c>#1 Query Hash</c>, … <c>#2 Database</c> top to bottom and the record stays together. The one
+    /// surface that does NOT is a Slack section's <c>fields</c> array, which Slack lays out in a two-across
+    /// grid filled left to right in submission order: seven attributes per query means query #1's text
+    /// lands beside query #2's hash, #3's database floats beside #2's SQL, and a multi-line text inflates
+    /// its grid row so the label/value adjacency below it breaks. Read live on a production High CPU page
+    /// (#3644), the card a person reads while production is on fire. Fields are Slack's tool for short,
+    /// genuinely PAIRED scalars — the card's own <c>Current Value / Threshold</c> pair renders fine — and
+    /// the wrong tool for a repeating record.</para>
+    /// <para>So a record-shaped item carries both: <see cref="Fields"/> for the flat surfaces, unchanged to
+    /// the byte, and this list for the renderers that can keep a record together as one visual unit (Slack
+    /// renders each as a bold summary line over the record's text in a code block; email and Teams render
+    /// the same compact list). A renderer that knows this list prefers it and skips the fields; one that
+    /// does not sees exactly what it saw before. Not persisted: it is derivable from the same drill-down
+    /// rows the fields already persist, nothing re-renders a rehydrated context to Slack, and doubling the
+    /// drill-down payload of every analysis row for a reader that renders the fields would buy nothing.
+    /// Producers that build items by hand (the engine alerts, the incident renderer) never populate it.</para>
+    /// </summary>
+    public List<AlertDetailRecord> Records { get; set; } = new();
+
+    /// <summary>
     /// Multi-paragraph prose for this item (advice Investigation / Remediation).
     /// When non-null, renderers emit this as flowing paragraph text rather than
     /// label/value rows.
@@ -211,6 +241,25 @@ public class AlertDetailItem
     /// </summary>
     public RemediationAction? Remediation { get; set; }
 }
+
+/// <summary>
+/// One record of a record-shaped detail item (#3644): the row's scalar attributes packed into ONE
+/// summary line, and its long text(s) — the query text, a blocked/blocking SQL pair, a CREATE or ALTER
+/// statement — carried separately so a renderer can set them in a code block under the summary rather
+/// than beside it.
+/// <para><see cref="Ordinal"/> is the row's 1-based position (<c>#1</c>, <c>#2</c>, …), the same number
+/// the flat fields prefix their labels with, so a reader moving between Slack and the email finds the same
+/// row under the same number. <see cref="Summary"/> is the non-empty scalar properties in the record's OWN
+/// order — the collectors write identity first (database, hash, id) and measures after — as
+/// <c>Label: value</c> pairs joined by <c>·</c>, numbers with group separators; it never carries the
+/// ordinal, which each renderer sets in its own idiom. <see cref="Texts"/> is every string property whose
+/// name says it is SQL (<c>query_text</c>, <c>blocked_sql</c>, <c>blocking_sql</c>, <c>victim_sql</c>,
+/// <c>create_statement</c>, <c>alter_statement</c>), labelled the way the flat field is, in property
+/// order; empty texts are not carried. The text is the row's full value as the collector bounded it (500
+/// characters on the query-store drill-downs), NOT the 300-character cut the flat field applies — the
+/// renderer that has a ceiling states its own cut.</para>
+/// </summary>
+public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string Label, string Text)> Texts);
 
 /// <summary>
 /// Serialization DTO for persisting <see cref="AlertContext"/> as JSON.

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -587,7 +588,7 @@ internal static class FindingMessageFormatter
                 var item = new AlertDetailItem { Heading = Humanize(key) };
                 try
                 {
-                    FlattenInto(item.Fields, JsonSerializer.SerializeToElement(value));
+                    FlattenInto(item, JsonSerializer.SerializeToElement(value));
                 }
                 catch
                 {
@@ -729,19 +730,38 @@ internal static class FindingMessageFormatter
         return sb.ToString();
     }
 
+    /// <summary>How many rows of an array-shaped drill-down reach the alert. The collectors write five;
+    /// three is what a chat card can carry and still be read as a card.</summary>
+    private const int DrillDownRowLimit = 3;
+
     /// <summary>
-    /// Flattens one drill-down value into label/value field pairs. Arrays are capped at
-    /// the first 3 elements; nested objects/arrays are rendered as compact JSON.
+    /// Flattens one drill-down value into the item's label/value field pairs. Arrays are capped at
+    /// the first <see cref="DrillDownRowLimit"/> elements; nested objects/arrays are rendered as compact JSON.
+    /// <para><b>#3644: an array of OBJECTS is also carried as <see cref="AlertDetailItem.Records"/>.</b> The
+    /// flat pairs (<c>#1 Database</c>, <c>#1 Query Hash</c>, … <c>#1 Query Text</c>, <c>#2 Database</c>, …)
+    /// are right for every surface that lays them out in one column, and wrong for exactly one: Slack's
+    /// two-across <c>fields</c> grid, where a seven-attribute record never stays together — #1's text lands
+    /// beside #2's hash, #3's database beside #2's SQL — and the reader reconstructs each query by hunting
+    /// <c>#N</c> labels across two columns and several screen-heights. Read live on a production High CPU
+    /// page during a sustained CPU arc. Fields are for PAIRED scalars; a repeating record is a list of rows,
+    /// so each row is ALSO packed as one record: the ordinal, one summary line of its non-empty scalars in
+    /// the record's own order (<see cref="IsTextProperty"/> decides which properties are text), and its
+    /// text(s) separately, so a renderer can set the summary over the text instead of beside it. The fields
+    /// are not changed by a byte — the persisted row, the email table, the in-app grid and every other flat
+    /// reader see what they saw — and the records are only populated when every kept element is an object,
+    /// so a mixed or scalar array keeps the flat shape alone (a scalar has no record to be).</para>
     /// </summary>
-    private static void FlattenInto(List<(string Label, string Value)> fields, JsonElement element)
+    private static void FlattenInto(AlertDetailItem item, JsonElement element)
     {
+        var fields = item.Fields;
         switch (element.ValueKind)
         {
             case JsonValueKind.Array:
                 var index = 0;
+                var allObjects = true;
                 foreach (var child in element.EnumerateArray())
                 {
-                    if (index >= 3)
+                    if (index >= DrillDownRowLimit)
                         break;
                     index++;
 
@@ -749,12 +769,17 @@ internal static class FindingMessageFormatter
                     {
                         foreach (var prop in child.EnumerateObject())
                             fields.Add(($"#{index} {Humanize(prop.Name)}", ScalarText(prop.Value)));
+                        item.Records.Add(ToRecord(index, child));
                     }
                     else
                     {
+                        allObjects = false;
                         fields.Add(($"#{index}", ScalarText(child)));
                     }
                 }
+
+                if (!allObjects)
+                    item.Records.Clear();
                 break;
 
             case JsonValueKind.Object:
@@ -766,6 +791,78 @@ internal static class FindingMessageFormatter
                 fields.Add(("value", ScalarText(element)));
                 break;
         }
+    }
+
+    /// <summary>
+    /// One drill-down row as an <see cref="AlertDetailRecord"/> (#3644). The summary is the row's non-empty
+    /// scalar properties, in the row's own property order, as <c>Label: value</c> joined by <c>·</c> — the
+    /// same humanized label the flat field carries, so a reader moving between surfaces matches them by eye
+    /// — with numbers group-separated (<see cref="SummaryNumber"/>), because a summary line is read, where
+    /// the flat field's raw digits are copied. Nulls and empty strings are left out of the summary (the
+    /// non-AG <c>replica_role</c> is empty on nearly every server, and "Replica Role:" followed by nothing
+    /// is noise on a line meant to be scanned); the flat field keeps them. Nested values render as the
+    /// compact JSON the flat field renders. Text properties go to <see cref="AlertDetailRecord.Texts"/>
+    /// whole — not through <see cref="Truncate"/>: the collectors bound them (LEFT(…, 500)), the email has no
+    /// ceiling, and the Slack renderer states its own cut.
+    /// </summary>
+    private static AlertDetailRecord ToRecord(int ordinal, JsonElement row)
+    {
+        var summary = new StringBuilder();
+        var texts = new List<(string Label, string Text)>();
+        foreach (var prop in row.EnumerateObject())
+        {
+            var label = Humanize(prop.Name);
+            if (IsTextProperty(prop.Name) && prop.Value.ValueKind == JsonValueKind.String)
+            {
+                var text = prop.Value.GetString();
+                if (!string.IsNullOrEmpty(text))
+                    texts.Add((label, text));
+                continue;
+            }
+
+            var value = prop.Value.ValueKind switch
+            {
+                JsonValueKind.Null => string.Empty,
+                JsonValueKind.Number => SummaryNumber(prop.Value),
+                _ => ScalarText(prop.Value)
+            };
+            if (value.Length == 0)
+                continue;
+
+            if (summary.Length > 0)
+                summary.Append(" · ");
+            summary.Append(label).Append(": ").Append(value);
+        }
+
+        return new AlertDetailRecord(ordinal, summary.ToString(), texts);
+    }
+
+    /// <summary>
+    /// Whether a drill-down property carries SQL text rather than a scalar (#3644): every text-bearing
+    /// property the collectors emit is named for it — <c>query_text</c>, <c>blocked_sql</c> / <c>blocking_sql</c> /
+    /// <c>victim_sql</c>, <c>create_statement</c> / <c>alter_statement</c> — so the suffix is the rule, and
+    /// a new collector that names its text the same way is grouped correctly without a change here. A
+    /// hash (<c>query_hash</c>, <c>query_plan_hash</c>) is a scalar and stays in the summary.
+    /// </summary>
+    private static bool IsTextProperty(string name) =>
+        name.EndsWith("_text", StringComparison.OrdinalIgnoreCase)
+        || name.EndsWith("_sql", StringComparison.OrdinalIgnoreCase)
+        || name.EndsWith("_statement", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("sql", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("text", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A JSON number for a summary line: integral values with group separators
+    /// (<c>3,088,689</c>), fractional ones to at most two decimals (<c>14.2</c>, <c>221.37</c>), invariant
+    /// culture. The flat field keeps the raw digits.</summary>
+    private static string SummaryNumber(JsonElement number)
+    {
+        if (number.TryGetInt64(out var whole))
+            return whole.ToString("N0", CultureInfo.InvariantCulture);
+        if (number.TryGetDouble(out var real))
+            return Math.Floor(real) == real && Math.Abs(real) < 1e15
+                ? real.ToString("N0", CultureInfo.InvariantCulture)
+                : real.ToString("#,##0.##", CultureInfo.InvariantCulture);
+        return number.GetRawText();
     }
 
     /// <summary>Renders a single JSON value as truncated display text.</summary>

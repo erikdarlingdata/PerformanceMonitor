@@ -644,9 +644,43 @@ public class WebhookAlertService
                 }
 
                 var itemFacts = new List<object>();
-                foreach (var (label, value) in detail.Fields)
+                if (detail.Records.Count > 0)
                 {
-                    itemFacts.Add(new { name = label, value });
+                    /* #3644: a record-shaped detail is one fact per ROW — name "#N", value the summary line
+                       over the text(s) in backticks — rather than one fact per attribute (seven per row). The
+                       MessageCard fact list is a name/value table, so the flat fields did not interleave here
+                       the way Slack's grid did; the compact list is the same reading order in a third of the
+                       rows, and the same row numbers a reader sees on Slack and in the email. Fact values
+                       render markdown; a MessageCard supports inline code but no fenced block, and the
+                       text's own backticks would end the span early, so they are replaced with a straight
+                       quote (a T-SQL text never carries one; a PostgreSQL text rarely). */
+                    foreach (var record in detail.Records)
+                    {
+                        var value = new StringBuilder(record.Summary);
+                        foreach (var (label, text) in record.Texts)
+                        {
+                            if (value.Length > 0)
+                            {
+                                value.Append("  \n");
+                            }
+
+                            if (record.Texts.Count > 1)
+                            {
+                                value.Append('_').Append(label).Append("_  \n");
+                            }
+
+                            value.Append('`').Append(text.Replace('`', '\'')).Append('`');
+                        }
+
+                        itemFacts.Add(new { name = string.Create(CultureInfo.InvariantCulture, $"#{record.Ordinal}"), value = value.ToString() });
+                    }
+                }
+                else
+                {
+                    foreach (var (label, value) in detail.Fields)
+                    {
+                        itemFacts.Add(new { name = label, value });
+                    }
                 }
 
                 itemSections.Add(new
@@ -850,6 +884,24 @@ public class WebhookAlertService
     /// leave it no capacity at all.
     /// </summary>
     private const int SlackDetailHeadingLimit = 500;
+
+    /// <summary>
+    /// The most one record of a record-shaped detail (<see cref="AlertDetailItem.Records"/>, #3644) may
+    /// occupy in a section's text: its bold summary line plus its code-blocked text(s), markup included.
+    /// Sized so that a record ALWAYS fits a section beside the detail's heading — the heading is bounded at
+    /// <see cref="SlackDetailHeadingLimit"/> and wrapped in <c>*…*\n</c> (four more units) — which is
+    /// what lets <see cref="AddSlackRecordSections"/> pack records greedily and open a fresh section on the
+    /// first one that does not fit, with no record ever cut between sections. No producer comes near it:
+    /// the widest drill-down row (Regressed Queries, twelve scalars and a 500-character text) is under
+    /// 900. A text that would push a record past it is cut with the count stated, through
+    /// <see cref="SlackBoundedText"/> — the same note, in the same characters, as a cut field.
+    /// </summary>
+    private const int SlackRecordLimit = SlackTextObjectLimit - SlackDetailHeadingLimit - 4;
+
+    /// <summary>The most of a record's summary line a Slack section carries before the texts take the rest
+    /// of the record's room. The producer packs a row's scalars into it — twelve labelled numbers is under
+    /// 400 — so this never fires on a real page; it exists so the texts' share below is always positive.</summary>
+    private const int SlackRecordSummaryLimit = 1000;
 
     /// <summary>
     /// What the stated-omission item for dropped details costs: its own divider, so it reads as the
@@ -1245,11 +1297,11 @@ public class WebhookAlertService
     /// <summary>
     /// One detail's block run: its leading divider, then the shape its kind has always rendered — a
     /// fixed pointer for remediation T-SQL (never inlined on a chat surface), a <c>*Heading*</c>-led
-    /// mrkdwn section for a body, or field sections (heading first, then <c>*label:*</c> fields) for
-    /// everything else. #3612 bounds each text object in the run: the body goes through the prose
-    /// splitter (<see cref="AddSlackProseSections"/>) with the heading as its header and
-    /// <paramref name="bodyBlockBudget"/> as its block budget, and every field through
-    /// <see cref="SlackFieldText"/>. A detail inside every cap renders the pre-#3612 bytes.
+    /// mrkdwn section for a body, record sections for a record-shaped detail (#3644, below), or field
+    /// sections (heading first, then <c>*label:*</c> fields) for everything else. #3612 bounds each text
+    /// object in the run: the body goes through the prose splitter (<see cref="AddSlackProseSections"/>)
+    /// with the heading as its header and <paramref name="bodyBlockBudget"/> as its block budget, and every
+    /// field through <see cref="SlackFieldText"/>. A detail inside every cap renders the pre-#3612 bytes.
     /// </summary>
     private static List<object> RenderSlackDetail(AlertDetailItem detail, int bodyBlockBudget)
     {
@@ -1272,6 +1324,14 @@ public class WebhookAlertService
             return run;
         }
 
+        if (detail.Records.Count > 0)
+        {
+            /* #3644: a repeating record is a list of rows, not a grid of pairs. The fields this detail also
+               carries are the same content, and they are what every other surface renders. */
+            AddSlackRecordSections(run, heading, detail.Records);
+            return run;
+        }
+
         var detailFields = new List<object>();
         detailFields.Add(new { type = "mrkdwn", text = $"*{heading}*" });
 
@@ -1282,6 +1342,114 @@ public class WebhookAlertService
 
         AddSlackFieldSections(run, detailFields);
         return run;
+    }
+
+    /// <summary>
+    /// A record-shaped detail (#3644) as mrkdwn sections: <c>*Heading*</c> leads the first, and each record
+    /// is one visual unit under it — a bold line <c>*#N · Database: … · Total Cpu Ms: 3,088,689 · …*</c>
+    /// over its text in a triple-backtick code block — stacked top to bottom. Read live on a production High
+    /// CPU page: the same rows as seven <c>fields</c> per query put query #1's text beside query #2's hash and
+    /// #3's database beside #2's SQL, because Slack fills a section's <c>fields</c> two across in submission
+    /// order; a section's <c>text</c> has one column, so a record cannot be pulled apart by its neighbour,
+    /// and a long text dislocates nothing but itself. The code block also takes the SQL OUT of mrkdwn
+    /// interpretation, which a field never did (<c>&gt;</c> at a line start is a quote, <c>*</c> pairs
+    /// bold).
+    ///
+    /// <para><b>Block cost: the divider plus as many sections as the records pack into under the
+    /// text-object ceiling — ONE for every drill-down the producer emits.</b> #3644 sketched one section per
+    /// record (three records, three sections); that costs MORE than the fields did for a narrow record —
+    /// three three-attribute rows are ten fields, one section, two blocks, and would become four — and the
+    /// #3612 budget is measured in blocks, so a layout fix that widened the card would push incidents off
+    /// the page to buy readability. Packing does not: records are appended to the current section while
+    /// the section stays inside <see cref="SlackTextObjectLimit"/>, and a record that would cross it opens
+    /// the next section (no heading on a continuation — a repeated heading would read as a second detail),
+    /// so the cost is <c>1 + ceil(records ÷ what fits)</c>, at most one section per record and never more
+    /// than the fields cost. Each record is bounded by <see cref="SlackRecordLimit"/>, which is what
+    /// guarantees any record fits a section with the heading; the fixture's six record-shaped drill-downs
+    /// (3 rows each, texts at the collector's 500) measure 474 to 2,614 characters and one section apiece,
+    /// so the five-fact page's fixed items fall from 33 blocks to 20 and the message from 37 + 2×incidents
+    /// to 24 + 2×incidents — thirteen incidents fit where six did, and the three production pages #3612
+    /// could deliver only by dropping incidents now deliver whole (<c>SlackDetailsSizeTests</c>). Visually
+    /// one section holding three records and three sections holding one each are the same stack; Slack
+    /// puts no rule between consecutive sections.</para>
+    ///
+    /// <para><b>Inside a record.</b> The summary is bounded at <see cref="SlackRecordSummaryLimit"/> with a
+    /// trailing ellipsis (it never fires; see the constant), then the texts share what is left of the
+    /// record's room equally, each through <see cref="SlackBoundedText"/> so a cut states its count in
+    /// characters the reader can count, on a whole character (#3622). One text carries no label — the
+    /// heading says what the drill-down is and the summary says whose row this is; "Query Text" would add
+    /// nothing — and two or more (a blocking chain's blocked and blocking SQL) are each led by their label
+    /// in italics so the reader can tell them apart.</para>
+    /// </summary>
+    private static void AddSlackRecordSections(List<object> run, string heading, List<AlertDetailRecord> records)
+    {
+        var section = new StringBuilder("*").Append(heading).Append('*');
+
+        void Flush()
+        {
+            run.Add(new { type = "section", text = new { type = "mrkdwn", text = section.ToString() } });
+            section.Clear();
+        }
+
+        foreach (var record in records)
+        {
+            var unit = SlackRecordText(record);
+            if (section.Length + 1 + unit.Length > SlackTextObjectLimit)
+            {
+                Flush();
+                section.Append(unit);
+            }
+            else
+            {
+                section.Append('\n').Append(unit);
+            }
+        }
+
+        Flush();
+    }
+
+    /// <summary>One record's unit of text — see <see cref="AddSlackRecordSections"/> — inside
+    /// <see cref="SlackRecordLimit"/>.</summary>
+    private static string SlackRecordText(AlertDetailRecord record)
+    {
+        var summary = record.Summary.Length <= SlackRecordSummaryLimit
+            ? record.Summary
+            : record.Summary[..SlackCutLength(record.Summary, SlackRecordSummaryLimit)] + "...";
+        var unit = new StringBuilder();
+        unit.Append("*#").Append(record.Ordinal.ToString(CultureInfo.InvariantCulture));
+        if (summary.Length > 0)
+        {
+            unit.Append(" · ").Append(summary);
+        }
+
+        unit.Append('*');
+
+        if (record.Texts.Count == 0)
+        {
+            return unit.ToString();
+        }
+
+        /* Each text's share of the record's remaining room, after its own markup: the code fence
+           ("\n```\n" + "\n```", nine units) and, when there are several, the italic label line. */
+        var labelled = record.Texts.Count > 1;
+        var markup = 0;
+        foreach (var (label, _) in record.Texts)
+        {
+            markup += 9 + (labelled ? label.Length + 3 : 0);
+        }
+
+        var share = Math.Max(0, (SlackRecordLimit - unit.Length - markup) / record.Texts.Count);
+        foreach (var (label, text) in record.Texts)
+        {
+            if (labelled)
+            {
+                unit.Append("\n_").Append(label).Append('_');
+            }
+
+            unit.Append("\n```\n").Append(SlackBoundedText(string.Empty, text, share)).Append("\n```");
+        }
+
+        return unit.ToString();
     }
 
     /// <summary>A detail heading bounded to <see cref="SlackDetailHeadingLimit"/>; unchanged for every
@@ -1307,10 +1475,19 @@ public class WebhookAlertService
     /// only be at or below the UTF-16 count the first sizing pass allowed for, so the note can only be
     /// narrower than the room held for it, and the field stays inside its limit.</para>
     /// </summary>
-    private static string SlackFieldText(string label, string value)
+    private static string SlackFieldText(string label, string value) =>
+        SlackBoundedText($"*{label}:*\n", value, SlackFieldTextLimit);
+
+    /// <summary>
+    /// <paramref name="prefix"/> over <paramref name="value"/> inside <paramref name="limit"/>, the cut
+    /// stated inline when there is one — the mechanics of <see cref="SlackFieldText"/>, which is this at
+    /// <see cref="SlackFieldTextLimit"/> with a <c>*label:*</c> prefix, lifted out (#3644) so a record's
+    /// code-blocked text (<see cref="SlackRecordText"/>, empty prefix, the record's share) states its cut in
+    /// exactly the words and the characters a cut field does. One note, one arithmetic, two sites.
+    /// </summary>
+    private static string SlackBoundedText(string prefix, string value, int limit)
     {
-        var prefix = $"*{label}:*\n";
-        if (prefix.Length + value.Length <= SlackFieldTextLimit)
+        if (prefix.Length + value.Length <= limit)
         {
             return prefix + value;
         }
@@ -1320,12 +1497,12 @@ public class WebhookAlertService
 
         /* The label is producer-controlled and short; a label that alone crowds the field is bounded so
            the arithmetic below stays positive. */
-        if (prefix.Length > SlackFieldTextLimit / 2)
+        if (prefix.Length > limit / 2)
         {
-            prefix = prefix[..SlackCutLength(prefix, SlackFieldTextLimit / 2)];
+            prefix = prefix[..SlackCutLength(prefix, limit / 2)];
         }
 
-        var keep = SlackCutLength(value, Math.Max(0, SlackFieldTextLimit - prefix.Length - Note(value.Length).Length));
+        var keep = SlackCutLength(value, Math.Max(0, limit - prefix.Length - Note(value.Length).Length));
         /* Counting the omitted characters IS a walk of the omitted tail — the pre-#3622 subtraction counted
            units, which is the thing that was wrong — so this costs the tail's length, once, on the
            truncation path only. Every producer bounds its values upstream (the analysis formatter cuts
@@ -1859,6 +2036,10 @@ public class WebhookAlertService
             {
                 Heading = detail.Heading,
                 Fields = detail.Fields,
+                /* #3644: the copy is the whole item less its payload. Inert today — this copy is only
+                   serialized, and the serializer carries fields, not records — but a copy that silently
+                   dropped a member is the kind of drift the next renderer of this copy would inherit. */
+                Records = detail.Records,
                 Body = detail.Body,
                 IsCodeBlock = false
             });
