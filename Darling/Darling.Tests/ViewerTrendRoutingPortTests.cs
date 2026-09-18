@@ -157,8 +157,10 @@ public sealed class ViewerTrendRoutingPortTests
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs");
         var partial = source[source.IndexOf("public sealed partial class ViewerDataService", StringComparison.Ordinal)..];
 
+        /* Two resolver calls: the shared body the two duration trends go through, and the execution-count read
+           (which routes on the query grain by itself). Two coverage descriptions, at the same two sites. */
         Assert.Equal(2, CountOf(partial, "DurationTrendRouting.ResolveTier("));
-        Assert.Equal(3, CountOf(partial, "DurationTrendRouting.DescribeCoverage("));
+        Assert.Equal(2, CountOf(partial, "DurationTrendRouting.DescribeCoverage("));
         Assert.DoesNotContain("RetentionTierRouter.", partial, StringComparison.Ordinal);
         Assert.Contains("static rollups => rollups.QueryGrainHourly", partial, StringComparison.Ordinal);
         Assert.Contains("static rollups => rollups.ProcedureGrainHourly", partial, StringComparison.Ordinal);
@@ -266,8 +268,12 @@ public sealed class ViewerTrendRoutingPortTests
 
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.FinOps.Pvs.cs");
         Assert.Contains("public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double? PvsSizeMb, double? PctOfDatabase);", lite, StringComparison.Ordinal);
-        Assert.Contains("reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),", lite, StringComparison.Ordinal);
-        Assert.DoesNotContain("IsDBNull(2) ? 0", lite, StringComparison.Ordinal);
+        var liteTrend = lite[lite.IndexOf("GetPvsTrendAsync(", StringComparison.Ordinal)..];
+        liteTrend = liteTrend[..liteTrend.IndexOf("return items;", StringComparison.Ordinal)];
+        Assert.Contains("reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),", liteTrend, StringComparison.Ordinal);
+        /* Scoped to the trend read: the latest-snapshot grid one method up reads a DIFFERENT ordinal-2
+           (database_data_size_mb, a denominator) and its 0 is that grid's own #1951 contract. */
+        Assert.DoesNotContain("IsDBNull(2) ? 0", liteTrend, StringComparison.Ordinal);
 
         var chart = RepoFile.ReadRepoFile("Lite", "Controls", "FinOpsTab.xaml.cs");
         Assert.Contains("trend.Where(t => t.PvsSizeMb.HasValue)", chart, StringComparison.Ordinal);
