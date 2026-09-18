@@ -1134,9 +1134,10 @@ public sealed class ViewerFleetDeadlockCoverageTests
         var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Overview.cs");
 
         /* Anchored on the DECLARATION, which is itself the shape being pinned: the helper hands the band
-           back beside the tallies rather than returning a pair the caller has to re-read the store for. */
+           back beside the tallies rather than returning a pair the caller has to re-read the store for.
+           The tuple grew a Total for #3539 A8d (the share's denominator) — a fourth tally, same shape. */
         var start = source.IndexOf(
-            "private async Task<(int Healthy, int Failing, string? DeadlockBand)> GetCollectorHealthCountsAsync",
+            "private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand)> GetCollectorHealthCountsAsync",
             StringComparison.Ordinal);
         Assert.True(start > 0, "the collector-health helper does not hand back the deadlock band");
         var end = source.IndexOf("private static int? MinutesAgo", start, StringComparison.Ordinal);
