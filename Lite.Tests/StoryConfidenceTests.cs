@@ -44,13 +44,16 @@ public sealed class StoryConfidenceTests
     /// One more matched amplifier, or one more node on the path, never LOWERS confidence — the property
     /// that makes "more corroboration" and "higher confidence" the same direction, which the legacy
     /// formula inverted at the lone-symptom step. Enumerated over every catalogue size a real key has
-    /// (the largest amplifier list is six entries; twelve is headroom) and paths to the engine's depth cap.
+    /// (the largest amplifier list is six entries; twelve is headroom) and every path length the traversal
+    /// can build — the root plus MaxPathDepth hops, i.e. <see cref="StoryConfidence.MaxPathNodes"/> (11),
+    /// not a round ten: the engine's depth constant counts HOPS, and the first review of this lane caught
+    /// the off-by-one in the pins' upper bound.
     /// </summary>
     [Fact]
     public void Compute_IsMonotonic_InMatchedAmplifiers_AndInPathDepth()
     {
         for (var defined = 0; defined <= 12; defined++)
-        for (var n = 1; n <= 10; n++)
+        for (var n = 1; n <= StoryConfidence.MaxPathNodes; n++)
         for (var matched = 0; matched <= defined; matched++)
         {
             var here = StoryConfidence.Compute(matched, defined, n);
@@ -91,11 +94,14 @@ public sealed class StoryConfidenceTests
     {
         var max = 0.0;
         for (var defined = 0; defined <= 12; defined++)
-        for (var n = 1; n <= 10; n++)
+        for (var n = 1; n <= StoryConfidence.MaxPathNodes; n++)
             max = Math.Max(max, StoryConfidence.Compute(defined, defined, n));
         Assert.True(max < 1.0, $"the formula reached {max}");
-        /* The catalogued ceiling at the depth cap: 0.20 + 0.48 + 0.32 × 0.9. */
-        Assert.Equal(0.968, StoryConfidence.Compute(5, 5, 10), precision: 9);
+        /* The two ceilings at the deepest path the traversal builds (11 nodes = root + 10 hops):
+           uncatalogued 0.20 + 0.80 × 10/11, catalogued 0.20 + 0.48 + 0.32 × 10/11. */
+        Assert.Equal(11, StoryConfidence.MaxPathNodes);
+        Assert.Equal(0.2 + 0.8 * 10.0 / 11.0, StoryConfidence.Compute(0, 0, StoryConfidence.MaxPathNodes), precision: 9);
+        Assert.Equal(0.2 + 0.48 + 0.32 * 10.0 / 11.0, StoryConfidence.Compute(5, 5, StoryConfidence.MaxPathNodes), precision: 9);
     }
 
     /// <summary>
@@ -108,7 +114,7 @@ public sealed class StoryConfidenceTests
     [InlineData(3, 3, 1, 0.68)]     // lone PAGEIOLATCH_SH, 3 of 3 matched: 0.20 + 0.48
     [InlineData(2, 3, 3, 0.7333333333)] // PAGEIOLATCH_SH → RESOURCE_SEMAPHORE → MEMORY_GRANT_PENDING, 2 of 3: 0.20 + 0.32 + 0.32 × 2/3
     [InlineData(0, 0, 2, 0.60)]     // SCH_M → RUNNING_JOBS: no catalogue, two nodes: 0.20 + 0.80 × 0.5
-    [InlineData(0, 0, 10, 0.92)]    // ten-node uncatalogued chain: 0.20 + 0.80 × 0.9 — the uncatalogued ceiling
+    [InlineData(0, 0, 10, 0.92)]    // ten-node uncatalogued chain: 0.20 + 0.80 × 0.9
     [InlineData(0, 5, 10, 0.488)]   // ten-node chain whose five checks all came back false: 0.20 + 0.32 × 0.9
     public void Compute_WorkedExamples(int matched, int defined, int pathLength, double expected)
     {
@@ -122,12 +128,13 @@ public sealed class StoryConfidenceTests
     /// "path-shape (pre-#3538)" — or a legacy row corroborated — and a schema marker would be the only
     /// honest alternative (a rung this campaign is not permitted). The legacy shape is exactly 1.0 or
     /// (n-1)/n; the formula's 0.20 floor keeps every lone value away from 1.0, and no small-integer
-    /// amplifier share puts a multi-node value on (n-1)/n.
+    /// amplifier share puts a multi-node value on (n-1)/n. Enumerated to the engine's REAL maximum path
+    /// (<see cref="StoryConfidence.MaxPathNodes"/> = root + MaxPathDepth hops = 11), not to ten.
     /// </summary>
     [Fact]
     public void Compute_NeverCollidesWithTheLegacyPathShape_SoTheBasisCanBeReDerivedAtReadTime()
     {
-        for (var n = 1; n <= 10; n++)
+        for (var n = 1; n <= StoryConfidence.MaxPathNodes; n++)
         for (var defined = 0; defined <= 12; defined++)
         for (var matched = 0; matched <= defined; matched++)
         {
