@@ -96,20 +96,24 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /// <summary>
-    /// query_stats seeds its PASS WINDOW only: the store persists neither statement offset the delta key
-    /// carries, so no row can reproduce the key. The read is the distinct collection times per server
-    /// inside the cutoff and nothing else.
+    /// query_stats is key-seeded since v61 (#3540): the store persists both statement offsets now, so the
+    /// read partitions by the collector's FULL key — sql_handle, both offsets, plan_handle — and returns
+    /// each key's latest row inside the window. The offsets are selected RAW (no COALESCE, no arithmetic)
+    /// because the seeder rebuilds the key from them with the collector's own interpolation, and there is
+    /// no offset filter in the SQL: a pre-v61 row (NULL offsets) is read for the pass window and skipped
+    /// for keys in C#, so one read serves both halves.
     /// </summary>
     [Fact]
-    public void QueryStatsPassSeedSql_IsThePassWindowOnly()
+    public void QueryStatsSeedSql_PartitionsByTheFullDeltaKeyAndSelectsTheOffsetsRaw()
     {
-        var sql = DeltaCalculator.QueryStatsPassSeedSql;
-        Assert.Contains("SELECT server_id, collection_time", sql, StringComparison.Ordinal);
+        var sql = DeltaCalculator.QueryStatsSeedSql;
+        Assert.Contains("SELECT DISTINCT ON (server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle, collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(sql, "collection_time >= $1"));
-        Assert.DoesNotContain("sql_handle", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("plan_handle", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -311,13 +315,71 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /// <summary>
-    /// THE pass-window pin (#3540 A4 / #2235). query_stats has no key seed — the store cannot reproduce
-    /// its key — but its pass window is seeded from the table's collection times, so on the FIRST
-    /// post-restart pass a plan compiled since the last pre-restart pass is credited in full with a
+    /// #3540 (v61): query_stats is KEY-seeded from the rows that carry the offsets, with the key spelled exactly
+    /// as the collector spells it — the raw offsets, <c>-1</c> included. A key present only in the OLDER pass
+    /// (it fell out of the TOP (n)) is restored from that pass, the per-key shape's whole point. A pre-v61 row
+    /// (NULL offsets) seeds NO key — not even under a normalized guess — while its collection time still
+    /// feeds the pass window (the next test). Every expected value was worked by hand from the rows and
+    /// executed against the real seeder on DuckDB before this was written.
+    /// </summary>
+    [Fact]
+    public async Task Seed_QueryStats_RestoresKeysFromRowsWithOffsets_SpelledAsTheCollectorSpellsThem()
+    {
+        var older = DateTime.UtcNow.AddMinutes(-4);
+        var latest = DateTime.UtcNow.AddMinutes(-2);
+
+        /* The whole-batch statement (0, -1) in both passes; a second statement of the same batch/plan
+           (100, 240) only in the older pass; a null-handle row; and a pre-v61 row with no offsets. */
+        await InsertKeyedQueryStatsAsync(RecentServerId, older, "0xSH1", 0, -1, "0xPH1", 10);
+        await InsertKeyedQueryStatsAsync(RecentServerId, latest, "0xSH1", 0, -1, "0xPH1", 15);
+        await InsertKeyedQueryStatsAsync(RecentServerId, older, "0xSH1", 100, 240, "0xPH1", 7);
+        await InsertKeyedQueryStatsAsync(RecentServerId, latest, null, 0, -1, null, 3);
+        await InsertQueryStatsAsync(RecentServerId, latest);
+
+        var deltas = new DeltaCalculator(NullLogger.Instance);
+        await deltas.SeedFromDatabaseAsync(_duckDb);
+
+        var now = DateTime.UtcNow;
+        const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+
+        /* The latest pass is the baseline for the key both passes wrote: 18 - 15, over ~120 s. The key
+           carries the raw -1, as the collector's $"{sh}:{start}:{end}:{ph}" does. */
+        Assert.Equal(3, deltas.CalculateDeltaWithInterval(RecentServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 18, out var interval, now, Gap));
+        Assert.InRange(interval, 118, 122);
+        /* Every one of the eight groups, from the same row (counters are multiples of the execution count). */
+        Assert.Equal(30, deltas.CalculateDelta(RecentServerId, "query_stats_worker", "0xSH1:0:-1:0xPH1", 180, now, Gap));
+        Assert.Equal(60, deltas.CalculateDelta(RecentServerId, "query_stats_elapsed", "0xSH1:0:-1:0xPH1", 360, now, Gap));
+        Assert.Equal(90, deltas.CalculateDelta(RecentServerId, "query_stats_reads", "0xSH1:0:-1:0xPH1", 540, now, Gap));
+        Assert.Equal(120, deltas.CalculateDelta(RecentServerId, "query_stats_writes", "0xSH1:0:-1:0xPH1", 720, now, Gap));
+        Assert.Equal(150, deltas.CalculateDelta(RecentServerId, "query_stats_phys_reads", "0xSH1:0:-1:0xPH1", 900, now, Gap));
+        Assert.Equal(180, deltas.CalculateDelta(RecentServerId, "query_stats_rows", "0xSH1:0:-1:0xPH1", 1080, now, Gap));
+        Assert.Equal(210, deltas.CalculateDelta(RecentServerId, "query_stats_spills", "0xSH1:0:-1:0xPH1", 1260, now, Gap));
+
+        /* The statement that fell out of the TOP (n) on the latest pass: seeded from its OLDER row, over
+           ~240 s. The latest-collection shape would have missed it and this would be 0. */
+        Assert.Equal(2, deltas.CalculateDeltaWithInterval(RecentServerId, "query_stats_exec", "0xSH1:100:240:0xPH1", 9, out var span, now, Gap));
+        Assert.InRange(span, 238, 242);
+
+        /* A null handle formats as EMPTY on both sides — the collector's interpolation and the seeder's. */
+        Assert.Equal(2, deltas.CalculateDelta(RecentServerId, "query_stats_exec", ":0:-1:", 5, now, Gap));
+
+        /* The pre-v61 row seeded nothing: not under the guess a normalizing seeder would have made (0, 0),
+           nor under the whole-batch pair. Gap policy OFF so a first sighting is the only way to read 0 here —
+           a seeded baseline of 1 would return 4. */
+        Assert.Equal(0, deltas.CalculateDelta(RecentServerId, "query_stats_exec", "sh:0:0:ph", 5, now, 0));
+        Assert.Equal(0, deltas.CalculateDelta(RecentServerId, "query_stats_exec", "sh:0:-1:ph", 5, now, 0));
+    }
+
+    /// <summary>
+    /// THE pass-window pin (#3540 A4 / #2235). Until v61 query_stats had no key seed — the store could not
+    /// reproduce its key — and only its pass window was seeded from the table's collection times, so on the
+    /// FIRST post-restart pass a plan compiled since the last pre-restart pass is credited in full with a
     /// real interval, while a plan older than that gap baselines honestly. On an unseeded calculator both
-    /// are (0, 0): the rescue was inert on exactly the cycle it exists for. The window is also seeded
-    /// for the ORIGINAL families (wait_stats here), proven through the same path; and a server whose
-    /// only rows predate the window gets no pass window.
+    /// are (0, 0): the rescue was inert on exactly the cycle it exists for. The rows here are PRE-v61 rows
+    /// (no offsets), which is what makes this also the pin that the v61 key seed still feeds the pass window
+    /// from every row: the first restart after the upgrade sees only such rows. The window is also seeded
+    /// for the ORIGINAL families (wait_stats here), proven through the same path; and a server whose only
+    /// rows predate the window gets no pass window.
     /// </summary>
     [Fact]
     public async Task Seed_PassWindow_ArmsTheSeriesAgeRescueOnTheFirstPostRestartPass()
@@ -500,6 +562,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'P', $8, $9, $10, $11, $12, $13, $14, $15)";
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>A pre-v61 query_stats row: no offsets stored, so it can feed the pass window and nothing else.</summary>
     private async Task InsertQueryStatsAsync(int serverId, DateTime collectionTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();
@@ -513,6 +576,38 @@ VALUES ($1, $2, $3, $4, 'qh', 'sh', 'ph', 1)";
         cmd.Parameters.Add(new DuckDBParameter { Value = Truncate(collectionTimeUtc) });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "delta-seed-window" });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>A v61 query_stats row: the two offsets stored raw, the eight counters as multiples of the
+    /// execution count so every group's expected delta is derivable.</summary>
+    private async Task InsertKeyedQueryStatsAsync(int serverId, DateTime collectionTimeUtc, string? sqlHandle, int start, int end, string? planHandle, long executions)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, query_hash, sql_handle, plan_handle,
+     statement_start_offset, statement_end_offset,
+     execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_logical_writes, total_physical_reads, total_rows, total_spills)
+VALUES ($1, $2, $3, $4, 'qh', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Truncate(collectionTimeUtc) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "delta-seed-window" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)sqlHandle ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)planHandle ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = start });
+        cmd.Parameters.Add(new DuckDBParameter { Value = end });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 10 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 20 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 30 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 40 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 50 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 60 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executions * 70 });
         await cmd.ExecuteNonQueryAsync();
     }
 }

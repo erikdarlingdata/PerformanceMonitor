@@ -25,13 +25,13 @@ public class PgWaitStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
-    private static CollectorContext MakeContext()
+    private static CollectorContext MakeContext(RecordingCollectorDeltaCalculator? deltas = null)
         => new()
         {
             ServerId = 42,
             ServerName = "aurora-writer",
             CollectionTime = new DateTime(2026, 8, 11, 12, 0, 0, DateTimeKind.Utc),
-            Deltas = s_deltas,
+            Deltas = deltas ?? s_deltas,
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,
@@ -90,6 +90,9 @@ public class PgWaitStatsCollectorDefinitionTests
             ("wait_time_us", CollectorColumnType.BigInt),
             ("delta_waits", CollectorColumnType.BigInt),
             ("delta_wait_time_us", CollectorColumnType.BigInt),
+            /* #3540 (Darling V128): the TRAILING column, in the same Integer perfmon_stats and query_stats
+               have always used, so the positional COPY writer lands it after every pre-existing column. */
+            ("sample_interval_seconds", CollectorColumnType.Integer),
         };
 
         var actual = PgWaitStatsCollector.Instance.PayloadColumns;
@@ -99,6 +102,10 @@ public class PgWaitStatsCollectorDefinitionTests
             Assert.Equal(expected[i].Name, actual[i].Name);
             Assert.Equal(expected[i].Type, actual[i].Type);
         }
+
+        Assert.Equal(
+            PerfmonStatsCollector.Instance.PayloadColumns.Single(c => c.Name == "sample_interval_seconds").Type,
+            actual[^1].Type);
     }
 
     /// <summary>
@@ -225,7 +232,7 @@ public class PgWaitStatsCollectorDefinitionTests
     {
         var writer = new RecordingCollectorRowWriter();
         PgWaitStatsCollector.Instance.WritePayload(
-            new PgWaitStatsCollector.Row(10, 167772160L, "IO", "DataFileRead", 100L, 5000L, DeltaWaits: 7L, DeltaWaitTime: 250L),
+            new PgWaitStatsCollector.Row(10, 167772160L, "IO", "DataFileRead", 100L, 5000L, DeltaWaits: 7L, DeltaWaitTime: 250L, SampleIntervalSeconds: 137),
             writer,
             MakeContext());
 
@@ -238,6 +245,35 @@ public class PgWaitStatsCollectorDefinitionTests
         Assert.Equal(5000L, writer.Values[5]);
         Assert.Equal(7L, writer.Values[6]);
         Assert.Equal(250L, writer.Values[7]);
+        /* #3540 (V128): the row's measured interval reaches the payload as read — a distinctive value, so
+           this passes only if the ROW's interval (computed in ReadAsync) is what is written, not a constant. */
+        Assert.Equal(137, writer.Values[8]);
+    }
+
+    /// <summary>
+    /// #3540 (V128): the interval ReadAsync computes beside the deltas is the MINIMUM over the row's two
+    /// groups, so a row whose wait-time series alone is unknowable is stored as (…, 0) and no reader divides
+    /// that group's 0 by the waits series' real span. Reads through the recording fake with a per-group
+    /// override, the way the V127 collectors' minimum rule is pinned.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_CarriesTheMinimumIntervalOverTheRowsDeltaGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 300 };
+        deltas.IntervalByGroup["pg_wait_stats_time"] = 0;
+
+        var reader = new FakeCollectorDataReader(
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L });
+        var rows = await PgWaitStatsCollector.Instance.ReadAsync(reader, MakeContext(deltas), CancellationToken.None);
+
+        Assert.Equal(0, Assert.Single(rows).SampleIntervalSeconds);
+
+        /* And with both groups agreeing, the measured value itself. */
+        var steady = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var steadyRows = await PgWaitStatsCollector.Instance.ReadAsync(
+            new FakeCollectorDataReader(new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L }),
+            MakeContext(steady), CancellationToken.None);
+        Assert.Equal(137, Assert.Single(steadyRows).SampleIntervalSeconds);
     }
 
     [Fact]

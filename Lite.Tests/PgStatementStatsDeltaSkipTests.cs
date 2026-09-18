@@ -80,7 +80,9 @@ public class PgStatementStatsDeltaSkipTests
 
         var rows = await ReadAsync(Row(queryId: 1, calls: 0, totalExecTimeMs: 0), T0, deltas);
 
-        Assert.Single(rows);
+        /* #3540 (V128): and it ships as the (0, 0) marker — interval 0 is what tells a reader this row's
+           zero deltas are unknowable rather than a confirmed idle interval. */
+        Assert.Equal(0, Assert.Single(rows).SampleIntervalSeconds);
     }
 
     [Fact]
@@ -106,6 +108,8 @@ public class PgStatementStatsDeltaSkipTests
         Assert.Equal(50, row.DeltaCalls);
         Assert.Equal(500, row.DeltaTotalExecTimeMs);
         Assert.Equal(15, row.DeltaRows);
+        /* #3540 (V128): the measured span the three deltas accrued over, stored beside them. */
+        Assert.Equal(60, row.SampleIntervalSeconds);
     }
 
     /// <summary>
@@ -122,7 +126,9 @@ public class PgStatementStatsDeltaSkipTests
 
         var afterReset = await ReadAsync(Row(queryId: 4, calls: 40, totalExecTimeMs: 300), T0.AddSeconds(60), deltas);
 
-        Assert.Single(afterReset);
+        /* #3540 (V128): a reset row ships with interval 0, not the 60 s that elapsed — the elapsed span is
+           real, but no delta is knowable over it, and a stored 60 beside a 0 delta would read as idle. */
+        Assert.Equal(0, Assert.Single(afterReset).SampleIntervalSeconds);
     }
 
     /// <summary>

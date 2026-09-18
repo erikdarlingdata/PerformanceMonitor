@@ -95,6 +95,36 @@ public sealed class PgTrendReaderTests
     }
 
     /// <summary>
+    /// #3540 (V128): the same reasoning the trend already applied to the DELTAS now applies to the INTERVAL.
+    /// pg_statement_stats stores <c>sample_interval_seconds</c> beside its deltas — the span the delta accrued
+    /// over, which for a collector that skips idle rows is NOT the gap between the rows it left behind. Per
+    /// snapshot the interval is MAX over the queryid's rows (0 only when every row was the unknowable marker),
+    /// 0 → NULL through NULLIF, NULL (pre-V128) → the LAG this read always used. No ELSE 0 on
+    /// calls_per_second: a NULL rate is dropped by the reader rather than plotted as 0.00 calls/sec at a
+    /// restart, and the first pre-V128 snapshot is absent rather than a fabricated 0.0.
+    /// </summary>
+    [Fact]
+    public void TheQueryTrendPrefersTheStoredInterval_AndNeverFabricatesZeroCallsPerSecond()
+    {
+        var sql = DarlingPgTrendReader.QueryDurationTrendSql;
+
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN interval_seconds > 0", sql, StringComparison.Ordinal);
+        Assert.Contains("/ interval_seconds", sql, StringComparison.Ordinal);
+
+        /* The reader drops the NULL-rate point; it does not read it as 0. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgTrendReader.cs");
+        var reader = source[source.IndexOf("GetQueryDurationTrendAsync(", StringComparison.Ordinal)..];
+        reader = reader[..reader.IndexOf("return points;", StringComparison.Ordinal)];
+        Assert.Contains("if (reader.IsDBNull(4))", reader, StringComparison.Ordinal);
+        Assert.Contains("continue;", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("reader.IsDBNull(4) ? 0", reader, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The automatic choice must skip the CPU class. <c>pg_wait_sampling</c>'s <c>Running</c> means the
     /// backend was NOT waiting and dominates any healthy server's profile — measured on the rig it grew by
     /// 1,534 samples against 194 for the next event — so defaulting to it answers the opposite of the

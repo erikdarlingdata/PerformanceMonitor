@@ -71,7 +71,11 @@ public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWai
            whether this row ships at all, which means it must exist before the row is (or is not)
            added to the list WritePayload will later be called once per. */
         long DeltaWaits,
-        long DeltaWaitTime);
+        long DeltaWaitTime,
+        /* #3540 (Darling V128): the measured seconds the two deltas accrued over — the minimum over the
+           row's two groups, so 0 means "no delta in this row is knowable". Computed beside the deltas in
+           ReadAsync because that is where the calculator is called. */
+        int SampleIntervalSeconds);
 
     /* Wait TYPES whose events are never a finding. Filtered by type rather than by event name so a
        new background worker in a future Aurora release is excluded automatically instead of arriving
@@ -171,6 +175,14 @@ WHERE w.wait_time > 0";
         new CollectorColumn("wait_time_us", CollectorColumnType.BigInt),
         new CollectorColumn("delta_waits", CollectorColumnType.BigInt),
         new CollectorColumn("delta_wait_time_us", CollectorColumnType.BigInt),
+        /* Appended (Darling V128, #3540): the measured seconds the row's two deltas accrued over, or 0
+           when no delta was knowable. Appended at the END because the COPY writer is positional — the
+           same rule GoldenCollectorSchema's header states for every column a numbered migration adds by
+           ALTER TABLE. Until V128 this collector asked the calculator for the interval only to decide
+           the idle-row skip and stored nothing, so every row it DID ship with interval 0 (first sighting,
+           reset, gap re-baseline — the three cases the skip deliberately lets through) carried a delta 0
+           that read as a measured idle interval. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -206,10 +218,13 @@ WHERE w.wait_time > 0";
                 context.ServerId, "pg_wait_stats_waits", key, waits, out var waitsIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
             /* Computed unconditionally, even on a row this pass goes on to skip — see the class remarks
-               on why the wait-time series' baseline must stay fresh regardless. */
-            var deltaWaitTime = context.Deltas.CalculateDelta(
-                context.ServerId, "pg_wait_stats_time", key, waitTimeMicroseconds,
+               on why the wait-time series' baseline must stay fresh regardless. With the interval (#3540,
+               V128): the stored interval is the MINIMUM over the row's two groups (the V127 rule,
+               WaitStatsCollector), so a reader never divides one group's reset 0 by the other's real span. */
+            var deltaWaitTime = context.Deltas.CalculateDeltaWithInterval(
+                context.ServerId, "pg_wait_stats_time", key, waitTimeMicroseconds, out var timeIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+            var sampleIntervalSeconds = Math.Min(waitsIntervalSeconds, timeIntervalSeconds);
 
             /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
                pass just re-baselined) with zero new waits means the event demonstrably did not fire,
@@ -228,7 +243,8 @@ WHERE w.wait_time > 0";
                 Waits: waits,
                 WaitTimeMicroseconds: waitTimeMicroseconds,
                 DeltaWaits: deltaWaits,
-                DeltaWaitTime: deltaWaitTime));
+                DeltaWaitTime: deltaWaitTime,
+                SampleIntervalSeconds: sampleIntervalSeconds));
         }
 
         return rows;
@@ -244,6 +260,7 @@ WHERE w.wait_time > 0";
             .Value(row.Waits)                   /* waits BIGINT */
             .Value(row.WaitTimeMicroseconds)    /* wait_time_us BIGINT */
             .Value(row.DeltaWaits)              /* delta_waits BIGINT */
-            .Value(row.DeltaWaitTime);           /* delta_wait_time_us BIGINT */
+            .Value(row.DeltaWaitTime)           /* delta_wait_time_us BIGINT */
+            .Value(row.SampleIntervalSeconds);  /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

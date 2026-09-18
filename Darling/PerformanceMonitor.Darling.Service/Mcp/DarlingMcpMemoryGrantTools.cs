@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpMemoryGrantTools
 {
-    [McpServerTool(Name = "get_resource_semaphore"), Description("Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance.")]
+    [McpServerTool(Name = "get_resource_semaphore"), Description("Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. sample_interval_seconds is the measured seconds the two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column.")]
     public static async Task<string> GetResourceSemaphore(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -68,7 +68,14 @@ public sealed class DarlingMcpMemoryGrantTools
                 timeout_error_count = r.TimeoutErrorCount,
                 forced_grant_count = r.ForcedGrantCount,
                 timeout_error_count_delta = r.TimeoutErrorCountDelta,
-                forced_grant_count_delta = r.ForcedGrantCountDelta
+                forced_grant_count_delta = r.ForcedGrantCountDelta,
+                /* #3540 (V128): the interval the deltas accrued over, the way the perfmon and file-I/O tools
+                   hand it over. A stored 0 is the calculator's no-delta-knowable marker (a restart, not a
+                   quiet semaphore) and is reported as null rather than 0 — 0 seconds is not a measurement;
+                   a pre-V128 row that never recorded one is null too. interval_known states the one thing
+                   both nulls have in common: the two *_delta zeros beside them are not "none this interval". */
+                sample_interval_seconds = r.SampleIntervalSeconds is > 0 ? r.SampleIntervalSeconds : null,
+                interval_known = r.SampleIntervalSeconds is > 0
             });
 
             return JsonSerializer.Serialize(new

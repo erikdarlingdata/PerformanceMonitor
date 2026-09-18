@@ -204,28 +204,36 @@ public sealed class OversizedPlanBacklogPins
     }
 
     [Fact]
-    public void BothCollectors_DeclareTheSizeAsTheirLastPayloadColumn()
+    public void BothCollectors_DeclareTheSizeAtTheOrdinalItWasAppendedAt()
     {
-        /* Appended LAST on both, which is what keeps every earlier ordinal — and therefore every existing
-           store column's position, the positional binary COPY and the positional DuckDB appender — stable.
-           BigInt because DATALENGTH over an nvarchar(max) expression returns bigint, and a narrower store
-           column would silently overflow on the megabyte-scale plans this exists to describe.
+        /* Appended LAST on both when #3392 landed, which is what keeps every earlier ordinal — and therefore
+           every existing store column's position, the positional binary COPY and the positional DuckDB
+           appender — stable. BigInt because DATALENGTH over an nvarchar(max) expression returns bigint, and
+           a narrower store column would silently overflow on the megabyte-scale plans this exists to
+           describe.
+
+           No longer the LAST column: V128 / Lite v61 (#3540) appended behind it — the interval on
+           procedure_stats, the two statement offsets on query_stats — by the same append-only rule. The
+           claim that outlives that is the one the stores depend on: this column's ORDINAL never moved.
+           Pinned as the ordinal (51 and 35), which is what "appended last at #3392" means once later rungs
+           exist; a `names[^1]` pin here would assert #3392 is still the newest appender, which is how the
+           next rung's build goes red.
 
            This is the declaration half. The SELECT-ordinal-to-payload-slot agreement is driven through the
            real shredder in Lite.Tests' two collector-definition suites, which own the reader fakes. */
-        Assert.Equal(52, QueryStatsCollector.Instance.PayloadColumns.Count);
-        Assert.Equal(36, ProcedureStatsCollector.Instance.PayloadColumns.Count);
+        Assert.Equal(54, QueryStatsCollector.Instance.PayloadColumns.Count);
+        Assert.Equal(37, ProcedureStatsCollector.Instance.PayloadColumns.Count);
 
-        foreach (ICollectorSchemaInfo collector in new ICollectorSchemaInfo[]
+        foreach (var (collector, ordinal) in new (ICollectorSchemaInfo, int)[]
         {
-            QueryStatsCollector.Instance,
-            ProcedureStatsCollector.Instance,
+            (QueryStatsCollector.Instance, 51),
+            (ProcedureStatsCollector.Instance, 35),
         })
         {
             var names = collector.PayloadColumns.Select(c => c.Name).ToArray();
 
-            Assert.Equal("query_plan_xml_bytes", names[^1]);
-            Assert.Equal(CollectorColumnType.BigInt, collector.PayloadColumns[^1].Type);
+            Assert.Equal("query_plan_xml_bytes", names[ordinal]);
+            Assert.Equal(CollectorColumnType.BigInt, collector.PayloadColumns[ordinal].Type);
 
             /* The gated content column is still there and still AHEAD of the size, which is the pair a
                reader tests as "measured, not captured". query_stats keeps other columns between them, so

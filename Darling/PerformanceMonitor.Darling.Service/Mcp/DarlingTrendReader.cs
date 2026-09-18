@@ -594,6 +594,13 @@ internal static class DarlingTrendReader
     /// shows up smeared across however many statements it runs. This charges the whole call to the
     /// procedure. When both are available, the pair answers "did ad-hoc SQL regress, or did a procedure?" -
     /// which one series alone never can. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
+    /// over the collection's rows, because a plan first seen in an otherwise steady pass carries 0 beside
+    /// its siblings' real interval and contributes 0 to the sums; MAX is 0 only when EVERY row was
+    /// unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the rates are NULL and the
+    /// reader drops the point rather than rendering 0.00 ms/sec. NULL (a pre-V128 collection) falls back to
+    /// the LAG this read always used. No <c>ELSE 0</c>. Verbatim from the viewer's copy apart from the
+    /// database filter, as before.</para>
     /// </summary>
     public const string ProcedureDurationTrendSql = """
         WITH raw AS
@@ -602,7 +609,10 @@ internal static class DarlingTrendReader
                 collection_time,
                 SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
                 SUM(delta_execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END AS interval_seconds
             FROM procedure_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -611,8 +621,8 @@ internal static class DarlingTrendReader
         )
         SELECT
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
         FROM raw
         ORDER BY collection_time
         """;
@@ -796,10 +806,18 @@ internal static class DarlingTrendReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540, V128): the point is dropped, not read as 0. Only
+               the procedure trend emits one today (its query-stats and Query Store siblings keep ELSE 0), so
+               this is a no-op for them and the missing-sample posture for it. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             var executionsPerSecond = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                Convert.ToDouble(reader.GetValue(1)),
                 (long)executionsPerSecond,
                 executionsPerSecond));
         }

@@ -148,7 +148,8 @@ SELECT
     timeout_error_count,
     forced_grant_count,
     timeout_error_count_delta,
-    forced_grant_count_delta
+    forced_grant_count_delta,
+    sample_interval_seconds
 FROM v_memory_grant_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
@@ -178,7 +179,10 @@ ORDER BY pool_id, resource_semaphore_id";
                 TimeoutErrorCount = reader.IsDBNull(11) ? 0 : ToInt64(reader.GetValue(11)),
                 ForcedGrantCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12)),
                 TimeoutErrorCountDelta = reader.IsDBNull(13) ? 0 : ToInt64(reader.GetValue(13)),
-                ForcedGrantCountDelta = reader.IsDBNull(14) ? 0 : ToInt64(reader.GetValue(14))
+                ForcedGrantCountDelta = reader.IsDBNull(14) ? 0 : ToInt64(reader.GetValue(14)),
+                /* NULL stays NULL: a pre-v61 row never recorded its interval, and that is a different
+                   statement from the 0 the calculator writes when no delta was knowable. */
+                SampleIntervalSeconds = reader.IsDBNull(15) ? null : (int)ToInt64(reader.GetValue(15))
             });
         }
         return items;
@@ -201,7 +205,9 @@ public class MemoryGrantChartPoint
 /// <summary>One resource-semaphore latest-snapshot row (the get_resource_semaphore MCP lens): one
 /// (pool_id, resource_semaphore_id) semaphore's full ceiling metrics at the most recent collection in the
 /// window — target / max-target / total workspace memory, granted vs available/used, grantee/waiter counts,
-/// and the cumulative + per-interval-delta timeout/forced-grant pressure counters.</summary>
+/// the cumulative + per-interval-delta timeout/forced-grant pressure counters, and (since v61, #3540) the
+/// measured seconds those deltas accrued over: <c>0</c> is the calculator's "no delta knowable" marker (a
+/// restart, not a quiet semaphore), <c>null</c> a pre-v61 row that never recorded one.</summary>
 public class ResourceSemaphoreRow
 {
     public DateTime CollectionTime { get; set; }
@@ -219,4 +225,9 @@ public class ResourceSemaphoreRow
     public long ForcedGrantCount { get; set; }
     public long TimeoutErrorCountDelta { get; set; }
     public long ForcedGrantCountDelta { get; set; }
+    public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>True when the row's deltas are the calculator's (0, 0) marker: no delta was knowable, so
+    /// the two <c>*Delta</c> zeros beside it are not "no timeouts this interval".</summary>
+    public bool IsUnknowable => SampleIntervalSeconds == 0;
 }

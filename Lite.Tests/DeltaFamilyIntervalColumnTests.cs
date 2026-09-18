@@ -22,46 +22,53 @@ namespace Lite.Tests;
 /// the interval is the ONLY thing that tells those apart. Four of the six SQL Server delta families
 /// (<c>wait_stats</c>, <c>file_io_stats</c>, <c>latch_stats</c>, <c>spinlock_stats</c>) discarded it at the
 /// write until Darling V127 / Lite v60, so a restart's fabricated zero survived as a measured one and every
-/// per-second reader LAG-divided it into a confident 0.00. This is the census that keeps a seventh family
-/// from shipping naked, and keeps the four that still are named rather than assumed.
+/// per-second reader LAG-divided it into a confident 0.00; the remaining four (<c>procedure_stats</c>,
+/// <c>memory_grant_stats</c>, <c>pg_wait_stats</c>, <c>pg_statement_stats</c>) followed at Darling V128 /
+/// Lite v61. This is the census that keeps an eleventh family from shipping naked. Rule 4 is COMPLETE: the
+/// still-naked list below is empty, and asserted empty, so the claim "every delta family stores its
+/// interval" is a test rather than a sentence.
 /// </summary>
 public sealed class DeltaFamilyIntervalColumnTests
 {
     private const string IntervalColumn = "sample_interval_seconds";
 
     /// <summary>
-    /// The delta families that persist NO interval today, named so the list can only SHRINK deliberately.
-    /// <c>procedure_stats</c> and <c>memory_grant_stats</c> take the calculator's bare long;
-    /// <c>pg_wait_stats</c> and <c>pg_statement_stats</c> ask for the interval only to skip idle rows at the
-    /// write and store nothing. Each is a follow-up in the #3540 campaign, not a permanent exemption — a
-    /// rung that gives one of them the column must remove it from here, and the reverse-direction assertion
-    /// below is what makes forgetting to loud.
+    /// The delta families that persist NO interval, named so the list can only SHRINK deliberately. EMPTY
+    /// since Darling V128 / Lite v61 (#3540). From V127 / v60 until then it named four: <c>procedure_stats</c>
+    /// and <c>memory_grant_stats</c> took the calculator's bare long; <c>pg_wait_stats</c> and
+    /// <c>pg_statement_stats</c> asked for the interval only to skip idle rows at the write and stored
+    /// nothing. Each was a follow-up in the #3540 campaign, not a permanent exemption, and the rung that
+    /// dressed them removed them from here — the reverse-direction assertion below is what made forgetting
+    /// to loud. Kept declared, and asserted empty, so a twelfth family that ships naked has to name itself
+    /// here to pass and the diff says so.
     /// </summary>
-    private static readonly HashSet<string> StillNaked = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "procedure_stats",
-        "memory_grant_stats",
-        "pg_wait_stats",
-        "pg_statement_stats",
-    };
+    private static readonly HashSet<string> StillNaked = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The families this PR dressed, plus the two that were never naked.</summary>
+    /// <summary>Every delta family: the two that were never naked, the four V127 / v60 dressed, and the four
+    /// V128 / v61 dressed. Stated as a literal so the PR that adds a family has to say so here too.</summary>
     private static readonly string[] Dressed =
     {
         "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats", "perfmon_stats", "query_stats",
+        "procedure_stats", "memory_grant_stats", "pg_wait_stats", "pg_statement_stats",
     };
 
     /// <summary>
     /// Every member of <see cref="CollectorDeltaCalculator.DeltaFamilyCollectors"/> either carries the
     /// interval column or is on the named still-naked list — and nothing on that list carries it. Both
     /// directions, so a new delta family cannot ship without the column by omission, and a family that gains
-    /// the column cannot keep claiming it has not.
+    /// the column cannot keep claiming it has not. Since V128 / v61 the list is empty, so the "named as still
+    /// naked" branch is the historical record of how the four got here and the census reduces to: every
+    /// family carries the column.
     /// </summary>
     [Fact]
     public void EveryDeltaFamily_PersistsItsInterval_OrIsNamedAsStillNaked()
     {
         var families = CollectorDeltaCalculator.DeltaFamilyCollectors.OrderBy(f => f, StringComparer.Ordinal).ToList();
         Assert.NotEmpty(families);
+        Assert.Equal(10, families.Count); /* the floor that makes "every family" mean something */
+
+        /* Rule 4 is complete: nothing is exempt. A family added to the list has to be a deliberate diff. */
+        Assert.Empty(StillNaked);
 
         foreach (var family in families)
         {
@@ -109,19 +116,27 @@ public sealed class DeltaFamilyIntervalColumnTests
         }
     }
 
+    /// <summary>The families the two rungs dressed: V127 / v60's four, then V128 / v61's four. On every one
+    /// the column was ADDED by ALTER TABLE, so it must be the tail — see the test below.</summary>
+    private static readonly string[] DressedByRung =
+    {
+        "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats",
+        "procedure_stats", "memory_grant_stats", "pg_wait_stats", "pg_statement_stats",
+    };
+
     /// <summary>
-    /// On the four families this PR dressed, the column is the LAST payload column. Both stores' writers are
-    /// positional — the DuckDB appender writes one value per declared column in order, the PostgreSQL COPY
-    /// writer likewise — and an existing database receives the column by <c>ALTER TABLE ADD COLUMN</c>, which
-    /// can only ever land at the end. A column declared anywhere else would shift every later ordinal on an
-    /// upgraded store and write deltas into the wrong columns. (perfmon_stats and query_stats are not held to
-    /// the tail: they were extracted with the column already in place and query_stats has since appended
-    /// others behind it.)
+    /// On the eight families the two rungs dressed, the column is the LAST payload column. Both stores'
+    /// writers are positional — the DuckDB appender writes one value per declared column in order, the
+    /// PostgreSQL COPY writer likewise — and an existing database receives the column by
+    /// <c>ALTER TABLE ADD COLUMN</c>, which can only ever land at the end. A column declared anywhere else
+    /// would shift every later ordinal on an upgraded store and write deltas into the wrong columns.
+    /// (perfmon_stats and query_stats are not held to the tail: they were extracted with the column already
+    /// in place and query_stats has since appended others behind it — the V128 offsets among them.)
     /// </summary>
     [Fact]
-    public void OnTheFourNewlyDressedFamilies_TheIntervalIsTheTrailingColumn()
+    public void OnTheEightRungDressedFamilies_TheIntervalIsTheTrailingColumn()
     {
-        foreach (var family in new[] { "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats" })
+        foreach (var family in DressedByRung)
         {
             var columns = CollectorCatalog.Find(family)!.PayloadColumns;
             Assert.Equal(IntervalColumn, columns[^1].Name);
@@ -129,14 +144,22 @@ public sealed class DeltaFamilyIntervalColumnTests
     }
 
     /// <summary>
-    /// The DuckDB generator carries the column into a fresh store's DDL for each of the four, as the trailing
-    /// column and nullable — the same shape the v60 <c>ALTER TABLE ... ADD COLUMN IF NOT EXISTS
-    /// sample_interval_seconds INTEGER</c> gives an upgraded store, so fresh and upgraded databases agree.
+    /// The DuckDB generator carries the column into a fresh store's DDL for each family Lite stores, as the
+    /// trailing column and nullable — the same shape the v60 / v61 <c>ALTER TABLE ... ADD COLUMN IF NOT
+    /// EXISTS sample_interval_seconds INTEGER</c> gives an upgraded store, so fresh and upgraded databases
+    /// agree. The PostgreSQL pair is not a DuckDB table (Lite monitors no PostgreSQL), so it is not here;
+    /// <c>DeltaFamilyIntervalCompletionRungTests</c> pins its generated PostgreSQL DDL.
     /// </summary>
     [Fact]
-    public void TheDuckDbGenerator_EmitsTheIntervalAsTheTrailingNullableColumn_OnTheFour()
+    public void TheDuckDbGenerator_EmitsTheIntervalAsTheTrailingNullableColumn_OnTheSixLiteStores()
     {
-        foreach (var family in new[] { "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats" })
+        var liteTables = DuckDbSchemaGenerator.CollectorTableNames().ToHashSet(StringComparer.Ordinal);
+        var lite = DressedByRung.Where(liteTables.Contains).ToList();
+        Assert.Equal(6, lite.Count);
+        Assert.DoesNotContain("pg_wait_stats", lite);
+        Assert.DoesNotContain("pg_statement_stats", lite);
+
+        foreach (var family in lite)
         {
             var ddl = DuckDbSchemaGenerator.CreateTable(CollectorCatalog.Find(family)!);
             var lines = ddl.Split('\n').Select(l => l.Trim().TrimEnd(',')).Where(l => l.Length > 0).ToList();
@@ -167,6 +190,40 @@ public sealed class DeltaFamilyIntervalColumnTests
         Assert.Contains(
             "$\"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS sample_interval_seconds INTEGER\"",
             source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The v61 twin of Darling's V128: the interval on the two remaining Lite-stored families, the two
+    /// statement offsets on query_stats, and the version bump. Four (table, column) pairs, every one an
+    /// idempotent INTEGER ADD COLUMN, held by the same parity rule as v60 — and the offsets' semantics
+    /// (BYTE offsets into the batch's nvarchar text; -1 = end of batch; stored raw) stated in the block so the
+    /// next reader finds them where they will look.
+    /// </summary>
+    [Fact]
+    public void TheLiteMigration_CompletesTheIntervalAndStoresTheOffsets_AtSchemaVersion61()
+    {
+        Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 61);
+
+        var source = RepoSource.Read("Lite", "Database", "DuckDbInitializer.cs");
+        var block = source[source.IndexOf("if (fromVersion < 61)", StringComparison.Ordinal)..];
+
+        foreach (var pair in new[]
+        {
+            "(\"procedure_stats\", \"sample_interval_seconds\")",
+            "(\"memory_grant_stats\", \"sample_interval_seconds\")",
+            "(\"query_stats\", \"statement_start_offset\")",
+            "(\"query_stats\", \"statement_end_offset\")",
+        })
+        {
+            Assert.Contains(pair, block, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("$\"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} INTEGER\"", block, StringComparison.Ordinal);
+
+        /* The offsets' semantics, in the block, in these words: the pair a future reader second-guesses. */
+        Assert.Contains("BYTES", block, StringComparison.Ordinal);
+        Assert.Contains("statement_end_offset = -1 means \"to the end of the batch\"", block, StringComparison.Ordinal);
+        Assert.Contains("VERBATIM", block, StringComparison.Ordinal);
     }
 
     private static class RepoSource

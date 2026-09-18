@@ -25,8 +25,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// get_resource_semaphore is the semaphore/ceiling lens: one row per (resource_semaphore_id, pool_id) with the
 /// full workspace-memory sizing — <c>target</c> / <c>max_target</c> (the hard ceiling) / <c>total</c> /
 /// <c>available</c> / <c>granted</c> / <c>used</c> plus grantee/waiter/timeout/forced counts and deltas. It
-/// carries <c>max_target_memory_mb</c> (present in the store, the Dashboard tool omitted it) and drops the
-/// Dashboard's <c>sample_interval_seconds</c> (Darling's delta collector stores no sample interval). get_memory_grants
+/// carries <c>max_target_memory_mb</c> (present in the store, the Dashboard tool omitted it) and, since V128
+/// (#3540), the Dashboard's <c>sample_interval_seconds</c> too — the measured seconds the two deltas accrued
+/// over, which this tool dropped while the collector stored none; <c>0</c> is the calculator's "no delta
+/// knowable" marker (a restart, not a quiet semaphore) and the tool reports it as <c>null</c>, and a pre-V128
+/// row that never recorded one reads as <c>null</c> with <c>interval_known = false</c>. get_memory_grants
 /// is Lite's pool-detail lens: the sizing + activity SUMMED per pool (Lite's <c>GetMemoryGrantChartDataAsync</c>
 /// shape). Every SQL string is a public const so Darling.Tests can pin the dialect + columns without a live Postgres.
 /// </para>
@@ -36,11 +39,19 @@ internal static class DarlingMemoryGrantReader
     /* ─────────────────────────── result rows ─────────────────────────── */
 
     /// <summary>One resource semaphore at the latest snapshot — the workspace-memory ceiling lens.</summary>
+    /// <param name="SampleIntervalSeconds">#3540 (V128): the measured seconds the two deltas accrued over;
+    /// <c>0</c> is the calculator's "no delta knowable" marker (first sighting, counter reset, a gap past the
+    /// policy — a restart, not a quiet semaphore); <c>null</c> is a pre-V128 row that never recorded one.</param>
     public sealed record ResourceSemaphoreRow(
         DateTime CollectionTime, short ResourceSemaphoreId, int PoolId, double TargetMemoryMb, double MaxTargetMemoryMb,
         double TotalMemoryMb, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
         int GranteeCount, int WaiterCount, long TimeoutErrorCount, long ForcedGrantCount,
-        long TimeoutErrorCountDelta, long ForcedGrantCountDelta);
+        long TimeoutErrorCountDelta, long ForcedGrantCountDelta, int? SampleIntervalSeconds)
+    {
+        /// <summary>True when the row's deltas are the calculator's (0, 0) marker: no delta was knowable, so
+        /// the two <c>*_delta</c> zeros beside it are not "no timeouts this interval".</summary>
+        public bool IsUnknowable => SampleIntervalSeconds == 0;
+    }
 
     /// <summary>One resource pool at the latest snapshot (summed across its semaphores) — Lite's grant lens.</summary>
     public sealed record MemoryGrantRow(
@@ -51,9 +62,9 @@ internal static class DarlingMemoryGrantReader
 
     /// <summary>
     /// The latest snapshot's per-(semaphore, pool) rows — the Dashboard's <c>get_resource_semaphore</c> shape
-    /// over Darling's store (plus <c>max_target_memory_mb</c> from the store; minus the Dashboard's
-    /// unstored <c>sample_interval_seconds</c>). MB columns are <c>numeric(18,2)</c> → double precision.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// over Darling's store (plus <c>max_target_memory_mb</c> from the store; plus, since V128, the
+    /// Dashboard's <c>sample_interval_seconds</c>, trailing so every existing ordinal is stable). MB columns
+    /// are <c>numeric(18,2)</c> → double precision. $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string ResourceSemaphoreLatestSql = """
         WITH latest AS
@@ -79,7 +90,8 @@ internal static class DarlingMemoryGrantReader
             timeout_error_count,
             forced_grant_count,
             timeout_error_count_delta,
-            forced_grant_count_delta
+            forced_grant_count_delta,
+            sample_interval_seconds
         FROM v_memory_grant_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
@@ -111,7 +123,10 @@ internal static class DarlingMemoryGrantReader
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
                 reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                reader.IsDBNull(14) ? 0 : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
+                /* NULL stays NULL: a pre-V128 row never recorded its interval, and that is a different
+                   statement from the 0 the calculator writes when no delta was knowable. */
+                reader.IsDBNull(15) ? null : reader.GetInt32(15)));
         }
 
         return rows;

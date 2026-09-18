@@ -90,6 +90,13 @@ OPTION(RECOMPILE);";
         new CollectorColumn("forced_grant_count", CollectorColumnType.BigInt),
         new CollectorColumn("timeout_error_count_delta", CollectorColumnType.BigInt),
         new CollectorColumn("forced_grant_count_delta", CollectorColumnType.BigInt),
+        /* Appended (Darling V128 / Lite v61, #3540): the measured seconds the row's two deltas accrued
+           over, or 0 when no delta was knowable. Appended at the END because both stores' writers are
+           positional — the same rule GoldenCollectorSchema's header states for every column a numbered
+           migration adds by ALTER TABLE. This is the column the deprecated Dashboard's
+           get_resource_semaphore always served and Darling's twin dropped as "unstored"; both hosts'
+           tools emit it again now that it is. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -118,10 +125,25 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Composite delta key and group names are the parity contract — do not change casually. */
+        /* Composite delta key and group names are the parity contract — do not change casually.
+
+           The interval is stored beside the deltas (#3540, Darling V128 / Lite v61). The calculator reports
+           (delta 0, interval 0) when no delta is knowable — first sighting, counter reset, a gap past the
+           policy — and (0, n) when the interval was genuinely idle; the interval is the ONLY thing that
+           tells those apart, and this collector took the bare long and discarded it. The two counters here
+           are exactly the ones where the distinction matters most: grant timeouts and forced grants are
+           rare, monotonic, and read as "none this interval" whenever the delta is 0 — a restart's
+           fabricated 0 was indistinguishable from a genuinely quiet semaphore.
+
+           One interval per ROW, the minimum over the two groups (the V127 rule, WaitStatsCollector): the
+           groups share a key and a collection time, so the two intervals agree in every case but an
+           independent single-counter reset, which this DMV does not do — a semaphore's counters reset
+           together on instance restart. The minimum makes the stored pair mean "every delta in this row is
+           knowable". */
         var deltaKey = $"{row.PoolId}_{row.ResourceSemaphoreId}";
-        var deltaTimeouts = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_timeouts", deltaKey, row.TimeoutErrorCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaForced = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_forced", deltaKey, row.ForcedGrantCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaTimeouts = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "memory_grants_timeouts", deltaKey, row.TimeoutErrorCount, out var timeoutsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaForced = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "memory_grants_forced", deltaKey, row.ForcedGrantCount, out var forcedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var sampleIntervalSeconds = Math.Min(timeoutsInterval, forcedInterval);
 
         writer
             .Value(row.ResourceSemaphoreId)   /* resource_semaphore_id (appended as SHORT, matching the original) */
@@ -137,6 +159,7 @@ OPTION(RECOMPILE);";
             .Value(row.TimeoutErrorCount)     /* timeout_error_count BIGINT */
             .Value(row.ForcedGrantCount)      /* forced_grant_count BIGINT */
             .Value(deltaTimeouts)             /* timeout_error_count_delta BIGINT */
-            .Value(deltaForced);              /* forced_grant_count_delta BIGINT */
+            .Value(deltaForced)               /* forced_grant_count_delta BIGINT */
+            .Value(sampleIntervalSeconds);    /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

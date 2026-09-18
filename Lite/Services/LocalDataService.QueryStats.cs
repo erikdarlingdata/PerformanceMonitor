@@ -572,7 +572,10 @@ SELECT
     total_physical_reads,
     total_logical_writes,
     delta_spills,
-    CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS BIGINT) AS sample_interval_seconds
+    /* #3540 (v61): the STORED interval where the row has one — including 0, which the grid shows as the
+       Interval (sec) 0 the query_stats history has always shown for an unknowable row — and the LAG over
+       collection_time this read always derived for a pre-v61 row (NULL) that never recorded one. */
+    COALESCE(sample_interval_seconds, CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS BIGINT)) AS sample_interval_seconds
 FROM v_procedure_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -1189,6 +1192,15 @@ LIMIT 1";
 
     /// <summary>
     /// Gets procedure duration trend — elapsed time per second per collection snapshot.
+    ///
+    /// <para>#3540 (v61): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
+    /// over the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150)
+    /// readmission) carries 0 beside its siblings' real interval and contributes 0 to the sums; MAX is 0
+    /// only when EVERY row was unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the
+    /// rates are NULL and the point is dropped rather than rendered as 0.00 ms/sec. NULL (a pre-v61
+    /// collection that never recorded one) falls back to the LAG over collection_time this read always
+    /// used, so history renders exactly as it did. No <c>ELSE 0</c>: the first row of a pre-v61 series is
+    /// absent rather than a fabricated 0.0, the same correction v60 made for the wait trends.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -1205,7 +1217,10 @@ WITH raw AS
         collection_time,
         SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
         SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
     FROM v_procedure_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1214,8 +1229,8 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
 ORDER BY collection_time";
 
@@ -1229,10 +1244,16 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540, v61): the point is dropped, not read as 0. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                Value = ToDouble(reader.GetValue(1)),
                 ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
                 ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
             });

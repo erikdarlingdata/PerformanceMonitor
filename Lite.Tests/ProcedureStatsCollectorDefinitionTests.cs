@@ -22,7 +22,7 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted procedure_stats definition: the dynamic-SQL
 /// standard variant with double-escaped literal exclusions, the Azure single-database variant
 /// (token intentionally left unreplaced, as the original did), the plan_handle delta key with
-/// its db.schema.object fallback, the 35-column payload, and the #1262 gated whole-module plan
+/// its db.schema.object fallback, the 37-column payload (the #3540 trailing interval last), and the #1262 gated whole-module plan
 /// capture (off = byte-identical to the no-plan form; on = the text DMV keyed on 0, -1).
 /// </summary>
 public sealed class ProcedureStatsCollectorDefinitionTests
@@ -115,10 +115,10 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchema_36Columns()
+    public void PayloadColumns_MatchSchema_37Columns()
     {
         var names = ProcedureStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(36, names.Length);
+        Assert.Equal(37, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("plan_handle", names[26]);
         Assert.Equal("delta_spills", names[33]);
@@ -127,6 +127,15 @@ public sealed class ProcedureStatsCollectorDefinitionTests
            nvarchar(max) expression returns bigint, and a module-grain plan is measured in megabytes. */
         Assert.Equal("query_plan_xml_bytes", names[35]);
         Assert.Equal(CollectorColumnType.BigInt, ProcedureStatsCollector.Instance.PayloadColumns[35].Type);
+        /* #3540 (Darling V128 / Lite v61): the interval is the TRAILING column, in the same INTEGER type
+           perfmon_stats and query_stats have always used, so the two stores' positional writers land it
+           after every pre-existing column and one NULLIF idiom reads every family. */
+        var interval = ProcedureStatsCollector.Instance.PayloadColumns[^1];
+        Assert.Equal("sample_interval_seconds", interval.Name);
+        Assert.Equal(CollectorColumnType.Integer, interval.Type);
+        Assert.Equal(
+            PerfmonStatsCollector.Instance.PayloadColumns.Single(c => c.Name == "sample_interval_seconds").Type,
+            interval.Type);
     }
 
     [Fact]
@@ -211,9 +220,10 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(36, writer.Values.Count);
+        Assert.Equal(37, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>proc</ShowPlanXML>", writer.Values[34]);   /* query_plan_xml payload slot */
         Assert.Equal(9_000_000L, writer.Values[35]);                          /* #3392: query_plan_xml_bytes */
+        Assert.Equal(0, writer.Values[36]);                                   /* #3540: interval — the fake reports 0, the unknowable marker */
 
         /* #3392: 9 MB is over the cap, so this row IS a backlog candidate — and the offsets it hands back
            are the module-grain literals the plan apply passes, never per-statement values this DMV family
@@ -242,9 +252,10 @@ public sealed class ProcedureStatsCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         ProcedureStatsCollector.Instance.WritePayload(rows[0], writer, context);
-        Assert.Equal(36, writer.Values.Count);
+        Assert.Equal(37, writer.Values.Count);
         Assert.Null(writer.Values[34]);   /* query_plan_xml null when the flag is off */
         Assert.Null(writer.Values[35]);   /* #3392: and no measurement either */
+        Assert.Equal(0, writer.Values[36]);   /* #3540: the interval, trailing */
 
         /* No measurement is not an oversized plan: null is "nobody measured", which is what a
            plan-capture-off host and an aged-out handle both produce. */
@@ -257,6 +268,49 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         deltas.Calls.Clear();
         ProcedureStatsCollector.Instance.WritePayload(rows[1], writer, context);
         Assert.All(deltas.Calls, c => Assert.Equal("SO.dbo.usp_GetUser", c.Key));
+    }
+
+    /// <summary>
+    /// #3540 (V128 / v61): the interval reaches the payload MEASURED, not as a constant. A distinctive value
+    /// (neither 0 nor a plausible cadence) so this can only pass if what the calculator reported is what was
+    /// written.
+    /// </summary>
+    [Fact]
+    public async Task WritePayload_WritesTheMeasuredInterval()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
+        var context = CollectorTestContext.Make(deltas);
+
+        using var reader = new FakeCollectorDataReader(MakeSqlRow(planHandle: "0x0600"));
+        var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var writer = new RecordingCollectorRowWriter();
+        ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
+
+        Assert.Equal(137, writer.Values[^1]);
+        Assert.Equal(7, deltas.Calls.Count);
+    }
+
+    /// <summary>
+    /// #3540: one interval per ROW, the MINIMUM over the row's seven delta groups. If any one group's delta
+    /// is unknowable (interval 0) the row is stored as (…, 0), so no reader divides a reset counter's 0 by a
+    /// sibling's real interval and reads it as a procedure that ran zero times.
+    /// </summary>
+    [Fact]
+    public async Task WritePayload_StoresTheMinimumIntervalAcrossTheRowsDeltaGroups()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 300 };
+        deltas.IntervalByGroup["proc_stats_spills"] = 0;
+        var context = CollectorTestContext.Make(deltas);
+
+        using var reader = new FakeCollectorDataReader(MakeSqlRow(planHandle: "0x0600"));
+        var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var writer = new RecordingCollectorRowWriter();
+        ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
+
+        Assert.Equal(0, writer.Values[^1]);
+        Assert.Equal(7, deltas.Calls.Count);
     }
 
     private static object[] MakeSqlRow(string? planHandle) => new object[]

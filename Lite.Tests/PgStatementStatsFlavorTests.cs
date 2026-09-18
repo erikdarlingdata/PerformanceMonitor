@@ -100,7 +100,9 @@ public class PgStatementStatsFlavorTests
         var vanilla = SelectAliases(Sql(isAurora: false));
 
         Assert.Equal(aurora, vanilla);
-        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 3, aurora.Count);
+        /* The SELECT list is the payload minus the four columns computed on the client: the three deltas
+           and, since V128 (#3540), the interval they accrued over. */
+        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4, aurora.Count);
     }
 
     /// <summary>

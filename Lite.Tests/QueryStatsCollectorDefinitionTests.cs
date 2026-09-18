@@ -21,8 +21,9 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted query_stats definition: the full row-identity delta
 /// key (sql_handle:start:end:plan_handle — the multi-statement cross-contamination fix), the
 /// interval-captured worker delta feeding sample_interval_seconds, the two query variants, and
-/// the 52-column payload with the query_plan_xml placeholder, the trailing host_object_name
-/// (#2012 stage 2) and query_plan_xml_bytes (#3392).
+/// the 54-column payload with the query_plan_xml placeholder, the trailing host_object_name
+/// (#2012 stage 2), query_plan_xml_bytes (#3392) and the two statement offsets (#3540, stored raw so
+/// the restart seed can rebuild the key).
 /// </summary>
 public sealed class QueryStatsCollectorDefinitionTests
 {
@@ -213,17 +214,19 @@ public sealed class QueryStatsCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(52, writer.Values.Count);
+        Assert.Equal(54, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>captured</ShowPlanXML>", writer.Values[37]);   /* query_plan_xml payload slot */
         Assert.Equal("dbo.HostProc", writer.Values[50]);                          /* host_object_name payload slot */
         Assert.Equal(37L, writer.Values[51]);                                     /* #3392: query_plan_xml_bytes */
+        Assert.Equal(66, writer.Values[52]);                                      /* #3540: statement_start_offset, raw */
+        Assert.Equal(512, writer.Values[53]);                                     /* #3540: statement_end_offset, raw */
 
         /* #3392: a measurement at or under the cap is not a backlog candidate, and a captured plan of 37
            bytes is comfortably under it. Strictly-greater is what the SQL CASE does, so this side of the
            boundary must agree. */
         Assert.Null(QueryStatsCollector.Instance.DescribeOversizedPlan(rows[0]));
 
-        /* #2235: the compile age reaches the delta calculator and is NOT stored — 52 payload values, as
+        /* #2235: the compile age reaches the delta calculator and is NOT stored — 54 payload values, as
            pinned above, and one age per delta'd counter. Nine, because crediting only some of them would
            make one row's metrics disagree about how much work it did. */
         Assert.Equal(8, deltas.SeriesAges.Count);
@@ -270,10 +273,10 @@ public sealed class QueryStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_52Columns()
+    public void PayloadColumns_MatchSchemaOrder_54Columns()
     {
         var names = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(52, names.Length);
+        Assert.Equal(54, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_plan_xml", names[37]);
         Assert.Equal("sample_interval_seconds", names[49]);
@@ -284,6 +287,14 @@ public sealed class QueryStatsCollectorDefinitionTests
            megabyte-scale plans this column exists to describe. */
         Assert.Equal("query_plan_xml_bytes", names[51]);
         Assert.Equal(CollectorColumnType.BigInt, QueryStatsCollector.Instance.PayloadColumns[51].Type);
+        /* #3540 (Darling V128 / Lite v61): the delta key's two statement offsets, appended after it for the
+           same reason — start then end, the DMV's order — as Integer, the DMV's own type. Byte offsets into
+           the batch's nvarchar text; -1 as the end offset is "to the end of the batch"; stored raw so the
+           restart seed spells the collector's key. */
+        Assert.Equal("statement_start_offset", names[52]);
+        Assert.Equal("statement_end_offset", names[53]);
+        Assert.Equal(CollectorColumnType.Integer, QueryStatsCollector.Instance.PayloadColumns[52].Type);
+        Assert.Equal(CollectorColumnType.Integer, QueryStatsCollector.Instance.PayloadColumns[53].Type);
     }
 
     [Fact]
@@ -313,11 +324,15 @@ public sealed class QueryStatsCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(52, writer.Values.Count);
+        Assert.Equal(54, writer.Values.Count);
         Assert.Null(writer.Values[37]);                                   /* query_plan_xml placeholder */
         Assert.Equal(0, writer.Values[49]);                               /* interval from recording fake */
         Assert.Equal("dbo.HostProc", writer.Values[50]);                  /* host_object_name appended last */
         Assert.Null(writer.Values[51]);                                   /* #3392: no measurement with plans off */
+        /* #3540: the offsets are stored exactly as read — the same 66 and 512 the delta key below is built
+           from — so the seed's rebuilt key and the collector's key are the same string. */
+        Assert.Equal(66, writer.Values[52]);
+        Assert.Equal(512, writer.Values[53]);
 
         /* A row with no measurement is not a backlog candidate: null is "nobody measured", which is what a
            plan-capture-off host and an aged-out handle both produce, and neither is an oversized plan. */
