@@ -721,11 +721,13 @@ sends a new operator away from the thing that would have answered their first we
 
 What genuinely remains, re-checked against `dev` at the time of this revision:
 
-- **Scheduled analysis findings.** The analysis pipeline is still SQL-Server-shaped and a PostgreSQL
-  target produces no findings — but it now says so instead of sitting blank: `analysis_state` records
-  that scheduled analysis does not apply to a PostgreSQL target and routes you to the `get_pg_*` reads
-  and the outage-predictor alerts. Do not read that message as "still collecting". Deliberate, until a
-  PostgreSQL inference engine exists.
+- **Scheduled analysis findings.** The analysis pass now runs for a PostgreSQL target: the service
+  routes by the registry's `engine_kind`, measures the 24-hour data-span gate on `pg_database_stats`
+  and scores the PostgreSQL-target vocabulary (`PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`). Until the #3542
+  v1 detector families land, a pass over a target with a day of history returns an honest all-clear over
+  the facts it has; `analysis_state` clears on the first real pass (no more "does not apply" tombstone).
+  A target whose registry row has no engine stamp yet says so in its insufficient-data message and is
+  measured correctly from its next connect.
 - **Knobs on the three Tier 0 predictors.** Not a gap in the sense the rest of this list is — see above
   and step 9 — but listed so nobody goes looking for a `pgWraparound...` setting that does not exist.
 - **The `pg_stats` helper-function route.** Step 8 documents `pg_read_all_data` and the

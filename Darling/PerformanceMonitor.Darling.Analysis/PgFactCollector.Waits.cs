@@ -135,8 +135,12 @@ WHERE collection_time >= $2";
     /// (last row to window end — a collector that died mid-window leaves nothing after itself to LAG
     /// from) are edge properties of the window and are computed here; the in-series discarded stretch
     /// comes from the query. Largest gap is the longest of the three.
+    ///
+    /// <para>Internal rather than private (#3542): <see cref="PgTargetFactCollector"/>'s coverage witness reads
+    /// a different series (<c>pg_database_stats</c>) with the same five-column shape and finishes it through
+    /// THIS method, so the two engines can never disagree about what a lead-in or a tail gap is.</para>
     /// </summary>
-    private static WindowCoverage BuildCoverage(
+    internal static WindowCoverage BuildCoverage(
         AnalysisContext context, double nominalMs, long sampleCount, double observedSeconds,
         double largestDiscardedSeconds, long orphanCount, DateTime? firstSample, DateTime? lastSample)
     {

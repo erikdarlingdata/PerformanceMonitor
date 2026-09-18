@@ -49,6 +49,12 @@ public static class FactAdvice
         if (_byKey.TryGetValue(factKey, out var direct))
             return direct;
 
+        /* #3542: the PostgreSQL-target vocabulary has its own static table, in PgTargetAdvice — one arm
+           here, so the content lanes never touch this file. Before any SQL Server prefix arm, because
+           ANOMALY_PG_* must not reach the ANOMALY_WAIT_ composer below. */
+        if (PgTargetAdvice.IsPgKey(factKey))
+            return PgTargetAdvice.Static(factKey);
+
         if (factKey.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
             return _byKey.GetValueOrDefault("BAD_ACTOR");
 
@@ -137,6 +143,10 @@ public static class FactAdvice
     {
         if (string.IsNullOrEmpty(rootFactKey))
             return null;
+        /* #3542: the PostgreSQL-target vocabulary composes in PgTargetAdvice — one delegating arm, so the
+           content lanes never edit this switch. */
+        if (PgTargetAdvice.IsPgKey(rootFactKey))
+            return PgTargetAdvice.Compose(rootFactKey, factsByKey);
         // BAD_ACTOR facts are keyed BAD_ACTOR_{query_hash}; compose from that fact directly.
         if (rootFactKey.StartsWith("BAD_ACTOR_", StringComparison.Ordinal))
             return ComposeBadActor(rootFactKey, factsByKey);

@@ -219,13 +219,22 @@ public sealed class FactCollectorCommandTimeoutTests
         Assert.Equal(expectedSite, s_commandCtor.IsMatch(code));
     }
 
+    /// <summary>
+    /// Both fact-collector families (#3542): the SQL Server one (<c>PgFactCollector.*.cs</c>) and the
+    /// PostgreSQL-target one (<c>PgTargetFactCollector.*.cs</c>). The second shares the first's deadline
+    /// constant by reference and the same pass budget, so the same pin holds over it — widened here on the
+    /// day the family was created, so the first content lane that constructs a command without a deadline
+    /// fails HERE rather than inheriting Npgsql's 30 s in silence.
+    /// </summary>
     private static IEnumerable<string> FactCollectorSources()
     {
-        var darling = Directory.GetFiles(
-            Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis"),
-            "PgFactCollector.*.cs");
+        var analysis = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis");
+        var darling = Directory.GetFiles(analysis, "PgFactCollector.*.cs")
+            .Concat(Directory.GetFiles(analysis, "PgTargetFactCollector.*.cs"))
+            .ToList();
 
         Assert.NotEmpty(darling);
+        Assert.Contains(darling, f => Path.GetFileName(f).StartsWith("PgTargetFactCollector.", StringComparison.Ordinal));
 
         return darling.OrderBy(f => f, StringComparer.Ordinal);
     }

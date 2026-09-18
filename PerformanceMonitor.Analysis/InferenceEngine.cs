@@ -95,9 +95,13 @@ public class InferenceEngine
         // standing misconfig surfaces on a quiet, healthy server (it would otherwise never reach
         // 0.5 without contention — e.g. RCSI-off is base 0.3). Severity ordering + `consumed`
         // (below) keep an incident story from being shadowed by, or duplicating, its config leaf.
+        /* #3542: the PostgreSQL-target advisory roots live in PgTargetFactKeys.ConfigAdvisoryRoots (the
+           CONFIG_PG_* convention checks and the pg_posture keys, D5/D6) and are consulted through this one
+           delegating check, so the content lanes register a root in the shared keys file and never edit
+           this set again. */
         var entryPoints = facts
             .Where(f => f.Severity >= MinimumSeverityThreshold
-                     || (ConfigAdvisoryRootKeys.Contains(f.Key) && f.Severity > 0))
+                     || ((ConfigAdvisoryRootKeys.Contains(f.Key) || PgTargetFactKeys.IsConfigAdvisoryRoot(f.Key)) && f.Severity > 0))
             .OrderByDescending(f => f.Severity)
             .ToList();
 
