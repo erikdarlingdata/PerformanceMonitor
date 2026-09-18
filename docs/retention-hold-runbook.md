@@ -76,7 +76,12 @@ operator checking whether a hold has released will meet all of them:
   rollups) or 4 days (daily rollups). Added by #3581; before it the rollups were never compressed at all. On a store
   that had already materialized weeks of history their `next_start` values read as consecutive calendar days on
   the first pass — that is the backlog being staged one aggregate per night, largest first, not a scheduling
-  fault. Every run after the first finds only the chunks that aged in since the day before.
+  fault. Every run after the first finds only the chunks that aged in since the day before. The materializations
+  these jobs compress are chunked at **1 day**, the same width as every raw table (#3620; TimescaleDB's default
+  would be ten times the raw width, which made a 7-day rollup hold up to 17 days and kept the newest ten days of
+  every rollup out of compression's reach) — so on a store that predates #3620, `timescaledb_information.chunks`
+  shows a mix of old 10-day and new 1-day chunks for a couple of weeks, and the short rollups' row counts shrink
+  toward their designed window as the wide chunks age out. That tightening is convergence, not data loss.
 
 None of the compression jobs participate in the coverage gate, and pausing or re-arming them has no effect on a
 `Retention Held` alert. A `policy_compression` job on a rollup with `scheduled = false` is not a hold — the hold

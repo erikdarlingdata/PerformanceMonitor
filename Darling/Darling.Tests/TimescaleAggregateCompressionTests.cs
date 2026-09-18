@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// backlog, the registry that every one of those reads from, and — gated on <c>DARLING_TEST_PG</c> — the
 /// ensure itself against a real TimescaleDB store: every aggregate compression-enabled, one once-a-day policy
 /// per aggregate, a settled second pass that adds nothing, and the raw compression converge leaving the family
-/// alone.
+/// alone — and (#3620) every materialization held at one raw chunk of width, with a re-run that changes none.
 ///
 /// <para>Ungated pins read the shipped registry and the shipped CREATE text, never a copy of either, so a new
 /// aggregate is covered the moment it is registered and a pin cannot agree with a derivation the product does
@@ -345,6 +345,53 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
+    /// THE MATERIALIZATION CHUNK WIDTH (#3620) is one raw chunk, as a DERIVATION from
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> and not a written day: the span, the literal the
+    /// statement interpolates, and the statement itself all read from the constant, so the raw tables and their
+    /// rollups cannot be at different widths. The write resolves the materialization from the catalog by view
+    /// name (the internal <c>_materialized_hypertable_N</c> name is TimescaleDB's and differs per store), refuses
+    /// a view the registry does not carry, and the read joins <c>dimensions</c> on the materialization identity,
+    /// time dimension only, in seconds — the shape the ensure compares with integer equality.
+    /// </summary>
+    [Fact]
+    public void MaterializationChunkInterval_IsOneRawChunk_DerivedFromChunkIntervalDays_AndTheStatementsResolveTheMaterialization()
+    {
+        Assert.Equal(TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays), TimescaleSupport.MaterializationChunkIntervalSpan);
+        Assert.Equal(TimescaleSupport.AggregateCompressMarginSpan, TimescaleSupport.MaterializationChunkIntervalSpan);
+        Assert.Equal(TimescaleSupport.WholeDaysInterval(TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays)), TimescaleSupport.MaterializationChunkInterval);
+        Assert.Equal($"{TimescaleSupport.ChunkIntervalDays} days", TimescaleSupport.MaterializationChunkInterval);
+
+        /* Today's value, as what the expression evaluates to. */
+        Assert.Equal(TimeSpan.FromDays(1), TimescaleSupport.MaterializationChunkIntervalSpan);
+        Assert.Equal("1 days", TimescaleSupport.MaterializationChunkInterval);
+
+        /* The raw tables' own CREATE and the materializations' SET carry the SAME literal. */
+        var raw = TimescaleSupport.CreateHypertableSql("collect.query_stats", "collected_at");
+        Assert.Contains($"INTERVAL '{TimescaleSupport.MaterializationChunkInterval}'", raw, StringComparison.Ordinal);
+
+        foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+        {
+            var set = TimescaleSupport.SetMaterializationChunkIntervalSql(view);
+            Assert.Contains("SELECT set_chunk_time_interval(", set, StringComparison.Ordinal);
+            Assert.Contains("format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass", set, StringComparison.Ordinal);
+            Assert.Contains($"INTERVAL '{TimescaleSupport.MaterializationChunkInterval}'", set, StringComparison.Ordinal);
+            Assert.Contains($"WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'", set, StringComparison.Ordinal);
+            Assert.DoesNotContain("_materialized_hypertable", set, StringComparison.Ordinal);
+        }
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.SetMaterializationChunkIntervalSql("query_stats"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.SetMaterializationChunkIntervalSql("not_an_aggregate"));
+
+        var state = TimescaleSupport.MaterializationChunkIntervalStateSql;
+        Assert.Contains("EXTRACT(EPOCH FROM d.time_interval)::bigint", state, StringComparison.Ordinal);
+        Assert.Contains("JOIN timescaledb_information.dimensions AS d", state, StringComparison.Ordinal);
+        Assert.Contains("d.hypertable_schema = ca.materialization_hypertable_schema", state, StringComparison.Ordinal);
+        Assert.Contains("d.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
+        Assert.Contains("d.dimension_type = 'Time'", state, StringComparison.Ordinal);
+        Assert.Contains("WHERE ca.view_schema = 'collect'", state, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// THE STAGING (#3581), pinned on a synthetic store: aggregates with a backlog take consecutive nights
     /// largest first; aggregates with nothing eligible take night zero whatever their size; a fresh store —
     /// nothing eligible anywhere — is therefore all night zero with no special case; size ties break on
@@ -482,9 +529,36 @@ public sealed class TimescaleAggregateCompressionTests
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, created);
 
+            /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
+               every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read
+               so the change count below is asserted against what was actually wide, not against a version fact. */
+            var wideBefore = (await MaterializationChunkIntervalSecondsAsync(connection, ct))
+                .Count(kv => kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
+
             var firstLog = new CapturingTestLogger();
             var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);
             Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, first);
+
+            /* THE WIDTH (#3620): every registered materialization's time dimension reads one raw chunk after the
+               ensure, from the catalog; the summary line says how many the start changed, and it is the number
+               that were wide. */
+            var widths = await MaterializationChunkIntervalSecondsAsync(connection, ct);
+            foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+            {
+                Assert.True(widths.TryGetValue(view, out var seconds), $"{view} has no time dimension on its materialization");
+                Assert.Equal((long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds, seconds);
+            }
+
+            Assert.Contains($"20/20 materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"{wideBefore} changed this start", firstLog.Joined, StringComparison.Ordinal);
+
+            /* A settled store issues no set_chunk_time_interval at all: the direct call returns zero changes and
+               says so, and the widths are what they were. */
+            var widthLog = new CapturingTestLogger();
+            Assert.Equal(0, await TimescaleSupport.EnsureMaterializationChunkIntervalAsync(connection, widthLog, ct));
+            Assert.Contains("0 changed this start", widthLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("materialization now chunks at", widthLog.Joined, StringComparison.Ordinal);
+            Assert.Equal(widths, await MaterializationChunkIntervalSecondsAsync(connection, ct));
 
             /* Every aggregate: compression enabled, exactly one compression job, at its tier's window, on the daily
                cadence, on a fixed schedule at its hour and the band's minute. Read back from the catalog, not from
@@ -533,6 +607,7 @@ public sealed class TimescaleAggregateCompressionTests
             Assert.Equal(first, second);
             Assert.Contains("(0 added this start, 0 converged", secondLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("gets a once-a-day compression policy", secondLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("0 changed this start", secondLog.Joined, StringComparison.Ordinal);
 
             /* THE EXCLUSION: the raw compression converge sees these once-a-day jobs in its unscoped read and must
                leave every one of them on the daily cadence. Asserted on the catalog after the converge, not only on
@@ -655,6 +730,25 @@ public sealed class TimescaleAggregateCompressionTests
                 await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
                     (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
         }
+    }
+
+    /// <summary>Every <c>collect</c> aggregate's materialization chunk interval in seconds, read from
+    /// <c>timescaledb_information.dimensions</c> through the SAME join the ensure uses — the catalog, not the
+    /// ensure's return value, is what the width assertions read.</summary>
+    private static async Task<Dictionary<string, long>> MaterializationChunkIntervalSecondsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(TimescaleSupport.MaterializationChunkIntervalStateSql, connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var widths = new Dictionary<string, long>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                widths[reader.GetString(0)] = reader.GetInt64(1);
+            }
+        }
+
+        return widths;
     }
 
     /// <summary>The continuous aggregates standing in <c>collect</c> right now — the snapshot the restore
