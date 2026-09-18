@@ -38,6 +38,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rollover, degrading the Index Only Scan back to heap fetches). Verified: the two panels that timed out at 15 s
 /// then ran in 139 ms / 514 ms with 0 heap fetches on vacuumed chunks. DarlingStoredPlanReader and ComposeCompiler
 /// are unchanged — correct as-is, they just needed these indexes + the vacuum state to perform.</para>
+///
+/// <para><b>The alerting pass joined the composer here (#3573)</b>, for the same reason and with the same
+/// EXPLAIN-backed shape: <c>DarlingAlertReadAdapter.ForcePlanFailuresSql</c> takes the fourth covering index
+/// below, an Index Only Scan replacing a plan that streamed the whole fleet's two-hour slice of
+/// <c>query_store_stats</c> to keep one server's rows. Its derivation is on the statement itself — including
+/// why it is here and not a ladder rung, and why it is a plain <c>CREATE INDEX</c> and not the per-chunk form.</para>
 /// </summary>
 public static class PgTableTuning
 {
@@ -47,12 +53,29 @@ public static class PgTableTuning
     private const int SetupTimeoutSeconds = 300;
 
     /// <summary>
+    /// The #3573 covering index's name, and the columns it carries in key-then-INCLUDE order. Exposed so the
+    /// pin (<c>ForcePlanFailuresAccessPathTests</c>) can hold the read's column references against THIS list
+    /// rather than against a second copy of the statement text, and so the live test can find the index by
+    /// name in <c>pg_indexes</c>. The first two are the key; the rest are INCLUDE. Every column the read
+    /// references must appear here or the Index Only Scan silently degrades to the heap plan it replaced.
+    /// </summary>
+    public const string ForcePlanFailuresIndexName = "idx_query_store_stats_server_time_forcing";
+
+    public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
+    {
+        "server_id", "collection_time",
+        "database_name", "query_id", "plan_id", "force_failure_count", "is_forced_plan", "plan_forcing_type", "last_force_failure_reason",
+    };
+
+    /// <summary>
     /// The idempotent tuning statements, applied in order, each on its own command (failure-isolated). Three
     /// COVERING composer indexes (INCLUDE the aggregate columns the Procedures / Queries / Query Store measures
     /// SUM/AVG, for an Index Only Scan), three <c>(server_id, handle/hash/id, collection_time DESC)</c> lookup
-    /// indexes for the single-row analyze_*_plan reads (no INCLUDE — one heap fetch is cheap), then the per-table
-    /// autovacuum-insert override on exactly the four growing tables. Bare collect-qualified names; every
-    /// identifier is a compile-time constant, never user input, so interpolation is not a concern.
+    /// indexes for the single-row analyze_*_plan reads (no INCLUDE — one heap fetch is cheap), the #3573
+    /// covering index for the alerting pass's forced-plan-failures read (INCLUDE exactly that read's columns,
+    /// for the same Index Only Scan), then the per-table autovacuum-insert override on exactly the four growing
+    /// tables. Bare collect-qualified names; every identifier is a compile-time constant, never user input, so
+    /// interpolation is not a concern.
     /// </summary>
     public static IReadOnlyList<string> Statements { get; } = new[]
     {
@@ -66,6 +89,78 @@ public static class PgTableTuning
         "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)",
         "CREATE INDEX IF NOT EXISTS idx_query_store_stats_query_hash ON collect.query_store_stats (query_hash, collection_time) INCLUDE (database_name, module_name, execution_count, avg_duration_us, max_duration_us, avg_cpu_time_us, max_cpu_time_us)",
         "CREATE INDEX IF NOT EXISTS idx_query_store_stats_server_db_query_plan_time ON collect.query_store_stats (server_id, database_name, query_id, plan_id, collection_time DESC)",
+        /* #3573: the alerting pass's forced-plan-failures read (DarlingAlertReadAdapter.ForcePlanFailuresSql,
+           WHERE server_id = $1 AND collection_time > $2, a two-hour window, per server, every 30 s pass) outgrew
+           its 10 s deadline on the largest production store: 1,744.9 ms cold when the deadline was derived over
+           ~6 GB of query_store_stats, 10.3 s excursions at 23 GB. The live plan named the mechanism —
+
+               Index Scan Backward using _hyper_.._chunk_query_store_stats_collection_time_idx
+                 Index Cond: (collection_time > now() - '02:00:00')
+                 Filter: (server_id = ...)   Rows Removed by Filter: 691,058   actual rows: 37,878
+                 Buffers: shared hit=54,664 read=2,643
+
+           — the read walks the ENTIRE fleet's two-hour slice through the TimescaleDB default time index and
+           discards 95% of it to keep one server. Forty-three servers deep, that is the whole slice re-read
+           forty-three times per pass cycle; warm it is 422 ms, and the excursions are the cold tail whenever
+           cache pressure evicts a slice ~4x the size it had on measurement day.
+
+           THE INDEX THAT READ WANTED ALREADY EXISTED. V1's generated idx_query_store_stats_time is exactly
+           (server_id, collection_time), it is on the hypertable and on the very chunk in that plan, and the
+           planner declined it. Read from the production catalog: server_id's physical correlation is 0.022
+           (43 servers interleaved by collection pass) while collection_time's is 0.99999, so the cost model
+           prices the composite's heap fetches as one random page per tuple — ~50K pages at random_page_cost
+           4 — and the perfectly-correlated time index's 54,664-page stream wins on paper at 58,677. It loses
+           in fact by 11x: forced under random_page_cost = 1.1 the SAME statement took the existing composite
+           (Bitmap Index Scan, Index Cond on both columns) and touched 5,063 buffers (Heap Blocks: exact=5001)
+           instead of 57,307, because a server's rows land in one contiguous run per collection pass (~13
+           rows a page) that the planner's single correlation statistic cannot see. A second plain composite,
+           however ordered, would be priced identically and ignored identically — which is why this is not
+           the (server_id, collection_time DESC) rung the issue first proposed.
+
+           COVERING, so the choice stops depending on the cost model. With every column the read touches in
+           the key or INCLUDE, the plan is an Index Only Scan whose cost is the index pages for ONE server's
+           two hours and nothing else — no heap component to misprice, at any random_page_cost and at any
+           share of the fleet the busiest server grows into. Both uncompressed production chunks read
+           relallvisible = 100% of relpages (the insert-autovacuum override below is what keeps them there),
+           so heap fetches for visibility are the newest pass's pages at most. Measured on a PG18 /
+           TimescaleDB 2.28.1 rig seeded in the production's write pattern: the shipped statement went from
+           the identical time-index-plus-Filter plan at 1,514 buffers to Index Only Scan, Heap Fetches: 0,
+           50 buffers. The INCLUDE list IS the read's column list, deliberately and exactly — a column added
+           to the read and not to this list silently degrades it back to the heap plan, so
+           ForcePlanFailuresAccessPathTests pins the two against each other.
+
+           THE COST, stated rather than implied: INCLUDE disables btree deduplication, so this index is
+           ~86 bytes/row on the rig (V1's deduplicated composite is ~7) — roughly 0.7-0.9 GB per day-chunk on
+           the largest store's 8-16 M rows/day, against a 4.7-9.4 GB heap per chunk. It is self-limiting:
+           on 2.28.1 a compressed chunk's uncompressed relation is an empty shell, and CREATE INDEX on the
+           hypertable builds an 8 KB page for each one (measured: 4 compressed chunks at 8192 bytes each,
+           the 2 live chunks at 46 MB and 27 MB), so the footprint is the one or two uncompressed chunks and
+           the compression policy erases the rest a day later. That is also why the owner's "index only the
+           uncompressed/new chunks" needs no mechanism: it is what the engine does. New chunks inherit the
+           index at creation; a decompressed chunk fills it and recompression empties it (both measured).
+
+           PLAIN CREATE INDEX, ONE TRANSACTION, deliberately. The build takes a ShareLock on the hypertable
+           root for its duration — reads proceed, every INSERT into any chunk queues behind it — which is
+           why this list runs BEFORE collectors start and why this statement belongs here rather than in the
+           ladder (whose applier wraps each rung in a transaction block, the one place the per-chunk form
+           below is refused outright). A cancel at SetupTimeoutSeconds rolls the whole build back and the next
+           start retries with nothing left behind. The per-chunk form, WITH (timescaledb.transaction_per_chunk),
+           was measured and rejected: it takes the same root ShareLock first, buying no write concurrency here,
+           and a cancel MID-build — exactly what the command timeout is — commits the chunks built so far,
+           leaves the parent index indisvalid = false and the live chunk unindexed, after which this very
+           idempotent statement reports "already exists, skipping" on every start forever. CREATE INDEX
+           CONCURRENTLY is refused on hypertables ("hypertables do not support concurrent index creation").
+           A collision with the compression job on yesterday's chunk makes one of them wait for the other;
+           if that is this build past its budget, the cancel-and-retry above is the outcome.
+
+           NOT random_page_cost, though it flipped the plan: at 1.1 the composite won by 53,095 to 58,677 for
+           a server holding ~8% of the fleet's rows, and the ratio scales with that share, so the next-busiest
+           store or the same one a month on flips back. A store-wide planner setting is also an owner's
+           ruling for every read at once, not a lane's fix for one. NOT a partial index WHERE is_forced_plan,
+           which would be a few MB: the read aggregates unforced rows on purpose (a plan's previous sighting
+           may be its unforced one), so that index needs the statement reshaped and its first-sighting
+           semantics changed — the cheaper long-run shape, deferred rather than smuggled in. */
+        "CREATE INDEX IF NOT EXISTS " + ForcePlanFailuresIndexName + " ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",

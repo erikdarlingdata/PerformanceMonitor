@@ -17,7 +17,9 @@ namespace Darling.Tests;
 /// Pins the composer performance-tuning statements (covering indexes + per-table autovacuum-insert override,
 /// Erik's EXPLAIN-backed field fix) so the tested SQL can never silently drift. These are applied as idempotent
 /// RUNTIME setup (<see cref="PgTableTuning"/>), NOT a versioned migration, so they do not bump StorageVersion or
-/// gate the Viewer — the reason there is no schema-version change to pin here.
+/// gate the Viewer — the reason there is no schema-version change to pin here. The #3573 alerting-read covering
+/// index rides the same list for the same reason: results-invariant, so the Viewer's connect gate must not
+/// learn about it.
 /// </summary>
 public sealed class PgTableTuningTests
 {
@@ -39,8 +41,16 @@ public sealed class PgTableTuningTests
         Assert.Contains("idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", sql, StringComparison.Ordinal);
         Assert.Contains("idx_query_store_stats_server_db_query_plan_time ON collect.query_store_stats (server_id, database_name, query_id, plan_id, collection_time DESC)", sql, StringComparison.Ordinal);
 
+        /* #3573: the alerting pass's forced-plan-failures read gets the fourth COVERING index — the read's
+           (server_id, collection_time) predicate as the key and every other column it touches as INCLUDE, so
+           it runs as an Index Only Scan. The plain (server_id, collection_time) composite V1 already generates
+           was measured on the production store being priced out by the planner in favour of streaming the
+           fleet's whole two-hour slice; covering is what removes the heap component the cost model mispriced.
+           The column list is pinned against the read itself in ForcePlanFailuresAccessPathTests. */
+        Assert.Contains("idx_query_store_stats_server_time_forcing ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)", sql, StringComparison.Ordinal);
+
         /* Every index is idempotent (no-op where a field box already hand-applied it, or a prior start made it). */
-        Assert.Equal(7, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index */
+        Assert.Equal(8, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index; +1: the #3573 forced-plan covering index */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
         /* Per-table autovacuum-insert override on exactly the FOUR high-rate insert tables (NOT a global GUC
@@ -59,7 +69,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(12, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim */
+        Assert.Equal(13, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim, +1 #3573 forced-plan covering index */
     }
 
     /// <summary>
