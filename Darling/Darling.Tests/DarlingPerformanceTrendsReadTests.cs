@@ -350,7 +350,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
               rollup present, floor at 10:00, raw no deeper than the floor → hourly. ── */
         var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, ct);
         var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, ct);
-        var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(hour10.AddHours(-4), DateTime.UtcNow, rollups, coverage);
+        var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(hour10.AddHours(-4), rollups, coverage);
         Assert.Equal(RetentionTier.Hourly, route.Tier);
         Assert.Equal(hour10, route.Coverage.HourlyFloorUtc);
         Assert.Equal(hour10.AddMinutes(5), route.Coverage.RawOldestUtc);

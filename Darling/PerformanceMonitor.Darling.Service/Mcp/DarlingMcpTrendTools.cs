@@ -462,11 +462,12 @@ public sealed class DarlingMcpTrendTools
                 accepts 168 — so a 7-day request came back as 4 days under a label saying 7, and when
                 nothing survived the empty branch called the window "genuinely quiet" and advised widening
                 it, which cannot help with rows that were dropped. Same ladder as get_query_trend
-                (DarlingTrendReader.ResolveTier), measured against the WALL CLOCK because retention drops
-                by age, never by where a point sits inside the requested window.
+                (DarlingTrendReader.ResolveTier), measured by the reader against the WALL CLOCK because
+                retention drops by age, never by where a point sits inside the requested window — the
+                as_of anchor decides the window, not how old its rows are.
             */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
-            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, DateTime.UtcNow, rollups, coverage);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage);
             var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route);
 
             if (result.Points.Count == 0)
@@ -484,7 +485,7 @@ public sealed class DarlingMcpTrendTools
                    is not a server nothing was ever stored for. */
                 return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId),
-                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, DateTime.UtcNow, route, "query",
+                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "query",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
             }
 
@@ -518,7 +519,7 @@ public sealed class DarlingMcpTrendTools
 
             /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair. */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
-            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, DateTime.UtcNow, rollups, coverage);
+            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage);
             var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route);
 
             if (result.Points.Count == 0)
@@ -531,7 +532,7 @@ public sealed class DarlingMcpTrendTools
 
                 return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId),
-                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, DateTime.UtcNow, route, "stored-procedure",
+                    postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
@@ -861,7 +862,7 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
-        DateTime startUtc, DateTime windowEndUtc, DateTime nowUtc, DarlingTrendReader.DurationTrendRoute route,
+        DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
         string what, string checkThis)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc);
@@ -896,7 +897,7 @@ public sealed class DarlingMcpTrendTools
             would serve it absent or shallower — the only way a past-horizon window routes to raw). Unmeasured
             (an empty table), the horizon decides, and only where retention applies at all.
         */
-        var pastRawHorizon = route.RawRetentionApplies && startUtc < nowUtc - TimescaleSupport.RawRetentionSpan;
+        var pastRawHorizon = route.RawRetentionApplies && startUtc < route.ResolvedAtUtc - TimescaleSupport.RawRetentionSpan;
         var rawReaches = route.RawReaches(startUtc) ?? !pastRawHorizon;
         if (rawReaches)
         {

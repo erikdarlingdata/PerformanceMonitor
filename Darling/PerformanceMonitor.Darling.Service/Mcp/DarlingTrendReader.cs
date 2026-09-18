@@ -480,10 +480,15 @@ internal static class DarlingTrendReader
     /// or a failed availability probe — where no retention policy ever drops raw, so raw holds the complete
     /// answer and "quiet, widen the window" is honest there (#1665). On a TimescaleDB store it is true, and
     /// the empty branch has to consider that the rows were DROPPED, not absent.</para>
+    ///
+    /// <para><see cref="ResolvedAtUtc"/> is the wall clock the age decision was measured against. It rides on
+    /// the route so the tool that consumes it never names the clock itself: an <c>as_of</c>-anchored tool's
+    /// only "now" is the anchor it resolved (AsOfWindowAnchorTests pins that as an absolute), and retention's
+    /// clock — which is NOT the anchor, see <see cref="ShouldUseRawTier"/> — is this reader's concern.</para>
     /// </summary>
     public sealed record DurationTrendRoute(
         RetentionTier Tier, string RawTable, string HourlyView, bool HourlyAvailable, TierCoverage Coverage,
-        bool RawRetentionApplies)
+        bool RawRetentionApplies, DateTime ResolvedAtUtc)
     {
         /// <summary>The payload's <c>source</c> word: <c>raw</c> or <c>hourly</c>, get_query_trend's vocabulary.</summary>
         public string Source => Tier == RetentionTier.Raw ? "raw" : "hourly";
@@ -513,20 +518,22 @@ internal static class DarlingTrendReader
     /// <summary>
     /// Resolves the route for the query-stats duration trend: raw <c>query_stats</c> or
     /// <c>query_stats_hourly</c>, by <see cref="ResolveTier"/>. <paramref name="nowUtc"/> is the WALL CLOCK,
-    /// never the window's end — see <see cref="ShouldUseRawTier"/>.
+    /// never the window's end — see <see cref="ShouldUseRawTier"/> — and defaults to the real clock, the same
+    /// way <see cref="GetQueryHistoryAsync"/> takes it: the tool passes only its anchored window, a test
+    /// passes a fixed instant to pin the boundary.
     /// </summary>
     public static DurationTrendRoute ResolveQueryDurationTrendRoute(
-        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null)
         => ResolveDurationTrendRoute(
             "query_stats", TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
-            rollups.QueryGrainHourly, startUtc, nowUtc, rollups, coverage);
+            rollups.QueryGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage);
 
     /// <summary>The procedure-stats twin of <see cref="ResolveQueryDurationTrendRoute"/>.</summary>
     public static DurationTrendRoute ResolveProcedureDurationTrendRoute(
-        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null)
         => ResolveDurationTrendRoute(
             "procedure_stats", TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
-            rollups.ProcedureGrainHourly, startUtc, nowUtc, rollups, coverage);
+            rollups.ProcedureGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage);
 
     private static DurationTrendRoute ResolveDurationTrendRoute(
         string rawTable, string hourlyView, string dailyView, bool hourlyAvailable,
@@ -538,7 +545,8 @@ internal static class DarlingTrendReader
         return new DurationTrendRoute(
             ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
             rawTable, hourlyView, hourlyAvailable, tierCoverage,
-            RawRetentionApplies: rollups != RollupAvailability.None);
+            RawRetentionApplies: rollups != RollupAvailability.None,
+            ResolvedAtUtc: nowUtc);
     }
 
     /// <summary>

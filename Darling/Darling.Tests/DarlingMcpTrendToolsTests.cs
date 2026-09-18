@@ -599,14 +599,14 @@ public sealed class DurationTrendTierRoutingTests
             var expected = DarlingTrendReader.ShouldUseRawTier(start, Now) ? RetentionTier.Raw : RetentionTier.Hourly;
 
             Assert.Equal(expected, DarlingTrendReader.ResolveTier(start, Now, hourlyAvailable: true, TierCoverage.Unknown));
-            Assert.Equal(expected, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, Now, RollupAvailability.All, NoCoverage).Tier);
-            Assert.Equal(expected, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, Now, RollupAvailability.All, NoCoverage).Tier);
+            Assert.Equal(expected, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).Tier);
+            Assert.Equal(expected, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).Tier);
         }
 
         /* The two ends of the table, named, so the census cannot pass vacuously on a rule that answers one
            tier for everything. */
-        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-24), Now, RollupAvailability.All, NoCoverage).Tier);
-        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), Now, RollupAvailability.All, NoCoverage).Tier);
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-24), RollupAvailability.All, NoCoverage, Now).Tier);
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), RollupAvailability.All, NoCoverage, Now).Tier);
     }
 
     /// <summary>
@@ -620,14 +620,14 @@ public sealed class DurationTrendTierRoutingTests
     {
         var start = Now.AddHours(-168);
 
-        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, Now, RollupAvailability.None, NoCoverage).Tier);
-        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, Now, RollupAvailability.None, NoCoverage).Tier);
-        Assert.False(DarlingTrendReader.ResolveQueryDurationTrendRoute(start, Now, RollupAvailability.None, NoCoverage).RawRetentionApplies);
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).Tier);
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).Tier);
+        Assert.False(DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).RawRetentionApplies);
 
         var noProcedureRollup = RollupAvailability.All with { ProcedureGrainHourly = false };
-        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, Now, noProcedureRollup, NoCoverage).Tier);
-        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, Now, noProcedureRollup, NoCoverage).Tier);
-        Assert.True(DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, Now, noProcedureRollup, NoCoverage).RawRetentionApplies);
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).Tier);
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).Tier);
+        Assert.True(DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).RawRetentionApplies);
     }
 
     /// <summary>
@@ -665,12 +665,12 @@ public sealed class DurationTrendTierRoutingTests
     [Fact]
     public void TheRoute_NamesItsOwnPair_AndTheSourceWord()
     {
-        var hourly = DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), Now, RollupAvailability.All, NoCoverage);
+        var hourly = DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), RollupAvailability.All, NoCoverage, Now);
         Assert.Equal("hourly", hourly.Source);
         Assert.Equal(TimescaleSupport.QueryStatsHourlyView, hourly.Relation);
         Assert.Equal("query_stats", hourly.RawTable);
 
-        var raw = DarlingTrendReader.ResolveProcedureDurationTrendRoute(Now.AddHours(-1), Now, RollupAvailability.All, NoCoverage);
+        var raw = DarlingTrendReader.ResolveProcedureDurationTrendRoute(Now.AddHours(-1), RollupAvailability.All, NoCoverage, Now);
         Assert.Equal("raw", raw.Source);
         Assert.Equal("procedure_stats", raw.Relation);
         Assert.Equal(TimescaleSupport.ProcedureStatsHourlyView, raw.HourlyView);
@@ -678,8 +678,9 @@ public sealed class DurationTrendTierRoutingTests
         /* RawReaches: measured against the window start, null when unmeasured. */
         var measured = new DarlingTrendReader.DurationTrendRoute(
             RetentionTier.Raw, "query_stats", TimescaleSupport.QueryStatsHourlyView, true,
-            new TierCoverage(null, null, Now.AddDays(-3)), true);
+            new TierCoverage(null, null, Now.AddDays(-3)), true, Now);
         Assert.True(measured.RawReaches(Now.AddDays(-2)));
+        Assert.Equal(Now, hourly.ResolvedAtUtc);
         Assert.False(measured.RawReaches(Now.AddDays(-4)));
         Assert.Null(raw.RawReaches(Now.AddDays(-1)));
     }
