@@ -664,7 +664,11 @@ public sealed class FleetRollup
         }
         if (s.BlockingSeverity >= HealthSeverity.Warning && s.BlockingCount > 0)
         {
-            parts.Add($"Blocking {s.BlockingCount}");
+            /* #3539 A3: the RATE is what the count arm banded, so the reason names it — the deadlock line's
+               rule and the service's wording; an unrateable window prints the count alone. */
+            parts.Add(s.BlockingRatePerHour.HasValue
+                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                : $"Blocking {s.BlockingCount}");
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)
         {
@@ -677,7 +681,10 @@ public sealed class FleetRollup
         }
         if (s.CollectorSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
+            /* #3539 A8d: the share grades the band, so the denominator is named when there is one. */
+            parts.Add(s.CollectorCount > 0
+                ? $"{s.FailedCollectorCount} of {s.CollectorCount} collectors failing"
+                : $"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
         if (s.CollectionStale)
         {

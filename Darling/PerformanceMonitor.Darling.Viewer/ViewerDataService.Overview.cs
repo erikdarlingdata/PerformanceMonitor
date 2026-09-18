@@ -373,7 +373,7 @@ WHERE server_id = $1";
         /* Collectors row — REUSE the viewer's own 7-day per-collector health banding (the same STALE /
            FAILING / NEVER_RUN / HEALTHY logic the Collection Health tab renders), mirroring the Dashboard's
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
-        var (healthyCollectors, failingCollectors, deadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
+        var (healthyCollectors, failingCollectors, totalCollectors, deadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
 
         return new ServerSummaryItem
@@ -397,8 +397,10 @@ WHERE server_id = $1";
             DeadlockCount = deadlockCount,
             LastDeadlockMinutesAgo = lastDeadlockMinutesAgo,
             /* #3368: the count's denominator and the store's tiers, so this card bands on the same rate and
-               the same numbers the service's fleet card does. */
+               the same numbers the service's fleet card does. #3539 A3: the blocking count was read over the
+               same window, and carries it on its own terms. */
             DeadlockWindow = window,
+            BlockingWindow = window,
             DeadlockRateThresholds = deadlockTiers,
             TotalThreads = totalThreads,
             CurrentWorkers = currentWorkers,
@@ -406,6 +408,7 @@ WHERE server_id = $1";
             RequestsWaitingForThreads = requestsWaitingForThreads,
             HealthyCollectorCount = healthyCollectors,
             FailedCollectorCount = failingCollectors,
+            CollectorCount = totalCollectors,
             DeadlockCollectorBand = deadlockBand,
             LastCollectionTime = lastCollection,
         };
@@ -461,7 +464,7 @@ WHERE id = 1";
     /// <see cref="DeadlocksCollector"/>'s own name rather than a literal, so a rename cannot leave this
     /// silently matching nothing and reporting every server uncovered.</para>
     /// </summary>
-    private async Task<(int Healthy, int Failing, string? DeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
         var rows = await GetCollectionHealthAsync(serverId, cancellationToken);
         var healthy = rows.Count(r => r.HealthStatus == "HEALTHY");
@@ -469,7 +472,8 @@ WHERE id = 1";
         var deadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;
-        return (healthy, failing, deadlockBand);
+        /* #3539 A8d: every banded row is the share's denominator — the service's CollectorCounts.Total. */
+        return (healthy, failing, rows.Count, deadlockBand);
     }
 
     /// <summary>Whole minutes elapsed from a stored naive-UTC instant to now (UTC), floored at 0, or null
@@ -698,6 +702,11 @@ public sealed class ServerSummaryItem
     /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
     public int FailedCollectorCount { get; set; }
 
+    /// <summary>Every collector banded for this server in the 7-day window, on any band (#3539 A8d) — the
+    /// denominator <see cref="CollectorSeverity"/> grades the failing count against. Not healthy + failing:
+    /// STALE, WARNING, STOPPED and the permission bands are banded collectors that are neither.</summary>
+    public int CollectorCount { get; set; }
+
     public DateTime? LastCollectionTime { get; set; }
 
     /// <summary>
@@ -770,14 +779,24 @@ public sealed class ServerSummaryItem
     public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
-    /// The blocking detail (Dashboard's BlockingDetailText): the worst wait while blocking is present in
-    /// the window ("max: 42s"), else how long since the last blocking event ever ("Last: 3h ago"), else blank.
+    /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
+    /// banded RATE then the worst wait ("2.0/hr, max: 42s" — #3539 A3, the deadlock detail's rule: the value
+    /// beside it is the count, and both arms that can colour the dot are named); else how long since the
+    /// last blocking event ever ("Last: 3h ago"); else blank. The rate is omitted when the window was too
+    /// short to normalise, which is the reading the band itself had to go on.
     /// </summary>
     public string BlockingDetail
     {
         get
         {
-            if (BlockingCount > 0) return $"max: {MaxBlockedSeconds:F0}s";
+            if (BlockingCount > 0)
+            {
+                var max = $"max: {MaxBlockedSeconds:F0}s";
+                return BlockingRatePerHour.HasValue
+                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {max}"
+                    : max;
+            }
+
             if (LastBlockingMinutesAgo.HasValue) return $"Last: {FormatMinutesAgo(LastBlockingMinutesAgo.Value)}";
             return "";
         }
@@ -934,8 +953,27 @@ public sealed class ServerSummaryItem
     /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source Unknown.</summary>
     public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(MemoryPressureForBand);
 
-    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s or any blocking Warning; no source Unknown.</summary>
-    public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds);
+    /// <summary>
+    /// The window <see cref="BlockingCount"/> covers (#3539 A3) — the blocking rate's denominator, set by
+    /// the read from the same bounds as <see cref="DeadlockWindow"/> and never defaulted, for the same
+    /// reason: <see cref="TimeSpan.Zero"/> must stay the reading "no window was declared".
+    /// </summary>
+    public TimeSpan BlockingWindow { get; set; }
+
+    /// <summary>Blocking events per HOUR over <see cref="BlockingWindow"/> — what the count arm of the band
+    /// evaluates (#3539 A3), or null when the window is too short to normalise. BlockingCountForBand, not
+    /// the raw count, for <see cref="DeadlockRatePerHour"/>'s reason: a PostgreSQL target's raw zero would
+    /// render 0.0/hr on a card whose severity says Unknown.</summary>
+    public double? BlockingRatePerHour =>
+        BlockingCountForBand.HasValue
+            ? ServerHealthClassifier.BlockingRatePerHour(BlockingCountForBand.Value, BlockingWindow)
+            : null;
+
+    /// <summary>Blocking band (#3539 A3) — a 60 s block Critical whatever the rate; else blocking events per
+    /// hour over the window against the shared tiers (20/hr Critical, 5/hr Warning); a 10 s block Warning;
+    /// no source Unknown.</summary>
+    public HealthSeverity BlockingSeverity =>
+        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -977,13 +1015,15 @@ public sealed class ServerSummaryItem
 
     /// <summary>
     /// Collectors band — neutral Unknown when the server is offline (its collectors are unmeasured, not
-    /// healthy — #2784), else Warning on any FAILING collector. Offline is already painted by the card border /
-    /// overlay, so this governs only the per-metric dot: it must not show a green "healthy" dot on a dark
-    /// server. The overall metric band reads FailedCollectorCount straight from ToHealthMetrics(), not this
-    /// property, so the neutral offline reading never leaks into the card's worst-band or fleet score.
+    /// healthy — #2784), else the shared graded band (#3539 A8d): Warning on any FAILING collector,
+    /// Critical when the FAILING share of <see cref="CollectorCount"/> passes the collector-health
+    /// classifier's 20% bar. Offline is already painted by the card border / overlay, so this governs only
+    /// the per-metric dot: it must not show a green "healthy" dot on a dark server. The overall metric band
+    /// reads the counts straight from ToHealthMetrics(), not this property, so the neutral offline reading
+    /// never leaks into the card's worst-band or fleet score.
     /// </summary>
     public HealthSeverity CollectorSeverity =>
-        IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount);
+        IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount, CollectorCount);
 
     /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
@@ -1015,6 +1055,8 @@ public sealed class ServerSummaryItem
         HasMemoryPressure = MemoryPressureForBand,
         BlockingCount = BlockingCountForBand,
         MaxBlockedSeconds = MaxBlockedSeconds,
+        /* #3539 A3: the count's denominator, for the reason the deadlock trio below travels together. */
+        BlockingWindow = BlockingWindow,
         DeadlockCount = DeadlockCountForBand,
         /* #3368: the three travel together. Without them the card's overall band and its border would
            re-band the same count against no window while the deadlock dot banded a rate — a card
@@ -1026,6 +1068,8 @@ public sealed class ServerSummaryItem
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
         RequestsWaitingForThreads = RequestsWaitingForThreads,
         FailedCollectorCount = FailedCollectorCount,
+        /* #3539 A8d: the share's denominator, or the overall band would grade presence-flat again. */
+        CollectorCount = CollectorCount,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────

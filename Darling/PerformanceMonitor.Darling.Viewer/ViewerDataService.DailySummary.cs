@@ -112,6 +112,8 @@ public sealed partial class ViewerDataService
             MemoryCriticalEvents = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
             AlertCount = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
             MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+            /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
+            CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
             HasData = true,
         };
         row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals(), banding);
@@ -139,10 +141,15 @@ public class DailySummaryRow
     public long MemoryPressureEvents { get; set; }
     public long MemoryCriticalEvents { get; set; }
     public long CollectionErrors { get; set; }
+
+    /// <summary>Collector runs of every status that day (#3539 A2) — the denominator the collection-error
+    /// share bands on, read from the shared SQL's trailing <c>collection_runs</c> column.</summary>
+    public long CollectionRuns { get; set; }
     public long AlertCount { get; set; }
 
     /// <summary>The day's peak/max block wait in ms (0 when no blocking, or blocking from a source without a
-    /// wait time). Surfaced on the day-detail panel's blocking reason.</summary>
+    /// wait time). Surfaced on the day-detail panel's blocking reason, and the blocking band's wait arm
+    /// (#3539 A2).</summary>
     public long MaxBlockDurationMs { get; set; }
 
     /// <summary>True when the day had any collection. False renders the calendar cell as No-Data (grey).</summary>
@@ -168,8 +175,11 @@ public class DailySummaryRow
         HasData = HasData,
         Deadlocks = DeadlockCount,
         CollectionErrors = CollectionErrors,
+        CollectionRuns = CollectionRuns,
         HighCpuEvents = HighCpuEvents,
         BlockingEvents = BlockingEvents,
+        /* #3539 A2: the blocking band's wait arm reads the longest block, so the peak rides in the signals. */
+        PeakBlockWaitMs = MaxBlockDurationMs,
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,

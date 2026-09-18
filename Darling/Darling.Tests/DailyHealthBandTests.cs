@@ -26,13 +26,15 @@ public class DailyHealthBandTests
     private static DailyHealthSignals Signals(
         bool hasData = true, long deadlocks = 0, long collectionErrors = 0, long highCpu = 0,
         long blocking = 0, long memPressure = 0, long memCritical = 0, long alerts = 0,
-        TimeSpan window = default) => new()
+        TimeSpan window = default, long collectionRuns = 0, long peakBlockMs = 0) => new()
     {
         HasData = hasData,
         Deadlocks = deadlocks,
         CollectionErrors = collectionErrors,
+        CollectionRuns = collectionRuns,
         HighCpuEvents = highCpu,
         BlockingEvents = blocking,
+        PeakBlockWaitMs = peakBlockMs,
         MemoryPressureEvents = memPressure,
         MemoryCriticalEvents = memCritical,
         AlertCount = alerts,
@@ -52,14 +54,21 @@ public class DailyHealthBandTests
         Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(Signals()));
     }
 
+    /// <summary>
+    /// Each remaining Critical trigger alone, over a finished 24-hour day (#3539 A2 made every count
+    /// trigger window-aware, so the window is declared): severe memory pressure on presence; sustained
+    /// CPU at the day-scale bar of 30 hot samples; a blocking RATE at the 20/hr tier (480 over the day);
+    /// a single 60-second block whatever the count. Collection errors are no longer a Critical trigger at
+    /// any count — see the collection-error pins below.
+    /// </summary>
     [Theory]
-    [InlineData("collection-error", 1, 0, 0, 0, 0)]
-    [InlineData("memory-critical", 0, 0, 0, 1, 0)]
-    [InlineData("sustained-cpu", 0, 6, 0, 0, 0)]
-    [InlineData("heavy-blocking", 0, 0, 11, 0, 0)]
-    public void CriticalTriggers_EachAloneIsCritical(string _, long collErrors, long highCpu, long blocking, long memCritical, long alerts)
+    [InlineData("memory-critical", 0, 0, 0L, 1)]
+    [InlineData("sustained-cpu", 30, 0, 0L, 0)]
+    [InlineData("blocking-rate", 0, 480, 0L, 0)]
+    [InlineData("sixty-second-block", 0, 1, 60_000L, 0)]
+    public void CriticalTriggers_EachAloneIsCritical(string _, long highCpu, long blocking, long peakBlockMs, long memCritical)
     {
-        var s = Signals(collectionErrors: collErrors, highCpu: highCpu, blocking: blocking, memCritical: memCritical, alerts: alerts);
+        var s = Signals(highCpu: highCpu, blocking: blocking, peakBlockMs: peakBlockMs, memCritical: memCritical, window: Day);
         Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(s));
     }
 
@@ -153,14 +162,16 @@ public class DailyHealthBandTests
         Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(s, raised));
     }
 
+    /// <summary>Each Warning trigger alone over a finished day: six hot samples (the day-scale Warning bar),
+    /// blocking at the 5/hr tier (120 over the day), non-severe memory pressure, an alert.</summary>
     [Theory]
-    [InlineData("moderate-cpu", 3, 0, 0, 0)]
-    [InlineData("some-blocking", 0, 5, 0, 0)]
+    [InlineData("moderate-cpu", 6, 0, 0, 0)]
+    [InlineData("blocking-rate", 0, 120, 0, 0)]
     [InlineData("memory-pressure", 0, 0, 1, 0)]
     [InlineData("alert", 0, 0, 0, 1)]
     public void WarningTriggers_EachAloneIsWarning(string _, long highCpu, long blocking, long memPressure, long alerts)
     {
-        var s = Signals(highCpu: highCpu, blocking: blocking, memPressure: memPressure, alerts: alerts);
+        var s = Signals(highCpu: highCpu, blocking: blocking, memPressure: memPressure, alerts: alerts, window: Day);
         Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(s));
     }
 
@@ -172,28 +183,205 @@ public class DailyHealthBandTests
         Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(s));
     }
 
+    /* ── the high-CPU trigger (#3539 A2): a bar that scales with the window ── */
+
+    /// <summary>
+    /// Over an HOUR the pre-#3539 constants hold exactly: one hot sample is Warning, six is Critical — the
+    /// excursion-scale minimum dominates below 4.8 hours, so every fleet-sweep span at the default cadence
+    /// bands as it always did.
+    /// </summary>
     [Theory]
+    [InlineData(0, DailyHealthBand.Healthy)]
+    [InlineData(1, DailyHealthBand.Warning)]
     [InlineData(5, DailyHealthBand.Warning)]
     [InlineData(6, DailyHealthBand.Critical)]
-    public void HighCpu_CriticalThreshold_IsSixSamples(long highCpu, DailyHealthBand expected)
+    public void HighCpu_OverAnHour_BandsOnTheExcursionScaleMinimum(long highCpu, DailyHealthBand expected)
     {
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(highCpu: highCpu, window: Hour)));
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(highCpu: highCpu, window: TimeSpan.FromMinutes(15))));
+        /* An undeclared window yields the same minimum — a producer that declares nothing bands as it did. */
         Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(highCpu: highCpu)));
     }
 
+    /// <summary>
+    /// Over a DAY the rate decides: six hot samples — which reddened 5.9% of the measured server-days — is
+    /// now the Warning bar, and Critical needs thirty, the sustained-heat count 1.4% of server-days reach.
+    /// The measured routine excursion is 1–3 samples (95.8% of 758 excursions), so two of them in a day
+    /// (six) is Warning and one (up to five) is Healthy, where 19.2% of days used to turn amber on a single
+    /// 80%+ sample.
+    /// </summary>
     [Theory]
-    [InlineData(10, DailyHealthBand.Warning)]
-    [InlineData(11, DailyHealthBand.Critical)]
-    public void Blocking_CriticalThreshold_IsElevenEvents(long blocking, DailyHealthBand expected)
+    [InlineData(0, DailyHealthBand.Healthy)]
+    [InlineData(5, DailyHealthBand.Healthy)]
+    [InlineData(6, DailyHealthBand.Warning)]
+    [InlineData(29, DailyHealthBand.Warning)]
+    [InlineData(30, DailyHealthBand.Critical)]
+    [InlineData(155, DailyHealthBand.Critical)]  // the worst measured server-day
+    public void HighCpu_OverADay_BandsOnTheSustainedHeatRate(long highCpu, DailyHealthBand expected) =>
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(highCpu: highCpu, window: Day)));
+
+    /// <summary>The bar is the GREATER of the minimum and the rate: 6 until 4.8 hours, then 1.25 × hours.
+    /// Stated at the seam so the shape — not just its two endpoints — is pinned.</summary>
+    [Fact]
+    public void HighCpu_TheBar_IsTheGreaterOfMinimumAndRate()
     {
-        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(blocking: blocking)));
+        var t = DailyHealthThresholds.Default;
+        Assert.Equal(6.0, t.HighCpuCriticalSamplesFor(TimeSpan.Zero));
+        Assert.Equal(6.0, t.HighCpuCriticalSamplesFor(TimeSpan.FromMinutes(15)));
+        Assert.Equal(6.0, t.HighCpuCriticalSamplesFor(Hour));
+        Assert.Equal(6.0, t.HighCpuCriticalSamplesFor(TimeSpan.FromHours(4.8)));
+        Assert.Equal(15.0, t.HighCpuCriticalSamplesFor(TimeSpan.FromHours(12)));
+        Assert.Equal(30.0, t.HighCpuCriticalSamplesFor(Day));
+
+        Assert.Equal(1.0, t.HighCpuWarningSamplesFor(Hour));
+        Assert.Equal(6.0, t.HighCpuWarningSamplesFor(Day));
+
+        /* The two constants each carry their measured lineage: 1.25/hr is 30 per day; the minimum is six,
+           the 97.8th percentile of excursion length. */
+        Assert.Equal(30.0, t.HighCpuCriticalSamplesPerHour * 24);
+        Assert.Equal(6, t.HighCpuCriticalSamplesMinimum);
+    }
+
+    /// <summary>Two routine 3-sample excursions in a day used to redden the cell (#3282's finding); they
+    /// are Warning now, and the same six in one hour — a sustained excursion for that span — stays Critical.</summary>
+    [Fact]
+    public void TwoRoutineExcursions_InADay_AreNoLongerCritical()
+    {
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(highCpu: 6, window: Day)));
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(highCpu: 6, window: Hour)));
+    }
+
+    /* ── the blocking trigger (#3539 A2/A3): the card band's own rate and wait arms ── */
+
+    /// <summary>
+    /// The same per-hour rate bands the day identically over an hour and a day, through the card band's
+    /// tiers — 5/hr Warning, 20/hr Critical. Counts are rate × whole hours so the asserted rate is exactly
+    /// the one the band sees.
+    /// </summary>
+    [Theory]
+    [InlineData(4, DailyHealthBand.Healthy)]
+    [InlineData(5, DailyHealthBand.Warning)]
+    [InlineData(19, DailyHealthBand.Warning)]
+    [InlineData(20, DailyHealthBand.Critical)]
+    public void TheSameBlockingRate_BandsTheDayTheSame_OverAnHourAndADay(long ratePerHour, DailyHealthBand expected)
+    {
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(blocking: ratePerHour, window: Hour)));
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(blocking: ratePerHour * 24, window: Day)));
+    }
+
+    /// <summary>
+    /// The constant this replaced: eleven blocking events reddened 5.1% of measured server-days. Eleven in a
+    /// day is 0.46/hr and Healthy by count; eleven in an hour is inside the measured trough and Warning;
+    /// the same count over two windows bands differently, which the count trigger could not do.
+    /// </summary>
+    [Fact]
+    public void ElevenBlockingEventsInADay_IsNoLongerCritical()
+    {
+        var day = Signals(blocking: 11, window: Day);
+        Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(day));
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(blocking: 11, window: Hour)));
+
+        /* Still countable: the drill is offered and the tooltip lists it with its rate. */
+        Assert.Contains(DayDrillTarget.Blocking, DailyHealthBandCalculator.AvailableDrills(day));
+        Assert.Contains("11 blocking events (0.5/hr)", DailyHealthBandCalculator.Describe(day));
+    }
+
+    /// <summary>The day's peak block is the wait arm: a 60-second block is a Critical day and a 10-second
+    /// one a Warning day whatever the count or the window — the card band's rate-independent arms.</summary>
+    [Fact]
+    public void ThePeakBlock_IsTheDaysWaitArm()
+    {
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(blocking: 1, peakBlockMs: 60_000, window: Day)));
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(blocking: 1, peakBlockMs: 10_000, window: Day)));
+        Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(Signals(blocking: 1, peakBlockMs: 9_999, window: Day)));
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(blocking: 1, peakBlockMs: 60_000, window: TimeSpan.FromMinutes(15))));
+    }
+
+    /// <summary>A sub-hour or undeclared window is not rate-banded on blocking either: a non-zero count reads
+    /// Warning, never Critical by count, and a zero count stays out of the trigger.</summary>
+    [Fact]
+    public void ASubHourOrUndeclaredWindow_BandsBlockingWarning_NeverCriticalByCount()
+    {
+        foreach (var window in new[] { default, TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(59) })
+        {
+            Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(blocking: 1, window: window)));
+            Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(blocking: 10_000, window: window)));
+            Assert.Equal(DailyHealthBand.Healthy, DailyHealthBandCalculator.Classify(Signals(blocking: 0, window: window)));
+        }
+    }
+
+    /* ── the collection-error trigger (#3539 A2): a share of runs, Warning ceiling ── */
+
+    /// <summary>
+    /// The rule this replaced was <c>CollectionErrors &gt; 0 → Critical</c>; one transient ERROR row painted
+    /// a day red (#1805 was one). The errors now band as a share of the window's runs against the
+    /// collector-health classifier's own 20% bar, at ITS tier: past the bar the day is Warning, below it
+    /// the errors are disclosed but do not band, and nothing here can make a day Critical.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 30_000, DailyHealthBand.Healthy)]        // one transient error in a day's ~30k runs
+    [InlineData(6_000, 30_000, DailyHealthBand.Healthy)]    // exactly 20% — the bar is strict, as the classifier's is
+    [InlineData(6_001, 30_000, DailyHealthBand.Warning)]
+    [InlineData(30_000, 30_000, DailyHealthBand.Warning)]   // every run erroring is still Warning here, never Critical
+    [InlineData(0, 0, DailyHealthBand.Healthy)]
+    public void CollectionErrors_BandOnTheirShareOfRuns_WarningAtMost(long errors, long runs, DailyHealthBand expected) =>
+        Assert.Equal(expected, DailyHealthBandCalculator.Classify(Signals(collectionErrors: errors, collectionRuns: runs, window: Day)));
+
+    /// <summary>With no denominator declared a non-zero error count fails away from Healthy into Warning —
+    /// never Critical — and the tooltip prints the count without a share it could not compute.</summary>
+    [Fact]
+    public void CollectionErrors_WithNoDeclaredRuns_AreWarning_NeverCritical()
+    {
+        var s = Signals(collectionErrors: 1, window: Day);
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(s));
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(collectionErrors: 10_000, window: Day)));
+        Assert.Contains("1 collection error", DailyHealthBandCalculator.Describe(s));
+        Assert.DoesNotContain("% of", DailyHealthBandCalculator.Describe(s));
+    }
+
+    [Fact]
+    public void CollectionErrorLine_CarriesTheShare_WhenRunsAreDeclared()
+    {
+        var s = Signals(collectionErrors: 12, collectionRuns: 9_800, window: Day);
+        Assert.Contains("12 collection errors (0.1% of 9,800 runs)", DailyHealthBandCalculator.Describe(s));
+        Assert.Contains("12 collection errors (0.1% of 9,800 runs)", DailyHealthBandCalculator.BuildReasons(s));
+        Assert.Equal(HealthSeverity.Healthy, DailyHealthBandCalculator.CollectionErrorSeverity(12, 9_800));
+        Assert.Equal(20.0, CollectorHealthClassifier.WarningFailureRatePercent);
+    }
+
+    /// <summary>The 15-minute sweep span and the 24-hour day agree on identical behaviour: the same per-hour
+    /// blocking rate, the same error share, the same excursion-scale CPU count below the seam.</summary>
+    [Fact]
+    public void TheSweepSpan_AndTheDay_AgreeOnIdenticalBehaviour()
+    {
+        var quarterHour = TimeSpan.FromMinutes(15);
+
+        /* Blocking: sub-hour is the unrateable arm, so the comparison that CAN be made is the hour vs the
+           day at one rate — pinned above — and the wait arm, which is identical at every span. */
+        Assert.Equal(
+            DailyHealthBandCalculator.Classify(Signals(blocking: 3, peakBlockMs: 60_000, window: quarterHour)),
+            DailyHealthBandCalculator.Classify(Signals(blocking: 288, peakBlockMs: 60_000, window: Day)));
+
+        /* Collection errors: a share is a share. */
+        Assert.Equal(
+            DailyHealthBandCalculator.Classify(Signals(collectionErrors: 30, collectionRuns: 100, window: quarterHour)),
+            DailyHealthBandCalculator.Classify(Signals(collectionErrors: 3_000, collectionRuns: 10_000, window: Day)));
+        Assert.Equal(
+            DailyHealthBand.Warning,
+            DailyHealthBandCalculator.Classify(Signals(collectionErrors: 30, collectionRuns: 100, window: quarterHour)));
+
+        /* CPU: the minimum decides at both 15 minutes and an hour — the sweep floor and the default cadence. */
+        Assert.Equal(
+            DailyHealthBandCalculator.Classify(Signals(highCpu: 6, window: quarterHour)),
+            DailyHealthBandCalculator.Classify(Signals(highCpu: 6, window: Hour)));
     }
 
     [Fact]
     public void Thresholds_AreOverridable()
     {
-        var strict = new DailyHealthThresholds { HighCpuCriticalSamples = 3 };
-        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(highCpu: 3), strict));
-        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(highCpu: 3)));
+        var strict = new DailyHealthThresholds { HighCpuCriticalSamplesMinimum = 3 };
+        Assert.Equal(DailyHealthBand.Critical, DailyHealthBandCalculator.Classify(Signals(highCpu: 3, window: Hour), strict));
+        Assert.Equal(DailyHealthBand.Warning, DailyHealthBandCalculator.Classify(Signals(highCpu: 3, window: Hour)));
     }
 
     [Theory]

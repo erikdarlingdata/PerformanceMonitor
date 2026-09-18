@@ -278,6 +278,99 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(CollectionStoppedMinutesDefault);
 
+        /* ── the CPU band's two cutoffs ── */
+
+        /// <summary>
+        /// The CPU band's Warning bar, in percent of a FIXED capacity (see
+        /// <see cref="ServerHealthClassifier.CpuSeverity"/> for which percentage qualifies). Named here
+        /// rather than left as a literal in the classifier because a SECOND surface bands on it: the
+        /// Performance Calendar's daily aggregate counts "high-CPU samples" as samples whose total host CPU
+        /// is at or above this bar, in SQL, in both SKUs (<c>DailySummarySql.RangeSql</c> and Lite's
+        /// <c>LocalDataService.DailySummary</c>), and both suites pin that literal against this constant so
+        /// the day cell and the card cannot drift apart on what "high CPU" means (#3539 A2).
+        ///
+        /// <para><b>Deliberately NOT the alert engine's configurable CPU threshold.</b> That knob governs
+        /// when a page is DELIVERED and an operator may retune it; the calendar is a historical record
+        /// whose SQL re-counts samples at read time, so binding the day cell to the knob would recolour
+        /// every past day the moment the knob moved — the coupling #3539 objects to on the alert-count
+        /// signal, and the one signal here where it would actually happen. The card band is a compile-time
+        /// constant for the same reason, and it is the card the calendar is the day-scale analogue of.</para>
+        /// </summary>
+        public const double CpuWarningPercent = 80.0;
+
+        /// <summary>The CPU band's Critical bar, percent of a fixed capacity — see
+        /// <see cref="CpuWarningPercent"/> for why the pair is named.</summary>
+        public const double CpuCriticalPercent = 95.0;
+
+        /* ── the blocking RATE band (#3539 A3) ── */
+
+        /// <summary>
+        /// The shortest window a blocking rate is computed over — the SAME hour the deadlock band uses
+        /// (<see cref="DeadlockRateMinimumWindow"/>): every surface that windows one count windows the
+        /// other identically (the fleet reader's <c>hours_back</c>, <c>/api/fleet</c>, the viewer card's
+        /// fixed hour), so a single minimum keeps the two bands rateable on exactly the same windows.
+        ///
+        /// <para><b>Written as its own literal, NOT as <c>= DeadlockRateMinimumWindow</c>, on purpose.</b>
+        /// Static readonly fields initialise in textual order, and this one is declared above the deadlock
+        /// constant; an alias here would read <see cref="TimeSpan.Zero"/> at initialisation and silently
+        /// make every window rateable — a 15-minute sweep span multiplied into an hourly rate, and an
+        /// undeclared window divided by zero. The tests pin the two equal instead.</para>
+        /// </summary>
+        public static readonly TimeSpan BlockingRateMinimumWindow = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// WARNING tier of the blocking COUNT arm: blocked-process reports per hour, normalised over the
+        /// window.
+        ///
+        /// <para><b>The top of the measured quiet mode.</b> 14 days of <c>blocked_process_reports</c> on
+        /// the 43-server dogfood fleet — 2,398 reports over 14,448 server-hours, bucketed one server-hour
+        /// at a time. 99.39% of server-hours hold no report at all; of the 88 that hold any, the
+        /// distribution is bimodal: 51 hours hold 1–4 reports (35 hold exactly one), and a storm mode of 23
+        /// hours sits at 20 or more (up to 232). The 5–10 band between them holds 5 hours in 14 days. So a
+        /// tier at 5 per hour bands the whole quiet mode Healthy — the requirement, for the reason the
+        /// deadlock tiers state it: the band exists to find the server in trouble — and fires on 37 of
+        /// 14,448 server-hours (0.26%).</para>
+        ///
+        /// <para>The report count is a fair incident proxy on this population: the storm hours are MANY
+        /// distinct victim/blocker pairs (the worst hour's 232 reports were 232 distinct pairs), not one
+        /// long chain re-reporting; one pair re-firing up to 15 times exists but is the tail, not the
+        /// mode.</para>
+        /// </summary>
+        public const double BlockingWarnPerHour = 5.0;
+
+        /// <summary>
+        /// CRITICAL tier of the blocking COUNT arm: reports per hour.
+        ///
+        /// <para><b>Placed inside the measured trough, the #3368 method.</b> On the same 14-day distribution
+        /// the interval [5, 19] holds 14 server-hours (5 at 5–10, 9 at 11–19) against 23 at 20 or more, and
+        /// the quiet mode ends at 4. Twenty is the lower edge of the storm mode — 4x the warning tier, above
+        /// every hour of the quiet mode — so it catches a storm as it builds and nothing routine can reach
+        /// it. 23 of 14,448 server-hours (0.16%) band Critical by count.</para>
+        ///
+        /// <para>Compare the rule this replaces: <c>count &gt;= 5 &rarr; Critical</c> fired on 37 of the 88
+        /// active hours at a one-hour window, and on five reports per WEEK at the 168-hour one — the same
+        /// server, the same code, Critical or Healthy on the window alone (#3539 A3).</para>
+        /// </summary>
+        public const double BlockingCriticalPerHour = 20.0;
+
+        /// <summary>
+        /// The WAIT arm's Critical bar, seconds: the longest single block in the window. Rate-independent
+        /// on purpose — a 60-second block is a 60-second block whatever the window, and it is a claim about
+        /// one event's magnitude rather than about frequency. Measured: 20 of 2,398 reports (0.83%) reached
+        /// it, in 3 server-hours out of 14 days; the per-report distribution is p50 14.2 s, p90 18.9 s,
+        /// p99 47.4 s, max 208 s. Unchanged from the pre-#3539 ladder.
+        /// </summary>
+        public const double BlockingCriticalWaitSeconds = 60.0;
+
+        /// <summary>
+        /// The WAIT arm's Warning bar, seconds — unchanged from the pre-#3539 ladder, and deliberately NOT
+        /// re-derived here: the measurement that licensed the count tiers was a frequency distribution,
+        /// and this arm bands on magnitude. On the measured population the median report already waits
+        /// 14 s, so most hours with any blocking reach this bar; what the count tiers change is that
+        /// CRITICAL is no longer reachable by a handful of reports in a quiet hour or a quiet week.
+        /// </summary>
+        public const double BlockingWarnWaitSeconds = 10.0;
+
         /* ── the deadlock RATE band (#3368) ── */
 
         /// <summary>
@@ -438,6 +531,20 @@ namespace PerformanceMonitor.Common
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
+        /// <summary>
+        /// How long the window <see cref="BlockingCount"/> was counted over (#3539 A3) — the denominator of
+        /// the blocking rate the count arm evaluates. The <see cref="DeadlockWindow"/> discipline, verbatim:
+        /// <see cref="TimeSpan.Zero"/> means no window was declared and
+        /// <see cref="ServerHealthClassifier.BlockingSeverity"/> refuses to compute a rate from it.
+        ///
+        /// <para>A property of its own rather than a reuse of the deadlock window, even though every
+        /// production bundle fills both from the one variable that windowed both reads: each count carries
+        /// its own denominator on its own terms, so a future surface that windows the two differently
+        /// cannot silently band one count over the other's span. The rung census pins that every
+        /// production bundle declares both.</para>
+        /// </summary>
+        public TimeSpan BlockingWindow { get; init; }
+
         /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
         /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
         public int? DeadlockCount { get; init; }
@@ -453,9 +560,10 @@ namespace PerformanceMonitor.Common
         /// server that deadlocked. It is the <see cref="FleetCpuSource.NotCollected"/> discipline: a bundle
         /// built by a path that declares no window cannot land on an arm meaning "measured".</para>
         ///
-        /// <para>Populated on the count's own terms, not on <see cref="MaxBlockedSeconds"/>'s: blocking
-        /// bands on a wait duration, which carries its own scale, while a bare deadlock count means
-        /// different things over an hour and over a week.</para>
+        /// <para>Populated on the count's own terms: a bare deadlock count means different things over an
+        /// hour and over a week. <see cref="MaxBlockedSeconds"/> needs no window because a wait duration
+        /// carries its own scale; the blocking COUNT does need one, and carries it as
+        /// <see cref="BlockingWindow"/> (#3539 A3).</para>
         /// </summary>
         public TimeSpan DeadlockWindow { get; init; }
 
@@ -485,6 +593,16 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
         public int FailedCollectorCount { get; init; }
+
+        /// <summary>
+        /// How many collectors were banded at all for this server in the same health window (#3539 A8d) —
+        /// every row of the per-collector aggregate, whatever band it landed on — the denominator that
+        /// turns <see cref="FailedCollectorCount"/> into a share. Zero means no denominator was declared;
+        /// <see cref="ServerHealthClassifier.CollectorSeverity"/> then bands a non-zero failing count
+        /// Warning and never Critical, the fail-away-from-Healthy reading every undeclared denominator
+        /// here takes.
+        /// </summary>
+        public int CollectorCount { get; init; }
     }
 
     /// <summary>
@@ -610,12 +728,12 @@ namespace PerformanceMonitor.Common
                 return HealthSeverity.Unknown;
             }
 
-            if (banded >= 95)
+            if (banded >= ServerHealthThresholds.CpuCriticalPercent)
             {
                 return HealthSeverity.Critical;
             }
 
-            if (banded >= 80)
+            if (banded >= ServerHealthThresholds.CpuWarningPercent)
             {
                 return HealthSeverity.Warning;
             }
@@ -642,22 +760,71 @@ namespace PerformanceMonitor.Common
             return hasMemoryPressure.Value ? HealthSeverity.Critical : HealthSeverity.Healthy;
         }
 
-        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait or any blocking Warning; no source Unknown (#3272).
+        /// <summary>
+        /// Blocked-process reports per hour over <paramref name="window"/>, or <c>null</c> when the window
+        /// is too short to normalise honestly (below <see cref="ServerHealthThresholds.BlockingRateMinimumWindow"/>,
+        /// which includes a zero, negative or undeclared one) — <see cref="DeadlockRatePerHour"/>'s arithmetic
+        /// over the blocking count (#3539 A3). Public for the same reason: both cards and the day cell REPORT
+        /// the rate beside the count, because a band that reads a figure it does not show leaves "Blocking 7"
+        /// against a Critical dot with no way to see which tier was crossed.
+        /// </summary>
+        public static double? BlockingRatePerHour(long blockingCount, TimeSpan window) =>
+            RatePerHour(blockingCount, window, ServerHealthThresholds.BlockingRateMinimumWindow);
+
+        /// <summary>
+        /// Blocking band (#3539 A3): three arms, in this order — the longest single block's magnitude,
+        /// then blocked-process reports per HOUR over the window against
+        /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/> / <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>,
+        /// then the wait arm's Warning bar; no source Unknown (#3272).
         ///
-        /// <para>The COUNT carries the measured/not-measured distinction on its own — there is no second
-        /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
-        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para>
+        /// <para><b>A rate on the count, because the count was window-scoped and the band was not.</b> The
+        /// ladder this replaces read a raw count over a caller-chosen 1–168 hour window — <c>count &gt;= 5
+        /// → Critical</c> — so five reports were Critical at a one-week read and Healthy at a one-hour read
+        /// of the same server. Normalising removes the window from the answer, the way
+        /// <see cref="DeadlockSeverity"/> did for deadlocks: one pair of tiers means the same condition on
+        /// the MCP tool's <c>hours_back</c>, <c>/api/fleet</c>'s window, the viewer card's fixed hour, and —
+        /// through the daily classifier — a calendar day and a fleet-sweep span. The tiers come off the
+        /// 14-day distribution the tier constants cite: the quiet mode (1–4 reports an hour) bands Healthy
+        /// by count; Critical sits at the lower edge of the storm mode.</para>
         ///
-        /// <para><b>One Warning arm on the count, deliberately, and a second one would decide nothing.</b>
-        /// An arm at <c>&gt;= 2</c> above the <c>&gt; 0</c> one returns Warning for counts the lower arm
-        /// already returns Warning for, so it is indistinguishable from its neighbour rather than a tier
-        /// (#3368). Giving 2-4 events a band of their own is the alternative, and it is rejected: the enum
-        /// runs Healthy / Warning / Critical, Critical already belongs to <c>&gt;= 5</c>, and there is no
-        /// third label to put between them — inventing one would mean a threshold with nothing behind it,
-        /// where the deadlock tiers above come off a measured distribution. So the count decides exactly two
-        /// things here, and a magnitude tier wants that same derivation on the blocking population
-        /// first.</para></summary>
-        public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
+        /// <para><b>The wait arms are NOT normalised, and that is the point of having two kinds of arm.</b>
+        /// The longest block in the window is a claim about one event's magnitude — 60 seconds blocked is
+        /// 60 seconds blocked over any window — where a report count is a claim about frequency, which
+        /// means nothing without its denominator. So the 60 s Critical arm fires whatever the rate (a
+        /// rate-independent Critical, measured at 3 server-hours in 14 days), the 10 s Warning arm fires
+        /// whatever the rate, and only the count is divided by the hours. On the measured fleet the median
+        /// report waits 14 s, so Warning-by-blocking stays close to "any blocking" there; what changes is
+        /// that Critical stops being reachable by a handful of reports.</para>
+        ///
+        /// <para><b>The unrateable arm fails away from Healthy, never into Critical</b> — #3368's rule. On a
+        /// sub-hour or undeclared window the wait arms still apply (they need no denominator), and past them
+        /// a non-zero count reads Warning: blocking demonstrably happened and no rate supports a Critical
+        /// claim. A zero count on such a window reads Unknown, not Healthy — a window of no length measured
+        /// nothing.</para>
+        ///
+        /// <para><b>What the count is, on each source.</b> The tiers were measured on
+        /// <c>blocked_process_reports</c>; a card that falls back to the DMV blocking snapshots counts
+        /// blocked-session snapshots instead (one per blocked session per collection cycle), a coarser unit
+        /// on which the same numbers are conservative rather than calibrated — and there the wait arms,
+        /// which read the same duration either way, carry the band.</para>
+        ///
+        /// <para>Compile-time constants, not store-backed knobs: the deadlock tiers' V120 knob is the
+        /// precedent for making a threshold settable, and it is the shape this band would take if the
+        /// field asks for it — a migration rung of its own, deliberately not ridden in on a re-banding.</para>
+        /// </summary>
+        /// <param name="blockingCountOrNullWhenUnmeasured">Blocking events counted in the window, or null where
+        /// the engine has no blocking source behind the reading. The COUNT carries the measured/not-measured
+        /// distinction on its own because a max wait means nothing without a population to have waited (see
+        /// <see cref="MemorySeverity"/> for why the arm exists). A <c>long</c> for the daily classifier's
+        /// day-scale roll-ups; every <c>int</c> caller widens implicitly.</param>
+        /// <param name="maxBlockedSeconds">The longest single block in the window.</param>
+        /// <param name="window">How long the count covers. Required rather than defaulted, for the reason
+        /// <see cref="DeadlockSeverity"/>'s is: a caller that kept the old two-argument call would compile
+        /// and silently band a bare count again, which is the entire defect.</param>
+        public static HealthSeverity BlockingSeverity(
+            long? blockingCountOrNullWhenUnmeasured,
+            double maxBlockedSeconds,
+            TimeSpan window)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
             {
@@ -666,28 +833,39 @@ namespace PerformanceMonitor.Common
 
             var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
 
-            if (maxBlockedSeconds >= 60)
+            if (maxBlockedSeconds >= ServerHealthThresholds.BlockingCriticalWaitSeconds)
             {
                 return HealthSeverity.Critical;
             }
 
-            if (blockingCount >= 5)
+            var ratePerHour = BlockingRatePerHour(blockingCount, window);
+            if (ratePerHour.HasValue && ratePerHour.Value >= ServerHealthThresholds.BlockingCriticalPerHour)
             {
                 return HealthSeverity.Critical;
             }
 
-            if (maxBlockedSeconds >= 10)
+            if (maxBlockedSeconds >= ServerHealthThresholds.BlockingWarnWaitSeconds)
             {
                 return HealthSeverity.Warning;
             }
 
-            if (blockingCount > 0)
+            if (!ratePerHour.HasValue)
             {
-                return HealthSeverity.Warning;
+                return blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown;
             }
 
-            return HealthSeverity.Healthy;
+            return ratePerHour.Value >= ServerHealthThresholds.BlockingWarnPerHour
+                ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
         }
+
+        /// <summary>The one division behind both rate bands: events per hour, or null below the band's own
+        /// minimum window (which a zero, negative or undeclared window is). One function rather than two so
+        /// the two bands cannot disagree about what "too short to rate" means. The explicit positive-window
+        /// guard is belt to the minimum's braces: no minimum this class declares is zero, and if one ever
+        /// were, a division by a zero window must still be a null rather than an infinite rate.</summary>
+        private static double? RatePerHour(long count, TimeSpan window, TimeSpan minimumWindow) =>
+            window > TimeSpan.Zero && window >= minimumWindow ? count / window.TotalHours : null;
 
         /// <summary>
         /// Deadlocks per hour over <paramref name="window"/>, or <c>null</c> when the window is too short to
@@ -702,9 +880,7 @@ namespace PerformanceMonitor.Common
         /// roll-ups as longs (#3525); every <c>int</c> caller widens implicitly.</para>
         /// </summary>
         public static double? DeadlockRatePerHour(long deadlockCount, TimeSpan window) =>
-            window >= ServerHealthThresholds.DeadlockRateMinimumWindow
-                ? deadlockCount / window.TotalHours
-                : null;
+            RatePerHour(deadlockCount, window, ServerHealthThresholds.DeadlockRateMinimumWindow);
 
         /// <summary>
         /// Deadlock band (#3368): deadlocks per HOUR over the window, Critical at
@@ -814,9 +990,59 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Collectors band — any FAILING collector is Warning.</summary>
-        public static HealthSeverity CollectorSeverity(int failedCollectorCount) =>
-            failedCollectorCount > 0 ? HealthSeverity.Warning : HealthSeverity.Healthy;
+        /// <summary>
+        /// The share of a server's banded collectors that are FAILING, in percent, or <c>null</c> when no
+        /// denominator was declared (<paramref name="collectorCount"/> at or below zero). Public because the
+        /// card reasons name it (#3539 A8d): "3 of 40 collectors failing" is the fact the band read.
+        /// </summary>
+        public static double? FailingCollectorSharePercent(int failedCollectorCount, int collectorCount) =>
+            collectorCount > 0 ? failedCollectorCount * 100.0 / collectorCount : null;
+
+        /// <summary>
+        /// Collectors band (#3539 A8d): Healthy with nothing FAILING; otherwise Warning, escalating to
+        /// Critical when the FAILING share of this server's banded collectors exceeds
+        /// <see cref="CollectorHealthClassifier.WarningFailureRatePercent"/>.
+        ///
+        /// <para><b>Graded on a share, because a count of failing collectors was presence-flat.</b> The arm
+        /// this replaces was <c>failing &gt; 0 &rarr; Warning</c>, so one FAILING collector of forty and
+        /// forty of forty banded identically — a card whose collection had entirely stopped producing data
+        /// read the same amber dot as one with a single permission gap. A FAILING collector is one with no
+        /// success in over 24 hours (<see cref="CollectorHealthClassifier"/>'s ladder), so the share of them
+        /// is the share of this server's collection that has been dark for a day.</para>
+        ///
+        /// <para><b>The boundary is the one rate bar the product has already committed to for this
+        /// evidence, not a new measurement.</b> The collector-health classifier bands a single collector
+        /// WARNING when more than 20% of its runs error; the same fifth, applied to the collectors of a
+        /// server rather than the runs of a collector, is where Warning becomes Critical here. Stated
+        /// plainly: no fleet distribution of failing-collector shares was measured for this tier, and it is
+        /// borrowed by analogy from a bar that WAS chosen for the same "how much of the collection is
+        /// failing" question one level down. A measured share distribution would be the evidence to move
+        /// it, the way the blocking tiers next door were moved.</para>
+        ///
+        /// <para><b>Any FAILING collector still reads Warning.</b> One collector dark for a day is a real
+        /// gap in what this server's other bands can see, and the count is disclosed beside the band, so
+        /// the Healthy arm stays reserved for nothing failing. With no denominator declared the share cannot
+        /// be formed and a non-zero count fails away from Healthy into Warning, never into Critical — the
+        /// unrateable-window discipline the rate bands above follow. Nothing failing bands Healthy whatever
+        /// the denominator, as before: the counts come off a seven-day aggregate that only lacks rows for a
+        /// server that has collected nothing in a week, which the freshness axis already paints.</para>
+        /// </summary>
+        /// <param name="failedCollectorCount">Collectors whose seven-day band is FAILING.</param>
+        /// <param name="collectorCount">Collectors banded at all in the same window (every band). Required
+        /// rather than defaulted, for the reason the rate bands' windows are: a caller that kept the old
+        /// one-argument call would compile and silently band presence-flat again.</param>
+        public static HealthSeverity CollectorSeverity(int failedCollectorCount, int collectorCount)
+        {
+            if (failedCollectorCount <= 0)
+            {
+                return HealthSeverity.Healthy;
+            }
+
+            var share = FailingCollectorSharePercent(failedCollectorCount, collectorCount);
+            return share.HasValue && share.Value > CollectorHealthClassifier.WarningFailureRatePercent
+                ? HealthSeverity.Critical
+                : HealthSeverity.Warning;
+        }
 
         /// <summary>The six per-metric card severities, in card row order — the reuse surface for scoring / reasons.</summary>
         public static IEnumerable<HealthSeverity> MetricSeverities(ServerHealthMetrics m)
@@ -824,12 +1050,12 @@ namespace PerformanceMonitor.Common
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
-            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds);
+            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow);
             yield return DeadlockSeverity(
                 m.DeadlockCount,
                 m.DeadlockWindow,
                 m.DeadlockRateThresholds ?? DeadlockRateThresholds.Default);
-            yield return CollectorSeverity(m.FailedCollectorCount);
+            yield return CollectorSeverity(m.FailedCollectorCount, m.CollectorCount);
         }
 
         /// <summary>

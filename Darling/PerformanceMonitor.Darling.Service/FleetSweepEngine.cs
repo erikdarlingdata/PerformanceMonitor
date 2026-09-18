@@ -153,6 +153,11 @@ public static class FleetSweepEngine
        distinct from the alert engine's metric names: the ledger is derived from summary scoring, and
        borrowing the engine's spellings would claim a provenance the rows do not have. */
     public const string FamilyDeadlocks = "deadlocks";
+
+    /// <summary>Retained as VOCABULARY for rows already in the ledger; no new row carries it. #3539 A2 made
+    /// collection errors a Warning-ceiling share of the span's runs (the collector-health surface's own bar
+    /// and tier), and the ledger is derived from CRITICAL triggers only — so the family has nothing left to
+    /// fire on. Stored verdicts are immutable and their readers key on this spelling.</summary>
     public const string FamilyCollectionErrors = "collection-errors";
     public const string FamilyMemoryCritical = "memory-critical";
     public const string FamilyHighCpu = "high-cpu";
@@ -720,28 +725,71 @@ public static class FleetSweepEngine
                 ratePerHour, thresholds.DeadlockRates.CriticalPerHour, signals.Deadlocks));
         }
 
-        if (signals.CollectionErrors > 0)
-        {
-            yield return (FamilyCollectionErrors, Evidence("collector runs ending in ERROR", signals.CollectionErrors, 1));
-        }
+        /* Collection errors are absent from this decomposition on purpose (#3539 A2): the arm is now a
+           share of the span's runs with a Warning ceiling — see DailyHealthBandCalculator.CollectionErrorSeverity
+           — so no Critical verdict can be attributed to it and FamilyCollectionErrors produces no new rows. */
 
         if (signals.MemoryCriticalEvents > 0)
         {
             yield return (FamilyMemoryCritical, Evidence("severe memory-pressure events", signals.MemoryCriticalEvents, 1));
         }
 
-        if (signals.HighCpuEvents >= thresholds.HighCpuCriticalSamples)
+        /* #3539 A2: the CPU family fires on the arm the verdict banded with — the hot-sample count against
+           the bar SCALED to this span (the greater of the excursion-scale minimum and the sustained-heat
+           rate), never against the fixed 6 the pre-#3539 constant applied to every span. */
+        if (DailyHealthBandCalculator.HighCpuSeverity(signals.HighCpuEvents, signals.Window, thresholds) == HealthSeverity.Critical)
         {
-            yield return (FamilyHighCpu, Evidence("high-CPU samples (>= 80% total host)", signals.HighCpuEvents, thresholds.HighCpuCriticalSamples));
+            yield return (FamilyHighCpu, Evidence(
+                "high-CPU samples (>= 80% total host) against the span-scaled bar",
+                signals.HighCpuEvents,
+                thresholds.HighCpuCriticalSamplesFor(signals.Window)));
         }
 
-        if (signals.BlockingEvents >= thresholds.BlockingCriticalEvents)
+        /* #3539 A2/A3: the blocking family fires on the same BlockingSeverity call Classify makes — the
+           rate over the span, or the 60 s wait arm — so the ledger cannot page on a count the verdict did
+           not band. Which arm decided is legible from the evidence: the rate row names the rate tier, the
+           wait row names the wait bar. */
+        /* The SIGNALS' peak, not the reading's: Classify sees only the signals, and the two must agree.
+           The production read fills both from one MAX. */
+        var peakBlockSeconds = signals.PeakBlockWaitMs / 1000.0;
+        if (ServerHealthClassifier.BlockingSeverity(signals.BlockingEvents, peakBlockSeconds, signals.Window)
+            == HealthSeverity.Critical)
         {
-            yield return (FamilyBlocking, Evidence("blocking events", signals.BlockingEvents, thresholds.BlockingCriticalEvents));
+            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, signals.Window, peakBlockSeconds));
         }
     }
 
-    private static string Evidence(string what, long value, long threshold) =>
+    /// <summary>The blocking family's evidence (#3539 A3): the arm that banded is the one named. A 60 s
+    /// block is the wait arm's Critical whatever the rate; otherwise the RATE is the value, with the raw
+    /// count as its own member for the operator reconciling against the blocking grid.</summary>
+    private static string BlockingEvidence(long count, TimeSpan window, double peakBlockSeconds)
+    {
+        if (peakBlockSeconds >= ServerHealthThresholds.BlockingCriticalWaitSeconds)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+                trigger = "longest single block in the sweep span, seconds",
+                value = peakBlockSeconds,
+                threshold = ServerHealthThresholds.BlockingCriticalWaitSeconds,
+                blocking_count = count,
+            });
+        }
+
+        /* Critical without the wait arm implies a rateable window at or past the Critical tier, so the
+           rate is present by construction. */
+        var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(count, window)!.Value;
+        return JsonSerializer.Serialize(new
+        {
+            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            trigger = "blocking events per hour over the sweep span",
+            value = ratePerHour,
+            threshold = ServerHealthThresholds.BlockingCriticalPerHour,
+            blocking_count = count,
+        });
+    }
+
+    private static string Evidence(string what, long value, double threshold) =>
         JsonSerializer.Serialize(new
         {
             derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
@@ -775,8 +823,14 @@ public static class FleetSweepEngine
                 reading.Signals.Deadlocks, reading.Signals.Window),
             window_minutes = reading.Signals.Window.TotalMinutes,
             collection_errors = reading.Signals.CollectionErrors,
+            /* #3539 A2/A3, additive on NEW rows: the denominator the error share bands on, and the blocking
+               rate beside its count (null on an unrateable span) — the same disclosure rule as the deadlock
+               rate above. */
+            collection_runs = reading.Signals.CollectionRuns,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
+            blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(
+                reading.Signals.BlockingEvents, reading.Signals.Window),
             memory_pressure_events = reading.Signals.MemoryPressureEvents,
             memory_critical_events = reading.Signals.MemoryCriticalEvents,
             alert_count = reading.Signals.AlertCount,
@@ -882,13 +936,21 @@ public static class FleetSweepEngine
             var rows = await DarlingHealthReader.GetWindowSignalsAsync(
                 postgres, serverId, spanStartUtc, spanEndUtc, cancellationToken).ConfigureAwait(false);
 
+            var peakBlock = rows.Count == 0 ? 0L : rows.Max(r => r.MaxBlockDurationMs);
+
             var signals = new DailyHealthSignals
             {
                 HasData = rows.Count > 0,
                 Deadlocks = rows.Sum(r => r.DeadlockCount),
                 CollectionErrors = rows.Sum(r => r.CollectionErrors),
+                /* #3539 A2: runs sum exactly as the errors do (additive counts over one half-open window),
+                   so the share the band reads is the span's, not the first day-bucket's. */
+                CollectionRuns = rows.Sum(r => r.CollectionRuns),
                 HighCpuEvents = rows.Sum(r => r.HighCpuEvents),
                 BlockingEvents = rows.Sum(r => r.BlockingEvents),
+                /* #3539 A2: the longest block across the span's day buckets — a MAX, not a sum, because it
+                   is a magnitude; the blocking band's wait arm reads it. */
+                PeakBlockWaitMs = peakBlock,
                 MemoryPressureEvents = rows.Sum(r => r.MemoryPressureEvents),
                 MemoryCriticalEvents = rows.Sum(r => r.MemoryCriticalEvents),
                 AlertCount = rows.Sum(r => r.AlertCount),
@@ -897,8 +959,6 @@ public static class FleetSweepEngine
                    applies: deadlocks read Warning, never a rate-multiplied Critical. */
                 Window = spanEndUtc - spanStartUtc,
             };
-
-            var peakBlock = rows.Count == 0 ? 0L : rows.Max(r => r.MaxBlockDurationMs);
 
             return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null);
         }

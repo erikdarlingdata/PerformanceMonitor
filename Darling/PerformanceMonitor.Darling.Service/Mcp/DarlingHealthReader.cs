@@ -183,13 +183,23 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         /// unanchored reads (the explicit-date tool, the viewer path) band against the wall clock.</summary>
         public DateTime ReferenceUtc { get; init; } = DateTime.UtcNow;
 
+        /// <summary>Collector runs of every status in the window (#3539 A2) — the denominator the
+        /// collection-error share bands on. An <c>init</c> member rather than a positional parameter so the
+        /// positional shape every existing constructor call uses is unchanged; the reader stamps it from the
+        /// trailing <c>collection_runs</c> column.</summary>
+        public long CollectionRuns { get; init; }
+
         public DailyHealthSignals ToSignals() => new()
         {
             HasData = HasData,
             Deadlocks = DeadlockCount,
             CollectionErrors = CollectionErrors,
+            CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
+            /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
+               longest block — so the peak travels in the signals rather than only into the reasons line. */
+            PeakBlockWaitMs = MaxBlockDurationMs,
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
@@ -294,7 +304,8 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// calendar, <c>get_daily_summary</c> and now the sweep all band from, so the sweep's verdicts and
     /// the day surfaces cannot disagree about the same signals. The SQL buckets by UTC day, so a span
     /// crossing midnight returns one row per day touched; the caller sums the rows, which is exact
-    /// because every signal is an additive count over the same half-open window.</para>
+    /// because every COUNT is additive over the same half-open window — and takes the MAX of the one
+    /// magnitude, the peak block wait (#3539 A2), which is exact for the same reason.</para>
     ///
     /// <para><b>Throws on a store fault, deliberately</b> — the engine-read posture
     /// (<c>FleetSweepStore.GetLatestSweepAsync</c>'s reasoning): the sweep's caller must render a
@@ -345,5 +356,10 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
         reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
         reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
-        HasData: true);
+        HasData: true)
+    {
+        /* #3539 A2: the trailing collection_runs column, appended after peak_block_wait_ms so the eleven
+           positional reads above stay where they were. */
+        CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+    };
 }

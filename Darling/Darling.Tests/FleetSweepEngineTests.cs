@@ -118,6 +118,9 @@ public sealed class FleetSweepEngineTests
         Assert.Contains("\"deadlocks\":25", verdictA.VerdictJson, StringComparison.Ordinal);
         Assert.Contains("\"deadlock_rate_per_hour\":25", verdictA.VerdictJson, StringComparison.Ordinal);
         Assert.Contains("\"window_minutes\":60", verdictA.VerdictJson, StringComparison.Ordinal);
+        /* #3539 A2/A3, additive: the error share's denominator and the blocking rate beside its count. */
+        Assert.Contains("\"collection_runs\":0", verdictA.VerdictJson, StringComparison.Ordinal);
+        Assert.Contains("\"blocking_rate_per_hour\":0", verdictA.VerdictJson, StringComparison.Ordinal);
     }
 
     /* ─────────────────────── the diff: sweep N against sweep N−1's rows ─────────────────────── */
@@ -455,7 +458,8 @@ public sealed class FleetSweepEngineTests
     /// A sub-hour sweep span is not rateable (#3368's arm), so deadlocks alone cannot band the span
     /// Critical — and even when ANOTHER trigger makes the day Critical, the deadlock family stays out of
     /// the ledger: 10,000 deadlocks in 15 minutes is 40,000/hr arithmetically, and declining to claim it
-    /// is the honest reading the whole rate band is built on.
+    /// is the honest reading the whole rate band is built on. The other trigger here is severe memory
+    /// pressure, the one presence-banded Critical left after #3539 A2.
     /// </summary>
     [Fact]
     public void ASubHourSpan_NeverPagesTheDeadlockFamily()
@@ -464,7 +468,7 @@ public sealed class FleetSweepEngineTests
         {
             HasData = true,
             Deadlocks = 10_000,
-            CollectionErrors = 1,
+            MemoryCriticalEvents = 1,
             Window = TimeSpan.FromMinutes(15),
         }, 0, null);
 
@@ -472,7 +476,7 @@ public sealed class FleetSweepEngineTests
 
         Assert.Equal("Critical", composition.Verdicts.Single().Band);
         var families = composition.WouldHavePaged.Select(w => w.AlertFamily).ToList();
-        Assert.Contains(FleetSweepEngine.FamilyCollectionErrors, families);
+        Assert.Contains(FleetSweepEngine.FamilyMemoryCritical, families);
         Assert.DoesNotContain(FleetSweepEngine.FamilyDeadlocks, families);
 
         /* Deadlocks alone on the same span: Warning, not Critical — the unrateable arm. */
@@ -483,6 +487,129 @@ public sealed class FleetSweepEngineTests
             Window = TimeSpan.FromMinutes(15),
         }, 0, null);
         Assert.Equal("Warning", ComposeSimple(new[] { alone }).Verdicts.Single().Band);
+    }
+
+    /* ─────────────────────── #3539 A2/A3: the CPU, blocking and collection-error triggers ─────────────────────── */
+
+    /// <summary>
+    /// The collection-error family produces NO new ledger rows: the arm is a share of the span's runs with
+    /// a Warning ceiling now, so no Critical verdict can be attributed to it. A span whose every run
+    /// errored is Warning, never Critical, and the ledger (Critical triggers only) is empty for it. The
+    /// family constant stays as vocabulary for rows already stored.
+    /// </summary>
+    [Fact]
+    public void TheCollectionErrorFamily_NeverPages_AndAnAllErrorSpanIsWarning()
+    {
+        var allErrors = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            CollectionErrors = 900,
+            CollectionRuns = 900,
+            Window = FixtureSpan,
+        }, 0, null);
+
+        var composition = ComposeSimple(new[] { allErrors }, alertsEnabled: false);
+        Assert.Equal("Warning", composition.Verdicts.Single().Band);
+        Assert.Empty(composition.WouldHavePaged);
+        Assert.Contains("900 collection errors (100.0% of 900 runs)", composition.Verdicts.Single().BandReason, StringComparison.Ordinal);
+
+        /* One transient error among the span's runs: below the 20% bar, disclosed, and the span is Healthy. */
+        var oneError = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            CollectionErrors = 1,
+            CollectionRuns = 900,
+            Window = FixtureSpan,
+        }, 0, null);
+        Assert.Equal("Healthy", ComposeSimple(new[] { oneError }).Verdicts.Single().Band);
+        Assert.Equal("collection-errors", FleetSweepEngine.FamilyCollectionErrors);
+    }
+
+    /// <summary>
+    /// The CPU family fires on the arm the verdict banded with — the hot-sample count against the bar
+    /// SCALED to the span. Over the hourly span six is the bar (unchanged from the old constant); over a
+    /// day-long span the same ten samples are far under the 30 the sustained-heat rate demands, so a
+    /// day-ceiling sweep does not page on what an hourly one would — and the evidence names the bar it
+    /// used.
+    /// </summary>
+    [Fact]
+    public void TheCpuFamily_FiresAgainstTheSpanScaledBar()
+    {
+        var hourly = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            HighCpuEvents = 10,
+            Window = FixtureSpan,
+        }, 0, null);
+        var paged = ComposeSimple(new[] { hourly }, alertsEnabled: false)
+            .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyHighCpu);
+        using (var evidence = JsonDocument.Parse(paged.EvidenceJson))
+        {
+            Assert.Equal(10, evidence.RootElement.GetProperty("value").GetInt64());
+            Assert.Equal(6.0, evidence.RootElement.GetProperty("threshold").GetDouble());
+        }
+
+        var daily = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            HighCpuEvents = 10,
+            Window = TimeSpan.FromHours(24),
+        }, 0, null);
+        var dayComposition = ComposeSimple(new[] { daily }, alertsEnabled: false);
+        Assert.Equal("Warning", dayComposition.Verdicts.Single().Band);
+        Assert.Empty(dayComposition.WouldHavePaged);
+    }
+
+    /// <summary>
+    /// The blocking family fires on the same BlockingSeverity call Classify makes, and its evidence names
+    /// the arm that decided: the rate row carries the per-hour rate against the 20/hr tier with the raw
+    /// count beside it; a 60-second block is the wait arm's row whatever the rate. Twenty events in an
+    /// hour is the Critical tier; twenty in a day is 0.8/hr and pages nothing.
+    /// </summary>
+    [Fact]
+    public void TheBlockingFamily_FiresOnTheRateOrTheWaitArm_AndNamesWhich()
+    {
+        var storm = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 20,
+            Window = FixtureSpan,
+        }, 0, null);
+        var rateRow = ComposeSimple(new[] { storm }, alertsEnabled: false)
+            .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
+        using (var evidence = JsonDocument.Parse(rateRow.EvidenceJson))
+        {
+            Assert.Equal("blocking events per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+            Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
+            Assert.Equal(ServerHealthThresholds.BlockingCriticalPerHour, evidence.RootElement.GetProperty("threshold").GetDouble());
+            Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
+        }
+
+        var longBlock = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 1,
+            PeakBlockWaitMs = 90_000,
+            Window = TimeSpan.FromMinutes(15),
+        }, 90_000, null);
+        var waitRow = ComposeSimple(new[] { longBlock }, alertsEnabled: false)
+            .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
+        using (var evidence = JsonDocument.Parse(waitRow.EvidenceJson))
+        {
+            Assert.Equal("longest single block in the sweep span, seconds", evidence.RootElement.GetProperty("trigger").GetString());
+            Assert.Equal(90.0, evidence.RootElement.GetProperty("value").GetDouble());
+            Assert.Equal(ServerHealthThresholds.BlockingCriticalWaitSeconds, evidence.RootElement.GetProperty("threshold").GetDouble());
+        }
+
+        var diluted = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 20,
+            Window = TimeSpan.FromHours(24),
+        }, 0, null);
+        var dayComposition = ComposeSimple(new[] { diluted }, alertsEnabled: false);
+        Assert.Equal("Healthy", dayComposition.Verdicts.Single().Band);
+        Assert.Empty(dayComposition.WouldHavePaged);
     }
 
     /// <summary>

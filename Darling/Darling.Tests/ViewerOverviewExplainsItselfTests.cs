@@ -135,6 +135,7 @@ public sealed class ViewerOverviewExplainsItselfTests
             TotalThreads = 512,
             CurrentWorkers = 100,
             DeadlockWindow = TimeSpan.FromHours(1),
+            BlockingWindow = TimeSpan.FromHours(1),   // #3539 A3: a zero count is measured only over a window
         };
 
     /// <summary>

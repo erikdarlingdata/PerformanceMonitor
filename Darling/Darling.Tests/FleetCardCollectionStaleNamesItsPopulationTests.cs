@@ -325,7 +325,9 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             Status = ServerCollectionStatusRules
                 .Classify(flags.IsOnline, flags.CollectionStale, flags.AwaitingFirstCollection).Word(),
             FailedCollectorCount = failing,
-            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(failing),
+            /* No denominator declared: the share cannot form, so a failing count is Warning and never
+               Critical (#3539 A8d) — the two collection axes stay the only variables. */
+            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(failing, collectorCount: 0),
             OverallMetricSeverity = overall,
             Band = ServerHealthClassifier.ClassifyBand(
                 flags.IsOnline, flags.AwaitingFirstCollection, flags.CollectionStale, overall),
