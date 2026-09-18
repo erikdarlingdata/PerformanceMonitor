@@ -29,16 +29,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// target telling us everything it could" answer, which is the issue's ask. The two do not overlap —
 /// the plan-capture settings appear here as observed values with a pointer, never as a second verdict.</para>
 ///
-/// <para><b>No <c>hours_back</c> and no <c>as_of</c> PARAMETER, and that is the <c>get_pg_server_config</c>
-/// convention rather than an omission.</b> Configuration is a state, not a window: the audit is of the
-/// NEWEST snapshot, and the response carries that snapshot's collection time as <c>as_of</c> so the reader
-/// knows how old the state is. A windowed form would answer "no logging configuration" about a server
-/// whose hourly collector last ran just outside the window.</para>
+/// <para><b>No <c>hours_back</c> and no <c>as_of</c> PARAMETER, and that is the Stamped latest-read shape
+/// (#3541 A10) rather than an omission.</b> Configuration is a state, not a window: the audit is of the
+/// NEWEST snapshot, and the response carries that snapshot's collection time as <c>captured_at</c> — the
+/// one stamp every row shares, selected on the row statement — so the reader knows how old the state is. A
+/// windowed form would answer "no logging configuration" about a server whose hourly collector last ran
+/// just outside the window. <c>McpLatestSnapshotStampTests</c> holds the dialect; this tool is its
+/// Darling-only allowance because the roster's other half is a Lite file and Lite has no PostgreSQL.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPgLoggingAuditTools
 {
-    [McpServerTool(Name = "get_pg_logging_audit"), Description("Audits a PostgreSQL target's LOGGING settings - log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections - and says, per setting, whether it is producing the lines it could, what telemetry those lines unlock, the recommended value WITH its cost, and the remedy in the syntax this server's hosting needs (ALTER SYSTEM plus a reload where the server is yours to administer; a parameter group on RDS/Aurora, decided from rds.* parameters in the stored snapshot rather than guessed). It reads the STORED configuration snapshot pg_server_config already collects hourly, never the live server, and reports that snapshot's time as as_of. Read it at onboarding and whenever a target-side log read comes back empty: a target with every one of these off looks identical to a fully instrumented one from every counter-based read, and the difference shows up at incident time when the log somebody reaches for holds nothing. Verdicts are instrumented, partial, off or unknown - partial means a THRESHOLD is filtering (statements faster than N ms, temp files under N kB) and the row says what falls below it; for log_min_duration_statement the threshold IS the recommended posture, and its cost_note says so, because 0 logs every statement the server runs. unknown means the setting is not in the snapshot and nothing is inferred. Every facet names the Darling family that would consume its lines and says PLANNED where that consumer does not ship yet (#3601/#3602/#3603) - the counter reads that exist today are named beside it with what they cannot see. Plan capture's own settings (auto_explain, log_line_prefix %Q, lc_messages) are LISTED as observed for completeness but judged by get_pg_plan_capture_readiness, which owns their traps; lc_messages decides whether any of these lines are written in the English the parsers match. PostgreSQL-only.")]
+    [McpServerTool(Name = "get_pg_logging_audit"), Description("Audits a PostgreSQL target's LOGGING settings - log_min_duration_statement, log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints, log_connections, log_disconnections - and says, per setting, whether it is producing the lines it could, what telemetry those lines unlock, the recommended value WITH its cost, and the remedy in the syntax this server's hosting needs (ALTER SYSTEM plus a reload where the server is yours to administer; a parameter group on RDS/Aurora, decided from rds.* parameters in the stored snapshot rather than guessed). It reads the STORED configuration snapshot pg_server_config already collects hourly, never the live server. LATEST IS A TIME: captured_at is the instant that snapshot was taken, the collector runs hourly, so every value here is 'as of' that stamp and a change made since is not reflected until the next collection. Read it at onboarding and whenever a target-side log read comes back empty: a target with every one of these off looks identical to a fully instrumented one from every counter-based read, and the difference shows up at incident time when the log somebody reaches for holds nothing. Verdicts are instrumented, partial, off or unknown - partial means a THRESHOLD is filtering (statements faster than N ms, temp files under N kB) and the row says what falls below it; for log_min_duration_statement the threshold IS the recommended posture, and its cost_note says so, because 0 logs every statement the server runs. unknown means the setting is not in the snapshot and nothing is inferred. Every facet names the Darling family that would consume its lines and says PLANNED where that consumer does not ship yet (#3601/#3602/#3603) - the counter reads that exist today are named beside it with what they cannot see. Plan capture's own settings (auto_explain, log_line_prefix %Q, lc_messages) are LISTED as observed for completeness but judged by get_pg_plan_capture_readiness, which owns their traps; lc_messages decides whether any of these lines are written in the English the parsers match. PostgreSQL-only.")]
     public static async Task<string> GetPgLoggingAudit(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -92,9 +94,9 @@ public sealed class DarlingMcpPgLoggingAuditTools
         {
             server = serverName,
             status = "logging_audit",
-            /* The snapshot's collection time, on the wire under the name the other latest-snapshot reads
-               use (get_pvs_stats). It is how old this state is, not a window. */
-            as_of = audit.AsOf.ToString("o"),
+            /* The snapshot's collection time, under the #3541 A10 name every stamped latest read uses. It
+               is how old this state is, not a window. */
+            captured_at = audit.CapturedAt.ToString("o"),
             source = "pg_server_config, newest snapshot - stored configuration, not the live server",
             hosting = audit.Managed ? "managed (RDS/Aurora)" : "self-hosted",
             hosting_evidence = audit.HostingEvidence,

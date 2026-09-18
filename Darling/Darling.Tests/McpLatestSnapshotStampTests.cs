@@ -133,6 +133,24 @@ public sealed class McpLatestSnapshotStampTests
     /// holds the shape; the sweep only needs to know it is accounted for.</summary>
     public static readonly string[] ThreeClockTools = ["get_server_summary"];
 
+    /// <summary>
+    /// Stamped latest reads that exist on ONE SKU. <see cref="LatestTools"/> is a roster of PAIRS — every entry
+    /// names the Lite file its twin lives in and <see cref="LatestToolBodies"/> reads both — so a Darling-only
+    /// tool cannot sit in it without a Lite file to point at. These are held to the Stamped dialect by
+    /// <see cref="DarlingOnlyStampedTools_KeepTheStampedDialect"/> below with the SAME three assertions the
+    /// roster's Stamped entries get (a <c>captured_at</c> on the payload, LATEST IS A TIME in the description,
+    /// neither knob in the signature) — only the Lite half is absent, because the SKU is.
+    ///
+    /// <para><c>get_pg_logging_audit</c> (#3607) judges seven logging GUCs from the newest
+    /// <c>pg_server_config</c> snapshot; Lite has no PostgreSQL target, so there is no twin for the roster to
+    /// pair it with. The same architectural boundary <c>CrossAppMcpToolInventoryPinTests</c> records for every
+    /// <c>get_pg_*</c> read.</para>
+    /// </summary>
+    public static readonly (Type Tools, string ToolName)[] DarlingOnlyStamped =
+    [
+        (typeof(DarlingMcpPgLoggingAuditTools), "get_pg_logging_audit"),
+    ];
+
     /* ───────────────────────── the discriminators ───────────────────────── */
 
     /// <summary>The stamp, as a payload key.</summary>
@@ -198,6 +216,32 @@ public sealed class McpLatestSnapshotStampTests
             var lite = LiteParamNames(liteFile, name);
             Assert.DoesNotContain("hours_back", lite);
             Assert.DoesNotContain("as_of", lite);
+        }
+    }
+
+    /// <summary>
+    /// The Stamped dialect, held on the Darling-only reads with the roster's own three assertions — the stamp
+    /// on the payload, LATEST IS A TIME in the description, neither knob in the signature. Read from the
+    /// Darling source only, because there is no Lite half to read.
+    /// </summary>
+    [Fact]
+    public void DarlingOnlyStampedTools_KeepTheStampedDialect()
+    {
+        Assert.NotEmpty(DarlingOnlyStamped);
+
+        foreach (var (type, name) in DarlingOnlyStamped)
+        {
+            var body = ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), name);
+            Assert.True(CapturedAtKey.IsMatch(Strip(body)),
+                $"Darling {name}: no `captured_at =` on the payload — a latest read that never says when it was captured");
+
+            var description = ToolMethod(type, name).GetCustomAttribute<DescriptionAttribute>()!.Description;
+            Assert.Contains("captured_at", description, StringComparison.Ordinal);
+            Assert.Contains("LATEST IS A TIME", description, StringComparison.Ordinal);
+
+            var parameters = ToolMethod(type, name).GetParameters().Select(p => p.Name).ToArray();
+            Assert.DoesNotContain("hours_back", parameters);
+            Assert.DoesNotContain("as_of", parameters);
         }
     }
 
@@ -349,6 +393,7 @@ public sealed class McpLatestSnapshotStampTests
         var residualsSeen = new HashSet<string>(StringComparer.Ordinal);
         var lookupsSeen = new HashSet<string>(StringComparer.Ordinal);
         var threeClocksSeen = new HashSet<string>(StringComparer.Ordinal);
+        var darlingOnlySeen = new HashSet<string>(StringComparer.Ordinal);
         var examined = 0;
 
         foreach (var (file, source) in AllDarlingToolSources())
@@ -405,6 +450,14 @@ public sealed class McpLatestSnapshotStampTests
                     continue;
                 }
 
+                if (DarlingOnlyStamped.Any(t => t.ToolName == toolName))
+                {
+                    Assert.True(CapturedAtKey.IsMatch(body),
+                        $"{file} {toolName}: listed as a Darling-only STAMPED read but publishes no captured_at");
+                    darlingOnlySeen.Add(toolName);
+                    continue;
+                }
+
                 Assert.Fail($"{file} {toolName}: calls a latest-snapshot reader and is in no list here — give it a Shape in LatestTools (and stamp it) or name it as an allowance with its reason");
             }
         }
@@ -418,6 +471,8 @@ public sealed class McpLatestSnapshotStampTests
             "ThreeClockTools no longer matches what the sweep finds: " + string.Join(", ", ThreeClockTools.Except(threeClocksSeen)));
         Assert.True(StampedUnderCollectionTime.ToHashSet(StringComparer.Ordinal).SetEquals(allowancesUsed),
             "StampedUnderCollectionTime no longer matches what the sweep finds: " + string.Join(", ", StampedUnderCollectionTime.Except(allowancesUsed)));
+        Assert.True(DarlingOnlyStamped.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal).SetEquals(darlingOnlySeen),
+            "DarlingOnlyStamped no longer matches what the sweep finds: " + string.Join(", ", DarlingOnlyStamped.Select(t => t.ToolName).Except(darlingOnlySeen)));
         Assert.True(UnstampedLatestReadsPendingA10.ToHashSet(StringComparer.Ordinal).SetEquals(residualsSeen),
             "UnstampedLatestReadsPendingA10 no longer matches what the sweep finds: " + string.Join(", ", UnstampedLatestReadsPendingA10.Except(residualsSeen)));
     }
@@ -445,6 +500,7 @@ public sealed class McpLatestSnapshotStampTests
     [InlineData(nameof(DarlingCurrentConfigReader.TraceFlagsSql), "capture_time")]
     [InlineData(nameof(DarlingConfigHistoryReader.DatabaseScopedConfigSql), "capture_time")]
     [InlineData(nameof(DarlingConfigHistoryReader.QueryStoreHealthSql), "capture_time")]
+    [InlineData(nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
@@ -581,6 +637,7 @@ public sealed class McpLatestSnapshotStampTests
         nameof(DarlingConfigHistoryReader.QueryStoreHealthSql) => DarlingConfigHistoryReader.QueryStoreHealthSql,
         nameof(DarlingMemoryGrantReader.ResourceSemaphoreWindowSql) => DarlingMemoryGrantReader.ResourceSemaphoreWindowSql,
         nameof(DarlingMemoryGrantReader.MemoryGrantsWindowSql) => DarlingMemoryGrantReader.MemoryGrantsWindowSql,
+        nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql) => DarlingPgLoggingAuditReader.NewestSnapshotSql,
         _ => throw new ArgumentOutOfRangeException(nameof(sqlName), sqlName, "not a read this census names"),
     };
 

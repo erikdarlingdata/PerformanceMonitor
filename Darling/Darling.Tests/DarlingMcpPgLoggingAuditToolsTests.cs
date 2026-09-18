@@ -112,7 +112,7 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
         Assert.All(audit.Facets, f => Assert.Equal(DarlingPgLoggingAudit.Off, f.Verdict));
         Assert.False(audit.Managed);
         Assert.Contains("no rds.* parameter", audit.HostingEvidence, StringComparison.Ordinal);
-        Assert.Equal(Stamp, audit.AsOf);
+        Assert.Equal(Stamp, audit.CapturedAt);
 
         foreach (var facet in audit.Facets)
         {
@@ -432,14 +432,14 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
     /* ───────────────────────── the wire ───────────────────────── */
 
     /// <summary>
-    /// The response: the snapshot's time as <c>as_of</c> (the <c>get_pvs_stats</c> spelling for a
-    /// latest-snapshot read), counts that sum to the facet total, the off and unknown settings NAMED, and
+    /// The response: the snapshot's time as <c>captured_at</c> (the #3541 A10 spelling every stamped
+    /// latest read uses), counts that sum to the facet total, the off and unknown settings NAMED, and
     /// every facet carrying every prose column — <c>unlocks</c>, <c>consumer</c>, <c>recommended</c>,
     /// <c>cost_note</c>, <c>remedy</c> — because the readiness lesson (#3070) was that the remedy column is
     /// the one that goes missing on the way to the wire.
     /// </summary>
     [Fact]
-    public void TheWire_CarriesAsOf_TheCounts_TheNamedOffSettings_AndEveryProseColumn()
+    public void TheWire_CarriesCapturedAt_TheCounts_TheNamedOffSettings_AndEveryProseColumn()
     {
         var rows = Pg18Defaults();
         rows.RemoveAll(r => r.Name == "log_disconnections");
@@ -450,7 +450,8 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
         Assert.Equal("srv", root.GetProperty("server").GetString());
         Assert.Equal("logging_audit", root.GetProperty("status").GetString());
-        Assert.Equal(Stamp.ToString("o"), root.GetProperty("as_of").GetString());
+        Assert.Equal(Stamp.ToString("o"), root.GetProperty("captured_at").GetString());
+        Assert.False(root.TryGetProperty("as_of", out _));
         Assert.Contains("not the live server", root.GetProperty("source").GetString(), StringComparison.Ordinal);
         Assert.Equal("self-hosted", root.GetProperty("hosting").GetString());
         Assert.False(root.TryGetProperty("hours_back", out _));
@@ -539,7 +540,8 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
         Assert.Contains("STORED configuration snapshot", description, StringComparison.Ordinal);
         Assert.Contains("never the live server", description, StringComparison.Ordinal);
-        Assert.Contains("as_of", description, StringComparison.Ordinal);
+        Assert.Contains("LATEST IS A TIME", description, StringComparison.Ordinal);
+        Assert.Contains("captured_at", description, StringComparison.Ordinal);
         Assert.Contains("get_pg_plan_capture_readiness", description, StringComparison.Ordinal);
         Assert.Contains("partial means a THRESHOLD is filtering", description, StringComparison.Ordinal);
         Assert.Contains("PLANNED", description, StringComparison.Ordinal);
@@ -647,7 +649,7 @@ public sealed class DarlingMcpPgLoggingAuditLivePostgresTests
 
             Assert.Equal("logging_audit", self.GetProperty("status").GetString());
             Assert.Equal(SelfHostedName, self.GetProperty("server").GetString());
-            Assert.Equal(DateTime.SpecifyKind(newest, DateTimeKind.Utc).ToString("o"), self.GetProperty("as_of").GetString());
+            Assert.Equal(DateTime.SpecifyKind(newest, DateTimeKind.Utc).ToString("o"), self.GetProperty("captured_at").GetString());
             Assert.Equal("self-hosted", self.GetProperty("hosting").GetString());
 
             var selfFacets = self.GetProperty("facets").EnumerateArray().ToDictionary(f => f.GetProperty("setting").GetString()!);

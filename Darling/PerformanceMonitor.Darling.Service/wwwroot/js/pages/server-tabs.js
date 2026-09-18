@@ -1615,7 +1615,7 @@ export const POSTGRES_TABS = [
       /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
          other half of the same onboarding question - is this target telling us everything it could. Judged
          from the newest stored pg_server_config snapshot rather than collected, so it takes no window; the
-         subtitle carries the snapshot time the read reports as as_of. Every setting is shown whatever its
+         read reports the snapshot time as captured_at. Every setting is shown whatever its
          verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
          cannot show that a target IS instrumented. */
       table(

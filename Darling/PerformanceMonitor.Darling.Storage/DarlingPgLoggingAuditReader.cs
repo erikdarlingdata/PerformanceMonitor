@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// core GUC that <c>PgServerConfigCollector</c> (#2658) already stores hourly with its value, source and
 /// context, so a second collector would write the same rows under a second name and the two would drift.
 /// The judgment happens at read time over the snapshot that is already there, and the snapshot's
-/// <c>collection_time</c> is the audit's <c>as_of</c>.</para>
+/// <c>collection_time</c> is the audit's <c>captured_at</c> (#3541 A10's stamp, selected on the row statement).</para>
 ///
 /// <para><b>Anchored on <c>MAX(collection_time)</c>, not on a window</b> — the same reason
 /// <see cref="DarlingPgServerConfigReader.CurrentConfigSql"/> gives: configuration is a state, and an hours
@@ -61,7 +61,7 @@ public static class DarlingPgLoggingAuditReader
     /// <param name="BootValue">The compiled-in default, so "PostgreSQL 15 turned this on" is visible
     /// without a table of defaults that would rot at every major.</param>
     /// <param name="PendingRestart">The file and the running server disagree about this one.</param>
-    /// <param name="CollectionTime">When the snapshot was taken — the audit's <c>as_of</c>.</param>
+    /// <param name="CollectionTime">When the snapshot was taken — the audit's <c>captured_at</c>.</param>
     public sealed record PgLoggingSettingRow(
         string Name,
         string? Setting,

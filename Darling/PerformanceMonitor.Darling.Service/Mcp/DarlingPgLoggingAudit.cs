@@ -36,7 +36,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>PgServerConfigCollector</c> already stores hourly with its value, source, unit and context, so the
 /// judgment is a pure function over rows the store holds, computed when asked. No new table, no schema rung,
 /// nothing for a second collector to disagree with the first about. The snapshot's own
-/// <c>collection_time</c> is the audit's <c>as_of</c>.</para>
+/// <c>collection_time</c> is the audit's <c>captured_at</c>.</para>
 ///
 /// <para><b>Four verdicts, and <c>partial</c> is not a lesser <c>instrumented</c>.</b> <c>instrumented</c>
 /// means the setting is producing every line it can; <c>off</c> means none; <c>unknown</c> means the setting
@@ -115,13 +115,13 @@ public static class DarlingPgLoggingAudit
     /// <summary>A plan-capture setting shown as observed, with the readiness facet that judges it.</summary>
     public sealed record ReadinessSetting(string Setting, string? Value, string? Source, string ReadinessFacet);
 
-    /// <param name="AsOf">The snapshot's collection time.</param>
+    /// <param name="CapturedAt">The snapshot's collection time — the one stamp every row shares.</param>
     /// <param name="Managed">True when the snapshot carries <c>rds.*</c> parameters.</param>
     /// <param name="HostingEvidence">What the flavour decision rested on.</param>
     /// <param name="Facets">One per judged setting, in the order an operator reaches for them.</param>
     /// <param name="JudgedByReadiness">The plan-capture settings, listed not judged.</param>
     public sealed record Result(
-        DateTime AsOf,
+        DateTime CapturedAt,
         bool Managed,
         string HostingEvidence,
         IReadOnlyList<Facet> Facets,
@@ -176,7 +176,7 @@ public static class DarlingPgLoggingAudit
             byName.TryAdd(row.Name, row);
         }
 
-        var asOf = snapshot.Max(r => r.CollectionTime);
+        var capturedAt = snapshot.Max(r => r.CollectionTime);
 
         /* The hosting flavour, from evidence in the rows rather than from a registry token that cannot
            separate RDS from self-hosted. Counted so the response can say how much evidence there was. */
@@ -208,7 +208,7 @@ public static class DarlingPgLoggingAudit
                 : new ReadinessSetting(s.Setting, null, null, s.ReadinessFacet))
             .ToList();
 
-        return new Result(asOf, managed, hostingEvidence, facets, readiness);
+        return new Result(capturedAt, managed, hostingEvidence, facets, readiness);
     }
 
     /* ───────────────────────── the facets ───────────────────────── */
@@ -533,11 +533,20 @@ public static class DarlingPgLoggingAudit
     /// unit with no suffix (<c>600000</c> with <c>unit = ms</c>), so this is a plain parse; anything else is
     /// null and the caller says <c>unknown</c> rather than guessing.
     /// </summary>
-    private static long? Threshold(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row) =>
-        row?.Setting is { } text
-        && long.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+    private static long? Threshold(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row)
+    {
+        /* A block body, not an expression with a property pattern: TsqlConventionGuardTests' member scan
+           reads a `{ }` pattern as the member's body and stops short, which strands everything after it. */
+        var text = row?.Setting;
+        if (text is null)
+        {
+            return null;
+        }
+
+        return long.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
             ? value
             : null;
+    }
 
     /// <summary>The spellings PostgreSQL accepts for a boolean GUC, as <c>pg_settings</c> renders them.</summary>
     private static bool? Bool(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row) => BoolText(row?.Setting);
