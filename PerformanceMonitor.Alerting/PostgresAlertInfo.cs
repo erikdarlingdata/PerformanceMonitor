@@ -88,15 +88,29 @@ public sealed record PostgresWraparoundAlertInfo(
 /// <param name="XminAge">How far behind the horizon this holder is holding, in transactions.</param>
 /// <param name="ObservationsHeld">How many collections in the window showed this source winning — the
 /// chronic-versus-transient discriminator.</param>
-/// <param name="ObservationsTotal">Collections in the window, so a caller can read the ratio.</param>
+/// <param name="ObservationsTotal">Collections in the window that recorded ANY holder — the identity
+/// fraction's denominator. The collector emits no rows when the horizon is unheld, so this counts
+/// holder-bearing collections only, which is what makes held/total mean "of the times something held it,
+/// how often was it this one" — and also why it cannot serve as "collections in the window" for the
+/// horizon arm (#3537).</param>
 /// <param name="Detail">Free-text state the collector captured (e.g. "state=idle in transaction").</param>
+/// <param name="ObservationsAboveThreshold">#3537: collections in the window whose WINNING xmin_age sat at
+/// or above the evaluator's warning threshold, holder identity ignored — the horizon arm's numerator. 0
+/// (the default) means no window data was supplied and keeps that arm quiet, the conservative
+/// fail-direction <see cref="PostgresWraparoundAlertInfo.WindowPeakXidAge"/> already established.</param>
+/// <param name="CapturesInWindow">#3537: how many times the collector actually captured in the window —
+/// the horizon arm's denominator, sourced from the collection log rather than from the holder table, so
+/// quiet (zero-row, healthy) captures count. 0 (the default) reads as "no capture count supplied" and
+/// floors the horizon arm out rather than firing.</param>
 public sealed record PostgresXminHorizonAlertInfo(
     string Source,
     string? Identifier,
     long XminAge,
     int ObservationsHeld,
     int ObservationsTotal,
-    string? Detail);
+    string? Detail,
+    int ObservationsAboveThreshold = 0,
+    int CapturesInWindow = 0);
 
 /// <summary>
 /// Accumulated pressure for one poison wait event over the alert's evaluation window (#2711).

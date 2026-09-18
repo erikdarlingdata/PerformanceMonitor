@@ -81,7 +81,37 @@ public static class PostgresAlertEvaluator
        holder seen in a majority of the window's observations is chronic, while one seen once is a query
        that ran long, and only the first is worth waking anyone for. */
     public const long XminAgeWarningThreshold = 50_000_000;
+
+    /// <summary>
+    /// The majority standard both persistence arms apply (#3537) — one fraction, two denominators. The
+    /// IDENTITY arm asks it of the collections that recorded any holder ("of the times something held it,
+    /// how often was it this one"); the HORIZON arm asks it of the window's real captures ("of the times we
+    /// looked, how often was the horizon pinned past the threshold"). Majority is the line in both readings
+    /// because it is where "keeps happening" stops being arguable: below it every fire needs a judgment
+    /// call about how much less than half still counts, and there is no mechanics-derived number under 0.5
+    /// to anchor one.
+    /// </summary>
     public const double XminPersistenceFraction = 0.5;
+
+    /// <summary>
+    /// #3537: the floor under BOTH persistence denominators. Without it the identity arm read the first
+    /// holder after quiet hours as 1 win in 1 observation — 100%, "chronic", off a single sample — because
+    /// its denominator counts only holder-bearing collections and quiet hours contribute none. 5 because it
+    /// is the smallest denominator whose majority test cannot be satisfied by fewer than three sightings
+    /// (at 1–4 observations, one or two sightings clear 50% — the exact shape of the false fire), and at
+    /// the collector's 1-minute cadence three sightings means the condition spanned minutes, not a moment.
+    /// Higher would buy little: a holder that has aged the horizon 50 million transactions has existed for
+    /// minutes on any workload fast enough for the extra samples to cost real delay.
+    /// </summary>
+    public const int XminMinimumObservations = 5;
+
+    /// <summary>
+    /// The stable subject a horizon-arm fire carries when no single holder owns the incident (#3537). A
+    /// constant, like the metric names above, because the host's per-subject cooldown and history dedup
+    /// key on it: subjecting each parade member in turn would present every rotation as a brand-new
+    /// incident and page once per member for one continuously-pinned horizon.
+    /// </summary>
+    public const string XminRotatingHoldersSubject = "rotating holders";
 
     /* Replication slots. No byte threshold for the terminal states — `lost` and `unreserved` are failures
        that have already happened, at any size. For a slot merely retaining WAL, 10 GB is the point where
@@ -395,30 +425,83 @@ public static class PostgresAlertEvaluator
             return null;
         }
 
-        /* The persistence gate. Without it this fires on any long-running report, which is how an alert
-           earns a mute rule instead of a response. */
-        var persistent = xmin.ObservationsTotal > 0
+        /* The persistence gate, two arms (#3537). Without any gate this fires on any long-running report,
+           which is how an alert earns a mute rule instead of a response.
+
+           The IDENTITY arm is the original: THIS holder won a majority of the collections that recorded
+           any holder — the chronic-holder shape, and the arm that can name the thing to kill. Its
+           denominator counts holder-bearing collections only (deliberately: see the read adapter), which
+           is why it also needs the observation floor — the first holder after quiet hours is 1 win in 1
+           observation, and 100% of one sample is not "chronic" however the fraction reads.
+
+           The HORIZON arm covers what the identity fraction structurally cannot see: a horizon pinned
+           past the age threshold in a majority of the window's REAL captures while the holder identity
+           rotates. Each parade member is individually transient, so no identity fraction ever accumulates
+           — but the alert's own claim ("vacuum is reclaiming nothing cluster-wide") is about the horizon,
+           not the holder, and it is continuously true. Same majority standard, honest denominator for
+           each claim: the identity claim is about the collections that had a holder, the horizon claim is
+           about every time the collector looked. A capture count of 0 — an adapter that supplied none, or
+           a log write that failed — floors the arm out rather than firing, the conservative default. */
+        var identityFractionHolds = xmin.ObservationsTotal > 0
             && (double)xmin.ObservationsHeld / xmin.ObservationsTotal >= XminPersistenceFraction;
 
-        if (!persistent)
+        var identityArm = identityFractionHolds && xmin.ObservationsTotal >= XminMinimumObservations;
+
+        var horizonArm = xmin.CapturesInWindow >= XminMinimumObservations
+            && (double)xmin.ObservationsAboveThreshold / xmin.CapturesInWindow >= XminPersistenceFraction;
+
+        if (!identityArm && !horizonArm)
         {
             return null;
         }
 
-        var subject = string.IsNullOrWhiteSpace(xmin.Identifier)
+        var holder = string.IsNullOrWhiteSpace(xmin.Identifier)
             ? xmin.Source
             : $"{xmin.Source}:{xmin.Identifier}";
+
+        if (identityArm)
+        {
+            return new Finding(
+                XminHorizonMetric,
+                AlertSeverityLevel.Warning,
+                holder,
+                $"{xmin.XminAge:N0} transactions held by {holder}",
+                $"{XminAgeWarningThreshold:N0} transactions, held in at least "
+                    + $"{XminPersistenceFraction:P0} of observations",
+                $"Vacuum is reclaiming nothing cluster-wide: {holder} is holding the xmin horizon "
+                    + $"{xmin.XminAge:N0} transactions back, in {xmin.ObservationsHeld} of "
+                    + $"{xmin.ObservationsTotal} observations. {RemedyFor(xmin.Source)}"
+                    + (string.IsNullOrWhiteSpace(xmin.Detail) ? string.Empty : $" ({xmin.Detail})"),
+                xmin.XminAge,
+                XminAgeWarningThreshold);
+        }
+
+        /* Horizon-arm fire. Two shapes reach here, told apart by the identity FRACTION alone (the floor
+           is what a freshly-started window cannot yet satisfy): when the fraction holds, the latest
+           holder has won the collections that recorded one — a chronic holder observed through a window
+           still too young for the identity arm, so it keeps the subject and the naming. When it does not,
+           the holders are rotating, and the subject must NOT be the latest member: the incident is the
+           horizon, and a per-member subject would sidestep the host's per-subject cooldown to page once
+           per parade member. The remedy still names the latest holder's cause — it is the one thing
+           currently actionable either way. */
+        var rotating = !identityFractionHolds;
+        var subject = rotating ? XminRotatingHoldersSubject : holder;
+        var holderClause = rotating
+            ? $"by a succession of different holders rather than one chronic one — the latest is {holder}"
+            : $"by {holder}, the winner in {xmin.ObservationsHeld} of the {xmin.ObservationsTotal} "
+                + "collections that recorded a holder";
 
         return new Finding(
             XminHorizonMetric,
             AlertSeverityLevel.Warning,
             subject,
             $"{xmin.XminAge:N0} transactions held by {subject}",
-            $"{XminAgeWarningThreshold:N0} transactions, held in at least "
-                + $"{XminPersistenceFraction:P0} of observations",
-            $"Vacuum is reclaiming nothing cluster-wide: {subject} is holding the xmin horizon "
-                + $"{xmin.XminAge:N0} transactions back, in {xmin.ObservationsHeld} of "
-                + $"{xmin.ObservationsTotal} observations. {RemedyFor(xmin.Source)}"
+            $"{XminAgeWarningThreshold:N0} transactions, behind in at least "
+                + $"{XminPersistenceFraction:P0} of the window's captures",
+            $"Vacuum is reclaiming nothing cluster-wide: the xmin horizon has been at least "
+                + $"{XminAgeWarningThreshold:N0} transactions behind in {xmin.ObservationsAboveThreshold} of "
+                + $"the window's {xmin.CapturesInWindow} collections, held {holderClause}; it currently "
+                + $"stands {xmin.XminAge:N0} back. {RemedyFor(xmin.Source)}"
                 + (string.IsNullOrWhiteSpace(xmin.Detail) ? string.Empty : $" ({xmin.Detail})"),
             xmin.XminAge,
             XminAgeWarningThreshold);

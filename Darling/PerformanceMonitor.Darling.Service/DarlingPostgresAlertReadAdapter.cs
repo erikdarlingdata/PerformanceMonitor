@@ -74,6 +74,25 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     /// times something held it, how often was it this one" — which is the question. Note this became reachable
     /// only once the collector stopped attributing its own backend: while Darling's own snapshot was always a
     /// session holder, every collection had a holder and the distinction was invisible.</para>
+    /// <para><b>#3537: two window figures the identity fraction cannot supply.</b>
+    /// <c>observations_above_threshold</c> counts the collections whose WINNING age sat at or above the
+    /// evaluator's warning threshold, holder identity ignored — the alert's own claim is about the horizon,
+    /// and a horizon continuously pinned by a parade of DISTINCT holders never accumulates any single
+    /// holder's fraction. The threshold arrives as a bind from
+    /// <see cref="PostgresAlertEvaluator.XminAgeWarningThreshold"/> so the condition counted here and the
+    /// one evaluated there cannot drift apart.</para>
+    /// <para><c>captures_in_window</c> is the horizon arm's denominator, and it comes from
+    /// <c>collection_log</c> — this collector's own SUCCESS rows — rather than from this table, whose
+    /// distinct collection times count only holder-bearing collections (see above) and so read the first
+    /// holder after quiet hours as 1 of 1, 100%, "chronic". The log gets a row per run INCLUDING zero-row
+    /// (healthy, unheld) runs, sits behind its (server_id, collection_time) index, and counts the exact
+    /// collector whose captures are being fractioned — cheaper and more honest than inferring the cadence
+    /// from a cadence-mate table like <c>pg_database_stats</c>, which measures a different collector's
+    /// fate. Runs that stored nothing (ERROR / ABANDONED / PERMISSIONS / YIELDED) are excluded: a cycle
+    /// that could not look is not evidence the horizon was clear. The log write is failure-isolated and
+    /// can silently skip a row, so the count may UNDERCOUNT — which only inflates the fraction of a
+    /// horizon already measured above threshold, and the evaluator's minimum-captures floor keeps a
+    /// near-empty log from firing at all.</para>
     /// </summary>
     internal const string XminSql = """
         WITH latest AS (
@@ -92,10 +111,22 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                     WHERE is_winner
                     AND   source = (SELECT source FROM latest)
                     AND   holder IS NOT DISTINCT FROM (SELECT holder FROM latest)
-                ) AS observations_held
+                ) AS observations_held,
+                COUNT(DISTINCT collection_time) FILTER (
+                    WHERE is_winner
+                    AND   xmin_age >= $3
+                ) AS observations_above_threshold
             FROM pg_xmin_horizon
             WHERE server_id = $1
             AND   collection_time >= $2
+        ),
+        captures AS (
+            SELECT COUNT(*) AS captures_in_window
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'pg_xmin_horizon'
+            AND   collection_time >= $2
+            AND   status = 'SUCCESS'
         )
         SELECT
             l.source,
@@ -103,9 +134,12 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             l.xmin_age,
             w.observations_held,
             w.observations_total,
-            l.detail
+            l.detail,
+            w.observations_above_threshold,
+            c.captures_in_window
         FROM latest AS l
         CROSS JOIN window_stats AS w
+        CROSS JOIN captures AS c
         """;
 
     /// <summary>
@@ -241,6 +275,11 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
+        /* The evaluator's own age threshold, not a local copy: the SQL counts "collections above
+           threshold" and the evaluator fractions that count against the SAME bar, so read and evaluation
+           must agree on it or the horizon arm silently means something else — the PoisonWaitSql window
+           discipline, applied to a level. */
+        command.Parameters.AddWithValue(PostgresAlertEvaluator.XminAgeWarningThreshold);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -253,7 +292,12 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
             reader.IsDBNull(3) ? 0 : (int)reader.GetInt64(3),
             reader.IsDBNull(4) ? 0 : (int)reader.GetInt64(4),
-            reader.IsDBNull(5) ? null : reader.GetString(5));
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            /* ordinals 6/7: the #3537 horizon-arm figures. 0 reads as "no window data" in both — the
+               evaluator's floor keeps that from firing, the same conservative default the wraparound
+               window peaks take. */
+            reader.IsDBNull(6) ? 0 : (int)reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : (int)reader.GetInt64(7));
     }
 
     public async Task<List<PostgresSlotAlertInfo>> GetReplicationSlotRiskAsync(
