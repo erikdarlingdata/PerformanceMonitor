@@ -263,11 +263,12 @@ internal static class DarlingTriageEndpoint
 
             /* #3514: the web-dashboard TLS certificate expiry alert is config/host-shaped like the stale-mute
                one — get_store_metrics answers nothing about it, and renewing the certificate is an out-of-band
-               step on the service host. The actionable facts (subject, thumbprint, expiry) are in the alert
-               detail; the history is the firing trail, so the operator can see when the warning began. */
+               step on the service host. The actionable facts (subject, thumbprint, expiry — or, for the #3517
+               not-yet-valid arm of the same metric, the date the window opens) are in the alert detail; the
+               history is the firing trail, so the operator can see when the warning began. */
             [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
             {
-                F("Recent alerts (the certificate's subject, thumbprint and expiry are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+                F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },
 
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
