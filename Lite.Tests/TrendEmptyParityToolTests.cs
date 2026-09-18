@@ -116,7 +116,10 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
     /// <summary>
     /// #3529: the payload used to carry a hardcoded total_granted_mb of 0.0 — an agent investigating
     /// RESOURCE_SEMAPHORE read "granted was 0 all window" and ruled out memory grants, the exact wrong
-    /// turn. The field is now an explicit null and the envelope names the real source.
+    /// turn. With the #3548 join this is now specifically the UNCOVERED window (no memory_grant_stats
+    /// rows seeded anywhere near these points): every point stays an explicit null and the envelope's
+    /// note names the real source — never a fabricated zero. The covered arms live in
+    /// <see cref="MemoryTrendGrantJoinToolTests"/>.
     /// </summary>
     [Fact]
     public async Task MemoryTrend_GrantedMemoryIsNullWithANoteNamingTheGrantsTool_NeverALiteralZero()
@@ -134,14 +137,18 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         }
     }
 
-    /// <summary>#3529's description half: the tool promised granted memory it never delivered.</summary>
+    /// <summary>#3529's description half, superseded by the #3548 join: the tool now DELIVERS granted
+    /// memory (joined per point from the grants series), so the description may promise it again — but it
+    /// must name the null gap rather than promising an always-filled field, and still point at
+    /// get_memory_grants as the series' own tool.</summary>
     [Fact]
-    public void MemoryTrend_Description_PointsAtTheGrantsTool_AndDoesNotPromiseGrantedMemory()
+    public void MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap()
     {
         var description = typeof(McpMemoryTools).GetMethod(nameof(McpMemoryTools.GetMemoryTrend))!
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.DoesNotContain("and granted memory", description, StringComparison.Ordinal);
+        Assert.Contains("granted memory joined per point", description, StringComparison.Ordinal);
+        Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
         Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }
 

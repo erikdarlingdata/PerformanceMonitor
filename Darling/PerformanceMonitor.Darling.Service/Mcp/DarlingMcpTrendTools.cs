@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, and plan cache. total_granted_mb in this payload is always null — granted memory is a separate series; use get_memory_grants for it. Useful for identifying memory growth patterns or pressure periods.")]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods.")]
     public static async Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -87,32 +87,94 @@ public sealed class DarlingMcpTrendTools
                         $"No memory stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
             }
 
-            var result = points.Select(p => new
+            var grants = await DarlingTrendReader.GetMemoryGrantTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var granted = AlignGrantSeries(
+                points.Select(p => p.CollectionTime).ToArray(),
+                grants.Select(g => (g.CollectionTime, g.TotalGrantedMb)).ToArray());
+
+            var result = points.Select((p, i) => new
             {
                 time = p.CollectionTime.ToString("o"),
                 total_server_memory_mb = p.TotalServerMemoryMb,
                 target_server_memory_mb = p.TargetServerMemoryMb,
                 buffer_pool_mb = p.BufferPoolMb,
                 plan_cache_mb = p.PlanCacheMb,
-                /* The memory_stats source carries no grant data — the grant overlay is a separate series
-                   (get_memory_grants). null, not the 0 placeholder this used to ship: a literal zero read
-                   as "granted was 0 all window" and steered callers away from memory grants at exactly the
-                   wrong moment (#3529). Field-for-field parity with Lite's tool, which nulls it the same way. */
-                total_granted_mb = (double?)null
+                /* Joined from the memory-grant series (#3548): the nearest memory_grant_stats snapshot
+                   within 30 seconds of this memory sample, SUM(granted_memory_mb) across pools — the same
+                   series the viewer's Memory Overview overlay charts. null when no snapshot aligns, never
+                   a fabricated 0: a literal zero read as "granted was 0 all window" and steered callers
+                   away from memory grants at exactly the wrong moment (#3529). A genuine 0.0 still appears
+                   when a snapshot exists with nothing granted. Field-for-field parity with Lite's tool,
+                   which joins it the same way. */
+                total_granted_mb = granted[i]
             });
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                granted_note = "total_granted_mb is not sourced by this tool — the memory_stats series carries no grant data. Use get_memory_grants for the granted-memory series.",
-                trend = result
-            }, McpHelpers.JsonOptions);
+            /* The note exists to explain null points; a fully covered window gets no note at all rather
+               than a null-valued key (JsonOptions writes nulls). */
+            return granted.Any(v => v is null)
+                ? JsonSerializer.Serialize(new
+                {
+                    server = resolved.ServerName,
+                    hours_back,
+                    granted_note = GrantGapNote,
+                    trend = result
+                }, McpHelpers.JsonOptions)
+                : JsonSerializer.Serialize(new
+                {
+                    server = resolved.ServerName,
+                    hours_back,
+                    trend = result
+                }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_memory_trend", ex);
         }
+    }
+
+    /// <summary>
+    /// Half the 1-minute cadence floor both collectors share (<c>CollectorScheduleDefaults</c>). The two
+    /// series each stamp their own capture clock per collector run, so same-cycle rows sit seconds
+    /// apart and can never be equality-joined — while a grants series on a slower cadence must NOT smear
+    /// onto every memory point. Within half the finest cadence, at most one snapshot can claim a point.
+    /// </summary>
+    private static readonly TimeSpan GrantJoinTolerance = TimeSpan.FromSeconds(30);
+
+    /// <summary>Why a point is null, stated once per payload — and only when a null point exists.</summary>
+    private const string GrantGapNote =
+        "total_granted_mb is null where no memory-grant snapshot lies within 30 seconds of the memory sample — the memory_grant_stats series is collected on its own schedule, so a gap means no grant measurement at that moment, not zero granted. Use get_memory_grants for the full grant picture.";
+
+    /// <summary>
+    /// Nearest-match join of the memory-grant series onto the memory-trend points (#3548): for each trend
+    /// point, the closest grants snapshot within <see cref="GrantJoinTolerance"/>, else null — no grant
+    /// measurement at that moment, which is not the same claim as a genuine 0.0 from a snapshot with
+    /// nothing granted. Both inputs are time-ascending (both reads ORDER BY collection_time), so one
+    /// forward pointer finds every nearest neighbor. Twin of Lite's
+    /// <c>McpMemoryTools.AlignGrantSeries</c> — the two must stay in step so both SKUs join the same way.
+    /// </summary>
+    private static double?[] AlignGrantSeries(
+        DateTime[] trendTimes,
+        (DateTime Time, double TotalGrantedMb)[] grants)
+    {
+        var aligned = new double?[trendTimes.Length];
+        if (grants.Length == 0) return aligned;
+
+        var g = 0;
+        for (var t = 0; t < trendTimes.Length; t++)
+        {
+            var target = trendTimes[t];
+            while (g + 1 < grants.Length && (grants[g + 1].Time - target).Duration() <= (grants[g].Time - target).Duration())
+            {
+                g++;
+            }
+
+            if ((grants[g].Time - target).Duration() <= GrantJoinTolerance)
+            {
+                aligned[t] = grants[g].TotalGrantedMb;
+            }
+        }
+
+        return aligned;
     }
 
     [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names.")]

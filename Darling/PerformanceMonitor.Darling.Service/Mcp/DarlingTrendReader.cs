@@ -42,11 +42,19 @@ internal static class DarlingTrendReader
 
     /// <summary>One memory-trend point: the four MB metrics per collection (Lite's <c>MemoryTrendPoint</c>
     /// minus its <c>TotalGrantedMb</c> overlay field, which the memory_stats source never fills — the tool
-    /// publishes it as an explicit null with a note naming get_memory_grants (#3529) — see
+    /// joins it per point from the grants series (<see cref="MemoryGrantTrendPoint"/>), null with a note
+    /// naming get_memory_grants where no snapshot aligns (#3529, #3548) — see
     /// <see cref="DarlingMcpTrendTools.GetMemoryTrend"/>).</summary>
     public sealed record MemoryTrendPoint(
         DateTime CollectionTime, double TotalServerMemoryMb, double TargetServerMemoryMb,
         double BufferPoolMb, double PlanCacheMb);
+
+    /// <summary>One memory-grant-trend point: total granted workspace memory summed across every resource
+    /// pool at one grants collection (#3548) — the series <see cref="DarlingMcpTrendTools.GetMemoryTrend"/>
+    /// joins onto the memory trend, and the same series the viewer's Memory Overview overlay plots. Its
+    /// collection_times are the grants collector's OWN stamps, seconds apart from the memory series' even
+    /// in the same cycle, which is why the join is nearest-match rather than equality.</summary>
+    public sealed record MemoryGrantTrendPoint(DateTime CollectionTime, double TotalGrantedMb);
 
     /// <summary>One perfmon-trend point for a single counter: the counter value, the per-interval delta,
     /// and the wall-clock seconds that delta covers, all summed across the counter's instances at that
@@ -172,6 +180,42 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The memory-grant trend — the viewer's <c>MemoryGrantTrendSql</c> (Lite's
+    /// <c>GetMemoryGrantTrendAsync</c>): total granted MB across all pools per grants collection over the
+    /// window, for the join get_memory_trend makes onto the memory series (#3548). $1 server_id, $2/$3
+    /// window (naive UTC).
+    /// </summary>
+    public const string MemoryGrantTrendSql = """
+        SELECT
+            collection_time,
+            CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
+        FROM v_memory_grant_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        GROUP BY collection_time
+        ORDER BY collection_time
+        """;
+
+    public static async Task<List<MemoryGrantTrendPoint>> GetMemoryGrantTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        var items = new List<MemoryGrantTrendPoint>();
+        await using var command = postgres.CreateCommand(MemoryGrantTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new MemoryGrantTrendPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : reader.GetDouble(1)));
         }
 
         return items;

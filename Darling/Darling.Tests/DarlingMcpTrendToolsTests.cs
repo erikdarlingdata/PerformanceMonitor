@@ -20,6 +20,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -101,15 +102,18 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.False(McpParams("get_query_trend").Single(x => x.Name == "database_name").Optional);
     }
 
-    /// <summary>#3529: the description promised granted memory while the payload shipped a literal 0.
-    /// It now points at get_memory_grants, the tool that actually serves the grants series.</summary>
+    /// <summary>#3529's description half, superseded by the #3548 join: the tool now DELIVERS granted
+    /// memory (joined per point from the grants series), so the description may promise it again — but it
+    /// must name the null gap rather than promising an always-filled field, and still point at
+    /// get_memory_grants as the series' own tool.</summary>
     [Fact]
-    public void MemoryTrend_Description_PointsAtTheGrantsTool_AndDoesNotPromiseGrantedMemory()
+    public void MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap()
     {
         var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_memory_trend");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.DoesNotContain("and granted memory", description, StringComparison.Ordinal);
+        Assert.Contains("granted memory joined per point", description, StringComparison.Ordinal);
+        Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
         Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }
 
@@ -121,6 +125,24 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("CAST(total_server_memory_mb AS double precision)", sql, StringComparison.Ordinal);
         Assert.Contains("buffer_pool_mb", sql, StringComparison.Ordinal);
         Assert.Contains("plan_cache_mb", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3548: the grants-series read the get_memory_trend join rides on — byte-identical to the viewer's
+    /// proven overlay read (the reader's doctrine), so the MCP payload and the Memory Overview overlay can
+    /// never disagree about what the grants series says.
+    /// </summary>
+    [Fact]
+    public void MemoryGrantTrendSql_IsTheViewersOverlayRead_ByteForByte()
+    {
+        Assert.Equal(ViewerDataService.MemoryGrantTrendSql, DarlingTrendReader.MemoryGrantTrendSql);
+
+        var sql = DarlingTrendReader.MemoryGrantTrendSql;
+        Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
