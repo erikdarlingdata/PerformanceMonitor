@@ -78,6 +78,21 @@ public class FactAdviceCorrectnessTests
         Assert.DoesNotContain("right now", FactAdvice.GetForFactKey(key)!.Headline);
     }
 
+    // #3531: the two reader/writer lock twins hand out the same RCSI ALTER, so both must name its
+    // counter-objectives — the brief exclusive lock the ALTER takes, the test-on-a-copy warning for
+    // NOLOCK-dependent code, and the tempdb version-store cost FactRiskDisclosure discloses at apply
+    // time. LCK_M_IS shipped the bare ALTER calling RCSI "strictly better" with none of them.
+    [Theory]
+    [InlineData("LCK_M_S")]
+    [InlineData("LCK_M_IS")]
+    public void RcsiLockTwins_NameTheCaveatsAlongsideTheAlter(string key)
+    {
+        var remediation = FactAdvice.GetForFactKey(key)!.Remediation;
+        Assert.Contains("brief exclusive lock", remediation);
+        Assert.Contains("test on a copy", remediation);
+        Assert.Contains("version store", remediation);
+    }
+
     // Review note (§2): SOS rewrite over-swung to "never CPU pressure". The amount + a deep runnable
     // queue IS demand-exceeds-capacity; the advice must point at the runnable-queue discriminator.
     [Fact]

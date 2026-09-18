@@ -205,6 +205,7 @@ public partial class ServerTab : UserControl
             {
                 "TotalCpu" or "AvgCpu" => p => p.CpuMs,
                 "TotalReads" or "AvgReads" => p => p.Reads,
+                "TotalPhysReads" => p => p.PhysicalReads,
                 _ => p => p.ElapsedMs,
             };
 
@@ -368,7 +369,9 @@ public partial class ServerTab : UserControl
             "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
             "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
             "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
-            "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+            /* #3547: this arm mapped physical to the LOGICAL series while the reader dropped the physical
+               column; #3530 populates TotalPhysicalReads, so the label and the series finally agree. */
+            "AvgPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             "TotalExecutions" => ("Sessions", "Executions"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
@@ -387,6 +390,7 @@ public partial class ServerTab : UserControl
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 "Sessions" => bucket.SessionCount,
                 _ => bucket.TotalCpu,
             };

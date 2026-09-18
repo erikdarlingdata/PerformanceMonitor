@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -109,6 +111,38 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
 
         await SeedQueryAsync(DateTime.UtcNow.AddMinutes(-10));
         AssertPayload(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4));
+    }
+
+    /// <summary>
+    /// #3529: the payload used to carry a hardcoded total_granted_mb of 0.0 — an agent investigating
+    /// RESOURCE_SEMAPHORE read "granted was 0 all window" and ruled out memory grants, the exact wrong
+    /// turn. The field is now an explicit null and the envelope names the real source.
+    /// </summary>
+    [Fact]
+    public async Task MemoryTrend_GrantedMemoryIsNullWithANoteNamingTheGrantsTool_NeverALiteralZero()
+    {
+        await SeedMemoryAsync(DateTime.UtcNow.AddMinutes(-10));
+
+        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4);
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        Assert.True(root.GetProperty("trend").GetArrayLength() > 0);
+        Assert.Contains("get_memory_grants", root.GetProperty("granted_note").GetString(), StringComparison.Ordinal);
+        foreach (var point in root.GetProperty("trend").EnumerateArray())
+        {
+            Assert.Equal(JsonValueKind.Null, point.GetProperty("total_granted_mb").ValueKind);
+        }
+    }
+
+    /// <summary>#3529's description half: the tool promised granted memory it never delivered.</summary>
+    [Fact]
+    public void MemoryTrend_Description_PointsAtTheGrantsTool_AndDoesNotPromiseGrantedMemory()
+    {
+        var description = typeof(McpMemoryTools).GetMethod(nameof(McpMemoryTools.GetMemoryTrend))!
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("and granted memory", description, StringComparison.Ordinal);
+        Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }
 
     /// <summary>Nothing has ever been stored for this server: NOT an empty window, and widening it would
