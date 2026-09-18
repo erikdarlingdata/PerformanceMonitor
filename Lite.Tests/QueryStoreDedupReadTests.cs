@@ -210,7 +210,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             executionCount: 10, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 11, queryHash: "0xIOMAP",
             intervalId: 9301, intervalStart: BucketStart, avgWrites: 3, avgPhysicalReads: 5);
 
-        var bucket = Assert.Single(await new LocalDataService(_duckDb).GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
+        var service = new LocalDataService(_duckDb);
+        var bucket = Assert.Single(await service.GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
 
         /* 10 executions x the averages: logical 110, writes 30, physical 50 — all pairwise distinct.
            TotalReads and TotalLogicalReads are deliberate aliases of the LOGICAL aggregate (ordinal 4),
@@ -219,6 +220,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(110.0, bucket.TotalLogicalReads, precision: 6);
         Assert.Equal(30.0, bucket.TotalWrites, precision: 6);
         Assert.Equal(50.0, bucket.TotalPhysicalReads, precision: 6);
+
+        /* #3547's data half: the slicer OVERLAY reads the same rows through the timeline, whose SELECT
+           carried no physical column at all — so a physical-sorted chart had nothing honest to draw.
+           Same distinct values, so a logical/physical swap on either side goes red here. (The overlay's
+           metric->field switch itself is WPF code-behind, untestable here like its sibling arms.) */
+        var point = Assert.Single(await service.GetQueryStoreItemTimelineAsync(ServerId, Db, queryId: 7, planId: 77, hoursBack: 24));
+        Assert.Equal(110.0, point.Reads, precision: 6);
+        Assert.Equal(50.0, point.PhysicalReads, precision: 6);
     }
 
     [Fact]
