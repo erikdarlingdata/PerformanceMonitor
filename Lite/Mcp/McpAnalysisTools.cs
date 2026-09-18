@@ -55,10 +55,33 @@ public sealed class McpAnalysisTools
                 ? null
                 : "as_of was supplied, so this analysis ran over a PAST window and is exploratory: the findings below are complete but were NOT written to the store. A finding row carries the time the analysis RAN, and the reads that consume those rows (get_analysis_findings, the viewer's Recommendations tab) treat the newest analysis_time as this server's CURRENT state — so persisting a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Re-run without as_of to analyze and persist the present.";
 
+            if (analysisService.WindowEmptyMessage != null)
+            {
+                /* #3524: zero facts in the window is a DEAD-COLLECTOR shape, not a clean bill of
+                   health — the data-span gate passes on lifetime history, so a server whose
+                   collection broke last week lands here, and the "empty" all-clear below would tell
+                   the caller in prose that all metrics are normal when nothing was measured at all.
+                   Same miss vocabulary as get_analysis_facts' zero-facts case; same hints block as
+                   the all-clear, because an anchored empty-window run still owes the caller the
+                   persistence disclosure. */
+                return McpHelpers.Status(
+                    "unavailable",
+                    analysisService.WindowEmptyMessage +
+                    " Check get_collection_health to see when collectors last succeeded and why they stopped.",
+                    new
+                    {
+                        analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
+                        persisted = anchor is null,
+                        persistence_note = persistenceNote
+                    });
+            }
+
             if (findings.Count == 0)
             {
                 /* A successful analysis that found nothing wrong: a true negative ("all clear"),
-                   surfaced with the shared miss vocabulary so callers branch on it uniformly. */
+                   surfaced with the shared miss vocabulary so callers branch on it uniformly. Facts
+                   WERE collected and scored this time — the window-collected-nothing case returned
+                   above as unavailable instead (#3524). */
                 return McpHelpers.Status(
                     "empty",
                     "No significant findings. All metrics are within normal ranges.",
