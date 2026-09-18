@@ -234,6 +234,95 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3541 A2: the hourly-tier twins the two plan-cache trends fall to past the raw horizon read the
+    /// ROLLUP and bucket by it — asserted on the shipped SQL so a later edit that quietly repoints either at
+    /// its raw table (which would reintroduce the four-days-labelled-seven defect while every other test
+    /// still passed) has to argue with this. The view name is bound to the <see cref="TimescaleSupport"/>
+    /// constant rather than restated, so a rollup rename cannot leave the read naming a relation that no
+    /// longer exists.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(DarlingTrendReader.QueryDurationTrendHourlySql), TimescaleSupport.QueryStatsHourlyView, "query_stats")]
+    [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendHourlySql), TimescaleSupport.ProcedureStatsHourlyView, "procedure_stats")]
+    public void DurationTrendHourlySql_ReadsTheRollup_BucketsByIt_ProjectsTheSharedShape(string sqlName, string view, string rawTable)
+    {
+        var sql = SqlByName(sqlName);
+
+        Assert.Contains("FROM " + view, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY bucket", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
+
+        /* Same three columns, same aliases, as the raw read — one mapper serves both tiers. */
+        Assert.Contains("bucket AS collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("AS executions_per_second", sql, StringComparison.Ordinal);
+
+        /* The rollup's own summed columns, which the CAGG definition must still carry under these names. */
+        Assert.Contains("SUM(elapsed_time_sum)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(execution_count_sum)", sql, StringComparison.Ordinal);
+        var createSql = view == TimescaleSupport.QueryStatsHourlyView
+            ? TimescaleSupport.CreateQueryStatsHourlySql
+            : TimescaleSupport.CreateProcedureStatsHourlySql;
+        Assert.Contains("AS elapsed_time_sum", createSql, StringComparison.Ordinal);
+        Assert.Contains("AS execution_count_sum", createSql, StringComparison.Ordinal);
+        Assert.Contains("AS bucket", createSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The hourly tier divides by the bucket WIDTH, never by a LAG over neighbouring points (the measurement
+    /// lane's A11a, closed where the routing rewrite made it free). Two things ride on this: every bucket
+    /// has a real denominator, so the raw idiom's fabricated first-point zero does not exist on this tier;
+    /// and the literal the SQL divides by is pinned to the rollup's declared bucket so the two cannot drift
+    /// — a rollup moved to 30-minute buckets with this still saying 3,600 would halve every rate.
+    /// </summary>
+    [Fact]
+    public void DurationTrendHourlySql_DividesByTheBucketWidth_NotALag()
+    {
+        Assert.Equal(TimescaleSupport.HourlyBucket.TotalSeconds,
+            double.Parse(DarlingTrendReader.HourlyBucketSecondsSql, System.Globalization.CultureInfo.InvariantCulture));
+
+        foreach (var sql in new[] { DarlingTrendReader.QueryDurationTrendHourlySql, DarlingTrendReader.ProcedureDurationTrendHourlySql })
+        {
+            Assert.DoesNotContain("LAG(", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("interval_seconds", sql, StringComparison.Ordinal);
+            Assert.Contains("/ " + DarlingTrendReader.HourlyBucketSecondsSql + " AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+            Assert.Contains("/ " + DarlingTrendReader.HourlyBucketSecondsSql + " AS executions_per_second", sql, StringComparison.Ordinal);
+        }
+
+        /* And the raw reads still LAG — the A11a residual is reported, not silently rewritten here. */
+        Assert.Contains("LAG(collection_time)", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time)", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The truncation boundary the four tiered reads share, pinned to the value Lite's twin
+    /// (<c>McpQueryTools.TruncationSlack</c>) carries: the two SKUs' payloads are one contract, and a window
+    /// one SKU calls truncated and the other does not is a divergence about the same data. Lite.Tests pins
+    /// its side to the same ninety minutes; neither project can reference the other's assembly, so the
+    /// value is pinned twice rather than compared once.
+    /// </summary>
+    [Fact]
+    public void TruncationSlack_IsNinetyMinutes_AndDescribeCoverageAppliesIt()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(90), DarlingTrendReader.TruncationSlack);
+
+        var start = new DateTime(2026, 3, 4, 6, 0, 0, DateTimeKind.Unspecified);
+
+        /* Empty: the requested start stands and nothing is called truncated — the empty branch's message
+           carries the coverage story instead. */
+        Assert.Equal((start, false), DarlingTrendReader.DescribeCoverage(null, start));
+
+        /* A head inside the slack is not truncated; one past it is, and effective_start is the head. */
+        Assert.Equal((start.AddMinutes(90), false), DarlingTrendReader.DescribeCoverage(start.AddMinutes(90), start));
+        Assert.Equal((start.AddMinutes(91), true), DarlingTrendReader.DescribeCoverage(start.AddMinutes(91), start));
+        Assert.Equal((start.AddHours(4), true), DarlingTrendReader.DescribeCoverage(start.AddHours(4), start));
+    }
+
+    /// <summary>
     /// #2484: each probe must read the SAME table its trend reads. A probe on a different source could
     /// report a server as sampled for rows the trend can never see — the wrong branch in exactly the case
     /// the probe exists to get right. They are windowless by design: a time bound would make the probe
@@ -273,7 +362,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.DistinctPerfmonCountersSql))]
     [InlineData(nameof(DarlingTrendReader.FileIoLatencyTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.QueryDurationTrendHourlySql))]
     [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendHourlySql))]
     [InlineData(nameof(DarlingTrendReader.QueryStoreDurationTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryStoreDurationTrendRollupSql))]
     [InlineData(nameof(DarlingTrendReader.HasAnyQueryStatSql))]
@@ -299,7 +390,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         nameof(DarlingTrendReader.DistinctPerfmonCountersSql) => DarlingTrendReader.DistinctPerfmonCountersSql,
         nameof(DarlingTrendReader.FileIoLatencyTrendSql) => DarlingTrendReader.FileIoLatencyTrendSql,
         nameof(DarlingTrendReader.QueryDurationTrendSql) => DarlingTrendReader.QueryDurationTrendSql,
+        nameof(DarlingTrendReader.QueryDurationTrendHourlySql) => DarlingTrendReader.QueryDurationTrendHourlySql,
         nameof(DarlingTrendReader.ProcedureDurationTrendSql) => DarlingTrendReader.ProcedureDurationTrendSql,
+        nameof(DarlingTrendReader.ProcedureDurationTrendHourlySql) => DarlingTrendReader.ProcedureDurationTrendHourlySql,
         nameof(DarlingTrendReader.QueryStoreDurationTrendSql) => DarlingTrendReader.QueryStoreDurationTrendSql,
         nameof(DarlingTrendReader.QueryStoreDurationTrendRollupSql) => DarlingTrendReader.QueryStoreDurationTrendRollupSql,
         nameof(DarlingTrendReader.HasAnyQueryStatSql) => DarlingTrendReader.HasAnyQueryStatSql,
@@ -472,5 +565,138 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
         if (!keepServer) sql += $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
+/// #3541 A2: the tier decision the duration-trend trio shares with get_query_trend, walked as a table
+/// without a store. The defect was three reads over ROLLED tables going to raw only — whose rows a
+/// TimescaleDB store drops at four days — while accepting a 168-hour window, so a 7-day request returned
+/// 4 days under a label saying 7. The complete fix already existed one read over (#2353); what this pins
+/// is that the trio now makes the SAME decision for the same inputs, and that the decision degrades to
+/// what the store has (#1664) and to what it has materialized (#1759) instead of naming a relation that
+/// does not exist or reading an empty rollup while raw still held the rows.
+/// </summary>
+public sealed class DurationTrendTierRoutingTests
+{
+    private static readonly DateTime Now = new(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+
+    private static readonly RollupCoverage NoCoverage = RollupCoverage.Unknown;
+
+    /// <summary>
+    /// The census: for every hours_back the tools accept, on a fully-built store with no coverage evidence,
+    /// both plan-cache siblings route exactly where get_query_trend's age rule routes. The trio's
+    /// route-builders pass their own availability flag and coverage pair, so a wrong flag (the procedure
+    /// trend reading the query grain's availability, say) fails here even though all three call one
+    /// resolver.
+    /// </summary>
+    [Fact]
+    public void TheTrio_RoutesWhereGetQueryTrendRoutes_ForEveryAcceptedWindow()
+    {
+        for (var hoursBack = 1; hoursBack <= McpHelpers.MaxHoursBack; hoursBack++)
+        {
+            var start = Now.AddHours(-hoursBack);
+            var expected = DarlingTrendReader.ShouldUseRawTier(start, Now) ? RetentionTier.Raw : RetentionTier.Hourly;
+
+            Assert.Equal(expected, DarlingTrendReader.ResolveTier(start, Now, hourlyAvailable: true, TierCoverage.Unknown));
+            Assert.Equal(expected, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).Tier);
+            Assert.Equal(expected, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).Tier);
+        }
+
+        /* The two ends of the table, named, so the census cannot pass vacuously on a rule that answers one
+           tier for everything. */
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-24), RollupAvailability.All, NoCoverage, Now).Tier);
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), RollupAvailability.All, NoCoverage, Now).Tier);
+    }
+
+    /// <summary>
+    /// Availability (#1664): a store with no rollups routes every window to raw, because a relation named in
+    /// a statement is resolved at parse time and because nothing drops raw on such a store anyway. The
+    /// per-grain flag is the one consulted — a store whose PROCEDURE rollup failed its ensure sweep keeps
+    /// the query trend on the hourly tier and drops only the procedure trend to raw.
+    ///
+    /// <para>And <c>RawRetentionApplies</c> follows the SAME grain, not the store: the #1680 arming gate arms
+    /// each raw table's purge only once that table's own rollup covers it, so on that partially-built store
+    /// <c>procedure_stats</c> keeps every row while <c>query_stats</c> is being dropped. A store-wide "any
+    /// rollup exists" answer would have told the procedure trend's caller that rows were dropped and widening
+    /// cannot help — the false-and-harmful narrative this route removes, reintroduced (review finding on the
+    /// first cut of this change).</para>
+    /// </summary>
+    [Fact]
+    public void AStoreWithoutTheRollup_RoutesToRaw_AndKeepsRawComplete_PerGrain()
+    {
+        var start = Now.AddHours(-168);
+
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).Tier);
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).Tier);
+        Assert.False(DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).RawRetentionApplies);
+
+        var noProcedureRollup = RollupAvailability.All with { ProcedureGrainHourly = false };
+        var queryRoute = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now);
+        var procedureRoute = DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now);
+
+        Assert.Equal(RetentionTier.Hourly, queryRoute.Tier);
+        Assert.True(queryRoute.RawRetentionApplies);
+
+        Assert.Equal(RetentionTier.Raw, procedureRoute.Tier);
+        Assert.False(procedureRoute.RawRetentionApplies);
+
+        /* Fully built: both grains' purges can be armed, so both routes carry the flag. */
+        Assert.True(DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).RawRetentionApplies);
+    }
+
+    /// <summary>
+    /// Coverage (#1759), the comparative rule: hourly is abandoned for raw ONLY when raw is measured to reach
+    /// further back than the rollup's floor. A floor that covers the start keeps hourly; a floor above the
+    /// start with raw no deeper keeps hourly too (on a healthy store raw holds four days against the
+    /// rollup's ninety, and dropping would return LESS — the head is the payload's to disclose, not
+    /// routing's to hide); nulls are inert.
+    /// </summary>
+    [Fact]
+    public void Coverage_MovesToRaw_OnlyWhenRawIsMeasuredDeeperThanTheRollup()
+    {
+        var start = Now.AddHours(-168);
+
+        /* Floor covers the start: hourly. */
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveTier(start, Now, true, new TierCoverage(start.AddDays(-30), null, Now.AddDays(-4))));
+
+        /* Floor above the start, raw measured DEEPER than the floor: the #1759 held-purge shape — raw. */
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveTier(start, Now, true, new TierCoverage(Now.AddDays(-2), null, Now.AddDays(-60))));
+
+        /* Floor above the start, raw NOT deeper: hourly, with the head left for the payload to disclose. */
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveTier(start, Now, true, new TierCoverage(Now.AddDays(-5), null, Now.AddDays(-4))));
+
+        /* Rollup has materialized nothing (null floor) and raw is measured: raw beats a tier holding nothing. */
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveTier(start, Now, true, new TierCoverage(null, null, Now.AddDays(-4))));
+
+        /* Nothing measured at all: inert, the age + availability answer stands. */
+        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveTier(start, Now, true, TierCoverage.Unknown));
+
+        /* Coverage never promotes a raw-age window off raw. */
+        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveTier(Now.AddHours(-24), Now, true, new TierCoverage(Now.AddDays(-30), null, null)));
+    }
+
+    /// <summary>The route carries the pair it reads and the word the payload publishes, per grain.</summary>
+    [Fact]
+    public void TheRoute_NamesItsOwnPair_AndTheSourceWord()
+    {
+        var hourly = DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-168), RollupAvailability.All, NoCoverage, Now);
+        Assert.Equal("hourly", hourly.Source);
+        Assert.Equal(TimescaleSupport.QueryStatsHourlyView, hourly.Relation);
+        Assert.Equal("query_stats", hourly.RawTable);
+
+        var raw = DarlingTrendReader.ResolveProcedureDurationTrendRoute(Now.AddHours(-1), RollupAvailability.All, NoCoverage, Now);
+        Assert.Equal("raw", raw.Source);
+        Assert.Equal("procedure_stats", raw.Relation);
+        Assert.Equal(TimescaleSupport.ProcedureStatsHourlyView, raw.HourlyView);
+
+        /* RawReaches: measured against the window start, null when unmeasured. */
+        var measured = new DarlingTrendReader.DurationTrendRoute(
+            RetentionTier.Raw, "query_stats", TimescaleSupport.QueryStatsHourlyView, true,
+            new TierCoverage(null, null, Now.AddDays(-3)), true, Now);
+        Assert.True(measured.RawReaches(Now.AddDays(-2)));
+        Assert.Equal(Now, hourly.ResolvedAtUtc);
+        Assert.False(measured.RawReaches(Now.AddDays(-4)));
+        Assert.Null(raw.RawReaches(Now.AddDays(-1)));
     }
 }

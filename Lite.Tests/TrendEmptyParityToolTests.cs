@@ -104,13 +104,37 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
     {
         var service = new LocalDataService(_duckDb);
 
-        AssertNeverCollected(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4));
+        var never = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4);
+        AssertNeverCollected(never);
 
         await SeedQueryAsync(DateTime.UtcNow.AddHours(-48));
-        AssertQuietWindow(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 1));
+        var quiet = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 1);
+        AssertQuietWindow(quiet);
 
         await SeedQueryAsync(DateTime.UtcNow.AddMinutes(-10));
-        AssertPayload(await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4));
+        var payload = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4);
+        AssertPayload(payload);
+
+        /* #3541 A2: get_query_duration_trend's three answers all carry the same disclosure block as its
+           Darling twin — raw, per-collection, the requested start standing (not truncated) on the two empty
+           branches and the first point on the data one. */
+        foreach (var envelope in new[] { never, quiet, payload })
+        {
+            var root = JsonDocument.Parse(envelope).RootElement;
+            Assert.Equal("raw", root.GetProperty("source").GetString());
+            Assert.Equal("per-collection", root.GetProperty("bucket").GetString());
+            Assert.True(root.TryGetProperty("effective_start", out _));
+            Assert.True(root.TryGetProperty("truncated", out _));
+        }
+
+        Assert.False(JsonDocument.Parse(never).RootElement.GetProperty("truncated").GetBoolean());
+        Assert.False(JsonDocument.Parse(quiet).RootElement.GetProperty("truncated").GetBoolean());
+
+        var data = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal(data.GetProperty("trend")[0].GetProperty("time").GetString(), data.GetProperty("effective_start").GetString());
+        Assert.Equal(
+            data.GetProperty("trend")[0].GetProperty("value").GetDouble(),
+            data.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").GetDouble());
     }
 
     /// <summary>
