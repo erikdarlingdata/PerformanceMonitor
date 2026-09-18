@@ -420,6 +420,9 @@ public class StoreCopyPhaseTests
                 "DarlingCollectorRunner.cs",
                 "RdsCpuIngestor.cs",
                 "RdsDeadlockIngestor.cs",
+                /* #3601: the log-event pipeline's managed transport — the deadlock ingestor's write over a
+                   different definition, stamping the phase the same way. */
+                "RdsLogEventIngestor.cs",
                 "RdsPlanIngestor.cs",
             },
             copySites.Keys.ToArray());

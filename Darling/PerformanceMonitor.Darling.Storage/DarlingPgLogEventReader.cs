@@ -143,6 +143,9 @@ public static class DarlingPgLogEventReader
         var windowTotal = 0;
 
         await using var command = dataSource.CreateCommand(EventsSql);
+        /* The MCP-read regime's deadline (#2874), chosen rather than inherited — every reader in this project
+           sets one, and StorageCommandTimeoutTests sweeps for the one that does not. */
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));

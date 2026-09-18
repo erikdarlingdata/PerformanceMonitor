@@ -319,6 +319,20 @@ public sealed class PgLogEventsPipelineTests
         /* The unique-violation DETAIL's value tuple is the one unquoted value shape in PostgreSQL's prose. */
         var duplicate = events.Single(e => e.Message.StartsWith("duplicate key", StringComparison.Ordinal));
         Assert.Equal("Key (email)=(?) already exists.", duplicate.Detail);
+
+        /* Review caught the leak this pins: PostgreSQL does not escape the value, so a value carrying `)`
+           defeated a first-paren pattern and ` Inc.)` reached the store. The tuple now runs to its TRUE
+           close; expression keys and the other violation sentences are read the same way. */
+        Assert.Equal("Key (name)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (name)=(Acme (USA) Inc.) already exists."));
+        Assert.Equal("Key (name, region)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (name, region)=(Acme (USA) Inc., EMEA (west)) already exists."));
+        Assert.Equal("Key (lower(email))=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (lower(email))=(x) already exists."));
+        Assert.Equal("Key (order_id)=(?) is still referenced from table \"order_lines\".", PgLogTextRedactor.RedactMessage("Key (order_id)=(42 (legacy)) is still referenced from table \"order_lines\"."));
+        Assert.Equal("Key (customer_id)=(?) is not present in table \"customers\".", PgLogTextRedactor.RedactMessage("Key (customer_id)=(1007) is not present in table \"customers\"."));
+        Assert.Equal("Key (during)=(?) conflicts with existing key (during)=(?).", PgLogTextRedactor.RedactMessage("Key (during)=([\"2026-01-01\",\"2026-01-02\")) conflicts with existing key (during)=([\"2026-01-01\",\"2026-01-03\"))."));
+        Assert.DoesNotContain("Acme", PgLogTextRedactor.RedactMessage("Key (name)=(Acme (USA) Inc.) already exists.")!, StringComparison.Ordinal);
+        /* A value carrying `)=(` — the shape that would fool a pattern anchored on the tuple separator. */
+        Assert.Equal("Key (code)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (code)=(a)=(b) already exists."));
+        Assert.Equal("Key (code)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (code)=(x) conflicts with) already exists."));
         /* Identifiers stay: the constraint name is double-quoted and is not a value. */
         Assert.Equal("duplicate key value violates unique constraint \"customers_email_key\"", duplicate.Message);
 
@@ -665,7 +679,7 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("raw_line_hash text", sql, StringComparison.Ordinal);
         Assert.Contains("statement_fingerprint text", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("statement text", sql, StringComparison.Ordinal);
-        Assert.Equal(1, Regex.Matches(sql, "CREATE INDEX").Count);
+        Assert.Single(Regex.Matches(sql, "CREATE INDEX"));
         Assert.Contains("ON collect.pg_log_events(server_id, collection_time);", sql, StringComparison.Ordinal);
 
         /* The V104 argument for the missing family index is in the rung doc, so the next author knows it is

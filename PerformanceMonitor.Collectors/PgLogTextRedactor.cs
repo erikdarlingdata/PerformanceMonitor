@@ -53,11 +53,38 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgLogTextRedactor
 {
-    /* `Key (col, col)=(val, val)` — the unique/exclusion-violation DETAIL. The left tuple is column names
-       and stays; the right tuple is the row's values, unquoted whatever their type, and goes whole. */
+    /* `Key (col, col)=(val, val)` — the unique/exclusion/foreign-key-violation DETAIL. The left tuple is
+       column names and stays; the right tuple is the row's values, unquoted whatever their type, and goes
+       whole.
+
+       PostgreSQL does not escape the values, so a value can contain the very character that closes the
+       tuple: `Key (name)=(Acme (USA) Inc.) already exists.` A `[^)]*` value pattern stops at the FIRST `)`
+       and leaks ` Inc.)` into the store — caught in review, and exactly the leak the scope note forbids.
+       So the value runs GREEDILY to the LAST `)` in the text, which is the tuple's true close because every
+       sentence PostgreSQL writes after the tuple (`already exists.`, `is duplicated.`, `is still referenced
+       from table "t".`, `is not present in table "t".`, `conflicts with existing key ...`) carries no
+       parenthesis of its own; the lookahead asserts that no `)` follows. Wrong in the safe direction if a
+       future sentence ever did carry one: it would redact the sentence too, never leak the value.
+
+       The KEY tuple is matched lazily so an expression key — `Key (lower(email))=(...)` — is read whole: the
+       lazy run extends past the inner `)` until `=(` follows.
+
+       The exclusion-violation DETAIL carries TWO tuples — `Key (during)=(...) conflicts with existing key
+       (during)=(...).` — and the greedy rule alone would fold the second key's name and the sentence
+       between them into the first value: a leak of nothing, but a loss of the one word that says which
+       constraint fired. So that shape is matched FIRST, both values redacted, both key names and the
+       sentence kept; the greedy rule then takes every single-tuple shape. The exclusion pattern's own value
+       runs are greedy too, so a value that happened to contain the sentence is consumed rather than split.
+       Both patterns refuse a value that is already the redaction mark `(?)`, which is what stops the general
+       rule from re-reading the exclusion rule's output — `Key (a)=(?) conflicts with existing key (a)=(?).` —
+       as one tuple whose value runs to the final `)`, and folding the kept sentence back into a value. */
+    private static readonly Regex s_exclusionTupleValues = new(
+        @"(?<key>\bKey \(.*?\))=\((?!\?\)).*\) conflicts with existing key (?<key2>\(.*?\))=\((?!\?\)).*\)(?=[^)]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
     private static readonly Regex s_keyTupleValue = new(
-        @"(?<=\bKey \([^)]*\))=\([^)]*\)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"(?<key>\bKey \(.*?\))=\((?!\?\)).*\)(?=[^)]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     /// <summary>Prose: quoted literals and key-tuple values out, bare numbers kept. Null in, null out.</summary>
     public static string? RedactMessage(string? text)
@@ -68,7 +95,8 @@ public static class PgLogTextRedactor
         }
 
         var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(text, "'?'");
-        return s_keyTupleValue.Replace(scrubbed, "=(?)");
+        scrubbed = s_exclusionTupleValues.Replace(scrubbed, "${key}=(?) conflicts with existing key ${key2}=(?)");
+        return s_keyTupleValue.Replace(scrubbed, "${key}=(?)");
     }
 
     /// <summary>SQL: quoted literals AND bare numbers out, identifier-glued digits kept. Null in, null out.</summary>
