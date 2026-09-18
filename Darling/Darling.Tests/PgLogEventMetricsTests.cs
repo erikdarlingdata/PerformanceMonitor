@@ -677,7 +677,7 @@ public sealed class PgLogEventMetricsLivePostgresTests
             JsonAssert.Contains("\"max_duration_ms\": 27350", health);
             JsonAssert.Contains("\"total_wal_bytes\": 246915358", health);
             JsonAssert.Contains("\"recent_runs\": null", health);
-            JsonAssert.Contains("recent_runs on 1 of 2 tables", health);
+            Assert.Contains("recent_runs on 1 of 2 tables", health, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
