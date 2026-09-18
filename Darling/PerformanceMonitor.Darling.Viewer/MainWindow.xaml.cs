@@ -122,6 +122,20 @@ public partial class MainWindow : Window
     private bool _alertPollInFlight;
 
     /// <summary>
+    /// The mute rules as THIS viewer knows them (#3570): the enabled, unexpired rules from its latest read of
+    /// <c>config_mute_rules</c> (<see cref="UpdateServerSilencedAsync"/>, once per alert poll — the same read
+    /// that drives the sidebar's muted-bell), plus any rule this viewer has itself just written and not yet
+    /// re-read (a tray Snooze, a server Silence). Fed to <see cref="AlertToastCoordinator.SelectToasts"/> so
+    /// the tray honors a rule the moment the viewer holds it, instead of waiting for the service to reload its
+    /// own cache and stamp the next row <c>muted</c>.
+    ///
+    /// <para>Keep-last-known on a failed read, deliberately: a store blip must not un-mute the tray for a tick
+    /// any more than <see cref="MuteRuleService.LoadAsync"/> lets one un-mute the service (#3354). Only the UI
+    /// thread touches it (the poll and the click handlers both run there), so it is a plain list.</para>
+    /// </summary>
+    private List<MuteRule> _viewerMuteRules = new();
+
+    /// <summary>
     /// Restores the window from the tray if a sleep-/lock-driven minimize hid it (Lite #1050). Reachable now
     /// that minimize-to-tray can hide the viewer; paired with the App-startup SoftwareOnly render mode.
     /// </summary>
@@ -699,14 +713,18 @@ public partial class MainWindow : Window
             /* Per-server badges: always, independent of the toast master switch. */
             UpdateServerAttention(rows);
 
-            /* The sidebar's muted-bell (#2031): same cadence, its own small read (mute rules, not history). */
+            /* The sidebar's muted-bell (#2031): same cadence, its own small read (mute rules, not history). The
+               same read refreshes _viewerMuteRules for the toast filter below (#3570), so it MUST run before
+               SelectToasts: a rule written from another seat, over MCP, or by this viewer's own dialogs reaches
+               the tray on the poll that reads it. */
             await UpdateServerSilencedAsync();
 
-            /* Tray toasts: only when notifications are enabled and the tray exists. */
+            /* Tray toasts: only when notifications are enabled and the tray exists. The viewer's own rule set
+               rides along so a snoozed/silenced condition stops toasting NOW, not after the service's reload. */
             if (_alertsEnabled && _trayService is not null)
             {
                 var cooldown = TimeSpan.FromMinutes(Math.Max(0, _alertCooldownMinutes));
-                foreach (var row in _toastCoordinator.SelectToasts(rows, DateTime.UtcNow, cooldown))
+                foreach (var row in _toastCoordinator.SelectToasts(rows, DateTime.UtcNow, cooldown, _viewerMuteRules))
                 {
                     ShowAlertToast(row);
                 }
@@ -776,8 +794,24 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Persists a snooze from a tray toast: a temporary mute rule scoped to the alert's server + metric
-    /// (Lite's SnoozeBalloon semantics), written straight to <c>config_mute_rules</c>. The running Darling
-    /// service re-reads it on its next config load, so the condition stops re-alerting until it expires.
+    /// (Lite's SnoozeBalloon semantics, <see cref="ViewerDataService.BuildTraySnoozeRule"/>), written straight
+    /// to <c>config_mute_rules</c> with the reload beacon bumped, then — persist-then-cache, the
+    /// <see cref="MuteRuleService.AddRuleAsync"/> ordering — added to <see cref="_viewerMuteRules"/> so the
+    /// very next poll's toast filter honors it (#3570).
+    ///
+    /// <para>Two channels, two clocks, and the status line says both. The TRAY stops now: the rule is in this
+    /// viewer's hand and <see cref="AlertToastCoordinator"/> judges every polled row against it. The SERVICE's
+    /// channels (email/webhook) stop once it notices the beacon on its next sweep tick — within
+    /// <see cref="ViewerDataService.ServiceReloadTickSeconds"/> — and from then on it stamps the condition's
+    /// rows <c>muted</c>. Before this change the line said only "Snoozed …", and the toast's suppression
+    /// depended entirely on that second clock plus a reload the viewer could not see succeed or fail; when it
+    /// did not, the operator had been told "snoozed" and was toasted again five minutes later (the report).</para>
+    ///
+    /// <para>A failed write is REPORTED, not just logged: the balloon has already closed by the time the
+    /// callback returns, so the status line is the only place the operator can learn the snooze did not
+    /// happen. A read-only seat's <see cref="ViewerReadOnlyException"/> carries its own friendly text. The
+    /// local set is touched only on success — a snooze that did not persist must not suppress toasts on this
+    /// seat while every other surface says no such rule exists.</para>
     /// </summary>
     private async Task SnoozeAlertAsync(string serverName, string metricName, TimeSpan duration)
     {
@@ -786,20 +820,25 @@ public partial class MainWindow : Window
             return;
         }
 
-        var rule = new MuteRule
+        var rule = ViewerDataService.BuildTraySnoozeRule(serverName, metricName, duration, DateTime.UtcNow);
+        var label = ViewerDataService.FormatSnoozeDuration(duration);
+
+        try
         {
-            ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
-            MetricName = metricName,
-            ExpiresAtUtc = DateTime.UtcNow + duration,
-            Reason = $"Snoozed from tray ({FormatSnoozeDuration(duration)})",
-        };
+            await _dataService.InsertMuteRuleAsync(rule);
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("AlertToasts", $"Snooze of {metricName} on {serverName} was not saved: {ex.Message}");
+            StatusText.Text = $"Snooze not saved — {metricName} on {serverName} will keep alerting: {ex.Message}";
+            return;
+        }
 
-        await _dataService.InsertMuteRuleAsync(rule);
-        StatusText.Text = $"Snoozed {metricName} on {serverName} for {FormatSnoozeDuration(duration)} — {DateTime.Now:HH:mm:ss}";
+        _viewerMuteRules.Add(rule);
+        StatusText.Text =
+            $"Snoozed {metricName} on {serverName} for {label} — tray toasts stop now; the service applies it within "
+            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {DateTime.Now:HH:mm:ss}";
     }
-
-    private static string FormatSnoozeDuration(TimeSpan d) =>
-        d.TotalHours >= 1 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalMinutes}m";
 
     /// <summary>
     /// Single-clicking a sidebar server drives the server-scoped aggregate tabs to it: it syncs the
