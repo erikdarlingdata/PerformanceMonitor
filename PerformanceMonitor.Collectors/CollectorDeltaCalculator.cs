@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -40,6 +41,67 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     /// from a genuinely idle interval, so the guard did not merely lose data, it invented quiet.</para>
     /// </summary>
     public const int DefaultMaxGapSeconds = 3600;
+
+    /// <summary>
+    /// The slowest cadence (minutes) a schedule may give a delta-family collector — half of
+    /// <see cref="DefaultMaxGapSeconds"/> (#3532).
+    ///
+    /// <para>The gap between consecutive collections is never less than the cadence, and a gap past the
+    /// policy makes <see cref="CalculateDelta"/> discard the baseline and return (0, 0) — so a cadence AT
+    /// the policy (60 minutes) fabricates permanent quiet: every cycle's gap is the cadence plus scheduling
+    /// latency, always past 3600s, so every cycle re-baselines, every delta is zero, the charts flatline,
+    /// and the product reads green precisely because it stopped measuring. A cadence between half the
+    /// policy and the policy is wrong less deterministically: one sweep overrun longer than the leftover
+    /// headroom zeros that interval, and the fleet measurement above saw ~15 minutes of overrun at p99.9.
+    /// Half the policy is the cadence at which even an entirely missed cycle (a gap of two cadences)
+    /// still yields a real delta.</para>
+    /// </summary>
+    public const int MaxDeltaFrequencyMinutes = DefaultMaxGapSeconds / 60 / 2;
+
+    /// <summary>
+    /// The collectors whose stored values are deltas of cumulative counters — every schedule surface caps
+    /// their cadence at <see cref="MaxDeltaFrequencyMinutes"/> (#3532). Membership means "calls
+    /// <see cref="ICollectorDeltaCalculator"/> under <see cref="DefaultMaxGapSeconds"/>"; the
+    /// DeltaFamilyScheduleBoundTests census asserts this set equals the calculator's caller set, so a new
+    /// delta call site that is not listed here (or a listed collector that stopped calling) fails tests.
+    /// Snapshot collectors are deliberately absent — a long cadence loses them nothing.
+    /// </summary>
+    public static readonly IReadOnlySet<string> DeltaFamilyCollectors = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "wait_stats",
+        "latch_stats",
+        "spinlock_stats",
+        "query_stats",
+        "procedure_stats",
+        "file_io_stats",
+        "memory_grant_stats",
+        "perfmon_stats",
+        "pg_wait_stats",
+        "pg_statement_stats",
+    };
+
+    /// <summary>True when the named collector stores deltas of cumulative counters and so must stay
+    /// inside <see cref="MaxDeltaFrequencyMinutes"/>.</summary>
+    public static bool IsDeltaFamily(string collectorName) =>
+        collectorName is not null && DeltaFamilyCollectors.Contains(collectorName);
+
+    /// <summary>
+    /// The refusal for a delta-family collector scheduled past <see cref="MaxDeltaFrequencyMinutes"/>, or
+    /// null when the cadence is fine (any cadence on a non-delta collector is). Shared by both SKUs'
+    /// schedule editors and Lite's ScheduleManager so the bound and its explanation live exactly once.
+    /// </summary>
+    public static string? DeltaFrequencyError(string collectorName, int frequencyMinutes)
+    {
+        if (frequencyMinutes <= MaxDeltaFrequencyMinutes || !IsDeltaFamily(collectorName))
+        {
+            return null;
+        }
+
+        return $"'{collectorName}': frequency (minutes) can't exceed {MaxDeltaFrequencyMinutes} for this collector. " +
+            $"It reads cumulative counters and stores the change between consecutive runs; past the " +
+            $"{DefaultMaxGapSeconds / 60}-minute delta gap policy every reading is discarded as too stale to subtract from, " +
+            "so the collector would record zero activity forever. The cap is half the policy so a slow or missed cycle still lands inside it.";
+    }
 
     /// <summary>
     /// How far back a restart re-seed reads when restoring baselines from a host's own store.

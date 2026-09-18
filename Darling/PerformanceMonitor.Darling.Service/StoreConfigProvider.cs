@@ -1733,10 +1733,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
-           negative frequency or a retention < 1 (0 would invert the purge cutoff and wipe the table)
-           is treated as "no override" and falls through to the next level. Defense in depth with the
-           V17 CHECK constraints and the DarlingRetention sink clamp. */
-        var frequency = ValidFrequency(perServer?.FrequencyMinutes) ?? ValidFrequency(fleet?.FrequencyMinutes) ?? def.FrequencyMinutes;
+           negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
+           delta-family cadence past the gap-policy cap (#3532 — every cycle would exceed
+           CollectorDeltaCalculator.DefaultMaxGapSeconds, re-baseline, and store a zero delta forever) is
+           treated as "no override" and falls through to the next level. Defense in depth with the
+           V17 CHECK constraints, the viewer editor's ValidateSchedule, and the DarlingRetention sink clamp. */
+        var frequency = ValidFrequency(collectorName, perServer?.FrequencyMinutes) ?? ValidFrequency(collectorName, fleet?.FrequencyMinutes) ?? def.FrequencyMinutes;
         var retention = ValidRetention(perServer?.RetentionDays) ?? ValidRetention(fleet?.RetentionDays) ?? def.RetentionDays;
         /* No override row falls back to the collector's shared default enabled state — true for nearly
            every collector, but false for an opt-in one like long_query_completions (#1496). Falling back
@@ -1831,9 +1833,16 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
     private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
 
-    /// <summary>A frequency override is honored only when &gt;= 0 (0 = on-load-only); negative degrades to
-    /// "no override" so a bad value can't make a collector run every sweep.</summary>
-    private static int? ValidFrequency(int? minutes) => minutes is int v && v >= 0 ? v : null;
+    /// <summary>A frequency override is honored only when &gt;= 0 (0 = on-load-only) and, for a
+    /// delta-family collector, no slower than <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/>
+    /// (#3532 — a cadence past the delta gap policy fabricates permanent zeros); a bad value degrades to
+    /// "no override" so it can't make a collector run every sweep or stop measuring.</summary>
+    private static int? ValidFrequency(string collectorName, int? minutes) =>
+        minutes is int v
+            && v >= 0
+            && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
+        ? v
+        : null;
 
     /* ---------------- helpers ---------------- */
 
