@@ -2554,6 +2554,122 @@ public sealed class DarlingSelfAlertTests
         await e2.EvaluateCompressionJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
     }
 
+    /* ---------------- #3591: a crash-backoff row the scheduler recovers by itself ---------------- */
+
+    /// <summary>The 2.26.4+ shape of the -infinity row: the reader marks it SchedulerRetries with the version's sentence.</summary>
+    private static IReadOnlyList<StuckCompressionJob> CrashBackoff(params long[] jobIds) =>
+        jobIds.Select(id => new StuckCompressionJob(
+            id, "wait_stats", TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, SchedulerRetries: true)).ToList();
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_FirstSight_NoRearm_NoPage_LoggedAtInformation()
+    {
+        /* Measured on a 2.28.1 rig: alter_job(next_start => now()) against a job in crash backoff RESETS the
+           backoff (the retry moved from crash+5:00 to re-arm+5:04, for the re-armed job and its un-re-armed
+           sibling) and overwrites the -infinity, so a re-arm here would be a later retry and two untrue
+           messages. First sight is remembered and written to the log; the scheduler gets one check cadence. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+        var info = Assert.Single(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information);
+        Assert.Contains("1001", info.Message, StringComparison.Ordinal);
+        Assert.Contains("crash backoff", info.Message, StringComparison.Ordinal);
+        Assert.Contains("not re-armed, not alerted", info.Message, StringComparison.Ordinal);
+        Assert.Contains("#3591", info.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_StillThereAnHourOn_EscalatesOnce_NeverRearms()
+    {
+        /* The scheduler's own retry did not clear it within a check cadence — the jittered backoff fell past
+           the check, or the job crashed again and its backoff doubled. Either is a human's to read about in
+           the PostgreSQL log; neither is helped by alter_job. One Critical page, then the escalated state's
+           cooldown re-fires, and no re-arm at any point. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Compression Job Stuck", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal("compressjob:1001", fired.ServerKey);
+        Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("escalated", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-armed", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* Escalated: an hour later, still there, still no re-arm; re-fires only on the cooldown. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Contains("after escalation", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_SchedulerRetries_ClearsBeforeTheSecondCheck_NoResolutionRow_StateDropped()
+    {
+        /* The expected path on the fleet: the scheduler re-ran the job inside the hour. Nothing was paged, so
+           nothing is "Recovered" — a lone resolution with no alert before it is the message shape #3575
+           removed. The state is gone, so a later genuine sighting is a fresh first sight. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+        Assert.Contains(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+            && x.Message.Contains("running on schedule again", StringComparison.Ordinal)
+            && x.Message.Contains("#3591", StringComparison.Ordinal));
+
+        /* Fresh first sight afterwards: deferred again, not escalated — the state was dropped. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_PreFixRow_AndSchedulerRetriesRow_InOnePass_OnlyTheOldOneIsRearmedAndPaged()
+    {
+        /* The two kinds side by side, so the flag and not the position decides: the pre-2.26.4 row keeps every
+           #1581 semantic (re-armed once, paged Critical); the crash-backoff row is deferred. */
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        var both = new List<StuckCompressionJob>(CrashBackoff(1001));
+        both.AddRange(Stuck(1002));
+        await e.ApplyCompressionJobsStuckAsync(both, rearm.Delegate, Ct);
+
+        Assert.Equal(1002L, Assert.Single(rearm.Calls));
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("compressjob:1002", fired.ServerKey);
+        Assert.Contains("auto-re-armed", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompressionJobs_TheOldRowShape_DefaultsToTheRearmPath()
+    {
+        /* The three-argument record every pre-#3591 caller and pin builds is the old semantics, by default. */
+        Assert.False(new StuckCompressionJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+    }
+
     /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
 
     private static AgSyncJudgement Judge(

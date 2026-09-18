@@ -628,7 +628,10 @@ internal sealed class DarlingSelfAlertEvaluator
        when the job stops being stuck. Keyed by the CompressionKeyPrefix + job_id so the alert serverKey never
        collides with a real server_id (an int hash) — the deliverer's #1236 int.TryParse override no-ops on it,
        exactly like the non-numeric DiskKey. */
-    private enum CompressionJobHealth { ReArmed, Escalated }
+    /* AwaitingSchedulerRetry (#3591): a -infinity row on a TimescaleDB whose scheduler recovers it by itself
+       (StuckCompressionJob.SchedulerRetries) — seen once, not re-armed, not paged; a second consecutive
+       sighting escalates. The other two states are #1581's. */
+    private enum CompressionJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
     private readonly ConcurrentDictionary<string, CompressionJobHealth> _compressionJobState = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastCompressionJobAlert = new(StringComparer.Ordinal);
 
@@ -3888,6 +3891,31 @@ internal sealed class DarlingSelfAlertEvaluator
     /// This method keeps its single-sample semantics — first sight IS first sight — because the input is now
     /// worth that trust, and adding hysteresis here instead would have bought the same protection for an
     /// hour of detection latency on a genuinely dead job.</para>
+    ///
+    /// <para><b>Which TimescaleDB the dead-job arm's sentence and its re-arm are true on (#3591).</b> "The
+    /// scheduler will never run it again" was true of every TimescaleDB below 2.26.4: a persisted
+    /// <c>next_start = -infinity</c> was returned to the scheduler as the due time and the job was never due
+    /// again — the state #1581 was built against, and the one the re-arm genuinely rescues. Upstream #9360
+    /// ("Sanitize <c>DT_NOBEGIN</c> next_start to recover jobs stuck after primary failover", in 2.26.4 and
+    /// every 2.27+ release; <c>TimescaleSupport.TimescaleNextStartSanitizedFrom</c>) removed that state. On a
+    /// fixed store the only PERSISTENT <c>-infinity</c> is a crashed run — a worker killed between its start
+    /// and end marks by a SIGKILL, a crash-restart or a failover — which the scheduler holds in a CRASH
+    /// BACKOFF of at least five minutes and, for a compression policy with the default one-hour
+    /// <c>retry_period</c>, about an hour (±13 % jitter), and then re-runs by itself. Rows of that kind arrive
+    /// here with <see cref="StuckCompressionJob.SchedulerRetries"/> set, and this machine treats them
+    /// differently on the evidence of a 2.28.1 rig: re-arming a job in crash backoff does not shorten the
+    /// wait, it RESETS it — <c>alter_job</c> refreshes the scheduler's job list and every crash row's backoff
+    /// is recomputed from that instant (the un-re-armed sibling crash row moved too), and the re-arm overwrites
+    /// the <c>-infinity</c> so the next hourly read would call the job healthy before it had run. A re-arm on
+    /// such a row is therefore three untrue messages and a later retry, which is why the first sighting of
+    /// one is NOT re-armed and NOT paged: it is logged at Information and remembered as
+    /// <c>AwaitingSchedulerRetry</c>. If the same job is still on the arm an hour later — the scheduler's own
+    /// retry has not cleared it, because the jittered backoff fell just past the check cadence or because the
+    /// job crashed AGAIN and its backoff doubled — it escalates: one Critical page naming a crash the operator
+    /// should read the PostgreSQL log for, no re-arm, and the cooldown re-fires of the escalated state. A job
+    /// that clears while awaiting the retry is dropped silently, since nothing was paged for it to recover
+    /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
+    /// exactly — an unknown version is treated as old, because on an old store the re-arm is the rescue.</para>
     /// </summary>
     internal async Task ApplyCompressionJobsStuckAsync(
         IReadOnlyList<StuckCompressionJob> stuckJobs,
@@ -3913,6 +3941,19 @@ internal sealed class DarlingSelfAlertEvaluator
 
             if (!_compressionJobState.TryGetValue(key, out var state))
             {
+                if (job.SchedulerRetries)
+                {
+                    /* #3591: a crash-backoff row on a TimescaleDB that re-runs it by itself. Re-arming would
+                       reset that backoff and erase the evidence (see the method doc); paging would narrate a
+                       self-recovering condition as a rescue. Remember it, say so in the log, and give the
+                       scheduler one check cadence to do what it does. */
+                    _compressionJobState[key] = CompressionJobHealth.AwaitingSchedulerRetry;
+                    _logger?.LogInformation(
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a compression policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        label, job.Reason);
+                    continue;
+                }
+
                 /* First detection this episode: re-arm ONCE, then alert on the outcome. */
                 bool rearmed = await rearmAsync(job.JobId);
                 _lastCompressionJobAlert[key] = now;
@@ -3926,7 +3967,10 @@ internal sealed class DarlingSelfAlertEvaluator
                             "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
                             "uncompressed data grows without bound until the disk fills and collection stops for the WHOLE " +
                             "fleet, and a headless service has no dashboard to warn you. If it re-hangs the service will " +
-                            "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health.",
+                            "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health. " +
+                            "(A next_start of -infinity is permanent only below TimescaleDB 2.26.4; from 2.26.4 on, upstream " +
+                            "#9360, the scheduler recovers it by itself and the service leaves such rows to it — if this store " +
+                            "is on 2.26.4 or later, its extension version could not be read on this pass.)",
                         severity: AlertSeverityLevel.Critical,
                         shortMessage: $"{label} was stuck — auto-re-armed",
                         /* #1881: job.Reason is elapsed minutes when a run HUNG and a scheduler state with no
@@ -3953,6 +3997,29 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
                 }
+            }
+            else if (state == CompressionJobHealth.AwaitingSchedulerRetry)
+            {
+                /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
+                   landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
+                   human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
+                   backoff once more). Escalate: page once now, re-fire on the cooldown, never re-arm. */
+                _compressionJobState[key] = CompressionJobHealth.Escalated;
+                _lastCompressionJobAlert[key] = now;
+                await FireAsync(
+                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                    job.Reason, "running on schedule",
+                    detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
+                        "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
+                        "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
+                        "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
+                        "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
+                        "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
+                        "shortening it. Compression stays paused for this hypertable until the scheduler's retry succeeds.",
+                    severity: AlertSeverityLevel.Critical,
+                    shortMessage: $"{label} still in crash backoff an hour on — escalated",
+                    numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                    cancellationToken);
             }
             else if (state == CompressionJobHealth.ReArmed)
             {
@@ -4001,8 +4068,19 @@ internal sealed class DarlingSelfAlertEvaluator
                 continue;
             }
 
-            _compressionJobState.TryRemove(key, out _);
+            _compressionJobState.TryRemove(key, out var was);
             _lastCompressionJobAlert.TryRemove(key, out _);
+            if (was == CompressionJobHealth.AwaitingSchedulerRetry)
+            {
+                /* #3591: the scheduler's own retry cleared it and nothing was paged, so there is nothing to
+                   resolve — a lone "Recovered" with no preceding alert would be the very message shape #3575
+                   removed. The log carries the outcome instead. */
+                _logger?.LogInformation(
+                    "TimescaleDB compression job {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
+                    key);
+                continue;
+            }
+
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                 "Compression Job Recovered",

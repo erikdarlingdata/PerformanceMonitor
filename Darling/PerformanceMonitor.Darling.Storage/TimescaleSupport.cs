@@ -6499,9 +6499,118 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /* ---------------- compression-job self-heal (#1581) ---------------- */
 
     /// <summary>
+    /// The TimescaleDB release from which a persisted <c>next_start = -infinity</c> stopped being a PERMANENT
+    /// state (#3591): upstream #9360, "Sanitize <c>DT_NOBEGIN</c> next_start to recover jobs stuck after
+    /// primary failover", shipped in the 2.26.4 patch release (2026-04-28 — the CHANGELOG lists it under
+    /// 2.26.4, not 2.27.0 as the issue first said) and is therefore in every 2.27+ release as well.
+    /// <see cref="SchedulerRecoversNegativeInfinity"/> is the predicate over it.
+    ///
+    /// <para><b>What the fix changed, from the 2.28.1 source (<c>src/bgw/job_stat.c</c>,
+    /// <c>ts_bgw_job_stat_next_start</c>).</b> The scheduler computes each job's in-memory next start from
+    /// its stat row in three arms, in this order: a row with <c>consecutive_crashes &gt; 0</c> gets the CRASH
+    /// BACKOFF (below); otherwise, since #9360, a row whose persisted <c>next_start</c> is <c>-infinity</c> is
+    /// sanitized to "now" and runs at once; otherwise the persisted value stands. Before the fix the second arm
+    /// did not exist: the sentinel was returned as-is, the scheduler's due-time subtraction on <c>INT64_MIN</c>
+    /// wrapped, and the job was never due again — the permanent dead state #1581's arm was built against and
+    /// the field incident that filled a disk. A row reaches that state with <c>consecutive_crashes = 0</c> through
+    /// <c>on_failure_to_start_job</c>'s <c>next_start != DT_NOBEGIN</c> restore guard, or by inheriting a
+    /// mid-run row across a primary failover; both are named in the upstream fix's own comment.</para>
+    ///
+    /// <para><b>What a PERSISTENT <c>-infinity</c> is on a fixed store.</b> Only the first arm's row: a worker
+    /// killed between <c>mark_start</c> and <c>mark_end</c> (a SIGKILL, a crash-restart, a failover — a SIGTERM
+    /// is caught and marked as a FAILURE with a finite next start) leaves <c>next_start = -infinity</c>,
+    /// <c>last_finish = -infinity</c> (the view's <c>last_run_status IS NULL</c>) and <c>consecutive_crashes = 1</c>,
+    /// and the scheduler holds it there, un-persisted, for
+    /// <c>max(MIN_WAIT_AFTER_CRASH_MS, retry_period × crashes)</c> capped at five schedule intervals and
+    /// jittered ±13 %: at least FIVE MINUTES, and for a compression policy — whose <c>retry_period</c> defaults
+    /// to one hour, measured on 2.28.1 — about an hour. Then it re-runs the job itself. (#3575's rig read
+    /// exactly five minutes because its 10-second probe policy capped the retry term at 50 s; the five-minute
+    /// floor is the whole backoff only when the retry term is smaller than it.) So on 2.26.4+ the row this
+    /// product's dead-job arm fires on is a self-recovering condition, not a permanent one, and the alert's
+    /// sentence has to say which — <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// does, by version.</para>
+    ///
+    /// <para>The version is read from <c>pg_extension.extversion</c> by <see cref="ReadTimescaleVersionAsync"/>
+    /// — the first place in this file to read it. Nothing else here declares a TimescaleDB floor (the stated
+    /// target is "2.x"), and this does not either: a version that cannot be read or parsed is treated as OLD,
+    /// because "the scheduler will never run it again" is the sentence that costs nothing when wrong on a new
+    /// store and everything when wrong on an old one.</para>
+    /// </summary>
+    public static readonly Version TimescaleNextStartSanitizedFrom = new(2, 26, 4);
+
+    /// <summary>
+    /// Whether <paramref name="timescaleVersion"/> has upstream #9360 (#3591): <c>true</c> from
+    /// <see cref="TimescaleNextStartSanitizedFrom"/> up, <c>false</c> below it AND for <c>null</c> — an unknown
+    /// version is the old behaviour, deliberately (see the constant). Pure, so the version arms pin.
+    /// </summary>
+    public static bool SchedulerRecoversNegativeInfinity(Version? timescaleVersion)
+        => timescaleVersion is not null && timescaleVersion >= TimescaleNextStartSanitizedFrom;
+
+    /// <summary>
+    /// <c>pg_extension.extversion</c> for timescaledb as a <see cref="Version"/>, or <c>null</c> when it cannot
+    /// be read (#3591). Failure-isolated for the same reason the job-stat read is: this decides a SENTENCE,
+    /// not whether to page, and a store hiccup on it must fall back to the conservative text rather than
+    /// fail the check. Debug on failure; the caller already gates on the extension being present.
+    /// </summary>
+    public static async Task<Version?> ReadTimescaleVersionAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var raw = await command.ExecuteScalarAsync(cancellationToken) as string;
+            var parsed = ParseTimescaleVersion(raw);
+            if (parsed is null)
+            {
+                logger?.LogDebug("TimescaleDB extversion '{Raw}' did not parse as a version — treating the store as pre-2.26.4 for the compression dead-job text (#3591)", raw ?? "(absent)");
+            }
+
+            return parsed;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read the TimescaleDB extension version — treating the store as pre-2.26.4 for the compression dead-job text (#3591): {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The numeric prefix of an <c>extversion</c> string as a <see cref="Version"/> (#3591): <c>2.28.1</c>
+    /// parses whole; a development suffix (<c>2.29.0-dev</c>) is dropped and the number kept, because the
+    /// scheduler code in a dev build past 2.26.4 has the fix; anything with fewer than two dotted numbers
+    /// (<c>null</c>, empty, a bare <c>2</c>) is <c>null</c>, which the caller reads as OLD. Pure so it pins.
+    /// </summary>
+    public static Version? ParseTimescaleVersion(string? extversion)
+    {
+        if (string.IsNullOrWhiteSpace(extversion))
+        {
+            return null;
+        }
+
+        var span = extversion.AsSpan().Trim();
+        int end = 0;
+        while (end < span.Length && (char.IsAsciiDigit(span[end]) || span[end] == '.'))
+        {
+            end++;
+        }
+
+        var numeric = span[..end].TrimEnd('.');
+        return numeric.Contains('.') && Version.TryParse(numeric, out var version) ? version : null;
+    }
+
+    /// <summary>
     /// The parameterized re-arm statement (#1581): reschedule a background job to run immediately, which
     /// un-sticks a job whose <c>next_start</c> has become <c>-infinity</c> (the scheduler will never re-fire
-    /// it otherwise — the field-incident root cause). The job_id is ALWAYS bound as <c>$1</c>, never
+    /// it otherwise — the field-incident root cause, on TimescaleDB below 2.26.4; see
+    /// <see cref="TimescaleNextStartSanitizedFrom"/> for what the same row is above it, and
+    /// <see cref="StuckCompressionJob.SchedulerRetries"/> for why this statement must NOT be run against it
+    /// there — measured, it resets the scheduler's crash backoff rather than shortening it, #3591). The job_id is ALWAYS bound as <c>$1</c>, never
     /// interpolated (the discipline is uniform with DarlingRetention's parameterized paths); <c>now()</c> is
     /// SQL, not a value. It is cast <c>$1::integer</c> because TimescaleDB's <c>alter_job</c> takes
     /// <c>job_id integer</c>, but <see cref="StuckCompressionJob.JobId"/> is a <c>long</c> that Npgsql sends as
@@ -6666,9 +6775,11 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
-    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — the scheduler
-    /// abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed data grow without bound
-    /// until the disk filled), or</item>
+    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — on TimescaleDB
+    /// below 2.26.4 the scheduler abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed
+    /// data grow without bound until the disk filled); from 2.26.4 on (upstream #9360,
+    /// <see cref="TimescaleNextStartSanitizedFrom"/>) it is a crashed run in the scheduler's crash backoff,
+    /// which the scheduler clears by itself (#3591) — the same arm, a different sentence, and no re-arm; or</item>
     /// <item>it has been in the <c>Running</c> state since a <c>last_run_started_at</c> older than
     /// <see cref="StuckRunningBound"/> — a run that began long ago and never finished (a hung run).</item>
     /// </list>
@@ -6703,6 +6814,17 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <c>-infinity</c> never-ran sentinel, so this is the second line of defence: the sentinel maps to
     /// MinValue through Npgsql, and any future caller reading the column un-guarded would otherwise compute a
     /// ~739,000-day elapsed that clears every bound and flag a healthy job on its very first run.</para>
+    ///
+    /// <para><b>"Will never run it again" is true of TimescaleDB below 2.26.4 and false above it (#3591).</b>
+    /// Upstream #9360 (<see cref="TimescaleNextStartSanitizedFrom"/>) made the scheduler sanitize a persisted
+    /// <c>-infinity</c>, so on a fixed store the only PERSISTENT <c>-infinity</c> is a crashed run sitting out
+    /// its crash backoff, which the scheduler clears by itself. The VERDICT is the same on every version — the
+    /// row is still reported, still re-armed once, still paged, because the arm is also the backstop for the
+    /// older 2.x stores the compatibility target admits and for whatever the next upstream regression is — but
+    /// the SENTENCE differs, and this overload without a version says the old one. Production goes through
+    /// <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// with the version <see cref="ReadTimescaleVersionAsync"/> read; the version-less form is the pre-#3591
+    /// pins' entry point and the "unknown version" case, which are the same text.</para>
     /// </summary>
     public static bool IsCompressionJobStuck(
         bool nextStartIsNegativeInfinity,
@@ -6711,7 +6833,22 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
-        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, out reason)
+        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason)
+            != StuckCompressionJobArm.None;
+
+    /// <summary>
+    /// <see cref="IsCompressionJobStuck"/> with the store's TimescaleDB version, so the <c>-infinity</c> arm's
+    /// reason tells the truth for that version (#3591). <c>null</c> is "unknown, assume old".
+    /// </summary>
+    public static bool IsCompressionJobStuck(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        Version? timescaleVersion,
+        out string reason)
+        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion, out reason)
             != StuckCompressionJobArm.None;
 
     /// <summary>
@@ -6719,7 +6856,8 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <see cref="StuckCompressionJobArm.NextStartNegativeInfinity"/>, because that is the arm whose inputs
     /// race; <see cref="StuckCompressionJobArm.RunningPastBound"/> is judged on six hours of elapsed time and
     /// a second read five seconds later could not change it. Same decision, same reason text — this is the
-    /// implementation and the boolean is its projection, so the two cannot drift.
+    /// implementation and the boolean is its projection, so the two cannot drift. Version-less: the
+    /// <c>-infinity</c> reason is the pre-2.26.4 text (#3591); see the overload below.
     /// </summary>
     public static StuckCompressionJobArm ClassifyCompressionJob(
         bool nextStartIsNegativeInfinity,
@@ -6728,12 +6866,50 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
+        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason);
+
+    /// <summary>
+    /// The <c>-infinity</c> arm's reason on a TimescaleDB below <see cref="TimescaleNextStartSanitizedFrom"/>,
+    /// or of unknown version: the #1581 sentence, byte for byte, because on those stores it is true — the
+    /// scheduler returns the sentinel as the due time and the job is never due again.
+    /// </summary>
+    public const string NextStartNegativeInfinityPermanentReason =
+        "next_start is -infinity — the scheduler will never run it again";
+
+    /// <summary>
+    /// The <c>-infinity</c> arm's reason on a TimescaleDB with upstream #9360 (#3591): the row is a crashed
+    /// run in the scheduler's crash backoff, and the scheduler clears it without help. Names the fix and the
+    /// floor so an operator reading the page knows which condition they are looking at and where the claim
+    /// comes from; how long the backoff is, and what the re-arm does to it, is the evaluator's detail text.
+    /// </summary>
+    public const string NextStartNegativeInfinityCrashBackoffReason =
+        "next_start is -infinity — a crashed run left the job in the scheduler's crash backoff, which the scheduler clears on its own (TimescaleDB 2.26.4+, upstream #9360)";
+
+    /// <summary>
+    /// <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, out string)"/> with the
+    /// store's TimescaleDB version (#3591). The <c>-infinity</c> arm fires on exactly the same inputs whatever
+    /// the version — the confirm-read, the re-arm, the alert key and the severity all see one arm — and only
+    /// its <paramref name="reason"/> changes: <see cref="NextStartNegativeInfinityCrashBackoffReason"/> when
+    /// <see cref="SchedulerRecoversNegativeInfinity"/> says the scheduler has the fix,
+    /// <see cref="NextStartNegativeInfinityPermanentReason"/> below it and for <c>null</c>. The stuck-Running
+    /// arm does not read the version; nothing about a hung run changed upstream.
+    /// </summary>
+    public static StuckCompressionJobArm ClassifyCompressionJob(
+        bool nextStartIsNegativeInfinity,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        Version? timescaleVersion,
+        out string reason)
     {
         var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
 
         if (nextStartIsNegativeInfinity && !isRunning)
         {
-            reason = "next_start is -infinity — the scheduler will never run it again";
+            reason = SchedulerRecoversNegativeInfinity(timescaleVersion)
+                ? NextStartNegativeInfinityCrashBackoffReason
+                : NextStartNegativeInfinityPermanentReason;
             return StuckCompressionJobArm.NextStartNegativeInfinity;
         }
 
@@ -6785,6 +6961,17 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// which is why <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
     /// executes it TWICE, <see cref="StuckCompressionConfirmDelay"/> apart, when that arm trips. The text is
     /// unchanged from #1760; what changed is how many times it is asked.</para>
+    ///
+    /// <para><b>What a confirmed <c>next_start_neg_infinity</c> row IS depends on the store's TimescaleDB
+    /// (#3591), and this statement does not carry that.</b> Below 2.26.4 it is the permanent dead state #1581
+    /// was built against. From 2.26.4 (upstream #9360, <see cref="TimescaleNextStartSanitizedFrom"/>) the
+    /// scheduler sanitizes a persisted <c>-infinity</c> to "now", so the only row that stays <c>-infinity</c>
+    /// across the confirm delay is a crashed run in the scheduler's crash backoff, which the view shows as
+    /// <c>-infinity + Scheduled + last_run_status IS NULL</c> — and that <c>last_run_status IS NULL</c> is NOT a
+    /// discriminator between the two, because both are a <c>mark_start</c> whose <c>mark_end</c> never came.
+    /// The discriminator is <c>pg_extension.extversion</c>, read separately by
+    /// <see cref="ReadTimescaleVersionAsync"/> on the pass where the arm trips, and applied to the verdict's
+    /// text and re-arm by <see cref="ClassifyStuckCompressionJobs"/>.</para>
     /// </summary>
     public const string StuckCompressionJobsSql = @"
 SELECT
@@ -6814,8 +7001,10 @@ WHERE j.proc_name LIKE '%compression%'
     /// <see cref="StuckCompressionJobsSql"/> once more, and reports the job only if the same arm trips
     /// again. A run-instant edge — the view pairing the scheduler's already-committed <c>-infinity</c> with a
     /// worker that is not yet, or no longer, visible as <c>Running</c> — is over in milliseconds and clears;
-    /// a row the scheduler has genuinely abandoned, or a crashed run sitting out its five-minute backoff,
-    /// reads the same on both passes and is reported with the latency it always had plus five seconds. One
+    /// a row the scheduler has genuinely abandoned (TimescaleDB below 2.26.4), or a crashed run sitting out its
+    /// crash backoff (the only persistent <c>-infinity</c> from 2.26.4 on, #3591 — reported with
+    /// <see cref="StuckCompressionJob.SchedulerRetries"/> set so the evaluator neither re-arms nor pages it on
+    /// first sight), reads the same on both passes and is reported with the latency it always had plus five seconds. One
     /// confirm per pass, not per job: the delay is taken once however many jobs tripped. The
     /// <see cref="StuckCompressionJobArm.RunningPastBound"/> arm is reported from the first read as before —
     /// a six-hour elapsed bound has nothing to gain from a second look five seconds later.</para>
@@ -6846,7 +7035,8 @@ WHERE j.proc_name LIKE '%compression%'
             Task.Delay,
             nowUtc,
             logger,
-            cancellationToken);
+            cancellationToken,
+            ct => ReadTimescaleVersionAsync(connection, logger, ct));
     }
 
     /// <summary>
@@ -6856,13 +7046,20 @@ WHERE j.proc_name LIKE '%compression%'
     /// and the delay (so the pin can assert it is taken exactly when the <c>-infinity</c> arm tripped and
     /// never otherwise, without sleeping). Internal rather than private for that reason alone; production
     /// reaches it only through the connection overload.
+    ///
+    /// <para><paramref name="readVersion"/> (#3591) is the store's TimescaleDB version, read ONLY on a pass
+    /// where the <c>-infinity</c> arm tripped — it decides that arm's sentence and nothing else, so the common
+    /// hourly pass still costs one read. Omitted (the pre-#3591 pins) or failing, the version is unknown and
+    /// the sentence is the conservative pre-2.26.4 one. Read before the confirm delay, on the same connection
+    /// the first read used, so the two reads that decide the page are not pushed further apart.</para>
     /// </summary>
     internal static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
         Func<CancellationToken, Task<IReadOnlyList<CompressionJobStatRow>>> readRows,
         Func<TimeSpan, CancellationToken, Task> delay,
         DateTime nowUtc,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<Version?>>? readVersion = null)
     {
         if (readRows is null)
         {
@@ -6879,9 +7076,26 @@ WHERE j.proc_name LIKE '%compression%'
             var first = ClassifyStuckCompressionJobs(await readRows(cancellationToken), nowUtc);
             if (!first.Any(f => f.Arm == StuckCompressionJobArm.NextStartNegativeInfinity))
             {
-                /* Nothing on the racing arm: no delay, no second read. The common hourly pass costs exactly
-                   what it did before #3575. */
+                /* Nothing on the racing arm: no delay, no second read, no version read. The common hourly
+                   pass costs exactly what it did before #3575. */
                 return first.Select(f => f.ToJob()).ToList();
+            }
+
+            /* #3591: the sentence the confirmed row will carry depends on whether this store's scheduler
+               recovers a -infinity row by itself. ReadTimescaleVersionAsync is failure-isolated to null, and
+               a scripted reader that throws is treated the same way here — the version decides words, never
+               the verdict, so it must not be able to fail the pass. */
+            Version? timescaleVersion = null;
+            if (readVersion is not null)
+            {
+                try
+                {
+                    timescaleVersion = await readVersion(cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger?.LogDebug("Could not read the TimescaleDB extension version — treating the store as pre-2.26.4 for the compression dead-job text (#3591): {Message}", ex.Message);
+                }
             }
 
             await delay(StuckCompressionConfirmDelay, cancellationToken);
@@ -6903,7 +7117,7 @@ WHERE j.proc_name LIKE '%compression%'
                     ex.Message);
             }
 
-            return ConfirmStuckCompressionJobs(first, confirm, nowUtc, logger);
+            return ConfirmStuckCompressionJobs(first, confirm, nowUtc, logger, timescaleVersion);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -6932,12 +7146,18 @@ WHERE j.proc_name LIKE '%compression%'
     /// A job that appears on the confirm pass but not the first is not reported either: the confirm exists to
     /// ratify the first pass, not to widen it, and a job that only just went <c>-infinity</c> gets its own
     /// two reads next hour.
+    ///
+    /// <para><paramref name="timescaleVersion"/> (#3591) phrases the confirmed rows' reason for the store's
+    /// TimescaleDB; it is applied to the CONFIRM pass's classification because that is the row carried. The
+    /// first pass is classified without it on purpose — the arm is version-independent, and the first pass
+    /// only decides whether there is anything to confirm.</para>
     /// </summary>
     internal static IReadOnlyList<StuckCompressionJob> ConfirmStuckCompressionJobs(
         IReadOnlyList<ClassifiedCompressionJob> first,
         IReadOnlyList<CompressionJobStatRow>? confirm,
         DateTime nowUtc,
-        ILogger? logger)
+        ILogger? logger,
+        Version? timescaleVersion = null)
     {
         if (first is null)
         {
@@ -6947,7 +7167,7 @@ WHERE j.proc_name LIKE '%compression%'
         var result = new List<StuckCompressionJob>(first.Count);
         var confirmed = confirm is null
             ? null
-            : ClassifyStuckCompressionJobs(confirm, nowUtc)
+            : ClassifyStuckCompressionJobs(confirm, nowUtc, timescaleVersion)
                 .Where(c => c.Arm == StuckCompressionJobArm.NextStartNegativeInfinity)
                 .ToDictionary(c => c.Row.JobId);
 
@@ -6987,10 +7207,11 @@ WHERE j.proc_name LIKE '%compression%'
 
     /// <summary>
     /// One pass of the pure predicate over a result set: every row it flags, with the arm that fired. Rows
-    /// the predicate clears are not returned.
+    /// the predicate clears are not returned. <paramref name="timescaleVersion"/> (#3591) phrases the
+    /// <c>-infinity</c> arm's reason; <c>null</c> is the pre-2.26.4 text.
     /// </summary>
     internal static List<ClassifiedCompressionJob> ClassifyStuckCompressionJobs(
-        IReadOnlyList<CompressionJobStatRow> rows, DateTime nowUtc)
+        IReadOnlyList<CompressionJobStatRow> rows, DateTime nowUtc, Version? timescaleVersion = null)
     {
         if (rows is null)
         {
@@ -7001,10 +7222,12 @@ WHERE j.proc_name LIKE '%compression%'
         foreach (var row in rows)
         {
             var arm = ClassifyCompressionJob(
-                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, out var reason);
+                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
             if (arm != StuckCompressionJobArm.None)
             {
-                flagged.Add(new ClassifiedCompressionJob(row, arm, reason));
+                flagged.Add(new ClassifiedCompressionJob(
+                    row, arm, reason,
+                    SchedulerRetries: arm == StuckCompressionJobArm.NextStartNegativeInfinity && SchedulerRecoversNegativeInfinity(timescaleVersion)));
             }
         }
 
@@ -7933,8 +8156,21 @@ WHERE j.proc_name LIKE '%compression%'
 /// A COMPRESSION-policy background job that <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/> flagged
 /// as stuck (#1581): its immutable <c>job_id</c>, the hypertable it compresses (for a friendlier alert label —
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
+///
+/// <para><see cref="SchedulerRetries"/> (#3591) is <c>true</c> for a <c>-infinity</c> row on a TimescaleDB at or
+/// past <see cref="TimescaleSupport.TimescaleNextStartSanitizedFrom"/>: the row is a crashed run in the
+/// scheduler's crash backoff, and the scheduler will re-run it by itself. The evaluator MUST NOT re-arm such a
+/// row, measured on a 2.28.1 rig: <c>alter_job(next_start =&gt; now())</c> against a job in crash backoff does
+/// not shorten the wait — the scheduler's crash arm ignores the persisted <c>next_start</c> while
+/// <c>consecutive_crashes &gt; 0</c> — it RESETS it. The re-arm refreshes the scheduler's job list, every crash
+/// row's backoff is recomputed from that instant, and the retry moved from crash + 5:00 to re-arm + 5:04, for
+/// the re-armed job AND for an un-re-armed sibling crash row in the same database. It also overwrites the
+/// <c>-infinity</c> with a finite value, so the next hourly read would report the job healthy and post
+/// "Recovered" before it had run. On the fleet's hourly policies (default <c>retry_period</c> one hour) that is a
+/// retry pushed out by up to an hour and two untrue messages. <c>false</c> — the pre-2.26.4 row, an unknown
+/// version, or the stuck-Running arm — keeps #1581's re-arm-once semantics exactly.</para>
 /// </summary>
-public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason, bool SchedulerRetries = false);
 
 /// <summary>
 /// WHICH arm of <see cref="TimescaleSupport.IsCompressionJobStuck"/> fired (#3575), from
@@ -7974,11 +8210,13 @@ internal sealed record CompressionJobStatRow(
 /// <summary>
 /// A <see cref="CompressionJobStatRow"/> the predicate flagged, with the arm that fired and its reason —
 /// the unit <see cref="TimescaleSupport.ConfirmStuckCompressionJobs"/> merges two passes of (#3575).
+/// <see cref="SchedulerRetries"/> is <see cref="StuckCompressionJob.SchedulerRetries"/>, decided where the arm
+/// was (#3591): the <c>-infinity</c> arm on a store whose scheduler has upstream #9360.
 /// </summary>
-internal sealed record ClassifiedCompressionJob(CompressionJobStatRow Row, StuckCompressionJobArm Arm, string Reason)
+internal sealed record ClassifiedCompressionJob(CompressionJobStatRow Row, StuckCompressionJobArm Arm, string Reason, bool SchedulerRetries = false)
 {
     /// <summary>The product-facing shape of this flag.</summary>
-    public StuckCompressionJob ToJob() => new(Row.JobId, Row.HypertableName, Reason);
+    public StuckCompressionJob ToJob() => new(Row.JobId, Row.HypertableName, Reason, SchedulerRetries);
 }
 
 /// <summary>

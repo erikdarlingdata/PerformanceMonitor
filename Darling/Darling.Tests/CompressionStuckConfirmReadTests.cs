@@ -378,6 +378,122 @@ public sealed class CompressionStuckConfirmReadTests
         Assert.Equal("confirm", job.HypertableName);
     }
 
+    /* ---------------- the version read: when it is taken and what it decides (#3591) ---------------- */
+
+    /// <summary>A scripted version read: hands back the planted version (or throws), counting calls.</summary>
+    private sealed class ScriptedVersion
+    {
+        private readonly Version? _version;
+        private readonly Exception? _throw;
+        public int Calls { get; private set; }
+
+        public ScriptedVersion(Version? version) => _version = version;
+        public ScriptedVersion(Exception ex) => _throw = ex;
+
+        public Task<Version?> Read(CancellationToken ct)
+        {
+            Calls++;
+            return _throw is null ? Task.FromResult(_version) : Task.FromException<Version?>(_throw);
+        }
+    }
+
+    [Fact]
+    public async Task HealthyPass_NeverReadsTheVersion()
+    {
+        /* The version decides the -infinity arm's sentence and nothing else, so a pass with nothing on that arm
+           does not pay for it — the common hourly pass is still one read. */
+        var reads = new ScriptedReads().Then(Healthy(1), HungRun(4));
+        var version = new ScriptedVersion(new Version(2, 28, 1));
+
+        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+            reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
+
+        Assert.Single(result);
+        Assert.Equal(0, version.Calls);
+        Assert.False(result[0].SchedulerRetries);
+    }
+
+    [Fact]
+    public async Task PersistentNegInfinity_On_2_28_1_IsConfirmed_WithTheCrashBackoffSentence_AndSchedulerRetries()
+    {
+        /* The fleet's shape: a SIGKILLed worker's row on 2.28.1, reproduced on the rig. Still reported — the
+           arm is the arm — but the sentence is the true one for this version, and SchedulerRetries tells the
+           evaluator not to re-arm it (which, measured, resets the backoff rather than shortening it). */
+        var reads = new ScriptedReads()
+            .Then(NegInfinityScheduled(7, "wait_stats"))
+            .Then(NegInfinityScheduled(7, "wait_stats"));
+        var version = new ScriptedVersion(new Version(2, 28, 1));
+
+        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+            reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
+
+        var job = Assert.Single(result);
+        Assert.Equal(7L, job.JobId);
+        Assert.Equal(1, version.Calls);  /* once per pass, like the confirm */
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, job.Reason);
+        Assert.True(job.SchedulerRetries);
+    }
+
+    [Fact]
+    public async Task PersistentNegInfinity_BelowTheFix_KeepsTheOldSentence_AndTheReArm()
+    {
+        var reads = new ScriptedReads()
+            .Then(NegInfinityScheduled(7))
+            .Then(NegInfinityScheduled(7));
+        var version = new ScriptedVersion(new Version(2, 26, 3));
+
+        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+            reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
+
+        var job = Assert.Single(result);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityPermanentReason, job.Reason);
+        Assert.False(job.SchedulerRetries);
+    }
+
+    [Fact]
+    public async Task VersionReadFails_OrIsAbsent_IsTheOldSentence_AndNeverFailsThePass()
+    {
+        /* Words, not verdicts: a version read that throws is swallowed at Debug and the pass proceeds exactly as
+           if the version were unknown — the conservative sentence, the #1581 re-arm. The pre-#3591 seam (no
+           reader at all) is the same case. */
+        foreach (var reader in new Func<CancellationToken, Task<Version?>>?[]
+        {
+            new ScriptedVersion(new InvalidOperationException("permission denied for table pg_extension")).Read,
+            new ScriptedVersion((Version?)null).Read,
+            null,
+        })
+        {
+            var reads = new ScriptedReads()
+                .Then(NegInfinityScheduled(7))
+                .Then(NegInfinityScheduled(7));
+            var log = new CapturingTestLogger();
+
+            var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+                reads.Read, new RecordedDelay().Wait, s_now, log, TestContext.Current.CancellationToken, reader);
+
+            var job = Assert.Single(result);
+            Assert.Equal(TimescaleSupport.NextStartNegativeInfinityPermanentReason, job.Reason);
+            Assert.False(job.SchedulerRetries);
+            Assert.DoesNotContain("Warning:", log.Joined, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ConfirmStuckCompressionJobs_TheVersionPhrasesTheConfirmRow_HungRunUntouched()
+    {
+        /* The merge applies the version to the CONFIRM pass — the row that is carried — and the hung run, judged
+           from the first pass, never sees it. */
+        var first = TimescaleSupport.ClassifyStuckCompressionJobs(new[] { HungRun(4), NegInfinityScheduled(1) }, s_now);
+        var merged = TimescaleSupport.ConfirmStuckCompressionJobs(
+            first, new[] { HungRun(4), NegInfinityScheduled(1) }, s_now, logger: null, new Version(2, 28, 1));
+
+        Assert.Equal(2, merged.Count);
+        Assert.Contains("Running", merged[0].Reason, StringComparison.Ordinal);
+        Assert.False(merged[0].SchedulerRetries);
+        Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, merged[1].Reason);
+        Assert.True(merged[1].SchedulerRetries);
+    }
+
     /* ---------------- the delay constant, against what it has to clear and what it costs ---------------- */
 
     [Fact]
