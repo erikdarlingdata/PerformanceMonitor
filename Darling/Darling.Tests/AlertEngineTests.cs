@@ -2159,12 +2159,39 @@ public sealed class AlertEngineTests
         Assert.Contains("(name unresolved)", h.Deliverer.Outcomes[1].DetailText!, StringComparison.Ordinal);
     }
 
-    /* ---------------- tempdb ---------------- */
+    /* ---------------- tempdb: the #3653 (A5) persistence gate ---------------- */
+
+    /// <summary>
+    /// Drives <paramref name="samples"/> consecutive sweeps, each handing the engine a tempdb row with the
+    /// given shape and a DISTINCT, increasing <c>collection_time</c> — one gate observation per call, which
+    /// is what the gate counts. Returns the instant of the last row so a caller can keep the sequence going;
+    /// the CPU twin is <see cref="DriveCpuAsync"/>. <paramref name="maxSizeMb"/> defaults to 0, the
+    /// "ceiling never measured" spelling every pre-#2515 fixture relies on.
+    /// </summary>
+    private static async Task<DateTime> DriveTempDbAsync(
+        AlertEngine engine, Harness h, double reservedMb, double unallocatedMb, int samples,
+        DateTime from, double maxSizeMb = 0, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            h.Adapter.TempDb = new TempDbSpaceInfo
+            {
+                TotalReservedMb = reservedMb, UnallocatedMb = unallocatedMb, MaxSizeMb = maxSizeMb, CollectionTimeUtc = at
+            };
+            await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: suppressed));
+        }
+
+        return at;
+    }
 
     [Fact]
     public async Task TempDb_FiresAtThreshold_AndResolutionCarriesTheCurrentPercent()
     {
-        /* Lite AlertEngine.cs:420-465. */
+        /* Lite AlertEngine.cs:420-465, now behind the gate (#3653 A5): the threshold compare, the delivered
+           shape and the resolve strings are UNCHANGED — only the number of collected samples it takes to get
+           to the fire. */
         var h = new Harness();
         h.Settings.TempDbSpaceEnabled = true;
         var engine = h.Build();
@@ -2175,18 +2202,300 @@ public sealed class AlertEngineTests
            would have to move, and the fact that it does not is the guarantee that no existing on-prem or RDS
            target with an unlimited (or uncollected) tempdb sees its number change. The capped case gets its
            own test below rather than being folded in here. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% reserved */
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 800, unallocatedMb: 200, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase); /* 80% reserved */
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal("80% reserved (800 MB)", fired.CurrentValue);                /* :446 */
         Assert.Equal(80d, fired.NumericCurrentValue!.Value, precision: 3);    /* :450 */
 
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% reserved */
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveTempDbAsync(engine, h, reservedMb: 200, unallocatedMb: 800, samples: AlertEngine.TempDbSpaceClearSamples, from: at); /* 20% reserved */
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("tempdb Space Resolved", resolution.Title);              /* :463 */
         Assert.Equal("SRV-A: tempdb reserved space back to 20%", resolution.Message);  /* :461,:464 */
+        Assert.Equal("tempdb Space", resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task TempDb_OneOrTwoBreachingSamples_DoNotFire_TheThirdFiresExactlyOnce()
+    {
+        /* THE #3653 (A5) defect, stated as a pin: a single collected sample over the bar used to be an incident,
+           and on the measured store class that was 22 pages in 14 days about runs of 1-4 samples. This is the
+           assertion that reddens if TempDbSpaceBreachSamples goes back to 1 — and the K-1 arm is what catches
+           a K that quietly became 2. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("tempdb Space", fired.MetricName);
+        Assert.Equal("90% reserved (900 MB)", fired.CurrentValue);
+        Assert.False(fired.Muted);
+
+        /* Same standing breach one minute later: inside the 5-minute cooldown — no repeat (:423). */
+        h.Now = h.Now.AddMinutes(1);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* After the cooldown elapses the STANDING breach re-fires as the reminder it always was. The gate
+           changed what counts as an incident, deliberately not how often a standing one repeats — the same
+           line the CPU gate drew. */
+        h.Now = h.Now.AddMinutes(5);
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task TempDb_AStreakBrokenByOneClearSample_NeverFires_UntilThreeRunConsecutively()
+    {
+        /* Breach, clear, breach, breach: three breaching samples in all and never three in a ROW, so nothing
+           fires — the reset is what makes "sustained" mean sustained rather than "often", and it is the shape
+           the measured 1-4 sample flaps take when two of them land close together. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: Harness.SampleBase);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: 1, from: at);
+        at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 2, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* And the counter was RESET by the clear, not merely left one short: the third consecutive breach
+           after it — the fourth breaching sample overall — is the one that fires. */
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_RepeatedCollectionTime_DoesNotAdvanceTheStreak()
+    {
+        /* The reason the gate counts COLLECTIONS and not sweeps, and the pin that matters most on this arm:
+           the sweep is 30 s and tempdb_stats lands a row about once a minute, so the sweep re-reads the same
+           row roughly every other pass. Here the SAME collection_time is offered TempDbSpaceBreachSamples x 3
+           times: one observation, no fire. Without the freshness check this test fires — and the measured
+           1-4 sample flaps come straight back, one row re-counted three times inside 90 seconds. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var stuck = Harness.SampleBase.AddMinutes(1);
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples * 3; i++)
+        {
+            h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 950, UnallocatedMb = 50, CollectionTimeUtc = stuck };
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Two genuinely new collections on top of that one observation reach the bar. */
+        await DriveTempDbAsync(engine, h, reservedMb: 950, unallocatedMb: 50, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_NoCollectionTime_CountsEverySweep()
+    {
+        /* The documented DEGRADATION for a producer that supplies no collection instant (see
+           TempDbSpaceInfo.CollectionTimeUtc): persistence is then per-sweep rather than per-collection —
+           weaker, but the alert still fires, because silence is the one failure a monitoring product cannot
+           tell apart from health. Pinned so the fallback is a decision rather than an accident, and because
+           it is the path every pre-#3653 fixture in this file and in Lite.Tests rides. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 950, UnallocatedMb = 50 };
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples - 1; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_AMissingRowFreezesTheGate_AndNeverAnnouncesARecovery()
+    {
+        /* A tempdb_stats row that stops arriving is not a recovery. The pre-gate arm fell through to its
+           resolve branch on a null read and sent "tempdb reserved space back to N/A" — a recovery message
+           about a measurement nobody took. The streak is frozen instead, in both directions: the open
+           incident is neither resolved nor re-announced, and the row that eventually arrives continues
+           where the last real one left off. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.TempDb = null;
+        for (var i = 0; i < 5; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The frozen state is the OPEN incident: one real clear row resolves it, with the measured number. */
+        await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Equal("SRV-A: tempdb reserved space back to 10%", Assert.Single(h.Resolutions).Message);
+    }
+
+    [Fact]
+    public async Task TempDb_PersistsTheStreakUnderItsOwnMetric_AndResumesAcrossARestart()
+    {
+        /* The persisted record lives under the tempdb metric name in the SAME (server, metric) table the CPU
+           gate uses — which is why no migration rung was needed — and a partly-built streak survives a
+           restart, so a real event that spans a service restart is not delayed by K samples. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var at = await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(Key, persisted.Key.Key);
+        Assert.Equal(AlertEngine.TempDbSpacePersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.TempDbSpaceBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.Equal(at, persisted.Value.LastObservedSampleUtc);
+
+        /* A brand-new engine over the same state store IS the restart; the very next collection completes
+           the streak. */
+        await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task TempDb_ARestartDoesNotReAnnounceAnAlreadyOpenIncident()
+    {
+        /* The reason the in-memory _activeTempDbSpaceAlert flag had to go: it forgot the open incident on
+           every restart, so the first post-restart sweep over a standing 90% tempdb delivered the same page
+           again. The persisted Firing bit tells the restarted engine the incident is open, and the seed stamps
+           the cooldown clock so the standing-condition reminder waits its full cooldown rather than firing
+           on the first sweep — the same two-part guard the CPU gate's seed carries, for the same reason. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var at = await DriveTempDbAsync(h.Build(), h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        var restarted = h.Build();
+        at = await DriveTempDbAsync(restarted, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The stamped clock is a COOLDOWN, not a silence: once it elapses the reminder is delivered as usual. */
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveTempDbAsync(restarted, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* And it resolves normally rather than being orphaned. */
+        await DriveTempDbAsync(restarted, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task TempDb_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, and that holds for the GATE and not just the send: a
+           suppressed streak counts, so un-acknowledging a server reports the condition it is actually in
+           rather than starting a fresh K-sample wait. The CPU twin states why this pin lives here rather
+           than in Lite.Tests. */
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TempDb_APersistenceSaveFailure_StillFires_AndIsNotCountedAsASwallowedRead()
+    {
+        /* The CPU pin's two claims, held on the second arm through the ONE shared save path: the gate decides
+           from its in-memory record, so a store that cannot be written costs the streak across a restart
+           and never an alert; and the failure is a WRITE, not on #3013's read counter. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var store = new ThrowingPersistenceSaveStore();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.TempDbSpaceEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, h.Adapter, store, h.Deliverer, _ => false,
+            resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
+            utcNow: () => h.Now, readFailures: counter);
+
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 900, unallocatedMb: 100, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase);
+
+        Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(0, counter.ReadFor(Key).ServerReadFailures);
+        Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
+
+        await DriveTempDbAsync(engine, h, reservedMb: 100, unallocatedMb: 900, samples: AlertEngine.TempDbSpaceClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public void TempDbGateDefaults_AreDerivedFromTheMeasuredFlap()
+    {
+        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Three
+           breaching COLLECTIONS: measured on one production store class (43 servers, 14 days), one server
+           fired 22 times and every run was 1-4 samples over at most 206 s; K = 3 keeps 2 of 22. ONE clear:
+           the pre-gate resolve behaviour, kept because the measurement covered breach runs and said nothing
+           about mid-incident dips — the CPU gate's 2 rests on a dip it measured, and this arm has no such
+           measurement to cite. */
+        Assert.Equal(3, AlertEngine.TempDbSpaceBreachSamples);
+        Assert.Equal(1, AlertEngine.TempDbSpaceClearSamples);
+        Assert.True(AlertEngine.TempDbSpaceClearSamples < AlertEngine.TempDbSpaceBreachSamples);
+
+        /* The persisted subject is the metric an operator already knows — the mute context's, the history
+           row's and the resolve's spelling — not a second spelling of it. */
+        Assert.Equal("tempdb Space", AlertEngine.TempDbSpacePersistenceMetric);
+        Assert.NotEqual(AlertEngine.CpuPersistenceMetric, AlertEngine.TempDbSpacePersistenceMetric);
+    }
+
+    /// <summary>
+    /// The README's alert catalog states the sample count for this arm as it does for High CPU, so the number
+    /// is pinned to the constant rather than left as a prose copy of it — the same pin
+    /// <c>BuiltinAlertPersistenceRungTests.TheReadmeAlertCatalogStatesTheSampleCountItActuallyUses</c> holds
+    /// the CPU row to, for the same reason: a doc count that cannot be compared to the thing it describes is a
+    /// count nobody can check.
+    /// </summary>
+    [Fact]
+    public void TheReadmeAlertCatalogStatesTheTempDbSampleCountItActuallyUses()
+    {
+        /* The RAW reader, deliberately: none of the anchors below spans a line break (the row is found by its
+           prefix and searched with Contains, and a trailing '\r' on a CRLF checkout changes neither), so by
+           RepoFileAdoptionTests' own rule this file does not belong in s_lfReaders and must not read as if
+           it did. */
+        var readme = ReadRepoFile("README.md");
+
+        var row = readme
+            .Split('\n')
+            .Single(l => l.StartsWith("| **TempDB space**", StringComparison.Ordinal));
+
+        Assert.Contains($"held for {AlertEngine.TempDbSpaceBreachSamples} samples", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.TempDbSpaceBreachSamples} consecutive collected samples", row, StringComparison.Ordinal);
+
+        /* And it must not still describe the pre-gate rule as the whole story, which is the sentence a reader
+           would act on. */
+        Assert.DoesNotContain("when TempDB usage exceeds the percentage threshold. Measured", row, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -2206,14 +2515,15 @@ public sealed class AlertEngineTests
         Assert.Equal(80, h.Settings.TempDbSpaceThresholdPercent);
         var engine = h.Build();
 
-        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. Held
+           for a full gate's worth of collections (#3653 A5), so the silence below is the ceiling's and not the
+           persistence gate's. The collection instant threads FORWARD into the second arm because both share
+           one engine and one record: a re-used instant is a sample the gate has already counted. */
+        var at = await DriveTempDbAsync(engine, h, reservedMb: 59.75, unallocatedMb: 2.69, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, maxSizeMb: 65_536);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveTempDbAsync(engine, h, reservedMb: 59.75, unallocatedMb: 2.69, samples: AlertEngine.TempDbSpaceBreachSamples, from: at);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
@@ -2236,8 +2546,9 @@ public sealed class AlertEngineTests
         h.Settings.TempDbSpaceEnabled = true;
         var engine = h.Build();
 
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = reservedMb, UnallocatedMb = unallocatedMb, MaxSizeMb = maxSizeMb };
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        /* Driven through the #3653 (A5) gate: the grade is a property of the fire, and the fire takes
+           TempDbSpaceBreachSamples collections to earn. */
+        await DriveTempDbAsync(engine, h, reservedMb, unallocatedMb, samples: AlertEngine.TempDbSpaceBreachSamples, from: Harness.SampleBase, maxSizeMb: maxSizeMb);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);

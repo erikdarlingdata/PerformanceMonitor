@@ -172,14 +172,21 @@ public sealed class AlertEngine
 
        Seeded once per key from IAlertStateStore alongside the watermarks, then written through on change.
        The cache is authoritative WITHIN the process: EvaluateServerAsync serializes per server, so the
-       read-modify-write below cannot interleave for one key. */
+       read-modify-write below cannot interleave for one key.
+
+       #3653 (A5): tempdb Space is the SECOND arm behind the gate, and its active flag left this family
+       for exactly the reasons CPU's did — the persisted record IS the "incident open" bit, and a bool
+       beside it would be a second source of truth for the same fact. One record cache per gated metric,
+       each a row under its own metric name in the same (server, metric) persistence table, all driven
+       through ObservePersistenceAsync — one mechanism, as AlertPersistenceGate's header asks; a third
+       consumer is a third dictionary, a third seed line and a third pair of constants, nothing else. */
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _cpuPersistence = new();
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbPersistence = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activePoisonWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeLongRunningQueryAlert = new();
-    private readonly ConcurrentDictionary<string, bool> _activeTempDbSpaceAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeLowDiskAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeLongRunningJobAlert = new();
 
@@ -475,6 +482,21 @@ public sealed class AlertEngine
                     _lastCpuAlert[key] = _utcNow();
                 }
             }
+
+            /* #3653 (A5): the tempdb Space gate's record — the same seed, the same cooldown stamp on an
+               already-open incident, for the same reasons the CPU block above states; a second metric name
+               is a second row in the same (server, metric) table, so nothing new is stored and no rung was
+               needed. */
+            readClock.Restart();
+            var tempDbPersistence = await _stateStore.LoadAlertPersistenceAsync(key, TempDbSpacePersistenceMetric);
+            if (tempDbPersistence.HasValue)
+            {
+                _tempDbPersistence[key] = tempDbPersistence.Value;
+                if (tempDbPersistence.Value.State.Firing)
+                {
+                    _lastTempDbSpaceAlert[key] = _utcNow();
+                }
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -536,6 +558,56 @@ public sealed class AlertEngine
     public const string CpuPersistenceMetric = "High CPU";
 
     /// <summary>
+    /// Consecutive breaching tempdb Space SAMPLES required before the reserved percentage is an incident
+    /// (#3653 A5). Three collected samples: at the shipped <c>tempdb_stats</c> cadence of one minute that is
+    /// about three minutes, and at the light tier's five-minute cadence about fifteen — the count is per
+    /// COLLECTION, never per 30 s alert sweep, because <see cref="TempDbSpaceInfo.CollectionTimeUtc"/>
+    /// keeps a re-read of the last row from counting twice (the same fresh-sample rule the CPU gate uses).
+    ///
+    /// <para><b>Derived from the measured flap, not picked.</b> Measured on one production store class —
+    /// 43 servers over 14 days: one server fired tempdb Space at or above the 80% bar 22 times, and EVERY
+    /// run was 1–4 breaching samples spanning at most 206 seconds before the percentage fell back under the
+    /// bar. Twenty-two pages and twenty-two resolves in two weeks about a tempdb that was never in trouble
+    /// for longer than three and a half minutes. K = 3 keeps 2 of those 22: the two runs that held for
+    /// three or more consecutive collections, which are the only two an operator could still have seen
+    /// as TRUE when the message arrived. K = 2 would have kept the two-sample runs too, which is most of
+    /// the noise; K = 4 would have dropped both real ones and bought nothing the measurement asked for.</para>
+    ///
+    /// <para>The pre-gate arm fired on the FIRST breaching read and resolved on the first clear one, which
+    /// is precisely the shape the 22 fire/resolve pairs describe. Same reasoning as
+    /// <see cref="CpuBreachSamples"/> for why this is a constant and not a knob: the number is a
+    /// measurement, not a preference, and a setting here is a store column, a rung, a settings member and
+    /// MCP plumbing that #3314 already shows the cost of doing by halves.</para>
+    /// </summary>
+    public const int TempDbSpaceBreachSamples = 3;
+
+    /// <summary>
+    /// Consecutive clearing tempdb Space samples required to resolve an open incident (#3653 A5). ONE,
+    /// which is the pre-gate behaviour kept on purpose: the arm has always announced the resolve on the
+    /// first read under the bar, and this change touches only the rising edge.
+    ///
+    /// <para><b>Why not the CPU gate's two.</b> <see cref="CpuClearSamples"/> is 2 because #3282 MEASURED the
+    /// shape it guards against — a 99% sample followed one minute later by 23% inside a real saturation
+    /// event, i.e. one sample dipping under the bar mid-incident. No such measurement exists for tempdb:
+    /// the #3653 read counted breach RUNS (1–4 consecutive breaching samples, 22 of them) and said
+    /// nothing about dips inside a run, so there is no evidence that a resolve here is ever contradicted
+    /// by the next sample. Reserved tempdb is also a slower gauge than scheduler CPU — it moves when
+    /// allocation units are freed, not per ring-buffer tick — which is a reason to expect fewer mid-incident
+    /// dips, not more. Picking 2 anyway would be the folklore constant the lineage rule exists to refuse.
+    /// If the fleet shows resolve/re-fire pairs inside one tempdb event, this is the number that moves,
+    /// with the measurement beside it.</para>
+    /// </summary>
+    public const int TempDbSpaceClearSamples = 1;
+
+    /// <summary>
+    /// The (server, metric) key the tempdb Space gate's state is persisted under — the same string the mute
+    /// context, the history row and the resolve use, for the reason <see cref="CpuPersistenceMetric"/>
+    /// gives. A second metric name is a second row in the existing persistence table (V118 keyed it
+    /// <c>(server_id, metric_name)</c> for exactly this), so the rollout needed no rung.
+    /// </summary>
+    public const string TempDbSpacePersistenceMetric = "tempdb Space";
+
+    /// <summary>
     /// Row budget for the #3495 fire-time active-session probe. The read orders by elapsed DESC and the
     /// maintenance shapes are long-running by nature — a backup or rebuild burning enough CPU to matter
     /// has been at it for minutes while an OLTP session's elapsed is milliseconds — so the sessions this
@@ -578,51 +650,18 @@ public sealed class AlertEngine
             return;
         }
 
-        var priorRecord = _cpuPersistence.TryGetValue(key, out var cached) ? cached : AlertPersistenceRecord.Initial;
-
-        /* An observation counts only when it is a sample this subject has not counted yet. The sweep runs
-           on s_alertSweepInterval (30 s) while the ring-buffer sample behind alertCpuValue advances about
-           once a minute, so without this the SAME sample would advance the streak on consecutive sweeps
-           and CpuBreachSamples would be reached inside 90 seconds — shorter than every excursion #3282
-           measured, i.e. the defect intact behind a gate that looked like it fixed it.
-
-           A null sample instant counts every sweep instead (see AlertServerSnapshot.CpuSampleTimeUtc): the
-           persistence is then weaker, but the alert still fires, and silence is the one failure a monitoring
-           product cannot distinguish from health.
-
-           Where two samples land between sweeps the older one is skipped, so a sustained excursion can need
-           one extra sample to reach the bar. That undercounts and therefore UNDER-fires, which is the
-           correct direction for an alert that pages — the same reasoning PostgresAlertEvaluator's
-           poison-wait window states for its own partial coverage. */
-        bool freshSample = !snapshot.CpuSampleTimeUtc.HasValue
-            || !priorRecord.LastObservedSampleUtc.HasValue
-            || snapshot.CpuSampleTimeUtc.Value > priorRecord.LastObservedSampleUtc.Value;
-
         bool breaching = alertCpuValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
-        var outcome = PersistenceOutcome.None;
 
-        if (freshSample)
-        {
-            var evaluation = AlertPersistenceGate.Evaluate(
-                priorRecord.State, breaching, CpuBreachSamples, CpuClearSamples);
-            outcome = evaluation.Outcome;
-
-            var nextRecord = new AlertPersistenceRecord(
-                evaluation.State, snapshot.CpuSampleTimeUtc ?? priorRecord.LastObservedSampleUtc);
-
-            /* Value equality on the record is what makes the write skippable: on the vast majority of
-               sweeps nothing about the subject moved, and a store write per server per sweep would be
-               42 pointless upserts a minute on the measured fleet. */
-            if (!nextRecord.Equals(priorRecord))
-            {
-                _cpuPersistence[key] = nextRecord;
-                await SaveCpuPersistenceAsync(key, nextRecord);
-            }
-        }
-
-        bool incidentOpen = _cpuPersistence.TryGetValue(key, out var current)
-            ? current.State.Firing
-            : priorRecord.State.Firing;
+        /* The observation is the ring-buffer SAMPLE, identified by snapshot.CpuSampleTimeUtc: the sweep runs
+           on s_alertSweepInterval (30 s) while that sample advances about once a minute, so without the
+           instant the SAME sample would advance the streak on consecutive sweeps and CpuBreachSamples would
+           be reached inside 90 seconds — shorter than every excursion #3282 measured, i.e. the defect intact
+           behind a gate that looked like it fixed it. The fresh-sample rule, the null-instant fallback and
+           the skip-a-write-when-nothing-moved rule live in ObservePersistenceAsync since #3653 (A5) put a
+           second arm behind the same gate. */
+        var (outcome, incidentOpen) = await ObservePersistenceAsync(
+            _cpuPersistence, CpuPersistenceMetric, key, snapshot.CpuSampleTimeUtc, breaching,
+            CpuBreachSamples, CpuClearSamples);
 
         if (incidentOpen && breaching)
         {
@@ -729,15 +768,82 @@ public sealed class AlertEngine
     }
 
     /// <summary>
-    /// Persists one server's CPU gate record (#3282), absorbing store failures the way every other state
-    /// write in this class does: the gate has already decided this observation from the in-memory record,
-    /// so a dropped write costs the streak across a restart and never an alert.
+    /// Advances one gated metric's persistence record by one observation and returns the edge it produced
+    /// plus whether an incident is open afterwards. The ONE consumer-side mechanism over
+    /// <see cref="AlertPersistenceGate"/> for every built-in arm this engine gates — High CPU (#3282) and
+    /// tempdb Space (#3653 A5) today — so the rules below are stated once and cannot drift between arms.
+    ///
+    /// <para><b>An observation counts only when it is a sample this subject has not counted yet.</b> The
+    /// gate counts consecutive breaching SAMPLES, the sweep runs on <c>s_alertSweepInterval</c> (30 s), and
+    /// every gated reading here comes off a collected row that advances at the collector's cadence (CPU's
+    /// ring-buffer sample about once a minute; <c>tempdb_stats</c> once a minute at the shipped default,
+    /// every five at the light tier). Without <paramref name="sampleUtc"/> the SAME row would advance the
+    /// streak on consecutive sweeps and a K-sample bar would be reached inside K × 30 s of wall clock
+    /// regardless of how many samples were actually taken — the measured flap intact behind a gate that
+    /// looked like it fixed it. A sample instant that has not moved past
+    /// <see cref="AlertPersistenceRecord.LastObservedSampleUtc"/> is therefore not an observation at all:
+    /// the streak holds, nothing is written, and the caller still learns whether an incident is open so the
+    /// standing-condition reminder can run on a sweep that brought no new sample.</para>
+    ///
+    /// <para><b>A null sample instant counts every sweep instead</b> (see
+    /// <see cref="AlertServerSnapshot.CpuSampleTimeUtc"/> and <see cref="TempDbSpaceInfo.CollectionTimeUtc"/>
+    /// for which hosts supply none): the persistence is then weaker, but the alert still fires, and silence
+    /// is the one failure a monitoring product cannot distinguish from health.</para>
+    ///
+    /// <para>Where two samples land between sweeps the older one is skipped, so a sustained excursion can
+    /// need one extra sample to reach the bar. That undercounts and therefore UNDER-fires, which is the
+    /// correct direction for an alert that pages — the same reasoning <c>PostgresAlertEvaluator</c>'s
+    /// poison-wait window states for its own partial coverage.</para>
+    ///
+    /// <para><b>The write is skipped when nothing moved.</b> Value equality on the record is what makes
+    /// that safe: on the vast majority of sweeps nothing about the subject changes, and a store write per
+    /// server per gated metric per sweep would be 84 pointless upserts a minute on the measured fleet.</para>
+    ///
+    /// <para>NOT the gate for absent data. A caller with no reading must return BEFORE calling this — a
+    /// null is neither a breach nor a clear, and both arms say so at their own null check.</para>
     /// </summary>
-    private async Task SaveCpuPersistenceAsync(string key, AlertPersistenceRecord record)
+    /// <param name="records">The per-server record cache for this metric, seeded from the store at startup.</param>
+    /// <param name="metricName">The <c>(server, metric)</c> key the record is persisted under.</param>
+    /// <param name="sampleUtc">The observation's sample instant, or null for a host that has none.</param>
+    /// <returns>The edge this observation produced, and whether the subject is firing after it.</returns>
+    private async Task<(PersistenceOutcome Outcome, bool IncidentOpen)> ObservePersistenceAsync(
+        ConcurrentDictionary<string, AlertPersistenceRecord> records, string metricName, string key,
+        DateTime? sampleUtc, bool breaching, int breachSamples, int clearSamples)
+    {
+        var priorRecord = records.TryGetValue(key, out var cached) ? cached : AlertPersistenceRecord.Initial;
+
+        bool freshSample = !sampleUtc.HasValue
+            || !priorRecord.LastObservedSampleUtc.HasValue
+            || sampleUtc.Value > priorRecord.LastObservedSampleUtc.Value;
+
+        if (!freshSample)
+        {
+            return (PersistenceOutcome.None, priorRecord.State.Firing);
+        }
+
+        var evaluation = AlertPersistenceGate.Evaluate(priorRecord.State, breaching, breachSamples, clearSamples);
+        var nextRecord = new AlertPersistenceRecord(evaluation.State, sampleUtc ?? priorRecord.LastObservedSampleUtc);
+
+        if (!nextRecord.Equals(priorRecord))
+        {
+            records[key] = nextRecord;
+            await SavePersistenceAsync(key, metricName, nextRecord);
+        }
+
+        return (evaluation.Outcome, nextRecord.State.Firing);
+    }
+
+    /// <summary>
+    /// Persists one server's gate record for one metric (#3282; generalised over the metric for #3653 A5),
+    /// absorbing store failures the way every other state write in this class does: the gate has already
+    /// decided this observation from the in-memory record, so a dropped write costs the streak across a
+    /// restart and never an alert.
+    /// </summary>
+    private async Task SavePersistenceAsync(string key, string metricName, AlertPersistenceRecord record)
     {
         try
         {
-            await _stateStore.SaveAlertPersistenceAsync(key, CpuPersistenceMetric, record);
+            await _stateStore.SaveAlertPersistenceAsync(key, metricName, record);
         }
         catch (Exception ex)
         {
@@ -746,8 +852,8 @@ public sealed class AlertEngine
                performs and swallows, measured against a denominator of alert passes; a write in its
                numerator would read as the pass going blind on a condition when in fact the condition was
                evaluated correctly and only the memory of it was lost. The seed LOAD above is a read and is
-               counted there. */
-            _logger?.LogWarning("Could not persist the CPU persistence gate for {ServerKey}: {Message}", key, ex.Message);
+               counted there. One catch block for every gated metric, so the census exemption is one entry. */
+            _logger?.LogWarning("Could not persist the {Metric} persistence gate for {ServerKey}: {Message}", metricName, key, ex.Message);
         }
     }
 
@@ -1544,9 +1650,36 @@ public sealed class AlertEngine
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
             readClock.Restart();
 
-            if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
+            if (tempDb == null)
             {
-                _activeTempDbSpaceAlert[key] = true;                                /* :422 */
+                /* NO-DATA FREEZES THE GATE — never a breach, never a clear (#3653 A5). The pre-gate arm fell
+                   through to its resolve branch here and announced "tempdb reserved space back to N/A": a
+                   recovery nobody measured, rendered with the value it could not read. A store with no
+                   tempdb_stats row for this server (a collector that stopped, a server whose tempdb collector
+                   is off) is an absence of evidence, and resolving on absent evidence fabricates a recovery
+                   exactly as firing on it would fabricate an alert — the same call the CPU arm makes on a
+                   null sample and every per-check catch in this class makes by logging and skipping. The
+                   streak (and an open incident) hold until a real row arrives. */
+                return;
+            }
+
+            /* #3653 (A5): the FIRE decision sits behind the shared persistence gate, K = TempDbSpaceBreachSamples
+               consecutive breaching COLLECTIONS, identified by the row's collection_time so a 30 s sweep that
+               re-reads the last collected row is not a second observation (the measured flap is 1–4 samples;
+               three sweeps of one sample would have re-created it behind the gate). Everything downstream of
+               the decision is unchanged: the threshold compare, the Warning grade, the cooldown-governed
+               reminder, the card, and the resolve's falling edge — which now comes from the gate rather than
+               from the first sub-threshold read, though with TempDbSpaceClearSamples = 1 that is the same
+               instant it always was. The in-memory active flag is gone; the record's Firing bit is the one
+               "incident open" fact, and it survives a restart. */
+            bool breaching = tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent; /* :420 */
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _tempDbPersistence, TempDbSpacePersistenceMetric, key, tempDb.CollectionTimeUtc, breaching,
+                TempDbSpaceBreachSamples, TempDbSpaceClearSamples);
+            readClock.Restart();
+
+            if (incidentOpen && breaching)
+            {
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "tempdb Space" }; /* :425 */
@@ -1585,16 +1718,18 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
-            else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb) /* :456 */
+            else if (outcome == PersistenceOutcome.Resolve)                          /* :456 */
             {
-                _activeTempDbSpaceAlert[key] = false;                               /* :458 */
+                /* The falling edge, from the gate: produced exactly once, on the first fresh clear sample of
+                   an open incident (TempDbSpaceClearSamples). Still gated on !suppressed, exactly as before.
+                   The "N/A" arm of the old message is gone with the null-resolve above — tempDb is non-null
+                   here by construction, so the percentage is always the one that was measured. */
                 if (!suppressed)                                                    /* :459 */
                 {
-                    var pct = tempDb != null ? $"{tempDb.ReservedPercent:F0}%" : "N/A"; /* :461 */
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "tempdb Space",
                         "tempdb Space Resolved",                                    /* :463 */
-                        $"{serverName}: tempdb reserved space back to {pct}"), ct);          /* :464 */
+                        $"{serverName}: tempdb reserved space back to {tempDb.ReservedPercent:F0}%"), ct); /* :461,:464 */
                 }
             }
         }

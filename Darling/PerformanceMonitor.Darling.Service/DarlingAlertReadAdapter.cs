@@ -759,7 +759,10 @@ ORDER BY
 
     /* ---------------- tempdb ---------------- */
 
-    /// <summary>Lite's latest-tempdb-snapshot read verbatim (tempdb_stats table).</summary>
+    /// <summary>Lite's latest-tempdb-snapshot read verbatim (tempdb_stats table). <c>collection_time</c> rides
+    /// as the last column since #3653 (A5): it is the row the read already orders by, projected so the engine's
+    /// persistence gate can tell a fresh collection from a re-read of the last one — see
+    /// <see cref="TempDbSpaceInfo.CollectionTimeUtc"/>. Same shape as before: one row, one index seek.</summary>
     public const string TempDbSpaceSql = @"
 SELECT
     total_reserved_mb,
@@ -769,7 +772,8 @@ SELECT
     version_store_reserved_mb,
     top_session_tempdb_mb,
     top_session_id,
-    max_size_mb
+    max_size_mb,
+    collection_time
 FROM tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -799,7 +803,12 @@ LIMIT 1";
                 /* NULL on every row collected before the V81 rung, and 0 is what "no ceiling measured"
                    is spelled as — so history keeps reporting the percentage it always did rather than
                    dividing by a zero cap. */
-                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7))
+                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                /* #3653 (A5): naive UTC off the `timestamp` column, read back Kind Unspecified and stamped Utc
+                   because that is what it IS and what the property's name says — the #3636 file-growth read's
+                   idiom. The engine only ever compares one server's stamps with each other, so the Kind is
+                   honesty rather than arithmetic. */
+                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             };
         }
 
