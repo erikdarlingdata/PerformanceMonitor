@@ -21,6 +21,18 @@ namespace PerformanceMonitor.Collectors;
 /// 0 there (#1048); incomplete SystemHealth ring-buffer records are skipped (#989);
 /// Azure filters server-side on the watermark while the ring buffer dedups client-side
 /// (its sample_time is computed and cannot be filtered in SQL).
+///
+/// <para><b>Also the identity-epoch carrier for SQL Server targets (#3653 A5).</b> The ring-buffer batch
+/// already reads <c>sys.dm_os_sys_info</c> on every run for <c>ms_ticks</c> and <c>sqlserver_start_time</c>
+/// (the ring-buffer timestamps are converted off them), so the instance's start time is on the target side
+/// of the wire for free; a second result set hands it back with <c>@@SERVERNAME</c>, and <see cref="ReadAsync"/>
+/// gives the pair to <see cref="ServerEpoch.ObserveInstance"/>, which compares it against the pair persisted
+/// in <c>collector_state</c> under this collector's name and, on a value → different-value change, forgets
+/// every delta baseline for the server, marks the run's note, and persists the new pair. No new DMV, no new
+/// permission (the DMV was already required), no new round trip. The Azure SQL DB path carries no identity:
+/// its batch never touched the DMV (#1535's permission story) and a logical server's failover keeps its
+/// name, so an Azure target simply never observes an epoch here. The declared <see cref="StateKeys"/> are what
+/// makes both hosts load and persist the pair (#1962's generic wiring, CollectorStateContractTests).</para>
 /// </summary>
 public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtilizationCollector.Row>
 {
@@ -134,7 +146,15 @@ CROSS APPLY
 WHERE x.process_utilization IS NOT NULL
 AND   x.system_idle IS NOT NULL
 ORDER BY t.timestamp DESC
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* #3653 A5: the instance identity, as a second result set off the payload (the default_trace_events
+   idiom for a per-run fact the rows cannot carry). @start_time is the sqlserver_start_time this batch
+   read above; a login without VIEW SERVER STATE fails this batch at its first DMV and never reaches
+   this set, so an unknown start time here means the column was NULL, not that the read was refused. */
+SELECT
+    server_start_time = @start_time,
+    server_name = @@SERVERNAME;";
 
     public override string Name => "cpu_utilization";
 
@@ -145,6 +165,17 @@ OPTION(RECOMPILE);";
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
+
+    /// <summary>
+    /// The identity pair this collector persists per server (#3653 A5) — declared so both hosts read the
+    /// prior pair before the run and write the observed one after it. One row per server per key, for the
+    /// life of the server_id; the previous-pair key is written only on an epoch.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[]
+    {
+        ServerEpoch.IdentityStateKey,
+        ServerEpoch.IdentityPreviousStateKey,
+    };
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -187,6 +218,24 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 /* NULL = host/other CPU not derivable (SystemIdle reported 0, Issue #1048) */
                 reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)));
+        }
+
+        /* #3653 A5: the batch's SECOND result set — the instance identity. Read off the payload and after
+           it, because this collector subtracts nothing itself (CPU samples are gauges), so nothing here is
+           ordered before a delta call; the families that DO subtract and run after this collector in the
+           schedule are the ones the forget protects on this pass (see ServerEpoch's remarks on the order).
+           The Azure batch has no second set; the explicit engine gate says so rather than leaving it to a
+           NextResult that happens to return false. A NULL start time (never on this path today, but the
+           column is nullable) observes an unknown, which ServerEpoch treats as no evidence. */
+        if (!context.Target.IsAzureSqlDb
+            && await reader.NextResultAsync(cancellationToken)
+            && await reader.ReadAsync(cancellationToken))
+        {
+            ServerEpoch.ObserveInstance(
+                context,
+                new ServerEpoch.Stamp(
+                    reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
         }
 
         return rows;

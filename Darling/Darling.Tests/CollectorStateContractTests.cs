@@ -117,9 +117,18 @@ public sealed class CollectorStateContractTests
            on the service-sampler arm, the cumulative tally the next cycle adds to — state a MAX() over the
            table cannot recover, since the table holds only the tally's last written value per key. Neither
            needed host CODE: the wiring below is generic. Enumerated in the same file that pins that wiring,
-           so a collector newly declaring state lands here first. */
+           so a collector newly declaring state lands here first.
+
+           FOUR since #3653 A5. cpu_utilization persists the SQL Server instance identity it already reads
+           (sqlserver_start_time, @@SERVERNAME) and pg_statement_stats persists pg_stat_statements_info
+           .stats_reset - the pair each compares its next observation against to detect an identity epoch
+           (ServerEpoch). Persisted, not held in memory, because the case that matters most is a target that
+           restarted or failed over while the HOST was down: the host's restart seed (#3614) then restores
+           baselines read from the old instance, and only a prior that survived the host restart can catch
+           that on the first pass. Both write change-only, so the steady state is zero state writes; neither
+           needed host code either. */
         Assert.Equal(
-            new[] { "default_trace_events", "pg_wait_sampling" },
+            new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

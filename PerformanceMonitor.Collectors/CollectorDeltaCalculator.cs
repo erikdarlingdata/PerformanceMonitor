@@ -188,16 +188,102 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     }
 
     /// <summary>
+    /// The discontinuity accounts (#3653 A5) a definition handed to <see cref="ClearServer"/> or
+    /// <see cref="ClearGroups"/> and no host has logged yet: serverId -> the lines, in the order they were
+    /// given. The calculator is the one object a definition and its host both hold, so it is where the
+    /// account waits between the read that saw the epoch and the host's log line after the run; see
+    /// <see cref="DrainDiscontinuities"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, ConcurrentQueue<string>> _discontinuities = new();
+
+    /// <summary>
     /// Removes all cached entries for a server (e.g., when the server tab is closed).
     /// Next collection will re-seed from database if needed.
+    ///
+    /// <para>Since #3653 A5 this is also what a definition calls when it sees that the counters behind
+    /// <paramref name="serverId"/> are a different instance's than the baselines were read from — a new
+    /// <c>sqlserver_start_time</c> or <c>@@SERVERNAME</c> against the pair persisted in
+    /// <c>collector_state</c> (<see cref="ServerEpoch"/>) — and what Darling's reconcile calls when a
+    /// registration reconnects under the same id with a changed connection. <paramref name="discontinuity"/>
+    /// is the definition's one-line account of the change, queued for the host to log; null from the
+    /// remove paths, which log their own reason.</para>
     /// </summary>
-    public void ClearServer(int serverId)
+    public void ClearServer(int serverId, string? discontinuity = null)
     {
         _cache.TryRemove(serverId, out _);
         /* The pass window goes with the baselines it is interpreted against. Left behind, a re-added
            server's first pass would measure a series age against a look from before it was removed and
            credit a full counter to an interval that never happened. */
         _passes.TryRemove(serverId, out _);
+        NoteDiscontinuity(serverId, discontinuity);
+    }
+
+    /// <summary>
+    /// Forgets the baselines AND the pass window of the named delta groups for one server, leaving the
+    /// server's other groups untouched (#3653 A5). For an epoch that is one family's alone —
+    /// <c>pg_stat_statements_info.stats_reset</c> moving says the statements counters restarted and says
+    /// nothing about any other counter on the instance. Both halves go together for the reason
+    /// <see cref="ClearServer"/> gives: a group's pass window left behind would credit a series age against
+    /// a look that belongs to the counters being forgotten.
+    /// </summary>
+    public void ClearGroups(int serverId, string? discontinuity, params string[] groups)
+    {
+        if (groups is null || groups.Length == 0)
+        {
+            return;
+        }
+
+        if (_cache.TryGetValue(serverId, out var serverCache))
+        {
+            foreach (var group in groups)
+            {
+                serverCache.TryRemove(group, out _);
+            }
+        }
+
+        if (_passes.TryGetValue(serverId, out var serverPasses))
+        {
+            foreach (var group in groups)
+            {
+                serverPasses.TryRemove(group, out _);
+            }
+        }
+
+        NoteDiscontinuity(serverId, discontinuity);
+    }
+
+    /// <summary>
+    /// Hands back — and forgets — every discontinuity account queued for <paramref name="serverId"/> since
+    /// the last drain, oldest first; empty when there is nothing to say, which is every ordinary run. A host
+    /// calls this once per collector run, after the run, and writes each line to its log at Information:
+    /// the definition that saw the epoch composed the sentence (old value, new value, what was forgotten)
+    /// and the host owns the logger and the server's display name. Read-once so a line is logged by exactly
+    /// one run and never re-logged by the next.
+    /// </summary>
+    public IReadOnlyList<string> DrainDiscontinuities(int serverId)
+    {
+        if (!_discontinuities.TryRemove(serverId, out var queue) || queue.IsEmpty)
+        {
+            return System.Array.Empty<string>();
+        }
+
+        var lines = new List<string>(queue.Count);
+        while (queue.TryDequeue(out var line))
+        {
+            lines.Add(line);
+        }
+
+        return lines;
+    }
+
+    private void NoteDiscontinuity(int serverId, string? discontinuity)
+    {
+        if (string.IsNullOrWhiteSpace(discontinuity))
+        {
+            return;
+        }
+
+        _discontinuities.GetOrAdd(serverId, _ => new ConcurrentQueue<string>()).Enqueue(discontinuity);
     }
 
     /// <summary>

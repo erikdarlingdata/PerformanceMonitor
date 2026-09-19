@@ -77,6 +77,16 @@ namespace PerformanceMonitor.Collectors;
 /// would need one, but that is a distinct, not-yet-observed failure mode with its own tuning (mirroring
 /// the SQL Server compile-churn pattern already found on the use2 fleet), and adding a cap without
 /// evidence it is needed would just be another number to defend later.</para>
+/// <para><b>Also the statements-epoch carrier (#3653 A5).</b> Every delta above subtracts from a baseline
+/// keyed by the statement's identity, and until #3653 nothing asked whether the counters it subtracted from
+/// were the same counters: <c>pg_stat_statements_reset()</c>, a crash that lost the saved statistics, or an
+/// endpoint that now reaches another instance all restart the counters without changing a key. The query
+/// carries <c>pg_stat_statements_info.stats_reset</c> as its last column, and <see cref="ReadAsync"/> hands it
+/// to <see cref="ServerEpoch.ObserveStatements"/> off the first row, BEFORE that row's own subtraction, so an
+/// epoch forgets this family's baselines (and only this family's - the epoch says nothing about any other
+/// counter on the server) on the very pass that sees it. The reset branch already reported the rows whose
+/// counters FELL as (0, 0); what this adds is the rows whose counters rose past a stale baseline, the
+/// persisted record of when the counters restarted, and the note on the run's collection_log row.</para>
 /// </summary>
 public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<PgStatementStatsCollector.Row>
 {
@@ -156,6 +166,21 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
            older server, not a fallback. */
         var topLevel = postgresMajorVersion >= 14 ? "toplevel" : "true";
 
+        /* #3653 A5: the statements EPOCH, appended at ordinal 27 on both flavors. pg_stat_statements_info
+           (extension 1.9, the same release as toplevel, so the same major guards both) is one row holding
+           stats_reset - the moment the statistics last started from zero. It moves on
+           pg_stat_statements_reset(), when a crash left the saved statistics unreadable, and when the
+           endpoint now reaches an instance with its own history; it does NOT move on a clean restart with
+           pg_stat_statements.save = on, which is exactly right because the counters survive that restart and
+           a subtraction across it is honest. An uncorrelated scalar subquery, so the planner evaluates it
+           once per statement, not per row; on a source below 1.9 the column is a typed NULL, which
+           ServerEpoch reads as "unknown" rather than as a change. The same view under public. as the
+           vanilla read, on both flavors: Aurora's aurora_stat_statements() is the extension's data plus
+           columns and the extension's own info view sits beside it. */
+        var statsReset = postgresMajorVersion >= 14
+            ? "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)"
+            : "NULL::timestamp with time zone";
+
         if (!isAurora)
         {
             return $@"
@@ -186,7 +211,8 @@ SELECT
     wal_fpi::bigint                    AS wal_fpi,
     wal_bytes::bigint                  AS wal_bytes,
     NULL::bigint                       AS total_exec_peakmem,
-    NULL::bigint                       AS max_exec_peakmem
+    NULL::bigint                       AS max_exec_peakmem,
+    {statsReset}                       AS statements_stats_reset
 FROM public.pg_stat_statements
 WHERE calls > 0";
         }
@@ -219,7 +245,8 @@ SELECT
     wal_fpi::bigint                    AS wal_fpi,
     wal_bytes::bigint                  AS wal_bytes,
     total_exec_peakmem::bigint         AS total_exec_peakmem,
-    max_exec_peakmem::bigint           AS max_exec_peakmem
+    max_exec_peakmem::bigint           AS max_exec_peakmem,
+    {statsReset}                       AS statements_stats_reset
 FROM aurora_stat_statements(false)
 WHERE calls > 0";
     }
@@ -255,6 +282,26 @@ WHERE calls > 0";
 
     public override CollectorQuery BuildQuery(CollectorContext context)
         => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora));
+
+    /// <summary>
+    /// The statements epoch this collector persists per server (#3653 A5): <c>pg_stat_statements_info.stats_reset</c>
+    /// as last observed, and the value the latest change replaced. Declared so both hosts read the prior
+    /// before the run and write the observed one after it (#1962's generic wiring). One row per server per
+    /// key; the previous-value key is written only on an epoch.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[]
+    {
+        ServerEpoch.StatementsStateKey,
+        ServerEpoch.StatementsPreviousStateKey,
+    };
+
+    /// <summary>
+    /// The delta groups this collector subtracts under, spelled once for the epoch forget below. The three
+    /// <c>CalculateDeltaWithInterval</c> calls keep their literals on purpose: <c>DeltaFamilySeedingCensusTests</c>
+    /// reads the groups off those call sites, and <c>ServerEpochTests.PgStatementStats_ForgetsItsOwnGroupsBeforeItsFirstSubtraction</c>
+    /// drives one read and asserts the groups the forget named are exactly the groups the pass then subtracted under.
+    /// </summary>
+    internal static readonly string[] DeltaGroups = { "pg_statement_stats_calls", "pg_statement_stats_time", "pg_statement_stats_rows" };
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -305,9 +352,26 @@ WHERE calls > 0";
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var epochObserved = false;
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #3653 A5: the epoch first, off the FIRST row and BEFORE that row's own subtraction. stats_reset
+               is the same on every row (an uncorrelated scalar), so one read is the observation; and it has
+               to precede the delta calls because the forget it may trigger is what makes THIS pass's rows
+               honest - forgotten after the loop, every row would already have been subtracted from the
+               dead baseline and stored. A pass that returns no rows (an idle server right after a reset,
+               with `calls > 0` matching nothing) observes nothing and catches up on the first pass with a
+               row, where the reset branch would have marked those rows (0, 0) anyway. */
+            if (!epochObserved)
+            {
+                epochObserved = true;
+                ServerEpoch.ObserveStatements(
+                    context,
+                    reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                    DeltaGroups);
+            }
+
             var queryId = reader.GetInt64(0);
             var databaseId = reader.GetInt64(1);
             var userId = reader.GetInt64(2);

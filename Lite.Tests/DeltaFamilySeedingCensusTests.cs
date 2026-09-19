@@ -284,6 +284,31 @@ public sealed class DeltaFamilySeedingCensusTests
         Assert.Contains("_deltas?.ClearServer(id);", reconcile, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3653 A5, the adjacency #3540 A4 named and left: Darling's reconcile has a SECOND path that changes what
+    /// a server_id's counters are without removing the server — a definition edit that reconnects under the
+    /// same id (host, database, auth, intent, subnet failover, excluded databases; the fields
+    /// <c>ServerDefinitionEquals</c> compares). It must forget the delta baselines too, or the first pass on
+    /// the new connection subtracts a possibly different instance's counters from the old one's. Pinned as
+    /// two forgets in the method, the second inside the <c>connectionChanged</c> branch.
+    /// </summary>
+    [Fact]
+    public void DarlingReconcile_ForgetsTheDeltaCacheOnASameIdReconnectToo()
+    {
+        var worker = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+        var reconcile = worker[worker.IndexOf("private void ReconcileServers(", StringComparison.Ordinal)..];
+        reconcile = reconcile[..reconcile.IndexOf("\n    }", StringComparison.Ordinal)];
+
+        var forgets = System.Text.RegularExpressions.Regex.Matches(reconcile, System.Text.RegularExpressions.Regex.Escape("_deltas?.ClearServer(id);")).Count;
+        Assert.Equal(2, forgets);
+
+        var branch = reconcile[reconcile.IndexOf("if (connectionChanged)", StringComparison.Ordinal)..];
+        branch = branch[..branch.IndexOf("desiredById.Remove(id);", StringComparison.Ordinal)];
+        Assert.Contains("_deltas?.ClearServer(id);", branch, StringComparison.Ordinal);
+        /* The runtime is dropped in the same branch, so the forget and the reconnect travel together. */
+        Assert.Contains("state.Runtime = null;", branch, StringComparison.Ordinal);
+    }
+
     /* ---------------- helpers ---------------- */
 
     /// <summary>The delta groups each collector passes, read from the collector sources under the shared

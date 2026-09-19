@@ -30,7 +30,8 @@ namespace Lite.Tests;
 /// </para>
 ///
 /// <para>
-/// The ordinals are the load-bearing detail. Both queries select the same 27 columns in the same order — the
+/// The ordinals are the load-bearing detail. Both queries select the same 28 columns in the same order (the
+/// 28th, appended by #3653 A5, is the statements epoch <c>stats_reset</c>, read and not stored) — the
 /// vanilla one fills Aurora's six with typed NULL literals — so <c>ReadAsync</c>, <c>PayloadColumns</c> and
 /// <c>WritePayload</c> stay single implementations. A shorter vanilla SELECT would have meant a second reader
 /// whose ordinals could drift from this one, which is exactly the failure the per-major column naming in this
@@ -77,7 +78,12 @@ public class PgStatementStatsFlavorTests
         var sql = Sql(isAurora: true);
 
         Assert.Contains("FROM aurora_stat_statements(false)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_stat_statements", sql, StringComparison.Ordinal);
+        /* The VIEW is what Aurora must not read - its rows come from the extended function. The extension's
+           one-row pg_stat_statements_info (#3653 A5, the statements epoch) sits beside the view on Aurora
+           too and is read on both flavors; the word boundary is what tells the two apart, since `_` is a
+           word character and the info view's name continues past it. */
+        Assert.DoesNotMatch(new Regex(@"\bpg_stat_statements\b"), sql);
+        Assert.Contains("public.pg_stat_statements_info", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -100,9 +106,30 @@ public class PgStatementStatsFlavorTests
         var vanilla = SelectAliases(Sql(isAurora: false));
 
         Assert.Equal(aurora, vanilla);
-        /* The SELECT list is the payload minus the four columns computed on the client: the three deltas
-           and, since V128 (#3540), the interval they accrued over. */
-        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4, aurora.Count);
+        /* The SELECT list is the payload minus the four columns computed on the client (the three deltas
+           and, since V128 (#3540), the interval they accrued over) PLUS the one column read and not stored:
+           the statements epoch stats_reset (#3653 A5), last, so every stored ordinal is where it was. */
+        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 1, aurora.Count);
+        Assert.Equal("statements_stats_reset", aurora[^1]);
+    }
+
+    /// <summary>
+    /// The statements epoch (#3653 A5) is guarded by the same major as <c>toplevel</c>: both arrived in
+    /// pg_stat_statements 1.9 (PostgreSQL 14). Below it the column is a TYPED null — an untyped one would
+    /// arrive as text and Npgsql's strict <c>GetDateTime</c> would throw — and the epoch check reads null as
+    /// "unknown", never as a change. On 14+ it is an uncorrelated scalar subquery over the one-row info view,
+    /// so the planner evaluates it once per statement, and it is schema-qualified the way the vanilla read of
+    /// the view is.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 13, "NULL::timestamp with time zone")]
+    [InlineData(false, 13, "NULL::timestamp with time zone")]
+    [InlineData(true, 14, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
+    [InlineData(false, 14, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
+    [InlineData(false, 17, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
+    public void TheStatementsEpochColumnFollowsTheToplevelGuard(bool isAurora, int major, string expected)
+    {
+        Assert.Matches(new Regex($@"{Regex.Escape(expected)}\s+AS statements_stats_reset\b"), Sql(isAurora, major));
     }
 
     /// <summary>
@@ -170,7 +197,11 @@ public class PgStatementStatsFlavorTests
     {
         var body = Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
         var start = body.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length;
-        var end = body.IndexOf("FROM ", start, StringComparison.Ordinal);
+        /* The OUTER FROM starts a line; the statements-epoch scalar subquery (#3653 A5) carries an inline
+           `FROM public.pg_stat_statements_info` inside the select list, and a bare "FROM " search stopped
+           there and counted the list short. */
+        var end = body.IndexOf("\nFROM ", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the outer FROM must start its own line");
 
         return Regex.Matches(body[start..end], @"AS\s+([a-z_]+)\s*(?:,|$)", RegexOptions.IgnoreCase)
             .Select(m => m.Groups[1].Value)
