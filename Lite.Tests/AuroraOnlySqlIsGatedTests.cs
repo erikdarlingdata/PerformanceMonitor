@@ -89,6 +89,14 @@ public class AuroraOnlySqlIsGatedTests
             "PROSE (#3604). get_pg_wait_stats' instrument_note tells the caller which source fed the rows — " +
             "Aurora's aurora_stat_system_waits() — so a count can be read beside its grain. The tool reads " +
             "the STORE, never the target; the collector it describes is PgWaitStatsCollector's GATED entry.",
+
+        ["PgTargetAdvice.Anomaly.cs"] =
+            "PROSE (#3542). The ANOMALY_PG_WAIT_PROFILE advice block tells the operator which instrument the " +
+            "baselined wait rate came from — Aurora's aurora_stat_system_waits() deltas as stored in pg_wait_stats " +
+            "— because that anomaly exists only where the engine measured waits: stock PostgreSQL's sampled waits " +
+            "get no anomaly baseline in v1, and the advice must not read as if they did. The advice reads facts, " +
+            "never the target; the dependency itself is PgWaitStatsCollector's GATED entry, and the detector " +
+            "that emits the fact baselines pg_wait_stats, which is empty off Aurora.",
     };
 
     [Fact]
