@@ -79,6 +79,10 @@ public static partial class PgTargetAdvice
                 => ComposeReplication(rootFactKey, factsByKey),
             PgTargetFactKeys.BloatTrend or PgTargetFactKeys.IndexBloatTrend
                 => ComposeBloat(rootFactKey, factsByKey),
+            /* wave 3 (#3691, between waves): the blocking family's three measured keys; its anomaly takes the prefix
+               arm above into ComposeAnomaly, whose ANOMALY_PG_BLOCKING case delegates to ComposeBlockingAnomaly. */
+            PgTargetFactKeys.BlockingChain or PgTargetFactKeys.LockWaitEvents or PgTargetFactKeys.LongRunningQuery
+                => ComposeBlocking(rootFactKey, factsByKey),
             _ when rootFactKey.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)
                 => ComposeConfig(rootFactKey, factsByKey),
             _ => null,
@@ -119,4 +123,10 @@ public static partial class PgTargetAdvice
     private static partial AdviceBlock? ComposeIo(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeReplication(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeBloat(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+
+    /* wave 3 (#3691) — stubbed to null in PgTargetAdvice.Blocking.cs, filled by lane 17. The anomaly composer is
+       declared here too so ComposeAnomaly's arm exists before the family does (lanes 12 and 15 each had to add their
+       own arm to the anomaly partial; lane 17 does not). */
+    private static partial AdviceBlock? ComposeBlocking(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeBlockingAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
 }

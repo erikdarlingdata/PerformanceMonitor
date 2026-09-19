@@ -93,9 +93,13 @@ internal static class PgTargetToolRecommendations
         [
             new("get_pg_session_states", "How much of pg_stat_activity the monitoring role could see"),
         ],
+        /* #3691 between waves (lane 14's report): the idle fact names two of three chains its advice sends the operator
+           to — the xmin claim and the blocking leaf — so the reads for both follow the session read. */
         [PgTargetFactKeys.IdleInTransaction] =
         [
             new("get_pg_session_states", "Idle-in-transaction sessions and how long they have held"),
+            new("get_pg_xmin_horizon", "Whether the parked transaction is the session holding the xmin horizon back"),
+            new("get_pg_blocking", "Whether the parked transaction is the root of a captured blocking chain"),
         ],
         [PgTargetFactKeys.AutovacuumBacklog] =
         [
@@ -183,7 +187,29 @@ internal static class PgTargetToolRecommendations
         [
             new("get_pg_autovacuum_health", "Autovacuum worker activity by table over the window"),
         ],
+        /* Wave 3 (#3691, between waves): the blocking family's rows, declared with its stubs — PgTargetMcpSurfaceTests
+           requires a row the day a key is declared, and which get_pg_* read a family's table is a fact about the
+           product, not a threshold. Lane 17 may reorder or extend them when the advice names its first question. */
+        [PgTargetFactKeys.BlockingChain] = BlockingReads(),
+        [PgTargetFactKeys.LockWaitEvents] =
+        [
+            new("get_pg_log_events", "The lock_wait family: log_lock_waits' own 'still waiting' lines, written by the engine rather than sampled"),
+            new("get_pg_blocking", "The sampled chains over the same window, root blocker attributed"),
+        ],
+        [PgTargetFactKeys.LongRunningQuery] =
+        [
+            new("get_pg_session_states", "Active sessions and how long each statement has been running"),
+            new("get_pg_blocking", "Whether the long runner is the root of a captured blocking chain"),
+        ],
+        [PgTargetFactKeys.AnomalyBlocking] = BlockingReads(),
     };
+
+    private static List<ToolRecommendation> BlockingReads() =>
+    [
+        new("get_pg_blocking", "Captured blocking chains with the root blocker attributed and its recurrence across captures"),
+        new("get_pg_lock_stats", "Which lock modes and relations were contended over the window"),
+        new("get_pg_log_events", "The engine's written lock_wait events between the samples"),
+    ];
 
     private static List<ToolRecommendation> IoReads() =>
     [

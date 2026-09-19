@@ -58,6 +58,8 @@ public static partial class PgTargetScorer
             PgTargetSources.IoSource => ScoreIoFact(fact),
             PgTargetSources.ReplicationSource => ScoreReplicationFact(fact),
             PgTargetSources.BloatSource => ScoreBloatFact(fact),
+            /* wave 3 (#3691, between waves): the blocking family's arm, to its stub until lane 17. */
+            PgTargetSources.BlockingSource => ScoreBlockingFact(fact),
             _ => 0.0,
         };
     }
@@ -90,6 +92,9 @@ public static partial class PgTargetScorer
             PgTargetFactKeys.IoReadLatencyMs or PgTargetFactKeys.IoWriteLatencyMs => IoAmplifiers(key),
             PgTargetFactKeys.ReplicationLag or PgTargetFactKeys.SlotRetention or PgTargetFactKeys.SlotXmin => ReplicationAmplifiers(key),
             PgTargetFactKeys.BloatTrend or PgTargetFactKeys.IndexBloatTrend => BloatAmplifiers(key),
+            /* wave 3 (#3691, between waves): the blocking family's three measured keys. PgTargetSharedSwitchRoutingTests'
+               routing census reads this switch by reflection — a declared measured key with no arm here fails there. */
+            PgTargetFactKeys.BlockingChain or PgTargetFactKeys.LockWaitEvents or PgTargetFactKeys.LongRunningQuery => BlockingAmplifiers(key),
             _ when key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) => ConfigAmplifiers(key),
             _ => [],
         };
@@ -141,4 +146,9 @@ public static partial class PgTargetScorer
 
     private static partial double ScoreBloatFact(Fact fact);
     private static partial List<AmplifierDefinition> BloatAmplifiers(string key);
+
+    /* wave 3 (#3691) — stubbed in PgTargetScorer.Blocking.cs, filled by lane 17. */
+
+    private static partial double ScoreBlockingFact(Fact fact);
+    private static partial List<AmplifierDefinition> BlockingAmplifiers(string key);
 }

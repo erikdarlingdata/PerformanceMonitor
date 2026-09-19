@@ -399,11 +399,10 @@ public sealed class PgTargetKnobsTests
            not an edge — PG_WAL_VOLUME_SHIFT is a base-0 context fact (no absolute bar; graded only through its anomaly),
            so lane 2's inert shift → pressure edge was dead by construction and is gone; the anomaly is not re-keyed onto
            it either (PgTargetRelationshipGraph.Write.cs says why). PgTargetWriteTests pins the amplifier and the fold.
-           Lane 12 (#3691) declared the shift → PG_SLOT_RETENTION edge from its side; it is pinned by membership here and
-           carries the same base-0 caveat (reported on #3691). */
-        var shiftEdges = graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift);
-        Assert.DoesNotContain(shiftEdges, e => e.Destination == PgTargetFactKeys.CheckpointPressure);
-        Assert.Contains(shiftEdges, e => e.Destination == PgTargetFactKeys.SlotRetention);
+           Lane 12 (#3691) declared the shift → PG_SLOT_RETENTION edge from its side with the same base-0 caveat; the
+           #3691 between-waves batch removed it for the same reason and made the co-fire a slot-retention amplifier on
+           the anomaly (PgTargetBetweenWavesV2Tests) — so the shift has NO edges, and this pin moved with it. */
+        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift));
         Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.AnomalyWalVolume));
         Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.CheckpointPressure, atDefault)).Destination);
     }

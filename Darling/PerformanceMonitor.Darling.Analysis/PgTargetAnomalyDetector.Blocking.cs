@@ -1,0 +1,29 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
+
+namespace PerformanceMonitor.Darling.Analysis;
+
+public sealed partial class PgTargetAnomalyDetector
+{
+    /// <summary>
+    /// <c>ANOMALY_PG_BLOCKING</c>: the window's peak blocked-session count per capture (<c>pg_blocking_edges</c> waiters per <c>collection_time</c>) against the <c>pg_blocked_sessions</c> bucket — the z-score shape, graded by the shared deviation ramp (registered in <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c> by the between-waves batch). Folds onto <c>PG_BLOCKING_CHAIN</c>.
+    /// <para>/* filled by lane 17 — returns immediately until then. The filled body copies the five v1 detectors
+    /// in the root file: its own <c>try</c> / <c>catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex,
+    /// context.CancellationToken))</c> fence, the bucket through <see cref="Baselines"/>, the window read a
+    /// <c>public const string …Sql</c> in THIS file over the collector table (the detector census reflects them),
+    /// <c>CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds</c>, the token on every call, and
+    /// <c>AnomalyGate</c>'s metadata (<c>deviation_sigma</c>, <c>fire_threshold</c>, <c>baseline_low_quality</c>,
+    /// <c>fallback_exceedance</c>) plus <c>threshold_lineage = 0</c> on the fact. Any new bar goes in the
+    /// <c>AnomalyThresholds</c> PostgreSQL block WITH its lineage marker. */</para>
+    /// </summary>
+    private partial Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies) => Task.CompletedTask;
+}

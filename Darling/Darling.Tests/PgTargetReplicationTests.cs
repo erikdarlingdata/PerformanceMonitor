@@ -214,7 +214,10 @@ public sealed class PgTargetReplicationTests
         Assert.Contains(lag.AmplifierResults, a => a.Matched && a.Description.Contains("PG_SLOT_RETENTION co-fired", StringComparison.Ordinal));
         Assert.Contains(lag.AmplifierResults, a => a.Matched && a.Description.Contains("SYNCHRONOUS", StringComparison.Ordinal));
         Assert.Contains(lag.AmplifierResults, a => a.Matched == (anomaly.BaseSeverity > 0) && a.Description.Contains("ANOMALY_PG_REPLICATION_LAG co-fired", StringComparison.Ordinal));
-        Assert.Contains(lag.AmplifierResults, a => !a.Matched && a.Description.Contains("PG_WAL_VOLUME_SHIFT", StringComparison.Ordinal));
+        /* #3691 between waves: the WAL co-fire reads ANOMALY_PG_WAL_VOLUME (PgTargetBetweenWavesV2Tests drives it matched);
+           no anomaly in the set, so it is declared and unmatched here — and no amplifier names the context fact any more. */
+        Assert.Contains(lag.AmplifierResults, a => !a.Matched && a.Description.Contains("ANOMALY_PG_WAL_VOLUME", StringComparison.Ordinal));
+        Assert.DoesNotContain(lag.AmplifierResults, a => a.Description.Contains("PG_WAL_VOLUME_SHIFT", StringComparison.Ordinal));
         Assert.True(lag.Severity > lag.BaseSeverity);
 
         /* async, no siblings: nothing lifts it. */
@@ -382,8 +385,10 @@ public sealed class PgTargetReplicationTests
         Assert.Single(stories[1].Path);
     }
 
-    /// <summary>The mesh's other direction, and the inert edges: the hold leading reaches the slot leaf; the
-    /// WAL-shift and anomaly edges are declared against the constants and open only on the destination's BASE.</summary>
+    /// <summary>The mesh's other direction, and the declared edges: the hold leading reaches the slot leaf; the
+    /// lag-anomaly edge is declared against the constant and opens only on the destination's BASE. The WAL-shift
+    /// edge lane 12 declared is GONE (#3691 between waves): the shift is a context fact at base 0 and the edge
+    /// could never open; its co-fire is the slot-retention amplifier reading <c>ANOMALY_PG_WAL_VOLUME</c>.</summary>
     [Fact]
     public void WhenTheHoldLeads_ItReachesTheSlotLeaf_AndTheDeclaredEdgesOpenOnBaseSeverityOnly()
     {
@@ -404,8 +409,8 @@ public sealed class PgTargetReplicationTests
         Assert.Contains(graph.GetActiveEdges(PgTargetFactKeys.AnomalyReplicationLag, Lookup(lag)), e => e.Destination == PgTargetFactKeys.ReplicationLag);
         var slot = Slot(12L * 1024 * 1024 * 1024, "reserved", active: false, growth: 1);
         new FactScorer().ScoreAll([slot]);
-        Assert.Contains(graph.GetActiveEdges(PgTargetFactKeys.WalVolumeShift, Lookup(slot)), e => e.Destination == PgTargetFactKeys.SlotRetention);
-        Assert.DoesNotContain(graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift), e => e.Destination == PgTargetFactKeys.ReplicationLag);
+        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift));
+        Assert.DoesNotContain(graph.GetAllEdges(PgTargetFactKeys.AnomalyWalVolume), e => e.Destination == PgTargetFactKeys.SlotRetention);
         Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.AnomalyReplicationLag, Lookup(steady)));
         /* An amplifier cannot open an edge: BaseSeverity 0 with an inflated Severity stays closed. */
         steady.Severity = 0.9;

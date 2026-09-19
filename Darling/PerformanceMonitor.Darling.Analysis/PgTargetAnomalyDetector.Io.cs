@@ -19,66 +19,71 @@ namespace PerformanceMonitor.Darling.Analysis;
 public sealed partial class PgTargetAnomalyDetector
 {
     /// <summary>
-    /// The window's HOURLY ms per data-file read: the per-identity reset-aware difference of <c>pg_io_stats</c>
-    /// (<c>object_type = 'relation'</c>, every backend and context) at the HOUR grain — the last counter value of
-    /// each identity in each hour, differenced against the previous hour's, clamped at 0, summed over identities —
-    /// then peak, average and count over the hours that clear the operations floor, plus the peak hour and the
-    /// reads behind it. The same quantity, at the same grain and under the same floor, as the
-    /// <c>pg_io_read_latency</c> baseline arm (<c>PgTargetBaselineProvider.Io.cs</c>) and the #3691 calibration
-    /// read (§B1), so the number an hour is judged against is the number the buckets were built from.
+    /// The window's ms per data-file read per FIFTEEN-MINUTE sample: the per-identity reset-aware difference of
+    /// <c>pg_io_stats</c> (<c>object_type = 'relation'</c>, every backend and context) at the quarter-hour grain —
+    /// the last counter value of each identity in each sample, differenced against the previous sample's, clamped
+    /// at 0, summed over identities — then peak, average and count over the samples that clear the reads floor,
+    /// plus the peak sample and the reads behind it. The same quantity, at the same grain and under the same floor,
+    /// as the <c>pg_io_read_latency</c> baseline arm (<c>PgTargetBaselineProvider.Io.cs</c>), so the number a
+    /// sample is judged against is the number the buckets were built from; the calibration read (§B1) distributed
+    /// the same quotient at the hour grain, and a ratio of two sums is the same ratio over any partition of the
+    /// same rows.
     ///
-    /// <para><b>Why the hour, not the collection.</b> A one-minute ms-per-read on a server doing a few hundred
-    /// reads a minute is a quotient over a handful of operations, and its distribution is the noise the
-    /// calibration saw at the low-reads tail; at the hour grain the quotient stabilises and the operations floor
-    /// (<c>PgTargetScorer.IoMinimumOps</c>, the literal 1000 below — <c>PgTargetIoTests</c> pins them equal) has
-    /// a population to apply to. An hour under the floor is not rated, on either side of the comparison.</para>
+    /// <para><b>Why the quarter-hour (#3691 between waves).</b> Lane 11 shipped the hour: one sample per hour-of-week
+    /// bucket per week, four or five in 30 days, under <c>BaselineMath.RestoreThreshold</c> — so every I/O anomaly
+    /// was judged against the hour-of-day collapse. Four samples an hour restores the hour-of-week tier, and the
+    /// detector reads the grain the baseline is built at or the comparison is apples to oranges. A one-minute
+    /// ms-per-read on a server doing a few hundred reads a minute is a quotient over a handful of operations; at
+    /// the quarter-hour the quotient stabilises and the reads floor (<c>PgTargetScorer.IoBaselineBucketMinimumReads</c>,
+    /// the literal 250 below — <c>PgTargetIoTests</c> pins them equal) has a population to apply to. A sample under
+    /// the floor is not rated, on either side of the comparison.</para>
     ///
-    /// <para><c>MAX(counter)</c> per hour is the per-identity last value — a cumulative counter is monotone within
-    /// one <c>stats_reset</c> epoch, and a reset inside the hour makes the next difference negative, where
+    /// <para><c>MAX(counter)</c> per sample is the per-identity last value — a cumulative counter is monotone within
+    /// one <c>stats_reset</c> epoch, and a reset inside the sample makes the next difference negative, where
     /// <c>GREATEST(raw, 0)</c> drops it — the shape the calibration read validated. With timing off every
     /// <c>read_time_ms</c> delta is 0, the quotient is 0 and the peak sits under the floor: the detector is silent
     /// where the regular fact says <c>unavailable</c>, never "0 ms, 20σ below normal".</para>
     /// </summary>
     public const string IoLatencyWindowSql = @"
-WITH hourly AS (
+WITH sampled AS (
     SELECT backend_type, context,
-           date_trunc('hour', collection_time) AS hour_start,
+           date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01') AS sample_start,
            MAX(reads)        AS reads,
            MAX(read_time_ms) AS read_ms
     FROM pg_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     AND   object_type = 'relation'
-    GROUP BY backend_type, context, date_trunc('hour', collection_time)
+    GROUP BY backend_type, context, date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01')
 ),
 deltas AS (
-    SELECT hour_start,
+    SELECT sample_start,
            reads   - LAG(reads)   OVER series AS raw_reads,
            read_ms - LAG(read_ms) OVER series AS raw_read_ms
-    FROM hourly
-    WINDOW series AS (PARTITION BY backend_type, context ORDER BY hour_start)
+    FROM sampled
+    WINDOW series AS (PARTITION BY backend_type, context ORDER BY sample_start)
 ),
-per_hour AS (
-    SELECT hour_start,
+per_sample AS (
+    SELECT sample_start,
            SUM(GREATEST(raw_reads, 0))::DOUBLE PRECISION   AS reads,
            SUM(GREATEST(raw_read_ms, 0))::DOUBLE PRECISION AS read_ms
     FROM deltas
     WHERE raw_reads IS NOT NULL
-    GROUP BY hour_start
+    GROUP BY sample_start
 ),
 rated AS (
-    SELECT hour_start, reads, read_ms / reads AS ms_per_read
-    FROM per_hour
-    WHERE reads >= 1000 /* PgTargetScorer.IoMinimumOps — the per-hour operations floor */
+    SELECT sample_start, reads, read_ms / reads AS ms_per_read
+    FROM per_sample
+    WHERE reads >= 250 /* PgTargetScorer.IoBaselineBucketMinimumReads — the per-sample reads floor */
 )
 SELECT MAX(ms_per_read) AS peak_ms_per_read,
        AVG(ms_per_read) AS avg_ms_per_read,
-       COUNT(*)         AS rated_hours,
-       (SELECT hour_start FROM rated ORDER BY ms_per_read DESC, hour_start DESC LIMIT 1) AS peak_hour,
-       (SELECT reads      FROM rated ORDER BY ms_per_read DESC, hour_start DESC LIMIT 1) AS peak_hour_reads
+       COUNT(*)         AS rated_samples,
+       (SELECT sample_start FROM rated ORDER BY ms_per_read DESC, sample_start DESC LIMIT 1) AS peak_sample,
+       (SELECT reads        FROM rated ORDER BY ms_per_read DESC, sample_start DESC LIMIT 1) AS peak_sample_reads
 FROM rated";
 
     /// <summary>
-    /// <c>ANOMALY_PG_IO_LATENCY</c>: the window's peak hourly read latency (ms per read, from <c>pg_io_stats</c>) against the <c>pg_io_read_latency</c> bucket — the z-score shape <c>DetectSessionAnomalies</c> takes, graded by the shared deviation ramp (registered in <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c>).
+    /// <c>ANOMALY_PG_IO_LATENCY</c>: the window's peak quarter-hour read latency (ms per read, from <c>pg_io_stats</c>) against the <c>pg_io_read_latency</c> bucket — the z-score shape <c>DetectSessionAnomalies</c> takes, graded by the shared deviation ramp (registered in <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c>).
     /// <para>/* filled by lane 11 of #3691 (design §2a, the I/O analogue). The body copies the five v1 detectors in
     /// the root file: its own <c>try</c> / <c>catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex,
     /// context.CancellationToken))</c> fence, the bucket through <see cref="Baselines"/>, the window read
@@ -111,26 +116,30 @@ FROM rated";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
-            var ratedHours = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            if (ratedHours == 0) return;
+            var ratedSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            if (ratedSamples == 0) return;
 
             var peakMsPerRead = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var avgMsPerRead = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var peakHour = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var peakHourReads = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            var peakSample = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var peakSampleReads = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakMsPerRead,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgIoReadLatency), PgIoLatencyFloorMs, PgIoLatencyFallbackMs, SigmaDisplayCap);
             if (!decision.Fire) return;
 
-            var metadata = ZScoreMetadata(baseline, decision, ratedHours);
+            var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
             /* measured (§B1): the two bars above were read off the fleet — see the summary. */
             metadata["threshold_lineage"] = 1;
             metadata["peak_ms_per_read"] = peakMsPerRead;
             metadata["avg_ms_per_read"] = avgMsPerRead;
-            metadata["peak_hour_reads"] = peakHourReads;
-            metadata["peak_hour_ticks"] = peakHour?.Ticks ?? 0;
+            /* The quarter-hour sample the peak came from, the reads behind it, and the admission floor those reads
+               cleared (PgTargetScorer.IoBaselineBucketMinimumReads — unmeasured, stated on the constant; a sample-
+               admission floor, not a grading bar, so the lineage stamp above stays 1 for the measured fire bars). */
+            metadata["peak_sample_reads"] = peakSampleReads;
+            metadata["peak_sample_ticks"] = peakSample?.Ticks ?? 0;
+            metadata["bucket_reads_floor"] = PgTargetScorer.IoBaselineBucketMinimumReads;
 
             anomalies.Add(new Fact
             {

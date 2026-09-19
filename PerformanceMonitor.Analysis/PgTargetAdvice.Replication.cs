@@ -84,7 +84,9 @@ public static partial class PgTargetAdvice
         var overBar = peak >= PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes;
         var slot = facts.TryGetValue(PgTargetFactKeys.SlotRetention, out var sr) && sr.Severity > 0;
         var anomaly = facts.TryGetValue(PgTargetFactKeys.AnomalyReplicationLag, out var an) && an.Severity > 0;
-        var walShift = facts.TryGetValue(PgTargetFactKeys.WalVolumeShift, out var ws) && ws.Severity > 0;
+        /* #3691 between waves: the WAL-volume co-fire is the ANOMALY's verdict — PG_WAL_VOLUME_SHIFT is a context
+           fact at severity 0 by design (lane 15), so reading it here never produced the sentence. */
+        var walShift = facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var ws) && ws.Severity > 0;
 
         var shape = drifting ? "DRIFTING — falling further behind through the window" : "steady — pacing behind at a distance";
         var headline = f.Severity > 0
@@ -112,7 +114,7 @@ public static partial class PgTargetAdvice
         if (anomaly)
             inv.Append("ANOMALY_PG_REPLICATION_LAG co-fired: against this server's own hour-of-week baseline the gap is anomalous, not this standby's routine distance. ");
         if (walShift)
-            inv.Append("PG_WAL_VOLUME_SHIFT co-fired: the primary is writing more WAL than its baseline — more is being offered than the standby can apply. ");
+            inv.Append("ANOMALY_PG_WAL_VOLUME co-fired: the primary is writing more WAL than its own hour-of-week baseline — more is being offered than the standby can apply. ");
 
         var rem = new StringBuilder();
         rem.Append(stage switch
@@ -209,7 +211,9 @@ public static partial class PgTargetAdvice
         var kind = logical ? "logical" : "physical";
         var xmin = facts.TryGetValue(PgTargetFactKeys.SlotXmin, out var sx) && sx.Severity > 0;
         var lag = facts.TryGetValue(PgTargetFactKeys.ReplicationLag, out var rl) && rl.Severity > 0;
-        var walShift = facts.TryGetValue(PgTargetFactKeys.WalVolumeShift, out var ws) && ws.Severity > 0;
+        /* #3691 between waves: the WAL-volume co-fire is the ANOMALY's verdict — PG_WAL_VOLUME_SHIFT is a context
+           fact at severity 0 by design (lane 15), so reading it here never produced the sentence. */
+        var walShift = facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var ws) && ws.Severity > 0;
 
         var headline = arm switch
         {
@@ -237,7 +241,7 @@ public static partial class PgTargetAdvice
         if (lag)
             inv.Append("PG_REPLICATION_LAG co-fired: a connected standby is behind, so the retained WAL has a consumer that is not keeping up rather than none. ");
         if (walShift)
-            inv.Append("PG_WAL_VOLUME_SHIFT co-fired: the primary is writing more WAL than its baseline, so the pile grows faster than its history suggests. ");
+            inv.Append("ANOMALY_PG_WAL_VOLUME co-fired: the primary is writing more WAL than its own hour-of-week baseline, so the pile grows faster than its history suggests. ");
 
         var rem = new StringBuilder();
         rem.Append(arm switch

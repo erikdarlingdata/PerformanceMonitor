@@ -14,11 +14,18 @@ namespace PerformanceMonitor.Analysis;
 /// xmin", declared as a MESH for the reason the vacuum chain is one: whichever of the two roots first must reach
 /// the other or the one incident becomes two cards), <c>PG_REPLICATION_LAG</c> → <c>PG_SLOT_RETENTION</c> → <c>PG_SLOT_XMIN</c>
 /// (a standby's unreplayed WAL is its slot's retained WAL; a retaining slot may be pinning the horizon too — the
-/// two independent harms of one abandoned slot, walked in the order an operator meets them), <c>PG_WAL_VOLUME_SHIFT</c>
-/// → <c>PG_SLOT_RETENTION</c> (lane 15's fact: the primary writing more WAL than its baseline is a faster-growing
-/// pile behind a slot; declared against the constant, inert until that fact exists — the lag fact takes the shift
-/// as an amplifier, not an edge), and <c>ANOMALY_PG_REPLICATION_LAG</c> → <c>PG_REPLICATION_LAG</c> (the
-/// baseline-relative judgment leads to the fact that names the standby and the stage).
+/// two independent harms of one abandoned slot, walked in the order an operator meets them), and
+/// <c>ANOMALY_PG_REPLICATION_LAG</c> → <c>PG_REPLICATION_LAG</c> (the baseline-relative judgment leads to the fact
+/// that names the standby and the stage).
+///
+/// <para><b>No WAL-volume edge, and why (#3691 between waves, lane 15's report).</b> Lane 12 declared
+/// <c>PG_WAL_VOLUME_SHIFT</c> → <c>PG_SLOT_RETENTION</c> against the constant, expecting lane 15's fact to fire
+/// it. Lane 15 shipped the shift as a CONTEXT fact — base severity 0 by design, the WAL numbers for the advice to
+/// state — with the judgment in <c>ANOMALY_PG_WAL_VOLUME</c>, and <c>InferenceEngine</c> walks edges only from
+/// facts in the fired set, so the edge could never open. It is gone; the co-fire lives where lane 15 put the
+/// checkpoint family's: an amplifier on the slot-retention fact (<c>PgTargetScorer.Replication.cs</c>) that reads
+/// the anomaly's base severity. No edge from the anomaly either — it folds onto <c>PG_CHECKPOINT_PRESSURE</c>
+/// (<c>PgTargetFactKeys.AnomalyToFamilies</c>) and <c>PgTargetWriteTests</c> pins that it has no edges at all.</para>
 ///
 /// <para>Predicates read the destination fact's <see cref="Fact.BaseSeverity"/>, never a bar of their own and
 /// never <see cref="Fact.Severity"/> — an edge must not be opened by an amplifier the edge itself would then
@@ -45,13 +52,6 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.SlotRetention, PgTargetFactKeys.SlotXmin, ReplicationCategory,
             "PG_SLOT_XMIN fired — a slot is pinning the vacuum horizon as well as the disk: the second independent harm of an abandoned slot",
             facts => FiredBase(facts, PgTargetFactKeys.SlotXmin));
-
-        /* WAL volume shift (lane 15) → the slot retaining that WAL. Inert until the fact exists; the lag fact reads
-           the shift as an amplifier instead of an edge (the write chain already owns the shift's checkpoint walk,
-           and one replication destination keeps that walk from forking three ways). */
-        AddEdge(PgTargetFactKeys.WalVolumeShift, PgTargetFactKeys.SlotRetention, ReplicationCategory,
-            "PG_SLOT_RETENTION fired — the primary is writing more WAL than its baseline and a slot is making it keep that WAL",
-            facts => FiredBase(facts, PgTargetFactKeys.SlotRetention));
 
         /* anomaly → the fact it folds into: the baseline-relative judgment leads to the standby and stage. */
         AddEdge(PgTargetFactKeys.AnomalyReplicationLag, PgTargetFactKeys.ReplicationLag, ReplicationCategory,

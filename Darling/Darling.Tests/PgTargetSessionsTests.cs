@@ -473,7 +473,8 @@ public sealed class PgTargetSessionsTests
     /// <c>PG_IDLE_IN_TRANSACTION</c> hook became edges: saturation's edges are the two wait keys AND the idle fact,
     /// the idle fact's are saturation and the two wait keys, <c>PG_XMIN_HOLD</c> gains one edge into the idle fact
     /// (declared from this file, the vacuum chain's category), and the permissions fact still has none. The
-    /// wait-side pins (a Lock wait's edges stay Single) are <c>PgTargetWaitTests</c>'.
+    /// wait-side pins (a Lock wait's edges: saturation, and since the #3691 between-waves batch the idle leaf too)
+    /// are <c>PgTargetWaitTests</c>'; the file's <c>AddEdge</c> count moved 9 → 11 with that pair.
     /// </summary>
     [Fact]
     public void TheSaturationChain_MeshesWithTheLockWaits_AndTheIdleInTransactionLeaf_AndThePermissionsFactHasNoEdge()
@@ -492,7 +493,7 @@ public sealed class PgTargetSessionsTests
 
         var source = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Saturation.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
-        Assert.Equal(9, Count(code, "AddEdge("));
+        Assert.Equal(11, Count(code, "AddEdge("));
         Assert.Contains("PgTargetFactKeys.IdleInTransaction", code, StringComparison.Ordinal);
         /* Every predicate reads a verdict (BaseSeverity) or the saturation fact's own share — never a bar of its own. */
         Assert.DoesNotContain("Severity > 0.", code, StringComparison.Ordinal);

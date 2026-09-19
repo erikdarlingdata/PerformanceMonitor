@@ -54,13 +54,14 @@ public sealed class PgTargetFactCollectorTests
 
     /// <summary>
     /// The collect surface, ordinal-sorted: the two plumbing methods (coverage witness, registry metadata),
-    /// the ten v1 family partials, and (#3691 v2 plumbing) the three v2 family stubs — I/O (lane 11),
-    /// replication (lane 12), bloat (lane 13) — which the content lanes fill in place. Adding a family is a
-    /// deliberate edit here.
+    /// the ten v1 family partials, (#3691 v2 plumbing) the three v2 family stubs — I/O (lane 11),
+    /// replication (lane 12), bloat (lane 13) — and (#3691 between waves) the wave-3 blocking stub (lane 17),
+    /// which the content lanes fill in place. Adding a family is a deliberate edit here.
     /// </summary>
     private static readonly string[] CollectSurface =
     {
         "CollectBloatFactsAsync",
+        "CollectBlockingFactsAsync",
         "CollectBufferFactsAsync",
         "CollectConfigFactsAsync",
         "CollectCpuFactsAsync",
@@ -111,9 +112,10 @@ public sealed class PgTargetFactCollectorTests
         }
 
         var stubs = files.Where(f => f is not ("PgTargetFactCollector.Coverage.cs" or "PgTargetFactCollector.Metadata.cs")).ToList();
-        /* Ten v1 families plus the three v2 families (#3691). Every family file names its lane — two digits now
-           that v2's lanes are 11–13, which \d alone would have matched on their first digit and told no one. */
-        Assert.Equal(13, stubs.Count);
+        /* Ten v1 families plus the three v2 families (#3691) plus the wave-3 blocking family (#3691 between waves).
+           Every family file names its lane — two digits now that v2's lanes are 11–13, which \d alone would have
+           matched on their first digit and told no one. */
+        Assert.Equal(14, stubs.Count);
         foreach (var stub in stubs)
         {
             var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), stub!));
@@ -121,7 +123,7 @@ public sealed class PgTargetFactCollectorTests
         }
 
         /* The v2 files carry the exact marker the content briefs quote (a filled family keeps it, as v1's did). */
-        foreach (var (file, lane) in new[] { ("PgTargetFactCollector.Io.cs", 11), ("PgTargetFactCollector.Replication.cs", 12), ("PgTargetFactCollector.Bloat.cs", 13) })
+        foreach (var (file, lane) in new[] { ("PgTargetFactCollector.Io.cs", 11), ("PgTargetFactCollector.Replication.cs", 12), ("PgTargetFactCollector.Bloat.cs", 13), ("PgTargetFactCollector.Blocking.cs", 17) })
         {
             var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), file));
             Assert.Contains($"/* filled by lane {lane}", text, StringComparison.Ordinal);
@@ -217,6 +219,9 @@ public sealed class PgTargetFactCollectorTests
             ("pg_blocking_edges", "lane 16 — deadlock / blocking drill-down"),
             ("pg_lock_stats", "lane 14 — idle-in-transaction lock holders"),
             ("pg_wait_sampling", "lane 15 / lane 5 residue — the stock sampled wait estimate"),
+            /* wave 3 (#3691 between waves): the blocking family's three tables, pinned for lane 17. */
+            ("pg_log_events", "lane 17 — the lock_wait event family"),
+            ("pg_session_states", "lane 17 — long-running active statements (lane 14 reads it too)"),
         })
         {
             Assert.True(tables.Contains(table), $"{table} ({lane}) is not a CollectorCatalog target table; the v2 lane that reads it would fail the FROM/JOIN census");

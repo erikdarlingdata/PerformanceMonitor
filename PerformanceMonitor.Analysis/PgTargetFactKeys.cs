@@ -84,6 +84,13 @@ public static class PgTargetSources
     /// (lane 13).</summary>
     public const string BloatSource = "pg_bloat";
 
+    /* ── wave 3 (#3691) source, declared by the between-waves batch and filled by lane 17. ── */
+
+    /// <summary>Blocking-chain, lock-wait-event and long-running-query facts from <c>pg_blocking_edges</c> (the
+    /// sampled chain edges, <c>BlockingChainReconstructor</c>'s input), <c>pg_log_events</c> (the <c>lock_wait</c>
+    /// family — the engine's own written blocked-process report) and <c>pg_session_states</c> (design §2a; lane 17).</summary>
+    public const string BlockingSource = "pg_blocking";
+
     /// <summary>The prefix every PostgreSQL-target source carries; the shared scorer routes on it.</summary>
     public const string Prefix = "pg_";
 
@@ -91,7 +98,7 @@ public static class PgTargetSources
     /// keeps, so the two lists can be compared without re-sorting.</summary>
     public static readonly IReadOnlyList<string> All = new[]
     {
-        BloatSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, IoSource, PostureSource, QueriesSource,
+        BloatSource, BlockingSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, IoSource, PostureSource, QueriesSource,
         ReplicationSource, SessionsSource, TempSource, VacuumSource, WaitsSource, WriteSource,
     };
 
@@ -142,7 +149,12 @@ public static class PgTargetFactKeys
     public const string ConfigSuperuserReserved = "CONFIG_PG_SUPERUSER_RESERVED";
     public const string BufferCachePressure = "PG_BUFFER_CACHE_PRESSURE";
     public const string CheckpointPressure = "PG_CHECKPOINT_PRESSURE";
-    /// <summary>v2 fact; declared for the write-chain edge into <see cref="CheckpointPressure"/>.</summary>
+    /// <summary>The window's WAL volume against its baseline, as lane 15 of #3691 shipped it: a CONTEXT fact (base
+    /// severity 0) carrying the measured rates for the advice to state. The JUDGMENT is <see cref="AnomalyWalVolume"/>,
+    /// which folds onto <see cref="CheckpointPressure"/> and is what every co-fire reads (the checkpoint trigger
+    /// amplifier, the replication family's two WAL amplifiers); no graph edge leaves this key or the anomaly — a
+    /// base-0 fact is never in the fired set, so an edge from it can never open (the #3691 between-waves lesson,
+    /// pinned in <c>PgTargetWriteTests</c> and <c>PgTargetReplicationTests</c>).</summary>
     public const string WalVolumeShift = "PG_WAL_VOLUME_SHIFT";
     /// <summary>The one <c>pg_database_stats</c> read (lane 2's <c>Database.cs</c>) emits these four.</summary>
     public const string Tps = "PG_TPS";
@@ -267,6 +279,29 @@ public static class PgTargetFactKeys
     /// because WAL volume is the leading edge of checkpoint pressure (§3.11). Lane 15.</summary>
     public const string AnomalyWalVolume = "ANOMALY_PG_WAL_VOLUME";
 
+    /* ── Wave 3 (#3691) vocabulary, declared by the between-waves batch so lane 17 references constants and never
+       edits this file (the v2 plumbing's shape, #3715). Design §2a: active-query facts; blocking facts plus the
+       BlockingChainReconstructor port. Every stub the family fills carries the "filled by lane 17" marker. ── */
+
+    /* Lane 17 — blocking / active queries, from pg_blocking_edges, pg_log_events (lock_wait) and pg_session_states. */
+
+    /// <summary>A blocking chain reconstructed from the window's sampled <c>pg_blocking_edges</c> — the root blocker
+    /// attributed (pid, state, application, statement fingerprint), the sessions behind it, the depth; the fact
+    /// names the root and states how many captures it was the root of, so one stuck session and a recurring pattern
+    /// grade differently. A SAMPLE, never an event log (the collector's own caveat). Lane 17.</summary>
+    public const string BlockingChain = "PG_BLOCKING_CHAIN";
+    /// <summary>The <c>lock_wait</c> family of <c>pg_log_events</c> (#3601: <c>log_lock_waits</c>' "still waiting for
+    /// … after N ms" lines) at EVENT grain — written by the engine, not sampled, so it sees what the chain sample
+    /// between two captures cannot; a rate over observed time, with the statement fingerprint. Lane 17.</summary>
+    public const string LockWaitEvents = "PG_LOCK_WAIT_EVENTS";
+    /// <summary>An active statement running far longer than the window's norm for it (<c>pg_session_states</c>'s
+    /// active rows by <c>query_start</c>), named by fingerprint — the active-query half of §2a, distinct from the
+    /// idle holder <see cref="IdleInTransaction"/> names. Lane 17.</summary>
+    public const string LongRunningQuery = "PG_LONG_RUNNING_QUERY";
+    /// <summary>Blocked sessions per capture against their own baseline (<c>pg_blocked_sessions</c>) — z-score
+    /// shape; folds onto <see cref="BlockingChain"/>. Lane 17.</summary>
+    public const string AnomalyBlocking = "ANOMALY_PG_BLOCKING";
+
     /* Wave 2 — declared so the name is settled; no stub, no lane in this wave. */
 
     /// <summary>The autovacuum worker profile changing shape against its baseline
@@ -364,7 +399,9 @@ public static class PgTargetFactKeys
     /// <see cref="AnomalyReplicationLag"/> onto the lag fact; <see cref="AnomalyWalVolume"/> onto
     /// <see cref="CheckpointPressure"/>, not onto <see cref="WalVolumeShift"/> — WAL volume is the LEADING EDGE
     /// of checkpoint pressure (design §3.11), so the incident the operator sees is the checkpoint one, with the
-    /// volume shift as its early evidence rather than a second card.</para>
+    /// volume shift as its early evidence rather than a second card. Wave 3: <see cref="AnomalyBlocking"/> folds
+    /// onto <see cref="BlockingChain"/> — more sessions blocked than this hour usually sees is the statistical
+    /// reading of the chain the regular fact names.</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string[]> AnomalyToFamilies =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -375,6 +412,7 @@ public static class PgTargetFactKeys
             [AnomalyIoLatency] = [IoReadLatencyMs],
             [AnomalyReplicationLag] = [ReplicationLag],
             [AnomalyWalVolume] = [CheckpointPressure],
+            [AnomalyBlocking] = [BlockingChain],
         };
 
     /// <summary>The metadata prefix the wait-profile detector stamps its top contributors under —
