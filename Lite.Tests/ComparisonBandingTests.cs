@@ -566,6 +566,91 @@ public sealed class ComparisonBandingTests
     }
 
     /// <summary>
+    /// The v2 baselined keys (#3691 exit check): the exit check's planted store had <c>PG_IO_READ_LATENCY_MS</c>
+    /// 1.55 → 25 ms, <c>PG_REPLICATION_LAG</c> 1 → 200 MB and <c>PG_WAL_VOLUME_SHIFT</c> 1 → 9.7 MB/s all come back
+    /// <c>band_source: absolute</c>, <c>baseline_metric: null</c> while their detectors said 25σ. Each is now mapped to
+    /// the bucket its detector judges against and, given that bucket, reads <c>worse</c> by sigma. The I/O fact bands
+    /// on its value (same ms-per-read quotient as the quarter-hour bucket); the lag fact on its value (peak bytes
+    /// behind, the bucket's own <c>MAX</c>); the WAL fact on its PEAK metadata, never its mean value, because the bucket
+    /// is per-collection and the detector judges the peak — <c>value_delta</c> stays the mean. The withheld shapes:
+    /// an I/O fact that makes no latency claim or states an ungraded quotient, and the WAL <c>unavailable</c> shape
+    /// (no peak stamped) — two unavailable WAL sides are <c>stable</c> by the absolute rule with no sigma, the row
+    /// still naming the bucket.
+    /// </summary>
+    [Fact]
+    public void TheV2PostgresBaselinedKeys_IoLatency_ReplayLag_AndWalVolume_BandBySigma_AndTheirUnavailableShapesDoNot()
+    {
+        /* PG_IO_READ_LATENCY_MS: 1.5 → 25 ms against a bucket at 1.5 with MAD 0.06745 (sigma 0.1). */
+        var (ib, ic) = Scored([PgIo(1.5)], [PgIo(25)]);
+        Assert.Equal(1.5, ComparisonBanding.BaselinedValueFor(ib[0]));
+        var before = Assert.Single(ComparisonBanding.Compare(ib, ic, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, before.BandSource);
+        Assert.Equal(MetricNames.PgIoReadLatency, before.BaselineMetric);
+        var io = Compare(ib, ic, PgBucket(MetricNames.PgIoReadLatency, median: 1.5, mad: 0.06745));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, io.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, io.Status);
+        Assert.Equal(MetricNames.PgIoReadLatency, io.BaselineMetric);
+        Assert.Equal(0.1, io.BaselineSigma!.Value, precision: 4);
+        Assert.Equal(23.5, io.ValueDelta!.Value, precision: 6);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, io.DeltaSigma!.Value, precision: 2); // 235σ raw, capped
+        Assert.True(io.BeyondAnomalyCutoff!.Value);
+        /* Inside one sigma is stable. */
+        var (sb, sc) = Scored([PgIo(1.5)], [PgIo(1.58)]);
+        Assert.Equal(ComparisonBanding.StatusStable, Compare(sb, sc, PgBucket(MetricNames.PgIoReadLatency, 1.5, 0.06745)).Status);
+        /* No latency claim (timing off) or an ungraded quotient: withheld, absolute, the bucket still named. */
+        Assert.Null(ComparisonBanding.BaselinedValueFor(PgIo(0, measured: false)));
+        Assert.Null(ComparisonBanding.BaselinedValueFor(PgIo(25, insufficientOps: true)));
+        var (ub, uc) = Scored([PgIo(0, measured: false)], [PgIo(25)]);
+        var untimed = Compare(ub, uc, PgBucket(MetricNames.PgIoReadLatency, 1.5, 0.06745));
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, untimed.BandSource);
+        Assert.Null(untimed.DeltaSigma);
+        Assert.Equal(MetricNames.PgIoReadLatency, untimed.BaselineMetric);
+
+        /* PG_REPLICATION_LAG: 1 MB → 200 MB against a bucket at 1 MB with MAD 67,450 bytes (sigma 100,000). */
+        var (lb, lc) = Scored([PgLag(1_000_000)], [PgLag(200_000_000)]);
+        Assert.Equal(1_000_000.0, ComparisonBanding.BaselinedValueFor(lb[0]));
+        var lag = Compare(lb, lc, PgBucket(MetricNames.PgReplayLagBytes, median: 1_000_000, mad: 67_450));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, lag.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, lag.Status);
+        Assert.Equal(MetricNames.PgReplayLagBytes, lag.BaselineMetric);
+        Assert.Equal(100_000.0, lag.BaselineSigma!.Value, precision: 2);
+        Assert.Equal(199_000_000.0, lag.ValueDelta!.Value, precision: 2);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, lag.DeltaSigma!.Value, precision: 2);
+        var (qb, qc) = Scored([PgLag(1_000_000)], [PgLag(1_050_000)]);
+        Assert.Equal(ComparisonBanding.StatusStable, Compare(qb, qc, PgBucket(MetricNames.PgReplayLagBytes, 1_000_000, 67_450)).Status);
+
+        /* PG_WAL_VOLUME_SHIFT: mean 1 → 9.7 MB/s, peak 1.2 → 12 MB/s; the bucket (per-collection bytes/s) at 1 MB/s,
+           MAD 67,450 (sigma 100,000). The band is on the PEAK delta; value_delta is the mean's. */
+        var (wb, wc) = Scored([PgWal(mean: 1_000_000, peak: 1_200_000)], [PgWal(mean: 9_700_000, peak: 12_000_000)]);
+        Assert.Equal(1_200_000.0, ComparisonBanding.BaselinedValueFor(wb[0]));
+        Assert.Equal(12_000_000.0, ComparisonBanding.BaselinedValueFor(wc[0]));
+        var wal = Compare(wb, wc, PgBucket(MetricNames.PgWalBytesPerSec, median: 1_000_000, mad: 67_450));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, wal.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, wal.Status);
+        Assert.Equal(MetricNames.PgWalBytesPerSec, wal.BaselineMetric);
+        Assert.Equal(8_700_000.0, wal.ValueDelta!.Value, precision: 2);          // the mean, the fact's own unit
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, wal.DeltaSigma!.Value, precision: 2); // (12M − 1.2M) / 100k = 108σ raw
+        Assert.True(wal.BeyondAnomalyCutoff!.Value);
+        /* A peak inside one sigma is stable however the mean wobbled. */
+        var (pb, pc) = Scored([PgWal(1_000_000, 1_200_000)], [PgWal(1_100_000, 1_250_000)]);
+        Assert.Equal(ComparisonBanding.StatusStable, Compare(pb, pc, PgBucket(MetricNames.PgWalBytesPerSec, 1_000_000, 67_450)).Status);
+        /* Aurora: unavailable on both sides — no peak, no reading, stable by the absolute rule, no sigma. */
+        Assert.Null(ComparisonBanding.BaselinedValueFor(PgWalUnavailable()));
+        var (ab, ac) = Scored([PgWalUnavailable()], [PgWalUnavailable()]);
+        var aurora = Compare(ab, ac, PgBucket(MetricNames.PgWalBytesPerSec, 1_000_000, 67_450));
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, aurora.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, aurora.Status);
+        Assert.Null(aurora.DeltaSigma);
+        Assert.Null(aurora.BaselineSigma);
+        Assert.Equal(MetricNames.PgWalBytesPerSec, aurora.BaselineMetric);
+
+        /* The seven pg_ metrics a full PostgreSQL set asks for — and only those. */
+        Assert.Equal(
+            new[] { MetricNames.PgCpu, MetricNames.PgDeadlockRate, MetricNames.PgIoReadLatency, MetricNames.PgReplayLagBytes, MetricNames.PgSessionCount, MetricNames.PgTps, MetricNames.PgWalBytesPerSec },
+            ComparisonBanding.DispersionMetricsFor([PgTps(1), PgSaturation(1, 10), PgIo(1), PgLag(1)], [PgCpu(1, true), PgDeadlocks(0), PgWal(1, 1)]));
+    }
+
+    /// <summary>
     /// W2: the churn note speaks the engine of the facts. A PostgreSQL fact set (any <c>pg_</c> source) gets the
     /// statement-identity sentence; its <c>PG_BAD_ACTOR_*</c> keys take the presence path and its churn lists
     /// are empty by construction. A SQL Server fact set's note is the sentence it always was, verbatim.
@@ -704,6 +789,46 @@ public sealed class ComparisonBandingTests
     {
         Source = PgTargetSources.CpuSource, Key = PgTargetFactKeys.CpuPercent, Value = percent,
         Metadata = new Dictionary<string, double> { [PgTargetScorer.CpuCapacityMeasuredKey] = measured ? 1 : 0 }
+    };
+
+    /// <summary>The I/O collector's shape (<c>PgTargetFactCollector.Io.cs</c>): value = window read ms ÷ reads;
+    /// <c>latency_measured</c> 0 when timing is off or <c>pg_stat_io</c> is absent; <c>insufficient_ops</c> 1 when the
+    /// quotient is stated but not graded.</summary>
+    private static Fact PgIo(double msPerRead, bool measured = true, bool insufficientOps = false) => new()
+    {
+        Source = PgTargetSources.IoSource, Key = PgTargetFactKeys.IoReadLatencyMs, Value = msPerRead,
+        Metadata = new Dictionary<string, double>
+        {
+            [PgTargetScorer.IoLatencyMeasuredKey] = measured ? 1 : 0,
+            [PgTargetScorer.IoUnavailableKey] = measured ? 0 : 1,
+            [PgTargetScorer.IoInsufficientOpsKey] = insufficientOps ? 1 : 0,
+            [PgTargetScorer.IoOpsKey] = insufficientOps ? 100 : 26_400,
+        }
+    };
+
+    /// <summary>The replication collector's shape: value = the window's peak <c>replay_bytes_behind</c>, the same figure
+    /// in <c>replay_bytes_behind_peak</c>.</summary>
+    private static Fact PgLag(double peakBytes) => new()
+    {
+        Source = PgTargetSources.ReplicationSource, Key = PgTargetFactKeys.ReplicationLag, Value = peakBytes,
+        Metadata = new Dictionary<string, double> { [PgTargetScorer.LagPeakBytesKey] = peakBytes, [PgTargetScorer.LagLatestBytesKey] = peakBytes }
+    };
+
+    /// <summary>The write collector's tracked WAL shape: value = the window's MEAN bytes/s, the peak beside it.</summary>
+    private static Fact PgWal(double mean, double peak) => new()
+    {
+        Source = PgTargetSources.WriteSource, Key = PgTargetFactKeys.WalVolumeShift, Value = mean,
+        Metadata = new Dictionary<string, double>
+        {
+            ["wal_tracked"] = 1, ["avg_wal_bytes_per_sec"] = mean, ["peak_wal_bytes_per_sec"] = peak, ["threshold_lineage"] = 1
+        }
+    };
+
+    /// <summary>The write collector's <c>unavailable</c> WAL shape (Aurora): value 0, no peak stamped.</summary>
+    private static Fact PgWalUnavailable() => new()
+    {
+        Source = PgTargetSources.WriteSource, Key = PgTargetFactKeys.WalVolumeShift, Value = 0,
+        Metadata = new Dictionary<string, double> { ["wal_tracked"] = 0, ["unavailable"] = 1, ["reason_wal_stats_not_reported"] = 1, ["threshold_lineage"] = 1 }
     };
 
     private static Fact PgBadActor(long queryId, double totalMs) => new()

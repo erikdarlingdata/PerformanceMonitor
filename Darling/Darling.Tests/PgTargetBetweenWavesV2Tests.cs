@@ -268,10 +268,14 @@ public sealed class PgTargetBetweenWavesV2Tests
         var darling = Description(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs"));
         var lite = Description(RepoFile.ReadRepoFile("Lite", "Mcp", "McpAnalysisTools.cs"));
         Assert.Equal(darling, lite);
-        Assert.Contains("(SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity)", darling, StringComparison.Ordinal);
-        /* The four named are exactly the four ComparisonBanding maps to a pg_ metric (#3713's seam). */
-        foreach (var key in new[] { PgTargetFactKeys.Tps, PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.DeadlockRate, PgTargetFactKeys.CpuPercent })
+        Assert.Contains("(SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec)", darling, StringComparison.Ordinal);
+        /* The seven named are exactly the seven ComparisonBanding maps to a pg_ metric (#3713's seam, extended by the
+           v2 exit-check residue for the I/O, replication and WAL buckets). */
+        var mapped = new[] { PgTargetFactKeys.Tps, PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.DeadlockRate, PgTargetFactKeys.CpuPercent, PgTargetFactKeys.IoReadLatencyMs, PgTargetFactKeys.ReplicationLag, PgTargetFactKeys.WalVolumeShift };
+        foreach (var key in mapped)
             Assert.StartsWith("pg_", ComparisonBanding.BaselinedMetricFor(key)!, StringComparison.Ordinal);
+        Assert.Equal(7, typeof(PgTargetFactKeys).GetFields().Where(f => f.IsLiteral && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!).Count(k => ComparisonBanding.BaselinedMetricFor(k) is not null));
 
         using var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(ComparisonBanding.BandRulesPayload));
         var rule = doc.RootElement.GetProperty("baseline").GetString()!;

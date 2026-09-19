@@ -34,8 +34,9 @@ namespace PerformanceMonitor.Analysis;
 /// <list type="bullet">
 ///   <item><b>Baseline-banded</b> (<see cref="BandSourceBaseline"/>): a key whose reading is measured in the
 ///   same unit as one of the stored per-(server, metric, hour × day-of-week) baselines
-///   (<see cref="BaselinedMetricFor"/>; the reading is the value itself for every key but the PostgreSQL
-///   saturation fraction, whose peak count is read instead — <see cref="BaselinedValueFor"/>) expresses its
+///   (<see cref="BaselinedMetricFor"/>; the reading is the value itself for every key but two PostgreSQL ones —
+///   the saturation fraction, whose peak count is read instead, and the WAL-volume mean, whose peak rate is —
+///   <see cref="BaselinedValueFor"/>) expresses its
 ///   delta in that bucket's robust sigma
 ///   (<see cref="BaselineBucket.EffectiveRobustSigma"/>, MAD-based with the model's own floors) and is
 ///   <c>stable</c> inside ±<see cref="StableWithinRobustSigmas"/>. Used only when the bucket is
@@ -177,10 +178,28 @@ public static class ComparisonBanding
     /// <see cref="Fact.Value"/> is NOT the bucket's unit: the value is peak ÷ usable connections (a 0–1
     /// fraction) and <c>pg_session_count</c> is <c>MAX(total_sessions)</c> per capture (a count), so the row is
     /// banded on the fact's <c>peak_total_sessions</c> metadata — the very reading the bucket is built from and
-    /// the one <c>PgTargetAnomalyDetector</c> judges against it — never on the fraction in count-sigma. The
-    /// remaining PostgreSQL keys stay unmapped for the reasons the SQL Server ones do: the wait profile is
-    /// per-type shares against an all-types baseline, and no bucket exists for the buffer, write, vacuum, temp
-    /// or config readings.</para>
+    /// the one <c>PgTargetAnomalyDetector</c> judges against it — never on the fraction in count-sigma.</para>
+    ///
+    /// <para><b>The v2 baselined keys (#3691 exit check, the same gap repeated).</b> The v2 lanes stored three more
+    /// <c>pg_</c> buckets and shipped detectors that judge against them, and the exit check found the compare tool
+    /// banding all three <c>absolute</c> / <c>baseline_metric: null</c> in the same window their detectors called
+    /// 25σ. Mapped, each in the bucket's own unit: <c>PG_IO_READ_LATENCY_MS</c> is the window's read time ÷ reads in
+    /// ms (<c>pg_io_stats</c>, reset-aware) and <c>pg_io_read_latency</c> is the same quotient per quarter-hour sample —
+    /// the averaged-key case again, so the band is conservative; a fact that makes no latency claim
+    /// (<c>latency_measured = 0</c>: no <c>pg_stat_io</c> on the major, or <c>track_io_timing</c> off) or whose quotient
+    /// the scorer states but does not grade (<c>insufficient_ops = 1</c>) has no reading and
+    /// <see cref="BaselinedValueFor"/> withholds it. <c>PG_REPLICATION_LAG</c> is the window's peak
+    /// <c>replay_bytes_behind</c> and <c>pg_replay_lag_bytes</c> is <c>MAX(replay_bytes_behind)</c> per collection — the
+    /// same bytes, the value itself. <c>PG_WAL_VOLUME_SHIFT</c> is the second key whose <see cref="Fact.Value"/> is NOT
+    /// the reading banded: the value is the window's MEAN bytes/s across rated collections, but the
+    /// <c>pg_wal_bytes_per_sec</c> bucket is per-collection bytes/s and <c>PgTargetAnomalyDetector.Wal.cs</c> judges
+    /// the window's PEAK against it, so the row is banded on the fact's <c>peak_wal_bytes_per_sec</c> metadata —
+    /// the reading whose verdict <c>beyond_anomaly_cutoff</c> claims to agree with — while <c>value_delta</c> stays
+    /// the mean; the <c>unavailable</c> shape (Aurora, pre-14, an all-zero series — see
+    /// <c>PgTargetFactCollector.Write.cs</c>) carries no peak and is withheld, so two unavailable sides read
+    /// <c>stable</c> by the absolute rule with no sigma. The remaining PostgreSQL keys stay unmapped for the
+    /// reasons the SQL Server ones do: the wait profile is per-type shares against an all-types baseline, and no
+    /// bucket exists for the buffer, checkpoint, vacuum, temp or config readings.</para>
     /// </summary>
     public static string? BaselinedMetricFor(string key) => key switch
     {
@@ -192,6 +211,9 @@ public static class ComparisonBanding
         PgTargetFactKeys.ConnectionSaturation => MetricNames.PgSessionCount,
         PgTargetFactKeys.DeadlockRate => MetricNames.PgDeadlockRate,
         PgTargetFactKeys.CpuPercent => MetricNames.PgCpu,
+        PgTargetFactKeys.IoReadLatencyMs => MetricNames.PgIoReadLatency,
+        PgTargetFactKeys.ReplicationLag => MetricNames.PgReplayLagBytes,
+        PgTargetFactKeys.WalVolumeShift => MetricNames.PgWalBytesPerSec,
         _ => null
     };
 
@@ -203,6 +225,14 @@ public static class ComparisonBanding
     private const string PgSessionPeakCountKey = "peak_total_sessions";
 
     /// <summary>
+    /// The metadata key the PostgreSQL write collector (<c>PgTargetFactCollector.Write.cs</c>), its anomaly detector
+    /// and its advice all read the window's PEAK WAL rate from — the same literal, for the same reason as
+    /// <see cref="PgSessionPeakCountKey"/>. Absent on the fact's <c>unavailable</c> shape, which is how that shape
+    /// is withheld from the sigma path without a second flag being consulted here.
+    /// </summary>
+    private const string PgWalPeakBytesPerSecKey = "peak_wal_bytes_per_sec";
+
+    /// <summary>
     /// The reading of <paramref name="fact"/> in its baseline metric's unit, or null when this fact cannot be
     /// sigma-banded even though its key is mapped — the unit-reconciliation seam <see cref="BaselinedMetricFor"/>
     /// describes. Every SQL Server key and three of the four PostgreSQL ones return <see cref="Fact.Value"/>
@@ -210,8 +240,12 @@ public static class ComparisonBanding
     /// returns its <c>peak_total_sessions</c> (null when the metadata is absent, as on a hand-built fact);
     /// <c>PG_CPU_PERCENT</c> returns its value only when <c>capacity_measured</c> is stamped 1, because a fact
     /// carrying the raw <c>cpu_percent</c> is percent of the capacity CURRENTLY allocated (#3281) and the
-    /// <c>pg_cpu</c> bucket is percent of the configured ceiling. A null routes the key to the absolute rule with
-    /// <c>baseline_metric</c> still naming the bucket that WOULD apply — the never-blind fallback, not silence.
+    /// <c>pg_cpu</c> bucket is percent of the configured ceiling. Of the v2 keys, <c>PG_IO_READ_LATENCY_MS</c> returns
+    /// its value only when the collector stamped it a measured, graded quotient (<c>latency_measured = 1</c> and
+    /// <c>insufficient_ops = 0</c> — the unavailable shapes carry <c>latency_measured = 0</c>), and
+    /// <c>PG_WAL_VOLUME_SHIFT</c> returns its <c>peak_wal_bytes_per_sec</c> (null on the <c>unavailable</c> shape,
+    /// which does not carry it). A null routes the key to the absolute rule with <c>baseline_metric</c> still naming
+    /// the bucket that WOULD apply — the never-blind fallback, not silence.
     /// </summary>
     public static double? BaselinedValueFor(Fact fact) => fact.Key switch
     {
@@ -219,6 +253,12 @@ public static class ComparisonBanding
             fact.Metadata.TryGetValue(PgSessionPeakCountKey, out var peak) ? peak : null,
         PgTargetFactKeys.CpuPercent =>
             fact.Metadata.GetValueOrDefault(PgTargetScorer.CpuCapacityMeasuredKey) >= 1 ? fact.Value : null,
+        PgTargetFactKeys.IoReadLatencyMs =>
+            fact.Metadata.GetValueOrDefault(PgTargetScorer.IoLatencyMeasuredKey) >= 1
+                && fact.Metadata.GetValueOrDefault(PgTargetScorer.IoInsufficientOpsKey) < 1
+                ? fact.Value : null,
+        PgTargetFactKeys.WalVolumeShift =>
+            fact.Metadata.TryGetValue(PgWalPeakBytesPerSecKey, out var walPeak) ? walPeak : null,
         _ => fact.Value
     };
 
@@ -343,7 +383,8 @@ public static class ComparisonBanding
             var metric = BaselinedMetricFor(key);
             var bucket = metric is not null ? dispersionByMetric.GetValueOrDefault(metric) : null;
             /* Both sides must offer a reading in the bucket's unit (BaselinedValueFor) — a PostgreSQL
-               saturation fact without its peak count, or a CPU fact holding the raw percent, is not one. */
+               saturation fact without its peak count, a CPU fact holding the raw percent, an unavailable
+               I/O or WAL fact, is not one. */
             rows.Add(bucket is { IsTrustworthy: true } && bucket.EffectiveRobustSigma > 0
                      && BaselinedValueFor(baseline) is { } baselineReading
                      && BaselinedValueFor(comparison) is { } comparisonReading
@@ -408,8 +449,9 @@ public static class ComparisonBanding
 
     private static ComparisonRow BandBySigma(string key, Fact baseline, Fact comparison, double baselineReading, double comparisonReading, string metric, BaselineBucket bucket, bool coverageCaveat)
     {
-        /* value_delta stays in the fact's own unit (for PG_CONNECTION_SATURATION, the fraction); the band is
-           decided on the readings in the bucket's unit, which are the values themselves for every other key. */
+        /* value_delta stays in the fact's own unit (for PG_CONNECTION_SATURATION, the fraction; for
+           PG_WAL_VOLUME_SHIFT, the mean rate); the band is decided on the readings in the bucket's unit, which
+           are the values themselves for every other key. */
         var valueDelta = comparison.Value - baseline.Value;
         var readingDelta = comparisonReading - baselineReading;
         var sigma = bucket.EffectiveRobustSigma;

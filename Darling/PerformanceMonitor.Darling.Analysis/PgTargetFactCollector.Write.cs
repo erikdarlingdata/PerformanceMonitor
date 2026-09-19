@@ -41,7 +41,10 @@ public sealed partial class PgTargetFactCollector
     /// <para><b>NULL is "not reported", never zero.</b> <c>wal_bytes</c> is NULL on every Aurora row
     /// (<c>pg_stat_wal</c> is not implemented there; the collector's comment explains the typed NULL), so
     /// <c>GREATEST(NULL, 0)</c> sums to 0 and <c>wal_tracked</c> is what separates "no WAL" from "no
-    /// <c>pg_stat_wal</c>" — the fact carries it and the advice says which.</para>
+    /// <c>pg_stat_wal</c>" — the fact carries it and the advice says which. <c>wal_records</c> rides beside the
+    /// bytes (the last column, appended so the earlier ordinals did not move) because NULL-ness is only ONE of the
+    /// store's ways of saying "not reported": the trackedness decision itself is <see cref="WalIsTracked"/>, shared
+    /// with the WAL-volume read, and it needs both sums.</para>
     /// </summary>
     public const string PgTargetCheckpointSql = @"
 WITH sampled AS (
@@ -54,6 +57,7 @@ WITH sampled AS (
         buffers_written_checkpoint - LAG(buffers_written_checkpoint) OVER series AS raw_ckpt_buffers,
         wal_bytes                  - LAG(wal_bytes)                  OVER series AS raw_wal_bytes,
         wal_fpi                    - LAG(wal_fpi)                    OVER series AS raw_wal_fpi,
+        wal_records                - LAG(wal_records)                OVER series AS raw_wal_records,
         (ROW_NUMBER() OVER series > 1
          AND checkpointer_stats_reset IS DISTINCT FROM LAG(checkpointer_stats_reset) OVER series) AS ck_reset_here,
         (ROW_NUMBER() OVER series > 1
@@ -76,7 +80,8 @@ SELECT
     CAST(count(*) FILTER (WHERE ck_reset_here) AS integer)          AS checkpointer_reset_count,
     CAST(count(*) FILTER (WHERE wal_reset_here) AS integer)         AS wal_reset_count,
     coalesce(bool_or(wal_tracked), false)                           AS wal_tracked,
-    CAST(count(*) AS integer)                                       AS sample_count
+    CAST(count(*) AS integer)                                       AS sample_count,
+    CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint)  AS wal_records
 FROM sampled";
 
     /// <summary>
@@ -99,7 +104,8 @@ FROM sampled";
     /// the flavour or major saying so. <c>wal_records</c> rides beside <c>wal_bytes</c> so a window in which BOTH
     /// summed to zero across every sample can be told from a merely idle server: a live <c>pg_stat_wal</c> writes
     /// a record for every commit, and a PostgreSQL that ran checkpoints (the sibling read proves it did) while
-    /// writing zero WAL records is a counter that is not being populated, not a quiet one. The fact says which.</para>
+    /// writing zero WAL records is a counter that is not being populated, not a quiet one. The fact says which.
+    /// The decision over those columns is <see cref="WalIsTracked"/>, the one predicate both reads apply.</para>
     /// </summary>
     public const string PgTargetWalVolumeSql = @"
 WITH sampled AS (
@@ -237,7 +243,9 @@ SELECT
         var walFpi = ToInt64(reader.GetValue(6));
         var checkpointerResets = Convert.ToInt32(reader.GetValue(7));
         var walResets = Convert.ToInt32(reader.GetValue(8));
-        var walTracked = !reader.IsDBNull(9) && reader.GetBoolean(9);
+        var walAnyNonNull = !reader.IsDBNull(9) && reader.GetBoolean(9);
+        var walRecords = ToInt64(reader.GetValue(11));
+        var walTracked = WalIsTracked(walAnyNonNull, walBytes, walRecords);
 
         var observedSeconds = context.ObservedDurationMs / 1000.0;
         var observedHours = observedSeconds / 3600.0;
@@ -328,13 +336,13 @@ SELECT
         }
         if (sampleCount < 2) return;
 
-        var walTracked = !reader.IsDBNull(6) && reader.GetBoolean(6);
+        var walAnyNonNull = !reader.IsDBNull(6) && reader.GetBoolean(6);
         var walBytes = Convert.ToDouble(reader.GetValue(3));
         var walRecords = ToInt64(reader.GetValue(4));
 
-        /* Typed NULL (Aurora, the collector's own gate) or a live-looking series that wrote zero bytes AND zero
-           records across every sample while checkpoints ran: both are "not reported", and the fact says so. */
-        if (!walTracked || (walBytes <= 0 && walRecords <= 0))
+        /* The one trackedness decision (WalIsTracked) — the same three inputs the checkpoint read handed it a moment
+           ago, over the same window, so the two facts cannot disagree about whether WAL is reported. */
+        if (!WalIsTracked(walAnyNonNull, walBytes, walRecords))
         {
             facts.Add(UnavailableWalVolume(context, "reason_wal_stats_not_reported", sampleCount));
             return;
@@ -370,6 +378,33 @@ SELECT
             },
         });
     }
+
+    /// <summary>
+    /// Whether <c>pg_write_stats</c> is REPORTING WAL over a window — the one definition of "WAL tracked", applied by
+    /// <see cref="ReadCheckpointPressureAsync"/> (the <c>wal_tracked</c> flag and the per-second / per-checkpoint WAL
+    /// figures on <c>PG_CHECKPOINT_PRESSURE</c>) and by <see cref="ReadWalVolumeAsync"/> (the tracked vs
+    /// <c>unavailable</c> shape of <c>PG_WAL_VOLUME_SHIFT</c>) alike.
+    ///
+    /// <para><b>Why one predicate (#3691 exit check).</b> Lane 15 shipped two: the checkpoint read decided from NULL-ness
+    /// alone (<c>bool_or(wal_bytes IS NOT NULL)</c>) while the WAL-volume read also required a non-zero byte OR record
+    /// sum. On a window whose <c>wal_bytes</c> is 0-not-NULL the two disagreed on one pass over one table —
+    /// <c>PG_CHECKPOINT_PRESSURE</c> said <c>wal_tracked 1, wal_bytes 0, wal_bytes_per_sec 0</c> while
+    /// <c>PG_WAL_VOLUME_SHIFT</c> beside it said <c>unavailable, reason_wal_stats_not_reported</c>. That shape is a
+    /// planted store's: the REAL collector types the WAL columns NULL where <c>pg_stat_wal</c> is not implemented
+    /// (Aurora) or does not exist (below 14), so on the fleet it is unreachable — but a read that can contradict its
+    /// sibling on any input is two definitions, and the advice reads the pressure fact's flag to decide whether to
+    /// state WAL figures at all.</para>
+    ///
+    /// <para><b>The decision.</b> Tracked when some row in the window carried a non-NULL <c>wal_bytes</c>
+    /// (<paramref name="anyNonNull"/>) AND the window's reset-clamped sums are not both zero: a live
+    /// <c>pg_stat_wal</c> writes a record per commit and a checkpoint record per checkpoint, so a window in which
+    /// checkpoints ran (the pressure read only reaches here when they did) while the counters summed to zero bytes
+    /// AND zero records is a counter nobody is populating, not an idle server. A window with bytes but no records
+    /// (an older fixture, or a collector that stored one column) is tracked — either sum moving is the counter
+    /// moving. Untracked leaves the pressure fact's WAL figures ABSENT, not zero — the same posture as before.</para>
+    /// </summary>
+    internal static bool WalIsTracked(bool anyNonNull, double walBytes, long walRecords) =>
+        anyNonNull && (walBytes > 0 || walRecords > 0);
 
     /// <summary>The <c>PG_WAL_VOLUME_SHIFT</c> fact in its <c>unavailable</c> shape: value 0, <c>wal_tracked = 0</c>,
     /// <c>unavailable = 1</c> and exactly one reason flag (<paramref name="reason"/>, a metadata KEY — the
