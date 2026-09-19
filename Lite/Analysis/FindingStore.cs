@@ -628,6 +628,135 @@ RETURNING story_path";
         return result is long count ? count : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /* #3653 item 3 (Q3): the prior weeks, for RecurrenceLabeler — ONE statement per analysis pass, not one per
+       story. $1 server, $2 the lower bound (RecurrenceLabeler.ReadLowerBoundUtc — three weeks and an hour of
+       slack), $3 the pass's reference instant, which is BOTH the exclusive upper bound (this pass has not
+       persisted yet, and earlier passes inside this hour are this week, not a prior one) AND the instant whose
+       hour×weekday slot the read keys on — reused rather than passed twice so the two cannot disagree.
+
+       The slot is on the TARGET's clock: analysis_time is host UTC, so every row and the reference are shifted
+       by utc_offset_minutes — the latest non-null row of v_server_properties, the same read the
+       parameter-sensitivity SQL in DuckDbFactCollector.QueryPerf makes — before the hour and weekday are
+       taken. The CTE returns exactly one row, NULL when the server has no offset (the on-load collector has
+       not run), and the arithmetic COALESCEs that to 0 while the projection returns it RAW, so the caller
+       knows it fell back to UTC and can say so in the sentence it writes. One offset for the whole window is a
+       fixed offset, not a zone: a DST change inside the 21 days smears the older week by an hour — the Q6/Q8
+       defect, owned by the zone-id rung.
+
+       Two row families come back from one scan of idx_analysis_findings_time: every chain that fired in the
+       SAME slot (the recurrence arm), and every RUNNING_JOBS-rooted card in ANY slot (the moved-window arm — a
+       job that slid is by definition in a different slot). Rows collapse to one per (chain, root key, local
+       hour bucket): the engine re-persists every story every cycle (FindingOccurrences: 27.9x mean), and
+       "fired in that hour" is one fact however many passes ran inside it. story_text is read for the job rows
+       ONLY — the frozen job card is the one place a prior week's job NAME survives (Fact.ObjectName is not a
+       finding-row column) — through the CASE; MAX over the hour is a deterministic pick when two passes in one
+       hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
+       wrong pick labels nothing rather than the wrong job.
+
+       Byte-identical to Darling's PgFindingStore.GetPriorOccurrencesSql except for the ONE token this store
+       reads the offset through (v_server_properties — Lite's live + archive view; Darling has the bare table),
+       and a source pin in Darling.Tests holds the two to exactly that difference. */
+    public const string GetPriorOccurrencesSql = @"
+WITH svr AS
+(
+    SELECT
+    (
+        SELECT sp.utc_offset_minutes
+        FROM v_server_properties AS sp
+        WHERE sp.server_id = $1
+        AND   sp.utc_offset_minutes IS NOT NULL
+        ORDER BY sp.collection_time DESC
+        LIMIT 1
+    ) AS offset_minutes
+),
+local_rows AS
+(
+    SELECT
+        f.story_path_hash,
+        f.root_fact_key,
+        f.story_text,
+        date_trunc('hour', f.analysis_time + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE) AS local_bucket,
+        $3 + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE AS reference_local,
+        svr.offset_minutes
+    FROM analysis_findings AS f, svr
+    WHERE f.server_id = $1
+    AND   f.analysis_time >= $2
+    AND   f.analysis_time <  $3
+)
+SELECT
+    story_path_hash,
+    root_fact_key,
+    local_bucket,
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text,
+    offset_minutes
+FROM local_rows
+WHERE (EXTRACT(HOUR FROM local_bucket) = EXTRACT(HOUR FROM reference_local) AND EXTRACT(DOW FROM local_bucket) = EXTRACT(DOW FROM reference_local))
+OR    root_fact_key = 'RUNNING_JOBS'
+GROUP BY story_path_hash, root_fact_key, local_bucket, offset_minutes
+ORDER BY local_bucket, story_path_hash";
+
+    /// <summary>
+    /// #3653 item 3 (Q3): the prior three weeks' occurrences the <see cref="RecurrenceLabeler"/> labels this
+    /// pass's stories from — one statement (<see cref="GetPriorOccurrencesSql"/>), on the pass token, returning
+    /// every chain that fired in the reference instant's hour×weekday slot on the target's clock plus every
+    /// <c>RUNNING_JOBS</c>-rooted card in any slot, collapsed to one row per hour, and the UTC offset the slot was
+    /// keyed on (null when the store had none and the read fell back to UTC).
+    /// <paramref name="referenceUtc"/> is the pass's window end (<see cref="AnalysisContext.TimeRangeEnd"/>).
+    ///
+    /// <para>This is the ONE read in this store that catches and degrades, against the class's throw-not-swallow
+    /// discipline, and the reason is what the read is FOR: a label is presentation. Letting a failed history
+    /// read out would reach the pass's catch and cost the pass every finding — the Darling twin's #2299 shape
+    /// with a worse trade, because the rows the read wanted are still in the store and the next pass labels
+    /// from them correctly. So it logs the loss (WARN, one line) and returns <see cref="PriorOccurrenceRead.Empty"/>,
+    /// which labels nothing. An abandonment (#2443) is not swallowed: "the history could not be read" and "we
+    /// stopped reading" are different answers. The returned buckets are the target's LOCAL hours and are left
+    /// Kind-Unspecified: tagging them Utc would be the lie the shift exists to remove.</para>
+    /// </summary>
+    public async Task<PriorOccurrenceRead> GetPriorOccurrencesAsync(AnalysisContext context, DateTime referenceUtc)
+    {
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(context.CancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = GetPriorOccurrencesSql;
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = RecurrenceLabeler.ReadLowerBoundUtc(referenceUtc) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = referenceUtc });
+
+            int? offsetMinutes = null;
+            var occurrences = new List<PriorOccurrence>();
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                occurrences.Add(new PriorOccurrence(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+                if (!reader.IsDBNull(4))
+                {
+                    offsetMinutes = reader.GetInt32(4);
+                }
+            }
+
+            return new PriorOccurrenceRead(offsetMinutes, occurrences);
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            AppLogger.Warn("FindingStore",
+                $"GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {ex.Message}");
+            return PriorOccurrenceRead.Empty;
+        }
+    }
+
     /// <summary>
     /// Cleans up old findings beyond the retention period.
     ///
