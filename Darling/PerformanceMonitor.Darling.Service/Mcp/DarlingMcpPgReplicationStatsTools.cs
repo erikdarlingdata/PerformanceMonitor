@@ -106,7 +106,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL replication stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_replication_stats", ex);
         }
     }
 }

@@ -1480,7 +1480,13 @@ public sealed class SetMuteRuleEnabledTests
 
         var result = await DarlingMcpAlertTools.SetMuteRuleEnabled(dead, RuleId, false);
 
-        Assert.StartsWith("Error during set_mute_rule_enabled", result, StringComparison.Ordinal);
+        /* The failure is the one error envelope (#3653 Q11), not a bare sentence: status says error, the
+           message carries the unchanged grammar, and hints.operation names the verb. */
+        Assert.True(McpHelpers.IsErrorEnvelope(result), result);
+        using var envelope = JsonDocument.Parse(result);
+        Assert.Equal("error", envelope.RootElement.GetProperty("status").GetString());
+        Assert.StartsWith("Error during set_mute_rule_enabled: ", envelope.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("set_mute_rule_enabled", envelope.RootElement.GetProperty("hints").GetProperty("operation").GetString());
     }
 }
 
@@ -1763,7 +1769,12 @@ public sealed class UpdateMuteRuleTests
 
         var result = await DarlingMcpAlertTools.UpdateMuteRule(dead, RuleId, "{\"reason\":\"x\"}");
 
-        Assert.StartsWith("Error during update_mute_rule", result, StringComparison.Ordinal);
+        /* The one error envelope (#3653 Q11) — see SetMuteRuleEnabled's twin above for what each field pins. */
+        Assert.True(McpHelpers.IsErrorEnvelope(result), result);
+        using var envelope = JsonDocument.Parse(result);
+        Assert.Equal("error", envelope.RootElement.GetProperty("status").GetString());
+        Assert.StartsWith("Error during update_mute_rule: ", envelope.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("update_mute_rule", envelope.RootElement.GetProperty("hints").GetProperty("operation").GetString());
     }
 }
 
@@ -2111,19 +2122,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             }
 
             var fleet = await DarlingMcpAlertTools.GetAlertHistory(postgres);
-            Assert.False(fleet.StartsWith("Error during", StringComparison.Ordinal), fleet);
+            Assert.False(McpHelpers.IsErrorEnvelope(fleet), fleet);
             Assert.Contains("(all servers)", fleet, StringComparison.Ordinal);
             Assert.Contains("High CPU", fleet, StringComparison.Ordinal);
 
             /* Alert settings — the seeded row round-trips its default thresholds. */
             var settings = await DarlingMcpAlertTools.GetAlertSettings(postgres);
-            Assert.False(settings.StartsWith("Error during", StringComparison.Ordinal), settings);
+            Assert.False(McpHelpers.IsErrorEnvelope(settings), settings);
             Assert.Contains("threshold_percent", settings, StringComparison.Ordinal);
             Assert.Contains("delivery", settings, StringComparison.Ordinal);
 
             /* Mute rules — the planted rule surfaces. */
             var mutes = await DarlingMcpAlertTools.GetMuteRules(postgres);
-            Assert.False(mutes.StartsWith("Error during", StringComparison.Ordinal), mutes);
+            Assert.False(McpHelpers.IsErrorEnvelope(mutes), mutes);
             Assert.Contains(MuteRuleId, mutes, StringComparison.Ordinal);
 
             bodySucceeded = true;

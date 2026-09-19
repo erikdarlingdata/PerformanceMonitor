@@ -112,7 +112,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL CPU utilization failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_cpu_utilization", ex);
         }
     }
 

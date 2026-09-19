@@ -75,7 +75,7 @@ public sealed class DarlingMcpPgWaitTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL wait stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_wait_stats", ex);
         }
     }
 

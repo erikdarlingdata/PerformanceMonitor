@@ -125,7 +125,7 @@ public sealed class DarlingMcpCollectorCostTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Failed to read collector cost: {ex.Message}");
+            return McpHelpers.FormatError("get_collector_cost", ex);
         }
     }
 }

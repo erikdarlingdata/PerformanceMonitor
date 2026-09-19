@@ -508,7 +508,7 @@ public sealed class DarlingMcpPlanToolsLivePostgresTests
 
     private static void AssertAnalysisEnvelope(string json, string expectedSource)
     {
-        Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         Assert.Equal(expectedSource, root.GetProperty("source").GetString());

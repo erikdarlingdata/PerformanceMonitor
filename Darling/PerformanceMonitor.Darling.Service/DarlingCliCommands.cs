@@ -4764,12 +4764,15 @@ public static class DarlingCliCommands
         }
         catch (JsonException)
         {
-            /* Not every failure arrives as JSON. AddServersAsync's catch-all returns McpHelpers.FormatError,
-               which is PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure that happens
-               AFTER the request parsed — a dropped connection mid-batch, a constraint violation — lands here.
-               That text IS the message the operator needs; wrapping it in "could not parse" buries the one line
-               that explains the failure, precisely when the verb is being used as a deployment gate. Only
-               something that looked like JSON and was not gets the parse wrapper. */
+            /* Not every failure arrives as JSON. Until #3653 Q11, AddServersAsync's catch-all returned
+               McpHelpers.FormatError as PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure
+               that happened AFTER the request parsed — a dropped connection mid-batch, a constraint violation —
+               landed here. FormatError is now the {status:"error", message} envelope, which the whole-payload
+               branch above renders as "[ERROR] Error during add_servers: ..." with the same exit code; this arm
+               keeps the plain-text case honest for any non-JSON text that still reaches it. That text IS the
+               message the operator needs; wrapping it in "could not parse" buries the one line that explains the
+               failure, precisely when the verb is being used as a deployment gate. Only something that looked
+               like JSON and was not gets the parse wrapper. */
             var text = resultJson?.Trim() ?? string.Empty;
             lines.Add(text.StartsWith('{') || text.StartsWith('[')
                 ? $"  Could not parse the result: {text}"

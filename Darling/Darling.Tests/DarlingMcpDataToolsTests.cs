@@ -1049,7 +1049,7 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
     private static void AssertServerEnvelope(string json, string expectedKey)
     {
-        Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         Assert.Equal(ServerName, root.GetProperty("server").GetString());

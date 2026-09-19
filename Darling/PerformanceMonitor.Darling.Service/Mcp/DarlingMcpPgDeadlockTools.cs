@@ -114,7 +114,7 @@ public sealed class DarlingMcpPgDeadlockTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL deadlocks failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_deadlocks", ex);
         }
     }
 
@@ -179,7 +179,7 @@ public sealed class DarlingMcpPgDeadlockTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL deadlock failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_deadlock_detail", ex);
         }
     }
 }

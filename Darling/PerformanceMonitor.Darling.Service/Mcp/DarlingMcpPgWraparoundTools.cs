@@ -164,7 +164,7 @@ public sealed class DarlingMcpPgWraparoundTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL freeze headroom failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_wraparound_risk", ex);
         }
     }
 }

@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 
@@ -561,8 +562,10 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>Runs one section through its <c>/api/read</c> dispatch handler (a synthetic query string over
     /// the REAL binding + tool code), returning <c>{title, read, data}</c> on success — <c>data</c> is the
-    /// tool's own JSON, envelope included — or <c>{title, read, error}</c> when the tool answered with a bare
-    /// message or threw. Never throws: a broken section is one card on the page, not a dead page.</summary>
+    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool answered with a
+    /// bare message, caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11, reduced
+    /// to its sentence here because <c>error</c> on this page is TEXT the card renders), or threw. Never
+    /// throws: a broken section is one card on the page, not a dead page.</summary>
     private static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
@@ -596,13 +599,15 @@ internal static class DarlingTriageEndpoint
                     result["data"] = JsonNode.Parse(raw);
                     break;
                 default:
-                    result["error"] = raw;
+                    result["error"] = McpHelpers.ErrorMessageOf(raw);
                     break;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            result["error"] = $"Error during {section.Read}: {ex.Message}";
+            /* The binding-layer backstop, in the tools' own grammar (the sentence FormatError wraps), so the
+               card reads the same words whether the tool caught the exception or this seam did. */
+            result["error"] = McpHelpers.ErrorSentence(section.Read, ex);
         }
 
         return result;

@@ -192,7 +192,7 @@ public sealed class DarlingMcpPgSlotTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL replication slots failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_replication_slots", ex);
         }
     }
 }

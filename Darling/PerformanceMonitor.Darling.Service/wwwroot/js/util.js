@@ -375,8 +375,11 @@ export async function apiSend(method, path, body) {
 
 /**
  * Classify a completed Response into the same three-kind shape apiGet returns (shared by apiGet + apiSend):
- * an { "error": ... } body / non-2xx -> "error"; the {status, message[, hints]} envelope -> "empty"; anything
- * else (including a 204/empty body -> data:null) -> "data".
+ * an { "error": ... } body / non-2xx -> "error"; the {status, message[, hints]} envelope -> "empty" for the
+ * four miss words and "error" for status "error" (#3653 Q11: every tool's caught exception is that envelope on
+ * the MCP wire; the service maps it to a 500 {"error": sentence} before it reaches this page, so the 2xx arm
+ * below is the belt-and-braces for a body that arrived unmapped — a failure must never render as a quiet
+ * "nothing here" card); anything else (including a 204/empty body -> data:null) -> "data".
  */
 async function classifyResponse(resp) {
   const raw = await resp.text();
@@ -394,9 +397,12 @@ async function classifyResponse(resp) {
     return { kind: "error", message: msg, status: resp.status };
   }
 
-  /* The empty envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
+  /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
      Data payloads never carry a top-level message, so this never misfires on real data. */
   if (body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string") {
+    if (body.status === "error") {
+      return { kind: "error", message: body.message, status: resp.status };
+    }
     return { kind: "empty", status: body.status, message: body.message, hints: body.hints || null, data: body };
   }
 

@@ -21,6 +21,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -43,11 +44,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// minus exactly those exclusions, so a future tool cannot be silently missed.</para>
 ///
 /// <para><b>Response mapping.</b> The tools always return a string: a serialized JSON object/array for data (and
-/// for the <c>{"status", ...}</c> empty-result envelope), or a bare <c>"Error during ..."</c> string when the
-/// body's try/catch caught an exception, or a bare validation/resolution message. A leading <c>{</c> or <c>[</c>
-/// passes through verbatim as <c>application/json</c> (200); a <c>"Error during ..."</c> string maps to 500; any
-/// other bare (non-JSON) string is a client-correctable error (bad parameter, unknown server) and maps to 400 —
-/// both wrapped as <c>{"error": "..."}</c>.</para>
+/// for the <c>{"status", ...}</c> miss envelope), the <c>{"status":"error", ...}</c> envelope
+/// <c>McpHelpers.FormatError</c> builds when the body's try/catch caught an exception (#3653 Q11 — before that
+/// ruling the caught exception was a bare <c>"Error during ..."</c> string), or a bare validation/resolution
+/// message. The error envelope maps to 500; any other leading <c>{</c> or <c>[</c> passes through verbatim as
+/// <c>application/json</c> (200); any bare (non-JSON) string is a client-correctable error (bad parameter,
+/// unknown server) and maps to 400. Both error arms answer <c>{"error": "..."}</c> with the SENTENCE — the
+/// envelope's <c>message</c>, not the envelope — so the web surface keeps the one error body it has always
+/// had and a web client that reads <c>.error</c> is not handed JSON inside a string. The mapping is where the
+/// PostgreSQL tools' failures, which were already the envelope and therefore passed through as 200, become
+/// the 500 they always were.</para>
 ///
 /// <para><b>The pre-banded fleet.</b> <c>GET /api/fleet</c> and the <c>get_fleet_overview</c> MCP tool both read
 /// through <see cref="DarlingFleetReader"/> — the enriched per-server cards and the cross-server rollup, banded
@@ -283,9 +289,10 @@ public static class DarlingWebEndpoints
                 }
                 catch (Exception ex)
                 {
-                    /* The tools swallow their own exceptions into an "Error during ..." string; this is only a
-                       backstop for a binding-layer throw, mapped the same way (-> HTTP 500). */
-                    result = $"Error during {name}: {ex.Message}";
+                    /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope; this is only a
+                       backstop for a binding-layer throw, built by the same helper so it maps the same way
+                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more. */
+                    result = McpHelpers.FormatError(name, ex);
                 }
 
                 return ToHttpResult(result);
@@ -850,9 +857,10 @@ public static class DarlingWebEndpoints
     /// <summary>
     /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
     /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
-    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception
-    /// <c>"Error during ..."</c> string → 500 (classified by <see cref="ClassifyToolResponse"/>, like the read
-    /// surface); any other bare string is a shape the cores do not produce and maps to the client-correctable
+    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
+    /// (<c>McpHelpers.FormatError</c>, <c>{"status":"error", ...}</c>) → 500 (classified by
+    /// <see cref="ClassifyToolResponse"/>, like the read surface, and BEFORE the status switch below so the
+    /// failure word is never read as a verb outcome); any other bare string is a shape the cores do not produce and maps to the client-correctable
     /// 400 for the reason the read surface's mapping does. <c>unchanged</c> deliberately shares the success
     /// code: it is the retry-safe "already so" answer, and the envelope's own <c>status</c> field carries the
     /// distinction a caller might act on. Pure, so the whole table pins without a server.
@@ -886,14 +894,15 @@ public static class DarlingWebEndpoints
     }
 
     /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
-    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — except a bare (non-JSON) string, which is wrapped
-    /// as <c>{"error": ...}</c> exactly as <see cref="ToHttpResult"/> wraps the read surface's.</summary>
+    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — except an error (the caught-exception envelope or
+    /// a bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as
+    /// <see cref="ToHttpResult"/> wraps the read surface's.</summary>
     private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
     {
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
         return ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
             ? Results.Text(result, "application/json", statusCode: httpStatus)
-            : ErrorResult(result, httpStatus);
+            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
 
     /// <summary>The discriminated outcome of <see cref="RunComposedPanelAsync"/>: the <c>{sql, rows,
@@ -2741,10 +2750,12 @@ public static class DarlingWebEndpoints
     /// <summary>How a tool's returned string maps to an HTTP outcome.</summary>
     internal enum ToolResponseKind
     {
-        /// <summary>A serialized JSON object/array (data, or the {"status", ...} envelope) — 200 passthrough.</summary>
+        /// <summary>A serialized JSON object/array (data, or the {"status", ...} miss envelope) — 200 passthrough.</summary>
         JsonPassthrough,
 
-        /// <summary>A bare "Error during ..." string (the tool caught an exception) — HTTP 500.</summary>
+        /// <summary>The tool caught an exception — the <c>{"status":"error", ...}</c> envelope
+        /// <c>McpHelpers.FormatError</c> builds (#3653 Q11), or the bare "Error during ..." sentence it built
+        /// before that ruling — HTTP 500.</summary>
         ServerError,
 
         /// <summary>Any other bare string (validation / resolution) — a client-correctable HTTP 400.</summary>
@@ -2752,13 +2763,23 @@ public static class DarlingWebEndpoints
     }
 
     /// <summary>
-    /// Classifies a tool's returned string. A leading <c>{</c> or <c>[</c> (after any whitespace) is a serialized
-    /// object/array and passes through; a <c>"Error during ..."</c> string is the tool's caught-exception shape
-    /// (HTTP 500); anything else is a bare validation / resolution message (HTTP 400). Pure so the whole mapping
-    /// is unit-testable.
+    /// Classifies a tool's returned string. The error envelope (<see cref="McpHelpers.IsErrorEnvelope"/> —
+    /// <c>{"status":"error", ...}</c>, what every tool catch returns since #3653 Q11) is the tool's
+    /// caught-exception shape (HTTP 500) and is tested FIRST, because it also begins with <c>{</c> and the
+    /// passthrough sniff would otherwise answer 200 over a failure — which is exactly what it did for the
+    /// PostgreSQL tools before this ordering existed. Any other leading <c>{</c> or <c>[</c> (after any
+    /// whitespace) is a serialized object/array and passes through; the bare <c>"Error during ..."</c> sentence
+    /// the pre-#3653 helper built is kept as a server error so an un-migrated producer still maps to 500 rather
+    /// than to a client-correctable 400; anything else is a bare validation / resolution message (HTTP 400).
+    /// Pure so the whole mapping is unit-testable.
     /// </summary>
     internal static ToolResponseKind ClassifyToolResponse(string result)
     {
+        if (McpHelpers.IsErrorEnvelope(result))
+        {
+            return ToolResponseKind.ServerError;
+        }
+
         var trimmed = result.AsSpan().TrimStart();
         if (trimmed.Length > 0 && (trimmed[0] == '{' || trimmed[0] == '['))
         {
@@ -2773,10 +2794,14 @@ public static class DarlingWebEndpoints
         return ToolResponseKind.ClientError;
     }
 
+    /// <summary>The read surface's HTTP answer. Both error arms carry the SENTENCE under <c>error</c>
+    /// (<see cref="McpHelpers.ErrorMessageOf"/> unwraps the envelope; a bare string is already the sentence),
+    /// so the body a web client reads is the same <c>{"error": "Error during get_x: ..."}</c> it read before
+    /// the tools' own wire shape changed.</summary>
     private static IResult ToHttpResult(string result) => ClassifyToolResponse(result) switch
     {
         ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
-        ToolResponseKind.ServerError => Results.Json(new { error = result }, statusCode: StatusCodes.Status500InternalServerError),
+        ToolResponseKind.ServerError => Results.Json(new { error = McpHelpers.ErrorMessageOf(result) }, statusCode: StatusCodes.Status500InternalServerError),
         _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
     };
 

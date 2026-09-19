@@ -86,7 +86,7 @@ public sealed class DarlingMcpPgKernelStatsTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL kernel stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_kernel_stats", ex);
         }
     }
 

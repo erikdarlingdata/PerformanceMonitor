@@ -174,7 +174,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
                 "NOT SYNCHRONIZING", "0x0003", "0x0004", 9000L, 0L, 0L, 0L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 0L);
 
             var json = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName);
-            Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+            Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
@@ -442,7 +442,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
 
             var json = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName);
 
-            Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+            Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
             using var doc = JsonDocument.Parse(json);
             Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
 

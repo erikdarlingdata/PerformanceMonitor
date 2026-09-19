@@ -216,6 +216,18 @@ public sealed class McpMissMessageParityPinTests
         "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.",
         " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_* — it spans exactly growth_window_days.",
         "the store holds a single day of snapshots for this server, so no growth is knowable yet — every growth figure is null, not 0",
+
+        /* #3653 Q11 — errors one shape. The instructions paragraph that teaches a caller the FIFTH status
+           word: every tool's caught exception is McpHelpers.FormatError's {status:"error", message, hints}
+           envelope on both SKUs (a WIRE CHANGE for the 214 tools that answered with a bare sentence until
+           then). The envelope itself is built once in Common and is identical by construction; what lives
+           twice is the sentence teaching an agent to branch on `status` rather than on prose, and a SKU that
+           reworded it alone would teach one client to read a failure as text again. The example envelope is
+           pinned byte-for-byte because it is the one place the shape is spelled out for a reader. Each SKU's
+           trailing sentence on validation refusals is deliberately NOT here: Lite has no refusal that is the
+           envelope and Darling's PostgreSQL reads have a handful, so the two say different true things. */
+        "Every tool FAILURE — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
+        "It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
     };
 
     [Theory]

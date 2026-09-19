@@ -171,7 +171,7 @@ public sealed class DarlingMcpPgXminTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL xmin horizon failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_xmin_horizon", ex);
         }
     }
 }
