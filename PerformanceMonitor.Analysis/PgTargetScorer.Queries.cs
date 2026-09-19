@@ -78,7 +78,8 @@ public static partial class PgTargetScorer
 
     /// <summary>The boost a co-firing workload symptom adds to a bad actor — see <see cref="QueriesAmplifiers"/>.
     /// unmeasured: chosen, not measured — calibrate against analysis_findings co-fire rates before the next
-    /// release; the fact carries threshold_lineage = 0.</summary>
+    /// release. A boost is not a bar the base was graded on, so it does not move the fact's threshold_lineage (1, off the
+    /// measured bars above).</summary>
     public const double BadActorCoFireBoost = 0.25;
 
     /// <summary>

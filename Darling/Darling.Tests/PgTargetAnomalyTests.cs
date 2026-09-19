@@ -927,7 +927,7 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
                 Assert.Equal(AnomalyThresholds.SigmaDisplayCap, tpsMetadata.GetProperty("deviation_sigma").GetDouble());
                 Assert.Equal(AnomalyThresholds.ModifiedZThreshold, tpsMetadata.GetProperty("fire_threshold").GetDouble());
                 Assert.True(tpsMetadata.GetProperty("baseline_samples").GetDouble() > 0);
-                Assert.Equal(0, tpsMetadata.GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, tpsMetadata.GetProperty("threshold_lineage").GetDouble());   /* PgTpsFloor / PgTpsFallback fleet-measured 2026-09-19 */
                 Assert.Equal(1.0, tpsMetadata.GetProperty("baseline_confidence").GetDouble());
                 Assert.False(tpsMetadata.TryGetProperty("confidence", out _), "the tool projects an anomaly fact's confidence as baseline_confidence");
             }

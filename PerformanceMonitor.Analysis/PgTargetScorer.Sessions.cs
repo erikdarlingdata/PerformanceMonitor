@@ -89,7 +89,8 @@ public static partial class PgTargetScorer
 
     /// <summary>The boost a co-firing sibling adds to a saturation fact — see <see cref="SessionsAmplifiers"/>.
     /// unmeasured: chosen, not measured — calibrate against analysis_findings co-fire rates before the next
-    /// release; the fact carries threshold_lineage = 0.</summary>
+    /// release. A boost is not a bar the base was graded on, so it does not move the fact's threshold_lineage (1, off the
+    /// measured bars above).</summary>
     public const double ConnectionSaturationCoFireBoost = 0.25;
 
     /// <summary>
