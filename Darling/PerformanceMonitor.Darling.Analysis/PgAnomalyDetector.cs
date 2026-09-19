@@ -37,6 +37,19 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// Baseline computation and caching are handled by <see cref="PgBaselineProvider"/>.
 ///
 /// <para>
+/// #3653 (A8, first slice): every z-score family hands the shared <see cref="AnomalyGate"/> the
+/// window PEAK and the window MEAN as a pair, and the gate fires only when BOTH clear the existing
+/// cutoffs — the peak alone tested a window MAX against a per-sample distribution, so the verdict's
+/// null expectation grew with the number of samples in the window (a 24-hour anchored pass reported
+/// more anomalies than the 4-hour scheduled pass on identical behaviour; the post-install pages ran
+/// 11 → 24/h on the measured population). Every window read here already computed AVG beside MAX
+/// except <see cref="IoWindowSql"/>, which read AVG ALONE while its siblings read the peak under the
+/// same shared cutoffs; it now reads both and reports the peak like the rest. The reported deviation
+/// (Value, deviation_sigma) stays the PEAK's; the mean's rides beside it as mean_deviation_sigma.
+/// Lite's AnomalyDetector carries the identical reads, verbatim.
+/// </para>
+///
+/// <para>
 /// Postgres discipline (see PgFindingStore): the SQL is Lite-verbatim against the
 /// V4 passthrough views (already dialect-shared — no QUALIFY in the detector
 /// queries), with every window bound a naive-UTC Kind-Unspecified parameter.
@@ -209,8 +222,17 @@ SELECT
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS current_deadlocks";
 
+    /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
+       sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a window average
+       against cutoffs its siblings met with a window MAX, so a single file's stall burst that would have fired
+       on CPU or batch requests was diluted here, and an averaged window carried none of the per-sample peak the
+       ReadLatencyFloorMs / IoLatencyFallbackMs bars were sized for. The baseline is the per-file-row read ratio
+       at this same grain (PgBaselineProvider's io_latency arm), so MAX over the same rows is the statistic the
+       other families test. Lite-verbatim. */
     public const string IoWindowSql = @"
-SELECT AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+SELECT MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
+       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -457,7 +479,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCpu,
+                baseline, peakCpu, avgCpu,
                 GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu, GetDeviationThreshold(MetricNames.Cpu)), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap);
             if (!decision.Fire) return;
 
@@ -468,6 +490,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
@@ -724,24 +747,28 @@ ORDER BY ms_delta DESC LIMIT 1";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
-            var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var peakReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var avgReadLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var peakWriteLat = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
+            var avgWriteLat = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
 
             var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
 
-            // Read latency anomaly
+            // Read latency anomaly — the reported value and sigma are the PEAK's, the pair decides (#3653).
             var readDecision = AnomalyGate.EvaluateZScore(
-                baseline, currentReadLat,
+                baseline, peakReadLat, avgReadLat,
                 ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
             if (readDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
                 {
-                    ["current_latency_ms"] = currentReadLat,
+                    ["current_latency_ms"] = peakReadLat,
+                    ["avg_latency_ms"] = avgReadLat,
                     ["baseline_mean_ms"] = baseline.Mean,
                     ["baseline_stddev_ms"] = effectiveStdDev,
                     ["deviation_sigma"] = readDecision.Sigma,
-                ["fire_threshold"] = readDecision.ThresholdUsed,
+                    ["mean_deviation_sigma"] = readDecision.MeanSigma ?? 0,
+                    ["fire_threshold"] = readDecision.ThresholdUsed,
                     ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
                     ["fallback_exceedance"] = readDecision.FallbackExceedance,
                     ["baseline_samples"] = baseline.SampleCount
@@ -752,7 +779,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 {
                     Source = "anomaly",
                     Key = "ANOMALY_READ_LATENCY",
-                    Value = currentReadLat,
+                    Value = peakReadLat,
                     ServerId = context.ServerId,
                     Metadata = metadata
                 });
@@ -760,17 +787,19 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // Write latency anomaly
             var writeDecision = AnomalyGate.EvaluateZScore(
-                baseline, currentWriteLat,
+                baseline, peakWriteLat, avgWriteLat,
                 ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
             if (writeDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
                 {
-                    ["current_latency_ms"] = currentWriteLat,
+                    ["current_latency_ms"] = peakWriteLat,
+                    ["avg_latency_ms"] = avgWriteLat,
                     ["baseline_mean_ms"] = baseline.Mean,
                     ["baseline_stddev_ms"] = effectiveStdDev,
                     ["deviation_sigma"] = writeDecision.Sigma,
-                ["fire_threshold"] = writeDecision.ThresholdUsed,
+                    ["mean_deviation_sigma"] = writeDecision.MeanSigma ?? 0,
+                    ["fire_threshold"] = writeDecision.ThresholdUsed,
                     ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
                     ["fallback_exceedance"] = writeDecision.FallbackExceedance,
                     ["baseline_samples"] = baseline.SampleCount
@@ -781,7 +810,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 {
                     Source = "anomaly",
                     Key = "ANOMALY_WRITE_LATENCY",
-                    Value = currentWriteLat,
+                    Value = peakWriteLat,
                     ServerId = context.ServerId,
                     Metadata = metadata
                 });
@@ -823,7 +852,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakBatch,
+                baseline, peakBatch, avgBatch,
                 GetDeviationThreshold(MetricNames.BatchRequests), ModifiedZThresholdFor(MetricNames.BatchRequests, GetDeviationThreshold(MetricNames.BatchRequests)), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap);
             if (!decision.Fire) return;
 
@@ -834,6 +863,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
@@ -887,7 +917,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakConnections,
+                baseline, peakConnections, avgConnections,
                 GetDeviationThreshold(MetricNames.SessionCount), ModifiedZThresholdFor(MetricNames.SessionCount, GetDeviationThreshold(MetricNames.SessionCount)), SessionCountFloor, SessionCountFallback, SigmaDisplayCap);
             if (!decision.Fire) return;
 
@@ -898,6 +928,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
@@ -952,7 +983,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakElapsed,
+                baseline, peakElapsed, avgElapsed,
                 GetDeviationThreshold(MetricNames.QueryDuration), ModifiedZThresholdFor(MetricNames.QueryDuration, GetDeviationThreshold(MetricNames.QueryDuration)), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap);
             if (!decision.Fire) return;
 
@@ -963,6 +994,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
@@ -1018,7 +1050,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakPressure,
+                baseline, peakPressure, avgPressure,
                 GetDeviationThreshold(MetricNames.Memory), ModifiedZThresholdFor(MetricNames.Memory, GetDeviationThreshold(MetricNames.Memory)), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap);
             if (!decision.Fire) return;
 
@@ -1029,6 +1061,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_stddev"] = effectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
+                ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,

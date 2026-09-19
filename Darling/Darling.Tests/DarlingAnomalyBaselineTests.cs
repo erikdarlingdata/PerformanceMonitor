@@ -345,6 +345,60 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
+    /// #3653 (A8, first slice): the I/O window read hands the shared gate the PEAK and the MEAN per-file-row
+    /// latency for reads and for writes — it was the one z-score family reading AVG ALONE while its siblings
+    /// read the window MAX under the same shared cutoffs. Structural pin on the PG const, and a line-for-line
+    /// parity pin against Lite's inline twin (the two SKUs' window reads are Lite-verbatim by contract; the
+    /// repo pins no other IO-window parity, so this is the one that keeps them from drifting apart on the
+    /// statistic they hand the gate).
+    /// </summary>
+    [Fact]
+    public void IoWindow_ReadsThePeakAndMeanPair_ForReadsAndWrites_LiteVerbatim()
+    {
+        var sql = PgAnomalyDetector.IoWindowSql;
+        var expectedColumns = new[]
+        {
+            "MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat",
+            "AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat",
+            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
+            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
+        };
+        foreach (var column in expectedColumns)
+            Assert.Contains(column, sql, StringComparison.Ordinal);
+
+        /* The column ORDER is the reader's ordinal contract (0 peak read, 1 avg read, 2 peak write, 3 avg write). */
+        var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg column order is the reader's ordinal contract");
+
+        /* Same grain and row filter as the io_latency baseline arm (per-file-row, read-or-write-bearing rows). */
+        Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
+
+        /* Lite's inline twin carries the same four columns, in the same order. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
+        var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.All(litePositions, p => Assert.True(p > 0, "Lite's I/O window read has drifted from the PG twin"));
+        Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
+           in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
+           documented transitional state, owned by its content lanes). */
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pg, liteCode })
+        {
+            var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*(\w+),\s*(\w+),");
+            Assert.Equal(7, calls.Count); // cpu, read, write, batch, session, query duration, memory
+            foreach (System.Text.RegularExpressions.Match call in calls)
+            {
+                Assert.StartsWith("peak", call.Groups[1].Value, StringComparison.Ordinal);
+                Assert.StartsWith("avg", call.Groups[2].Value, StringComparison.Ordinal);
+            }
+            Assert.DoesNotMatch(@"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*\w+,\s*(ioThreshold|GetDeviationThreshold)", code);
+        }
+    }
+
+    /// <summary>
     /// #3527 proven live, both halves in one place: the BatchRequests BASELINE arm derives its
     /// per-second unit from LAG(collection_time) over the perfmon_baseline supply, and the DETECTOR's
     /// window read divides by the stored measured interval — so the two sides meet in the same
@@ -834,6 +888,132 @@ public sealed class DarlingAnomalyBaselineTests
             {
                 using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
                 await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3653 (A8, first slice) proven live through the PG detector: the I/O read hands the shared gate the
+    /// per-file-row PEAK and MEAN, and the gate fires only when both clear. History: three Mondays at 10:00,
+    /// four read-bearing rows each at exactly 2 ms (20 ms of stall over 10 reads) — 12 samples over 3 distinct
+    /// days, so the Full bucket is TRUSTWORTHY and the verdict is the z path, not the absolute bar; the
+    /// collapsed dispersion sits on the 2.5 ms I/O floor. Window A (the A8 shape): fifteen 2 ms rows and ONE
+    /// 60 ms row — peak 60 ms is 23σ and over the 10 ms floor, the pre-#3653 fire; the window mean 5.625 ms is
+    /// 1.45σ, under the 3.5 cutoff — no fact. Window B: fifteen 40 ms rows and one at 60 — peak 60 (23.2σ),
+    /// mean 41.25 (15.7σ) — ONE ANOMALY_READ_LATENCY whose Value and current_latency_ms are the PEAK (no
+    /// longer the average the read used to emit), avg_latency_ms the mean, both sigmas stamped.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoDetector_PeakAndMeanPair_OneHotRowStaysQuiet_SustainedWindowFires_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-detector test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 3; // own id — this test cleans its own rows
+        const string ioServerName = "io-peak-mean-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7); // a Monday 10:00, at least a day in the past
+
+            const string insertIo =
+                "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+            var id = 500L;
+            foreach (var weeksBack in new[] { 2, 1, 0 })
+            {
+                var monday = lastHistoryMonday.AddDays(-7 * weeksBack);
+                for (var i = 0; i < 4; i++)
+                    await InsertAsync(connection, insertIo, id++, monday.AddMinutes(5 * i), ioServerId, ioServerName, 10L, 0L, 20L);
+            }
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var baseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisTime);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(12L, baseline.SampleCount);
+            Assert.Equal(3L, baseline.DistinctDays);
+            Assert.True(baseline.IsTrustworthy, "three Mondays clear the Full-tier day floor: the z path, not the bar");
+            Assert.Equal(2.0, baseline.Mean, precision: 6);
+            Assert.Equal(2.5, baseline.EffectiveRobustSigma, precision: 6); // MAD 0 → the I/O absolute floor
+
+            /* Canary for the HasBaselineData gate — OUTSIDE the analysis window so the wait detector's own
+               window read stays empty and it emits nothing. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                600L, lastHistoryMonday, ioServerId, ioServerName, TestWaitType, 1L, 100L);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = ioServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(90),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: one hot file row in an otherwise-baseline window. */
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 20L);
+
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
+            Assert.Empty(quiet);
+
+            /* Window B: the whole window ran high. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 400L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained);
+            Assert.Equal("ANOMALY_READ_LATENCY", fact.Key);
+            Assert.Equal(60.0, fact.Value, 0.001);                                  // the PEAK, not the window average
+            Assert.Equal(60.0, fact.Metadata["current_latency_ms"], 0.001);
+            Assert.Equal(41.25, fact.Metadata["avg_latency_ms"], 0.001);
+            Assert.Equal(0.0, fact.Metadata["baseline_low_quality"]);               // the z path
+            Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);       // 23.2σ, the peak's
+            Assert.Equal((41.25 - 2.0) / 2.5, fact.Metadata["mean_deviation_sigma"], 0.001); // 15.7σ, the mean's
+            Assert.Equal(AnomalyThresholds.ModifiedZThreshold, fact.Metadata["fire_threshold"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
             });
         }
     }

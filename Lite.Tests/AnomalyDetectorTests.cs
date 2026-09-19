@@ -534,6 +534,82 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.Equal(0.0, cpu.Metadata["fallback_exceedance"]); // trusted path carries no fallback exceedance
     }
 
+    // ── #3653 (A8, first slice): the detector hands the gate the window PEAK and MEAN as a pair ──
+
+    [Fact]
+    public async Task DetectCpuAnomalies_OneHotSampleInAQuietWindow_DoesNotFire_ThePeakAloneWouldHave()
+    {
+        // THE A8 shape through the DuckDB read: a healthy 10% baseline, and a window that idled at the
+        // baseline for 15 of 16 samples with ONE 90% sample. Pre-#3653 the detector tested only the window
+        // MAX (90%: 40σ, over the 50% floor — a fire) against the per-sample distribution, so one hot
+        // sample read as an anomaly and a longer window bought more of them. The window mean (15×10 + 90)
+        // / 16 = 15% is 1σ — under the 2.0 cutoff — and the pair gate stays quiet.
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), i == 7 ? 90 : 10);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
+    }
+
+    [Fact]
+    public async Task DetectCpuAnomalies_SustainedWindow_Fires_ReportsThePeaksSigma_AndTheMeansBesideIt()
+    {
+        // The same baseline, a window that ran 70% for 15 samples and 90% for one: peak 90% and mean
+        // 71.25% both clear the cutoff — fire. The reported Value / deviation_sigma stay the PEAK's
+        // (the scorer grades off them unchanged); the mean's deviation rides beside as
+        // mean_deviation_sigma so the story can say both.
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), i == 7 ? 90 : 70);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var cpu = anomalies.FirstOrDefault(f => f.Key == "ANOMALY_CPU_SPIKE");
+        Assert.NotNull(cpu);
+        Assert.Equal(90.0, cpu!.Value);
+        Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
+        Assert.Equal(71.25, cpu.Metadata["avg_cpu_in_window"], precision: 6);
+        Assert.Equal(0.0, cpu.Metadata["baseline_low_quality"]);
+        Assert.True(cpu.Metadata["deviation_sigma"] >= cpu.Metadata["mean_deviation_sigma"], "the reported sigma is the peak's; the mean's is the smaller one");
+        Assert.True(cpu.Metadata["mean_deviation_sigma"] >= cpu.Metadata["fire_threshold"], "a fired fact's mean cleared the same cutoff");
+    }
+
+    [Fact]
+    public async Task DetectIoAnomalies_ReadsThePeakAndMeanPair_OneHotFileRowDoesNotFire_ASustainedWindowDoes()
+    {
+        // I/O was the one z-score family reading AVG ALONE while its siblings read the window MAX under
+        // the same shared cutoffs. It now reads both at the per-file-row grain the baseline uses (2 ms
+        // read latency: 20 ms of stall over 10 reads, 14 days). Window A: 15 rows at 2 ms and ONE row at
+        // 60 ms — peak 60 ms is 23σ over the 2.5 ms floored dispersion and over the 10 ms floor (a
+        // peak-only fire), mean 5.6 ms is 1.5σ — no fire.
+        await SeedBaselineIo(stallReadMs: 20, reads: 10);
+        await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
+        for (int i = 0; i < 16; i++)
+            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 600 : 20, reads: 10);
+
+        var quiet = await _detector.DetectAnomaliesAsync(CreateContext());
+        Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
+
+        // Window B, same baseline: every row at 40 ms (400 ms of stall over 10 reads) and one at 60 ms —
+        // peak 60, mean 41.25, both far over the cutoff and the floor. Fires, Value and
+        // current_latency_ms are the PEAK (no longer the average), avg_latency_ms carries the mean.
+        await ExecuteSeedAsync($"DELETE FROM file_io_stats WHERE server_id = {ServerId} AND collection_time >= '{_analysisStart:yyyy-MM-dd HH:mm:ss}'");
+        _baselineProvider.ClearCache();
+        for (int i = 0; i < 16; i++)
+            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 600 : 400, reads: 10);
+
+        var sustained = await _detector.DetectAnomaliesAsync(CreateContext());
+        var read = sustained.FirstOrDefault(f => f.Key == "ANOMALY_READ_LATENCY");
+        Assert.NotNull(read);
+        Assert.Equal(60.0, read!.Value);
+        Assert.Equal(60.0, read.Metadata["current_latency_ms"]);
+        Assert.Equal(41.25, read.Metadata["avg_latency_ms"], precision: 6);
+        Assert.True(read.Metadata["deviation_sigma"] >= read.Metadata["mean_deviation_sigma"]);
+        Assert.True(read.Metadata["mean_deviation_sigma"] >= read.Metadata["fire_threshold"]);
+    }
+
     // ── Wait profile (change 1): one ANOMALY_WAIT_PROFILE, minority-but-real wait captured ──
 
     [Fact]
@@ -685,6 +761,20 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await ExecuteSeedAsync("COMMIT");
     }
 
+    /// <summary>Seeds a per-file-row I/O baseline (#3653): one read-bearing row per sample at a fixed
+    /// stall/reads ratio, 14 days in the analysis hour like every other baseline seed here.</summary>
+    private async Task SeedBaselineIo(long stallReadMs, long reads)
+    {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
+        for (int day = 1; day <= 14; day++)
+        {
+            var baseDay = SeedDayStart(day);
+            for (int i = 0; i < 4; i++)
+                await SeedFileIoAsync(baseDay.AddMinutes(i * 3), stallReadMs, reads);
+        }
+        await ExecuteSeedAsync("COMMIT");
+    }
+
     private async Task SeedBaselineMemory(double avgTotalServerMb, double targetMb)
     {
         await ExecuteSeedAsync("BEGIN TRANSACTION");
@@ -789,6 +879,28 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaExecCount });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaElapsed });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Seeds one read-bearing file_io_stats row: the detector and the io_latency baseline both read
+    /// delta_stall_read_ms / delta_reads per row, so (stallReadMs, reads) IS the sample's latency.</summary>
+    private async Task SeedFileIoAsync(DateTime time, long stallReadMs, long reads)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO file_io_stats
+            (collection_id, collection_time, server_id, server_name,
+             database_name, file_name, file_type, physical_name, size_mb,
+             delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
+             delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+            VALUES ($1, $2, $3, 'TestServer', 'AppDb', 'AppDb_data', 'ROWS', 'D:\AppDb.mdf', 100,
+                    $4, 0, 81920, 0, $5, 0, 60)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = time });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = reads });
+        cmd.Parameters.Add(new DuckDBParameter { Value = stallReadMs });
         await cmd.ExecuteNonQueryAsync();
     }
 
