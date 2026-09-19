@@ -1413,6 +1413,14 @@ public sealed class DarlingWorker : BackgroundService
 
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
 
+                /* #3653 (Q12): one line per superseded hourly rollup — where the interval-honest successor's
+                   materialized floor stands against the legacy's and against the hourly tier's horizon — so the
+                   hand-over from legacy to successor is visible in the log while it happens. An instrument,
+                   not a mechanism (nothing here changes a policy or drops a relation; SupersededHourlyRollups
+                   states why the legacy trio stays). AFTER the ensure so both relations exist on the start that
+                   creates the successors; two min(bucket) reads per pair, failure-isolated, never fatal. */
+                await TimescaleSupport.LogSupersededHourlyRollupCoverageAsync(timescaleConnection, _logger, DateTime.UtcNow, stoppingToken);
+
                 /* #3597: AFTER the aggregates exist and BEFORE compression, take the eleven per-column group
                    indexes off the interval-dedup materialization on any store whose aggregate predates
                    create_group_indexes = false on its CREATE. Nothing reads them, and every hourly refresh paid

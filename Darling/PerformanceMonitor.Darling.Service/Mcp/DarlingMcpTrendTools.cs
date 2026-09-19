@@ -378,7 +378,11 @@ public sealed class DarlingMcpTrendTools
             var history = await DarlingTrendReader.GetQueryHistoryAsync(
                 postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now,
                 hourlyAvailable: rollups.QueryGrainHourly,
-                coverage: coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
+                coverage: coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView),
+                /* #3653 (Q12): the hourly relation for THIS window — the interval-honest successor where it
+                   reaches as far back as the legacy does, the legacy otherwise. The tier above is still decided
+                   over the legacy pair, the deeper of the two. */
+                hourlyRelation: coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, now.AddHours(-hours_back)));
             var rows = history.Points;
             if (rows.Count == 0)
             {

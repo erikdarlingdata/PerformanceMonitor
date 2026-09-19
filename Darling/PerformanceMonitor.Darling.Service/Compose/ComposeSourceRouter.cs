@@ -325,10 +325,18 @@ public static class ComposeSourceRouter
 
         var tierCoverage = coverage.For(hourlyView, dailyView);
 
+        /* #3653 (Q12): the tier is decided over the LEGACY hourly's floor above — it is the deeper of the pair on
+           any upgraded store — and only then is the hourly RELATION chosen: the interval-honest successor
+           (query_stats_interval_hourly / procedure_stats_interval_hourly) where it exists and reaches as far back
+           into the window as the legacy does, the legacy otherwise. Same dimensions, same column names on both,
+           so the compiled SQL and ComposeCaggValueMapper are identical either way — the #1849 arrangement, one
+           relation name swapped. The Query Store family has no successor here and comes back unchanged. The
+           daily tier is untouched: the dailies are hierarchical from the LEGACY hourly and have no successor of
+           their own yet (TimescaleSupport.SupersededHourlyRollups states why). */
         return tier switch
         {
             RetentionTier.Raw => (ComposeRoute.Raw, null),
-            RetentionTier.Hourly => (new ComposeRoute(ComposeSourceTier.Hourly, hourlyView), tierCoverage.HourlyFloorUtc),
+            RetentionTier.Hourly => (new ComposeRoute(ComposeSourceTier.Hourly, coverage.HourlyRelationFor(hourlyView, windowStartUtc)), tierCoverage.HourlyFloorUtc),
             _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),
         };
     }

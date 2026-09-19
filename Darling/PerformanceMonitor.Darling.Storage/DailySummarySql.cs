@@ -255,14 +255,29 @@ public static class DailySummarySql
     /// instead of silently leaving the tab on raw — which is precisely how this bug went unnoticed.
     /// </summary>
     public static string RangeSqlFor(RetentionTier tier)
+        => RangeSqlFor(tier, TimescaleSupport.QueryStatsHourlyView);
+
+    /// <summary>
+    /// <see cref="RangeSqlFor(RetentionTier)"/> with the HOURLY relation the caller resolved (#3653, Q12):
+    /// <paramref name="hourlyRelation"/> is <c>query_stats_hourly</c> or its interval-honest successor
+    /// <c>query_stats_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/> over the window's
+    /// start. The successor carries the same <c>query_hash</c> and <c>bucket</c> the queries CTE reads, and
+    /// leaves out the restart row the legacy counted as a query seen that day. The daily tier is not
+    /// parameterised: the daily has no successor (it is hierarchical from the legacy hourly —
+    /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). The one-argument form keeps the legacy for
+    /// callers that have not probed, which is what every pre-#3653 pin reads.
+    /// </summary>
+    public static string RangeSqlFor(RetentionTier tier, string hourlyRelation)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
         if (tier == RetentionTier.Raw)
         {
             return RangeSql;
         }
 
         var relation = tier == RetentionTier.Hourly
-            ? TimescaleSupport.QueryStatsHourlyView
+            ? hourlyRelation
             : TimescaleSupport.QueryStatsDailyView;
 
         var routed = RangeSql.Replace(

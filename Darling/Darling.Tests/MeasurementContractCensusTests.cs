@@ -355,7 +355,10 @@ public sealed class MeasurementContractCensusTests
 
     /// <summary>
     /// Aggregates over a delta family that admit the unknowable (0, 0) row, named so the list can only shrink
-    /// deliberately. Two kinds, stated apart because they retire differently:
+    /// deliberately — and, since #3653 Q12, EVERY member is SUPERSEDED: each has a registered interval-honest
+    /// successor carrying the predicate, which the test below asserts pair by pair, so the roster is no longer a
+    /// list of open defects but the record of which legacy text still exists and why. Two kinds, stated apart
+    /// because they retire differently:
     /// <list type="bullet">
     /// <item><description><c>perfmon_baseline</c>, <c>wait_stats_baseline</c> — the SUPERSEDED pair (#3698).
     /// Not registered (nothing creates them any more), read by <c>PgBaselineProvider</c>'s legacy arm for the
@@ -365,12 +368,18 @@ public sealed class MeasurementContractCensusTests
     /// retirement test builds its fixture from it.</description></item>
     /// <item><description><c>query_stats_hourly</c>, <c>procedure_stats_hourly</c>, <c>query_stats_db_hourly</c>
     /// — the REGISTERED hourly rollups over two delta families, built (#1849 era) before those tables carried
-    /// an interval. A restart's (0, 0) row costs their <c>sum()</c>s nothing, but <c>count(*) AS sample_count</c>
-    /// counts it as a sample on all three, and <c>min(delta_*)</c> reads it as a real minimum on the two that
-    /// carry a min (<c>query_stats_db_hourly</c> carries sums and the sample count only); the daily tier is
-    /// hierarchical from these and inherits both. A continuous aggregate cannot be altered in place, so the
-    /// fix is #3698's shape — a successor under a new name, <c>WITH NO DATA</c>, backfilled, coverage-gated
-    /// retirement — and it moves the hourly refresh phase grid, which is why it is a lane and not a line.
+    /// an interval, SUPERSEDED for the hourly-tier read by <c>query_stats_interval_hourly</c>,
+    /// <c>procedure_stats_interval_hourly</c> and <c>query_stats_db_interval_hourly</c> (#3653, Q12;
+    /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). A restart's (0, 0) row costs their <c>sum()</c>s
+    /// nothing, but <c>count(*) AS sample_count</c> counts it as a sample on all three, and <c>min(delta_*)</c>
+    /// reads it as a real minimum on the two that carry a min (<c>query_stats_db_hourly</c> carries sums and the
+    /// sample count only). Unlike the baseline pair they STAY registered and refreshing: the indefinite daily
+    /// tier is hierarchical from them and a continuous aggregate's source is fixed at CREATE, so they cannot be
+    /// dropped without cascading it nor frozen without stopping it. Every hourly-tier reader takes the
+    /// successor through <c>RollupCoverage.HourlyRelationFor</c> where it reaches as far as the legacy; the
+    /// daily tier inherits the legacy's contamination at the day grain until it has successors of its own
+    /// (which need the daily compression band re-derived first — it is full at twenty-three). These three
+    /// leave this list only with the legacy text, i.e. with a stitched read or a daily-successor lane.
     /// </description></item>
     /// </list>
     /// </summary>
@@ -412,16 +421,39 @@ public sealed class MeasurementContractCensusTests
         Assert.Equal(10, deltaTables.Count);
 
         var governed = aggregates.Where(a => deltaTables.Contains(a.From) && a.AggregatesADelta).ToList();
-        Assert.True(governed.Count >= 8, $"only {governed.Count} aggregates read a delta family — expected the two successors, the legacy pair, query_stats_baseline and the three hourly rollups at least");
+        Assert.True(governed.Count >= 11, $"only {governed.Count} aggregates read a delta family — expected the five successors, the legacy pair, query_stats_baseline and the three legacy hourly rollups at least");
 
         var carrying = governed.Where(a => a.CarriesIntervalPredicate).Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal).ToList();
         var equivalent = governed.Where(a => !a.CarriesIntervalPredicate && EquivalentPredicates.Any(e => e.View == a.View)).ToList();
         var admitting = governed.Where(a => !a.CarriesIntervalPredicate && EquivalentPredicates.All(e => e.View != a.View)).Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal).ToList();
 
-        /* The successors carry it — the whole point of #3698 — and are the two registered in the pair's
-           positions. */
-        Assert.Equal(new[] { TimescaleSupport.PerfmonIntervalBaselineView, TimescaleSupport.WaitStatsIntervalBaselineView }, carrying);
-        Assert.All(carrying, view => Assert.Contains(view, TimescaleSupport.BaselineAggregates.Select(a => a.View)));
+        /* The successors carry it — the whole point of #3698 and of #3653 Q12 — and every one is REGISTERED:
+           the baseline pair in the legacy pair's positions, the hourly trio appended to HourlyAggregates. */
+        Assert.Equal(
+            new[]
+            {
+                TimescaleSupport.PerfmonIntervalBaselineView,
+                TimescaleSupport.ProcedureStatsIntervalHourlyView,
+                TimescaleSupport.QueryStatsDbIntervalHourlyView,
+                TimescaleSupport.QueryStatsIntervalHourlyView,
+                TimescaleSupport.WaitStatsIntervalBaselineView,
+            }.OrderBy(v => v, StringComparer.Ordinal),
+            carrying);
+        var registeredHourlyOrBaseline = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.BaselineAggregates).Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        Assert.All(carrying, view => Assert.Contains(view, registeredHourlyOrBaseline));
+
+        /* THE INVARIANT SINCE Q12: every aggregate that still admits the row is SUPERSEDED — named in one of the
+           two supersession lists with a successor that is registered and carries the predicate. The roster
+           cannot empty while the legacy CREATE text exists (the hourly trio is registered for its daily tier;
+           the baseline pair's text is the live retirement fixture), so "empty" is not the honest assertion;
+           "every member has a carrying successor" is, and it is the stronger one: a new admitting aggregate
+           cannot pass by joining the roster, it has to come with its successor. */
+        var supersessions = TimescaleSupport.SupersededBaselineRelations.Select(s => (s.Legacy, s.Successor))
+            .Concat(TimescaleSupport.SupersededHourlyRollups.Select(s => (s.Legacy, s.Successor)))
+            .ToDictionary(s => s.Legacy, s => s.Successor, StringComparer.Ordinal);
+        Assert.All(admitting, legacy => Assert.True(supersessions.ContainsKey(legacy), $"{legacy} admits the unknowable row and has no registered successor — rule 5 is open again"));
+        Assert.All(admitting, legacy => Assert.Contains(supersessions[legacy], carrying));
+        Assert.Equal(admitting.Count, supersessions.Count);
 
         /* Every equivalent predicate is really in the WHERE it claims to be in. */
         foreach (var (view, predicate) in EquivalentPredicates)
@@ -450,6 +482,7 @@ public sealed class MeasurementContractCensusTests
         };
         var registeredAdmitting = admitting.Except(TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy)).ToList();
         Assert.Equal(contamination.Keys.OrderBy(v => v, StringComparer.Ordinal), registeredAdmitting);
+        Assert.Equal(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).OrderBy(v => v, StringComparer.Ordinal), registeredAdmitting);
         foreach (var view in registeredAdmitting)
         {
             Assert.Contains(view, TimescaleSupport.HourlyAggregates.Select(a => a.View));
@@ -461,6 +494,28 @@ public sealed class MeasurementContractCensusTests
 
             /* The db-hourly carries no min — the roster's remark says so; keep it true. */
             Assert.Equal(contamination[view].Contains("min(delta_"), Regex.IsMatch(text, @"\bmin\(delta_\w+\)"));
+
+            /* THE SUCCESSOR IS THE LEGACY'S SHAPE PLUS THE VERDICT (#3653, Q12): same FROM, same GROUP BY, every
+               legacy select item present under the same alias, the interval predicate in the WHERE, and the
+               measured interval carried as a per-bucket sum. Asserted on the shipped text so a successor that
+               drifted from its legacy's dimensions — which is what would make a reader's relation swap change
+               its answer's shape — is red here rather than at a 42703 on a store. */
+            var (_, successor, dependentDaily) = TimescaleSupport.SupersededHourlyRollups.Single(s => s.Legacy == view);
+            var successorText = Text(aggregates.Single(a => a.View == successor).Constant);
+            Assert.Contains(IntervalPredicate, successorText, StringComparison.Ordinal);
+            Assert.Contains("sum(sample_interval_seconds) AS sample_interval_seconds_sum", successorText, StringComparison.Ordinal);
+            Assert.Equal(Regex.Match(text, @"\bFROM\s+collect\.(\w+)").Groups[1].Value, Regex.Match(successorText, @"\bFROM\s+collect\.(\w+)").Groups[1].Value);
+            Assert.Equal(TimescaleSupport.RefreshGroupingTermsFor(text), TimescaleSupport.RefreshGroupingTermsFor(successorText));
+            foreach (Match alias in Regex.Matches(text, @"\b(\w+\([^)]*\)) AS (\w+)"))
+            {
+                Assert.Contains($"{alias.Groups[1].Value} AS {alias.Groups[2].Value}", successorText, StringComparison.Ordinal);
+            }
+
+            /* And the daily the legacy is kept for really is hierarchical from the LEGACY, not the successor —
+               the structural fact the whole "stays registered" reasoning rests on. */
+            var dailyText = Text(aggregates.Single(a => a.View == dependentDaily).Constant);
+            Assert.Contains($"FROM collect.{view}", dailyText, StringComparison.Ordinal);
+            Assert.Contains(dependentDaily, TimescaleSupport.DailyAggregates.Select(a => a.View));
         }
     }
 

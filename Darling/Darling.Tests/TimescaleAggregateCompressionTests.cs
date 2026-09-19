@@ -82,18 +82,20 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
-    /// The registry is the three creation lists and nothing else: twenty aggregates, each registered once, each
-    /// carrying the tier of the list it came from, each aliasing its bucket <c>bucket</c>, and each grouping by
-    /// <c>server_id</c> — the last two recovered from the shipped CREATE text, which is what lets the
-    /// <c>segmentby</c>/<c>orderby</c> the ensure emits be a property of the registry rather than an assumption.
+    /// The registry is the three creation lists and nothing else: twenty-three aggregates since #3653 (Q12 —
+    /// nine hourly, the six #3581 counted plus the three interval-honest successors; twenty before), each
+    /// registered once, each carrying the tier of the list it came from, each aliasing its bucket <c>bucket</c>,
+    /// and each grouping by <c>server_id</c> — the last two recovered from the shipped CREATE text, which is what
+    /// lets the <c>segmentby</c>/<c>orderby</c> the ensure emits be a property of the registry rather than an
+    /// assumption.
     /// </summary>
     [Fact]
     public void EveryAggregate_IsRegisteredOnce_WithItsTier_ABucketColumn_AndServerIdInItsGroupKey()
     {
         var targets = TimescaleSupport.AggregateCompressionTargets;
 
-        Assert.Equal(20, targets.Count);
-        Assert.Equal(6, TimescaleSupport.HourlyAggregates.Length);
+        Assert.Equal(23, targets.Count);
+        Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.DailyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
         Assert.Equal(
@@ -183,9 +185,11 @@ public sealed class TimescaleAggregateCompressionTests
                 $"{relation} compresses after {compressAfter} against a {dropAfter} horizon, so less than half its life is compressed");
         }
 
-        /* The control: the walk covered the whole aggregate ladder — every hourly history tier, both
-           interval-identity tiers and the seven baselines. Zero here is a filter that matched nothing. */
-        Assert.Equal(14, checkedTiers);
+        /* The control: the walk covered the whole aggregate ladder — every hourly history tier (eight since
+           #3653: the four originals, the corrected Query Store hourly and the three interval-honest
+           successors), both interval-identity tiers (the L1 dedup layer and the interval-grain daily) and the
+           seven baselines: 8 + 2 + 7. Zero here is a filter that matched nothing. */
+        Assert.Equal(17, checkedTiers);
     }
 
     /// <summary>
@@ -217,11 +221,13 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.DoesNotContain(minute, TimescaleSupport.CompressionPhaseMinutes);
         Assert.Equal(TimescaleSupport.CompressionPhaseMinutes[0], minute + 1);
 
-        /* Past the recorded ceiling of the heaviest refresh, with the margin stated: 1,200 s after its start
-           against 896 s. The grid asserts the ceiling fits the window; this asserts the band sits past the
-           ceiling inside that window, and a ceiling that grew to meet it fails here. */
+        /* Past the recorded ceiling of the heaviest refresh, with the margin stated: (35 - 18) * 60 = 1,020 s
+           after its start against 896 s (1,200 s while the heaviest started at :15; #3653's re-derived grid
+           moved its start three minutes later and left the band's minute where it was). The grid asserts the
+           ceiling fits the window; this asserts the band sits past the ceiling inside that window, and a
+           ceiling that grew to meet it fails here — 124 s of margin now, where there were 304. */
         var secondsPastHeaviest = (minute - TimescaleSupport.HeaviestRefreshStartMinute) * 60;
-        Assert.Equal(1200, secondsPastHeaviest);
+        Assert.Equal(1020, secondsPastHeaviest);
         Assert.True(
             secondsPastHeaviest > TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
             $"the daily band's minute is {secondsPastHeaviest}s past the heaviest refresh's start against a "
@@ -248,8 +254,11 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Equal(25, TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
 
         /* THE HOURS: one per aggregate in registry order from hour 1, distinct, never the midnight hour, all
-           inside the day. Asserted as identities against the registry so a twenty-first aggregate is placed
-           without editing this, and as a fit so a twenty-fourth is red rather than wrapped onto midnight. */
+           inside the day. Asserted as identities against the registry so a new aggregate is placed without
+           editing this, and as a fit so a twenty-fourth is red rather than wrapped onto midnight. #3653's
+           three successors took hours 21, 22 and 23: the band is FULL — the next aggregate registered
+           anywhere re-derives this band (two per hour, or a second minute) before it can be placed. */
+        Assert.Equal(TimescaleSupport.HoursInDailyCadence, TimescaleSupport.AggregateCompressionBandFirstHour + TimescaleSupport.AggregateCompressionTargets.Count);
         Assert.Equal(1, TimescaleSupport.AggregateCompressionBandFirstHour);
         Assert.Equal(24, TimescaleSupport.HoursInDailyCadence);
         Assert.Equal(TimeSpan.FromDays(1), TimescaleSupport.AggregateCompressionScheduleSpan);
@@ -549,7 +558,10 @@ public sealed class TimescaleAggregateCompressionTests
                 Assert.Equal((long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds, seconds);
             }
 
-            Assert.Contains($"20/20 materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
+            /* 23 since #3653 (Q12): the count is the registry's, not a literal, so the three successors are counted
+               the moment they are registered. */
+            Assert.Contains($"{TimescaleSupport.AggregateCompressionTargets.Count}/{TimescaleSupport.AggregateCompressionTargets.Count} materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Equal(23, TimescaleSupport.AggregateCompressionTargets.Count);
             Assert.Contains($"{wideBefore} changed this start", firstLog.Joined, StringComparison.Ordinal);
 
             /* A settled store issues no set_chunk_time_interval at all: the direct call returns zero changes and
@@ -596,7 +608,7 @@ public sealed class TimescaleAggregateCompressionTests
 
             /* The summary line names both windows and the band, and is rendered — a placeholder/argument
                mismatch renders wrong with no error anywhere, which no return-value assertion can catch. */
-            Assert.Contains("continuous-aggregate compression on 20/20 aggregates", firstLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"continuous-aggregate compression on {TimescaleSupport.AggregateCompressionTargets.Count}/{TimescaleSupport.AggregateCompressionTargets.Count} aggregates", firstLog.Joined, StringComparison.Ordinal);
             Assert.Contains($"compress_after {TimescaleSupport.HourlyAggregateCompressAfter} for the hourly-refreshed tier", firstLog.Joined, StringComparison.Ordinal);
             Assert.Contains($"{TimescaleSupport.DailyAggregateCompressAfter} for the daily tier", firstLog.Joined, StringComparison.Ordinal);
             Assert.Contains($"minute :{TimescaleSupport.AggregateCompressionBandMinute:00}Z, from hour {TimescaleSupport.AggregateCompressionBandFirstHour:00}Z", firstLog.Joined, StringComparison.Ordinal);

@@ -527,10 +527,15 @@ public sealed class RefreshCeilingProvenancePinTests
            without the threshold or the decision changing at all, so a pin on it would go red for a reason
            that is not a defect - and a pin on it going GREEN says nothing about whether the decision still
            holds. The ordering has neither property. */
+        /* The wording moved at #3653 (Q12): the re-derived 18-minute window put the alternative BELOW the
+           ceiling again (840 s against 896), so the sentence says BELOW where it said ABOVE, and the pattern
+           follows the words — route (1) of the parse-miss text, sanctioned because
+           EveryNumericPin_ReportsAnInjectedDrift re-derives this pin's mutation case from the pattern as
+           written. The figure is still held to the arithmetic below; only the direction word moved. */
         yield return (
             "the rejected alternative watch line",
             WarningLineDeclaration,
-            @"<see cref=""CompressionPhaseGuardMinutes""/> band, ([0-9]+) s, and it now sits ABOVE <see cref=""HeaviestHourlyRefreshObservedCeilingSeconds""/>",
+            @"<see cref=""CompressionPhaseGuardMinutes""/> band, ([0-9]+) s, and it sits BELOW <see cref=""HeaviestHourlyRefreshObservedCeilingSeconds""/>",
             true);
 
         yield return (
@@ -548,6 +553,18 @@ public sealed class RefreshCeilingProvenancePinTests
             "the light-refresh census",
             LightCeilingDeclaration,
             @"the maximum is ([0-9]+)\.([0-9]+) s over ([0-9]+) runs of ([0-9]+) views",
+            true);
+
+        /* THE SCOPE SENTENCE (#3653, Q12): the census predates the three interval-honest hourly successors,
+           so it covers a stated number of the light views the constant now bounds, and states how many are
+           unmeasured. All three figures are load-bearing: the covered count is the census's own view count,
+           the total is the product's light-policy count, and the unmeasured count is their difference — so
+           a fourth successor registered without a fresh census cannot pass by leaving this sentence alone,
+           and a fresh census over the full layout retires the sentence and this pin with it. */
+        yield return (
+            "the light views the census covers and the ones registered after it",
+            LightCeilingDeclaration,
+            @"it covers ([0-9]+) of the ([0-9]+) light views the constant now bounds; the ([0-9]+) registered after the read are unmeasured",
             true);
 
         /* The exclusion CONTROL, which is what says the succeeded/finish filter is not selecting the
@@ -1905,9 +1922,24 @@ public sealed class RefreshCeilingProvenancePinTests
             $"the stated census maximum {lightCensus[0]}.{lightCensus[1]} s is not this constant's "
             + $"{LightCeilingTenths / 10}.{LightCeilingTenths % 10} s - the comment says the estimator is "
             + "the maximum, so one of the two is wrong");
-        Require(lightCensus[3] == TimescaleSupport.LightHourlyRefreshCount,
-            $"the census states {lightCensus[3]} views against the "
-            + $"{TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product "
+        /* #3653 (Q12): the census was read over twelve light views and the product registers fifteen. The
+           scope sentence has to account for every one of the difference by name-of-count — covered plus
+           unmeasured equals the light-policy count, the covered count is the census's own, and the
+           unmeasured count is the one the shape argument in the prose is made for. A census re-read over the
+           full layout states covered == total and unmeasured == 0, and retires the sentence. */
+        var scope = Read("the light views the census covers and the ones registered after it");
+        Require(scope[0] == lightCensus[3],
+            $"the scope sentence says the census covers {scope[0]} views where the census states {lightCensus[3]}");
+        Require(scope[1] == TimescaleSupport.LightHourlyRefreshCount,
+            $"the scope sentence says the constant bounds {scope[1]} light views against the "
+            + $"{TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product registers");
+        Require(scope[2] == TimescaleSupport.LightHourlyRefreshCount - lightCensus[3],
+            $"the scope sentence says {scope[2]} light views are unmeasured against "
+            + $"{TimescaleSupport.LightHourlyRefreshCount - lightCensus[3]} derived (registered less censused) — "
+            + "a light member registered after the census has to be named in that sentence or the census re-read");
+        Require(lightCensus[3] + scope[2] == TimescaleSupport.LightHourlyRefreshCount,
+            $"the census states {lightCensus[3]} views and the scope sentence {scope[2]} unmeasured, which is not "
+            + $"the {TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product "
             + "registers, so it is a census of a different set of jobs than the one this constant bounds");
 
         var lightKept = Read("the light-refresh census exclusion count");

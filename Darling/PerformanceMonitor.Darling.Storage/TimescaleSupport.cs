@@ -1339,6 +1339,24 @@ $do$";
     ///
     /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
     /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
+    ///
+    /// <para><b>Nine since #3653 (Q12), and the three interval-honest successors are APPENDED rather than put in
+    /// their legacy's positions, which is the opposite of what #3698 did for the baseline pair — deliberately,
+    /// and the reason is on <see cref="SupersededHourlyRollups"/>.</b> The legacy trio cannot leave this list:
+    /// each has an indefinite daily tier hierarchical from it, so it must go on being created, refreshed and
+    /// phased. Nine members means the phase grid RE-DERIVES itself — <see cref="LightHourlyRefreshCount"/>
+    /// 12→15, <see cref="LightBandSpanMinutes"/> 11→14, <see cref="HeaviestRefreshStartMinute"/> 15→18,
+    /// <see cref="HeaviestRefreshWindowMinutes"/> 21→18 and <see cref="RefreshSlotWarningSeconds"/>
+    /// 1,050→900 s against the 896 s <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — by the
+    /// method the grid documents, not by anyone renumbering it; the pins in TimescaleSupportTests and
+    /// RefreshCeilingProvenancePinTests carry that derivation. Appended at the END of this list so the six
+    /// members ahead of them keep their minutes: the unbounded-cardinality successor takes the fourth
+    /// every-fourth position (12), and the two bounded successors are dealt into the bounded class in registry
+    /// order (3 and 5), which moves the seven baseline members — dealt after this list — two positions later
+    /// each. Nine sub-3 s policies re-phased once by <see cref="ConvergeContinuousAggregateRefreshAsync"/> on
+    /// the first start that carries this build, the operation that converge exists for; the map stays
+    /// injective and no two policies on one source share a minute. The raw source of each successor is a
+    /// hypertable, so none carries an ordering requirement against the corrected Query Store pair.</para>
     /// </summary>
     public static readonly (string CreateSql, string View)[] HourlyAggregates =
     {
@@ -1350,7 +1368,201 @@ $do$";
            which is hierarchical from it. */
         (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
         (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
+        /* The interval-honest successors of the first, second and fourth members (#3653, Q12), appended — see
+           the summary and SupersededHourlyRollups for why they do not take their legacy's positions. */
+        (CreateQueryStatsIntervalHourlySql,       QueryStatsIntervalHourlyView),
+        (CreateProcedureStatsIntervalHourlySql,   ProcedureStatsIntervalHourlyView),
+        (CreateQueryStatsDbIntervalHourlySql,     QueryStatsDbIntervalHourlyView),
     };
+
+    /// <summary>
+    /// The hourly rollups SUPERSEDED for the hourly-tier READ by an interval-honest successor (#3653, Q12):
+    /// each legacy, its successor, and the indefinite daily tier that is hierarchical from the LEGACY. Every
+    /// hourly-tier reader resolves its relation through <see cref="RollupCoverage.HourlyRelationFor"/>, which
+    /// reads this list and applies <see cref="PrefersSuccessor"/>.
+    ///
+    /// <para><b>These three do NOT retire the way #3698's baseline pair retires, and the difference is
+    /// structural rather than a choice.</b> <see cref="SupersededBaselineRelations"/> drops a legacy aggregate
+    /// once its successor covers the tier, because nothing else depends on it. Each legacy here has a DAILY
+    /// continuous aggregate built <c>FROM</c> it — <see cref="QueryStatsDailyView"/>,
+    /// <see cref="ProcedureStatsDailyView"/>, <see cref="QueryStatsDbDailyView"/> — and a continuous aggregate's
+    /// source is fixed at CREATE. A <c>DROP ... CASCADE</c> of the legacy takes the daily with it, and the daily
+    /// is the tier kept INDEFINITELY, holding history no other relation has; removing the legacy's REFRESH
+    /// policy instead would freeze the daily at that watermark, and a daily-tier window ending at now would
+    /// then be served incomplete, silently — the #1759 shape. So the legacy keeps its registration, its
+    /// refresh policy, its minute on the phase grid, its retention and its compression, for as long as the
+    /// daily tier reads through it.</para>
+    ///
+    /// <para><b>What that costs, stated.</b> Three more hourly refreshes on the grid for good — two sub-3 s
+    /// deployment-bounded ones and one unbounded-cardinality one (<see cref="QueryStatsIntervalHourlyView"/>
+    /// groups by statement, like its legacy, measured at 23.3 s on the largest store), each on its own minute,
+    /// so no lock adjacency — and the grid re-derived around fifteen light members instead of twelve, which
+    /// takes 180 s of window from the heaviest refresh and leaves
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> 4 s under the re-derived
+    /// <see cref="RefreshSlotWarningSeconds"/>. That margin is the ceiling essay's own "18 whole minutes" — the
+    /// smallest window whose five-sixths line still clears 896 s — reached exactly, and it is pinned rather than
+    /// eased: a live run past 900 s now warns where 1,050 s did, and the compression band's first minute
+    /// (<see cref="AggregateCompressionBandMinute"/>) does not move, because the band is the hour's remainder
+    /// after a window that shrank by what the light band grew.</para>
+    ///
+    /// <para><b>What the daily tier does NOT get from this.</b> The dailies stay hierarchical from the legacy
+    /// trio, so they inherit the legacy's contamination at the day grain: one extra <c>sample_count</c> per
+    /// restart per group, and a <c>min()</c> of 0 on any day with a restart. Their honesty is their parent's
+    /// (the measurement census scopes rule 5 to aggregates that read a delta family directly, for that reason).
+    /// Interval-honest dailies would be three more aggregates hierarchical from the successors here — and
+    /// <see cref="AggregateCompressionBandHourFor"/>'s band is FULL at twenty-three members after this change
+    /// (hours 1–23 of 24), so that lane re-derives the daily compression band before it registers anything.
+    /// Until it lands, the retirement condition for a legacy here is "its daily has a registered successor that
+    /// covers every daily-tier window the readers can ask for" — which, for an indefinite tier read by relation
+    /// rather than stitched, is never; the honest statement is that the legacy trio is permanent under the
+    /// current reader model, and this list is what a future stitched read or daily-successor lane consults.
+    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> reports the successor's reach on every start so the
+    /// hand-over is visible while it happens.</para>
+    ///
+    /// <para><b>The raw purge is NOT gated on the successors</b>, following the <see cref="QueryStatsDbHourlyView"/>
+    /// precedent (#1661) rather than the corrected Query Store L1's (#1849): adding them to
+    /// <see cref="RawTierCoverage"/> would HOLD every store's <c>query_stats</c> and <c>procedure_stats</c>
+    /// purge from the first start until an operator ran <c>--backfill-rollups</c>, and on the largest store
+    /// raw grows faster than that dependency can be assumed to be met. So a successor's history begins at the
+    /// first refresh after the start that created it (one <see cref="HourlyRefreshStartOffset"/> back) unless
+    /// the operator backfills within the raw horizon; the sliver it then lacks stays on the legacy read for
+    /// exactly as long as the legacy holds it, by <see cref="PrefersSuccessor"/>, and ages out at the hourly
+    /// tier's horizon. Nothing is lost that the legacy did not already hold.</para>
+    /// </summary>
+    public static readonly (string Legacy, string Successor, string DependentDaily)[] SupersededHourlyRollups =
+    {
+        (QueryStatsHourlyView,     QueryStatsIntervalHourlyView,     QueryStatsDailyView),
+        (ProcedureStatsHourlyView, ProcedureStatsIntervalHourlyView, ProcedureStatsDailyView),
+        (QueryStatsDbHourlyView,   QueryStatsDbIntervalHourlyView,   QueryStatsDbDailyView),
+    };
+
+    /// <summary>The interval-honest successor that supersedes <paramref name="legacyHourly"/> for the hourly-tier
+    /// read, or <c>null</c> for an hourly rollup that was never superseded (the Query Store family, and the
+    /// successors themselves).</summary>
+    public static string? SuccessorOf(string legacyHourly)
+    {
+        foreach (var (legacy, successor, _) in SupersededHourlyRollups)
+        {
+            if (string.Equals(legacy, legacyHourly, StringComparison.Ordinal))
+            {
+                return successor;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// THE SUPPLY RULE (#3653), pure so the tests can walk it, and shared: <c>PgBaselineProvider</c> applies it
+    /// per metric against one server's reach into the baseline supplies, and
+    /// <see cref="RollupCoverage.HourlyRelationFor"/> applies it against a store's materialized floors for the
+    /// hourly rollups. One rule, two callers, because the question is the same — read the successor when the
+    /// legacy relation is absent, or when the successor reaches at least as far back into the window as the
+    /// legacy does. <paramref name="windowStart"/> bounds what "as far back" can mean: history older than the
+    /// window is never read, so a legacy reaching 90 days back buys nothing over a successor reaching 30 when the
+    /// question is a 30-day window.
+    ///
+    /// <para><b>Compared against the legacy's OWN reach, not against the window alone.</b> A relation that
+    /// began three days ago has three days in BOTH supplies; a rule of "successor covers the window" would send
+    /// that read to the legacy, contaminated supply for the rest of the window for no gain. The comparison is
+    /// <c>successorOldest &lt;= GREATEST(legacyOldest, windowStart)</c>: the successor must reach the later of
+    /// the legacy's first bucket and the window's start, which is exactly the first instant the legacy could
+    /// contribute a row the successor cannot.</para>
+    ///
+    /// <para>An EMPTY successor (<c>null</c> oldest — created but not yet refreshed or backfilled) never wins
+    /// while a legacy with rows exists; an empty legacy always loses. Both empty: successor, since there is
+    /// nothing to read either way and the successor is the relation that will fill.</para>
+    /// </summary>
+    public static bool PrefersSuccessor(bool legacyExists, DateTime? legacyOldest, DateTime? successorOldest, DateTime windowStart)
+    {
+        if (!legacyExists || legacyOldest is null)
+        {
+            return true;
+        }
+
+        if (successorOldest is null)
+        {
+            return false;
+        }
+
+        var legacyReach = legacyOldest.Value > windowStart ? legacyOldest.Value : windowStart;
+        return successorOldest.Value <= legacyReach;
+    }
+
+    /// <summary>
+    /// Does <paramref name="successorOldest"/> reach the hourly tier's horizon — <paramref name="utcNow"/> minus
+    /// <see cref="HourlyRetentionSpan"/>? The hand-over milestone for one of <see cref="SupersededHourlyRollups"/>:
+    /// past it, no hourly-tier window the router can route has a start the legacy covers and the successor does
+    /// not, so <see cref="PrefersSuccessor"/> answers the successor for every hourly read. It does NOT release the
+    /// legacy (see the registry's summary for why nothing can, yet); it is what
+    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> reports. Pure, so the tests walk it across time. An
+    /// empty successor (<c>null</c>) reaches nothing. <c>&lt;=</c> so a bucket exactly on the horizon counts, the
+    /// <see cref="SupersededBaselineRelationDropsAt"/> convention.
+    /// </summary>
+    public static bool SuccessorCoversHourlyTier(DateTime? successorOldest, DateTime utcNow)
+        => successorOldest is DateTime oldest && oldest <= utcNow - HourlyRetentionSpan;
+
+    /// <summary>
+    /// One INFORMATION line per superseded hourly rollup on every start (#3653, Q12): where the successor's
+    /// materialized floor stands against the legacy's and against the hourly tier's horizon, so an operator can
+    /// see the hand-over happening — the successor takes over each read the moment it reaches as far as the
+    /// legacy does for that read's window, and takes over every hourly read once
+    /// <see cref="SuccessorCoversHourlyTier"/> holds (about <see cref="HourlyRetentionSpan"/> after the first
+    /// refresh, or at once after a <c>--backfill-rollups</c> that reached raw's oldest row on a store whose raw
+    /// is deep enough).
+    ///
+    /// <para>An instrument, not a mechanism: it changes nothing. The two <c>min(bucket)</c> reads per pair are the
+    /// same probe <see cref="RollupCoverageProbeSql"/> runs for every reader, once each here. Failure-isolated per
+    /// pair and never fatal — a store without the extension or with an aggregate whose setup failed logs the
+    /// miss at Debug and moves on. Runs AFTER <see cref="EnsureContinuousAggregatesAsync"/> so both relations
+    /// exist on the start that creates the successors. <paramref name="utcNow"/> is the service clock, bound as
+    /// a parameter's stand-in in C# rather than written as <c>now()</c> in store SQL (the
+    /// <see cref="BaselineBackfillProbeSql(string, string)"/> zone reasoning).</para>
+    /// </summary>
+    public static async Task LogSupersededHourlyRollupCoverageAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        foreach (var (legacy, successor, dependentDaily) in SupersededHourlyRollups)
+        {
+            try
+            {
+                DateTime? legacyOldest;
+                using (var probe = new NpgsqlCommand(BaselineCoverageOldestSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    legacyOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+                }
+
+                DateTime? successorOldest;
+                using (var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+                }
+
+                var horizon = utcNow - HourlyRetentionSpan;
+                logger?.LogInformation(
+                    "Superseded hourly rollup {Legacy} (#3653): its interval-honest successor {Successor} covers from {SuccessorOldest} where the legacy covers from {LegacyOldest}; the hourly tier's horizon is {Horizon}. {Verdict} The legacy stays registered and refreshing: {DependentDaily} is hierarchical from it and is the indefinite tier.",
+                    legacy, successor,
+                    successorOldest is DateTime s ? s.ToString("O", CultureInfo.InvariantCulture) : "nothing yet (WITH NO DATA; the first hourly refresh or --backfill-rollups fills it)",
+                    legacyOldest is DateTime l ? l.ToString("O", CultureInfo.InvariantCulture) : "nothing",
+                    horizon.ToString("O", CultureInfo.InvariantCulture),
+                    SuccessorCoversHourlyTier(successorOldest, utcNow)
+                        ? "The successor covers the whole hourly tier, so every hourly-tier read now takes it."
+                        : "Hourly-tier reads take the successor for windows it reaches as far back into as the legacy does, and the legacy for the rest, until it covers the tier.",
+                    dependentDaily);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogDebug(
+                    "Could not read the superseded hourly rollup {Legacy} / {Successor} coverage this start: {Message}",
+                    legacy, successor, ex.Message);
+            }
+        }
+    }
 
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
     /// retention list and the tests read one list rather than three hand-kept copies.
@@ -1401,10 +1613,34 @@ $do$";
         (CreateQueryStoreStatsDayGrainDailySql,   QueryStoreStatsDayGrainDailyView),
     };
 
+    /// <summary>The query_stats hourly rollup as #1849-era stores built it — SUPERSEDED for the hourly-tier READ by
+    /// <see cref="QueryStatsIntervalHourlyView"/> (#3653, Q12), and still REGISTERED: see
+    /// <see cref="SupersededHourlyRollups"/> for why this trio stays on the ensure sweep and the phase grid where
+    /// #3698's baseline pair left both.</summary>
     public const string QueryStatsHourlyView = "query_stats_hourly";
 
-    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling.</summary>
+    /// <summary><see cref="QueryStatsHourlyView"/>'s procedure_stats sibling — superseded for the read by
+    /// <see cref="ProcedureStatsIntervalHourlyView"/>, registered for the daily tier that hangs off it.</summary>
     public const string ProcedureStatsHourlyView = "procedure_stats_hourly";
+
+    /// <summary>
+    /// The INTERVAL-HONEST hourly rollups over the two SQL Server delta families (#3653, Q12 — item 16's rule-5
+    /// roster): the successors of <see cref="QueryStatsHourlyView"/>, <see cref="ProcedureStatsHourlyView"/> and
+    /// <see cref="QueryStatsDbHourlyView"/>, each with the collector's own knowability verdict
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) baked into its <c>WHERE</c> and the measured interval
+    /// carried as a per-bucket SUM. "interval" names that column, exactly as it does on
+    /// <see cref="PerfmonIntervalBaselineView"/> — and, as there, has nothing to do with the Query Store
+    /// <c>runtime_stats_interval</c> that <see cref="QueryStoreStatsIntervalHourlyView"/> is named for; the two
+    /// families share a word and nothing else.
+    /// </summary>
+    public const string QueryStatsIntervalHourlyView = "query_stats_interval_hourly";
+
+    /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s procedure_stats sibling.</summary>
+    public const string ProcedureStatsIntervalHourlyView = "procedure_stats_interval_hourly";
+
+    /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s database-grain sibling — the successor of
+    /// <see cref="QueryStatsDbHourlyView"/>, carrying the same I/O sums FinOps reads.</summary>
+    public const string QueryStatsDbIntervalHourlyView = "query_stats_db_interval_hourly";
 
     /// <summary>The query_store_stats hourly continuous aggregate. Built now, ahead of any writable-Query-Store
     /// primary — on a read-only replica QS surfaces nothing new to harvest, so this sits empty until one is added,
@@ -1417,7 +1653,9 @@ $do$";
     /// "coarsened but never fully lost" tier for anything past the hourly CAGG's own horizon.</summary>
     public const string QueryStatsDailyView = "query_stats_daily";
 
-    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661).</summary>
+    /// <summary>The per-database query_stats rollup carrying the I/O sums FinOps needs (#1661). Superseded for the
+    /// hourly-tier read by <see cref="QueryStatsDbIntervalHourlyView"/> (#3653), registered for
+    /// <see cref="QueryStatsDbDailyView"/>, which is hierarchical from it.</summary>
     public const string QueryStatsDbHourlyView = "query_stats_db_hourly";
 
     /// <summary>The daily sibling of <see cref="QueryStatsDbHourlyView"/> — kept indefinitely.</summary>
@@ -1527,10 +1765,71 @@ FROM collect.query_stats
 GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
 WITH NO DATA";
 
+    /// <summary>
+    /// The INTERVAL-HONEST query_stats hourly rollup (#3653, Q12): <see cref="CreateQueryStatsHourlySql"/>'s
+    /// successor, IDENTICAL in dimensions and in every column it shares, plus the two things the legacy text
+    /// could not be altered to carry.
+    ///
+    /// <para><b>The <c>WHERE</c> is the collector's own verdict, baked in.</b> <c>CollectorDeltaCalculator</c>
+    /// stores <c>sample_interval_seconds = 0</c> on exactly the rows whose delta was NOT knowable — a first
+    /// sighting, a counter reset (a restart, a plan-cache eviction) or a gap past the policy — and writes the
+    /// deltas as 0 beside it. Those zeros cost the legacy <c>sum()</c>s nothing, but <c>count(*) AS sample_count</c>
+    /// counted each as a sample and <c>min(delta_*)</c> read it as a real minimum, so every restart hour on the
+    /// legacy rollup reports one more sample than it measured and a floor of zero it never saw. Here the row
+    /// produces nothing. Pre-column rows (NULL interval — written before the store carried the column) pass,
+    /// which is the three-state rule the baseline successors stated at #3698: 0 unknowable, NULL never recorded,
+    /// n measured.</para>
+    ///
+    /// <para><b>The interval is carried as a SUM.</b> <c>sum(sample_interval_seconds) AS sample_interval_seconds_sum</c>
+    /// is the measured seconds this bucket's samples actually span for this group, which is what a per-second
+    /// reader divides by (rule 6 of the measurement contract: per-second names are quotients over the MEASURED
+    /// interval, never over the bucket's nominal width) and what a hierarchical daily can <c>sum()</c> again
+    /// without losing the unit. A <c>max()</c>, the baseline successors' idiom, is right where one row per
+    /// collection is grouped; this rollup groups a whole hour of collections, so the per-collection interval
+    /// has to be added up rather than picked. NULL intervals add nothing to it, so on a bucket of pre-column
+    /// rows the sum is NULL and a reader dividing by it gets NULL rather than a rate over an invented width.</para>
+    ///
+    /// <para><b>Why a NEW aggregate rather than an edit, and why the legacy stays registered.</b> A continuous
+    /// aggregate's query cannot be altered in place, and a DROP + recreate forfeits the 90-day hourly tier AND
+    /// cascades <see cref="QueryStatsDailyView"/>, the indefinite tier hierarchical from it. So this is #3698's
+    /// shape: a successor under a new name, <c>WITH NO DATA</c>, backfilled by <c>--backfill-rollups</c>, read in
+    /// preference by every hourly-tier reader once it reaches as far as the legacy does for the window asked
+    /// (<see cref="PrefersSuccessor"/>). What differs from #3698 is the legacy's fate — see
+    /// <see cref="SupersededHourlyRollups"/>. Same <c>materialized_only</c> discipline as the legacy (see its
+    /// #1759 remarks): the coverage probes read <c>min(bucket)</c> as the materialized floor, and a real-time
+    /// union would report raw's oldest row as this rollup's.</para>
+    /// </summary>
+    public const string CreateQueryStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
+WITH NO DATA";
+
     /// <summary>The procedure_stats hourly continuous aggregate — <see cref="CreateQueryStatsHourlySql"/>'s
     /// sibling, grouped by <c>schema_name</c> + <c>object_name</c> (procedure_stats' composer dimensions; a panel
     /// grouping by schema_name alone re-aggregates over its objects). Same aggregation shape, same WITH NO DATA +
-    /// IF NOT EXISTS discipline.</summary>
+    /// IF NOT EXISTS discipline. Superseded for the hourly-tier read by
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/> (#3653); registered because
+    /// <see cref="ProcedureStatsDailyView"/> is hierarchical from it.</summary>
     public const string CreateProcedureStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_hourly
 WITH (timescaledb.continuous) AS
 SELECT
@@ -1551,6 +1850,36 @@ SELECT
     max(delta_execution_count) AS execution_count_max,
     count(*) AS sample_count
 FROM collect.procedure_stats
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST procedure_stats hourly rollup (#3653, Q12) —
+    /// <see cref="CreateQueryStatsIntervalHourlySql"/>'s sibling over <c>procedure_stats</c>, which has carried
+    /// <c>sample_interval_seconds</c> since V128; the WHERE, the carried interval sum and the reasons are that
+    /// constant's. Grouped as <see cref="CreateProcedureStatsHourlySql"/> is, so a reader swaps the relation
+    /// name and nothing else.</summary>
+    public const string CreateProcedureStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.procedure_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
 WITH NO DATA";
 
@@ -1612,6 +1941,35 @@ SELECT
     count(*) AS sample_count
 FROM collect.query_stats
 WHERE delta_worker_time IS NOT NULL
+GROUP BY server_id, server_name, database_name, bucket
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST per-database query_stats rollup (#3653, Q12) —
+    /// <see cref="CreateQueryStatsDbHourlySql"/>'s successor. Keeps that text's <c>delta_worker_time IS NOT NULL</c>
+    /// (the pre-delta row has no work to sum) and adds the interval verdict beside it; the two predicates answer
+    /// different questions — "was a delta written" and "was the delta knowable" — and a restart row passes the
+    /// first (its deltas are written as 0) while failing the second. The only contamination the legacy carried
+    /// here was <c>count(*) AS sample_count</c> (it has no <c>min()</c>), which the WHERE now settles; the
+    /// interval sum rides along for the same per-second and hierarchical reasons
+    /// <see cref="CreateQueryStatsIntervalHourlySql"/> states.</summary>
+    public const string CreateQueryStatsDbIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_interval_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum,
+    sum(delta_execution_count) AS execution_count_sum,
+    max(last_execution_time) AS last_execution_time_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count
+FROM collect.query_stats
+WHERE delta_worker_time IS NOT NULL
+AND   sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, server_name, database_name, bucket
 WITH NO DATA";
 
@@ -3020,8 +3378,9 @@ WITH NO DATA";
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
-    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load; the heaviest
+    /// against a 1080-second slot the margin is 184 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load (it was 364 s against #3174's 1,260 s slot;
+    /// #3653's three appended hourly successors re-derived the window to 18 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -3030,9 +3389,10 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
+    /// <b>896.1 s</b>. That leaves <b>183.9 s</b> of the slot, <b>17.0%</b> of it, and sits <b>3.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/>. #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by four seconds, at #3653's re-derived 1,080 s window
+    /// (363.9 s, 28.8% and 153.9 s against #3174's 1,260 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -3061,8 +3421,26 @@ WITH NO DATA";
     /// <see cref="RefreshSlotPercentOfHourlyCadence"/> off the default V57 has already applied, so no step
     /// change was available at all. #3174 re-derived the grid's SHAPE instead
     /// (<see cref="LightRefreshStepMinutes"/>): the window the hour can spare is
-    /// <see cref="HeaviestRefreshWindowMinutes"/>, which puts the watch line at 1,050 s and this constant
+    /// <see cref="HeaviestRefreshWindowMinutes"/>, which put the watch line at 1,050 s and this constant
     /// 154 s below it.</para>
+    ///
+    /// <para><b>AND THE WINDOW MOVED AGAIN at #3653 (Q12), by the same method, to the 18 minutes that
+    /// arithmetic named as the floor.</b> Three interval-honest hourly successors joined
+    /// <see cref="HourlyAggregates"/> beside the legacy trio they supersede (the legacy cannot leave the grid:
+    /// <see cref="SupersededHourlyRollups"/>), so the light band grew from twelve members to fifteen, the
+    /// heaviest refresh starts at :18, and its window is 60 - 18 - 24 = 18 minutes — 1,080 s, whose
+    /// five-sixths line is 900 s. This constant sits <b>4 s</b> under that line: the ordering the pins hold
+    /// (<c>ceiling &lt; RefreshSlotWarningSeconds &lt; RefreshPhaseSlotSeconds</c>) still holds, and it holds
+    /// by the least any integer window can give. Two consequences are on the record rather than left to be
+    /// found. First, the 900 s line coincides EXACTLY with #2136's cadence knob (25% of 3,600 s), so a run at
+    /// or past it raises both signals on the same reading (TimescaleSupportTests pins the coincidence).
+    /// Second, a run this job has ALREADY made — the 952 s clean run of <c>2026-09-08 17:00Z</c> that
+    /// RefreshCeilingStalenessTests quotes as the falsification of this constant — sits ABOVE the new line,
+    /// so a recurrence classifies <see cref="RefreshSlotHeadroom.ApproachingSlot"/> where #3174's grid
+    /// classified it routine; it stays 128 s inside the 1,080 s wall. A fourth light member, or this constant
+    /// re-derived one run higher, turns the pin red, and the repair at that point is the one every paragraph
+    /// above names: fewer compression minutes, a cheaper refresh, a longer cadence for this one aggregate, or
+    /// a daily tier of its own for the legacy trio so they can leave the grid — never a hand-tuned band.</para>
     /// </summary>
     public const int HeaviestHourlyRefreshObservedCeilingSeconds = 896;
 
@@ -3111,7 +3489,8 @@ WITH NO DATA";
 
     /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
-    /// <see cref="RefreshPhaseSlotSeconds"/>, so 1,050 s against today's 1,260 s window.
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 900 s against today's 1,080 s window (1,050 s against
+    /// #3174's 1,260 s, before #3653's three hourly successors re-derived it).
     ///
     /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
@@ -3132,15 +3511,18 @@ WITH NO DATA";
     /// its slot and the grid's stated precondition is still TRUE.</para>
     ///
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
-    /// restate, because the old reason stopped being true.</b> The alternative that tempts here is the slot
-    /// less one <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it now sits ABOVE
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. It used to sit below it — that was the
-    /// whole of its rejection, since a line under the recorded ceiling warns on the very run the compression
-    /// grid is sized against — and the re-derivation took that argument away by shrinking the guard band from
-    /// half a uniform slot to the light refreshes' own ceiling. Both lines now clear the ceiling and they are
-    /// 30 s apart, so the ordering no longer discriminates and lead time argues mildly FOR the lower one.
-    /// What rejects it instead is COUPLING, a property the old geometry could not have exposed: the guard band
-    /// is a DECLARED width for the TWELVE OTHER refresh policies, so the alternative would make the
+    /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
+    /// came back.</b> The alternative that tempts here is the slot less one
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 840 s, and it sits BELOW
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's 18-minute window, as it did under
+    /// the uniform grid (480 s) and did NOT at #3174's 21-minute window (1,020 s). Below the ceiling was the
+    /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
+    /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
+    /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
+    /// the ceiling and 30 s apart, so the ordering no longer discriminated and lead time argued mildly FOR
+    /// the lower one. What rejected it then, and still rejects it whichever way the ordering falls, is
+    /// COUPLING, a property the old geometry could not have exposed: the guard band
+    /// is a DECLARED width for the FIFTEEN OTHER refresh policies, so the alternative would make the
     /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
     /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
     /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
@@ -3153,13 +3535,22 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 1,050 s and the ceiling is 154 s below it, so a reading in this band is again past
-    /// the whole of the record the compression grid is sized against: a different signal calling for a
-    /// different response, rather than a restatement of the grid's own sizing. <b>The relationship is what
-    /// is pinned, not the two numbers</b> — a ceiling that rose past this line would put the grid's own
-    /// sizing figure inside the warning band, and TimescaleSupportTests says so by going RED rather than
-    /// leaving a reader to notice. That pin has now fired once and been answered by re-deriving the geometry
-    /// instead of by renumbering the band, which is the only answer that changes anything.</para>
+    /// spare, this line is 900 s and the ceiling is 4 s below it (#3174's 21-minute window had it at 1,050 s
+    /// and 154 s; #3653's 18-minute window is the floor the ceiling essay's own arithmetic names), so a
+    /// reading in this band is again past the whole of the record the compression grid is sized against: a
+    /// different signal calling for a different response, rather than a restatement of the grid's own
+    /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
+    /// this line would put the grid's own sizing figure inside the warning band, and TimescaleSupportTests
+    /// says so by going RED rather than leaving a reader to notice. That pin has now fired once and been
+    /// answered by re-deriving the geometry instead of by renumbering the band, which is the only answer
+    /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
+    /// give and has to take a member OFF the grid or a minute off the compression band.</para>
+    ///
+    /// <para><b>The alternative's ordering is BACK below the ceiling at #3653's window</b>: 1,080 - 240 = 840 s
+    /// sits 56 s under the 896 s constant, so the rejection the paragraph above re-took as coupling is again
+    /// also an ordering — the alternative would warn on the grid's own sizing figure. Both reasons stand;
+    /// TimescaleSupportTests pins both, and says which one is left if a wider window ever restores #3174's
+    /// state.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
         RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
@@ -3579,7 +3970,16 @@ WITH NO DATA";
     /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
     /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
-    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
+    /// status-selected part of it. <b>TWELVE OF FIFTEEN, since #3653 (Q12).</b> The read predates the three
+    /// interval-honest hourly successors, so it covers 12 of the 15 light views the constant now bounds; the 3
+    /// registered after the read are unmeasured, and are held under this bound by SHAPE rather than by a
+    /// reading: <see cref="QueryStatsIntervalHourlyView"/> reads the same raw rows under the same group key
+    /// as <see cref="QueryStatsHourlyView"/> less the interval-0 rows (that view's own maximum in this
+    /// population is 23.3 s), and the other two are their legacies' shape less the same rows (sub-3 s). A
+    /// member that reads a SUBSET of a measured sibling's rows into the same group key cannot cost more
+    /// than the sibling, so the bound is argued, not measured — and <see cref="LogRefreshCeilingStaleness"/>
+    /// reports the first run of any of the three that falsifies it, exactly as it would for the twelve. The
+    /// next census over the fifteen-view layout replaces this sentence with a count. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
     /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
     /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
@@ -3946,11 +4346,12 @@ WITH NO DATA";
     /// this band cannot drift apart.</para>
     ///
     /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1080 seconds in its window and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 6 minutes of the window are past the refresh and are left on the table deliberately: recovering them
+    /// 3 minutes of the window are past the refresh and are left on the table deliberately (6 of #3174's
+    /// 1,260 s window; #3653's three hourly successors took three of them): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
@@ -5008,6 +5409,20 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: ProcedureStatsHourlyView,  DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { ProcedureStatsDailyView }),
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
+
+            /* The interval-honest hourly successors (#3653, Q12) take the hourly tier's horizon and the LEAF RULE
+               (#1757): nothing is hierarchical from them, so their consumer is the routed READ, which past
+               HourlyMaxAge goes to the daily tier — and the daily tier is the LEGACY daily, hierarchical from the
+               legacy hourly over the same raw rows (see SupersededHourlyRollups for why the successors have no
+               daily of their own yet). That is the corrected Query Store hourly's shape exactly: a leaf whose
+               coverage relation is a sibling daily built from a different parent over the same source. What the
+               gate protects here is the coarsened history — a successor bucket purged at 90 days is a day the
+               legacy daily has already summed; what it cannot protect, and does not claim to, is the successor's
+               interval-honest sample_count and min() at the day grain, which no daily carries until one is built
+               from these. */
+            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDailyView }),
+            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { ProcedureStatsDailyView }),
+            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDbDailyView }),
 
             /* The corrected Query Store tier (#1849, extended by #1869).
 
@@ -6616,7 +7031,13 @@ ORDER BY i.indexname";
         /* The day-grain daily and its dedup layer (#1869) — the same existence-is-the-probe degrade, so a
            store on a #1849-era service keeps reading the corrected daily and needs no version gate either. */
         $"to_regclass('collect.{QueryStoreStatsIntervalDailyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStoreStatsDayGrainDailyView}') IS NOT NULL, " +
+        /* The interval-honest hourly successors (#3653, Q12) — existence-is-the-probe once more: a store on an
+           older service has none of them, and RollupCoverage.HourlyRelationFor keeps every hourly-tier read on
+           the legacy relation for exactly that store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIntervalHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIntervalHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbIntervalHourlyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -6642,7 +7063,8 @@ ORDER BY i.indexname";
             reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
             reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
             reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
-            reader.GetBoolean(11), reader.GetBoolean(12));
+            reader.GetBoolean(11), reader.GetBoolean(12),
+            reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -6711,6 +7133,14 @@ ORDER BY i.indexname";
            BucketWidth above is what keeps the backfill honest here as well. */
         (QueryStoreStatsIntervalDailyView, "query_store_stats", QueryStoreStatsIntervalHourlyView, "bucket", DailyBucket),
         (QueryStoreStatsDayGrainDailyView, "query_store_stats", QueryStoreStatsIntervalDailyView, "bucket", DailyBucket),
+
+        /* The interval-honest hourly successors (#3653, Q12): raw-sourced, so depth 0 in the backfill order and
+           probed for coverage like any other hourly. Registering them HERE is what puts them on the
+           --backfill-rollups plan (RollupBackfill.Targets derives from this list), in the coverage probe every
+           hourly-tier reader routes on, and under RollupCoverage.HourlyRelationFor's supply choice. */
+        (QueryStatsIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (ProcedureStatsIntervalHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
+        (QueryStatsDbIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -6798,7 +7228,7 @@ ORDER BY i.indexname";
             }
         }
 
-        return new RollupCoverage(floors, rawOldest);
+        return new RollupCoverage(floors, rawOldest, availability);
     }
 
     /// <summary>
@@ -9317,7 +9747,8 @@ public readonly record struct RollupAvailability(
     bool QueryGrainHourly, bool QueryGrainDaily, bool DbGrainHourly, bool DbGrainDaily,
     bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily,
     bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
-    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false)
+    bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
+    bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -9325,13 +9756,20 @@ public readonly record struct RollupAvailability(
         QueryGrainHourly && QueryGrainDaily && DbGrainHourly && DbGrainDaily
         && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily
         && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
-        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily;
+        && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
+        && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#3653 shape: every rollup a #1869-era service created, none of the interval-honest hourly
+    /// successors (Q12) — a store whose service predates this build. Its hourly-tier reads must keep routing to
+    /// the legacy trio, which is the degrade that lets the successors ship with no migration and no version
+    /// gate; <see cref="RollupCoverage.HourlyRelationFor"/> answers the legacy name for exactly this shape.</summary>
+    public static RollupAvailability WithoutIntervalHourlies => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#1849 shape: every ORIGINAL rollup present, none of the corrected Query Store ones —
     /// i.e. a store whose service has not yet created them. The routing fallback's test shorthand.</summary>
@@ -9363,6 +9801,9 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStoreStatsCorrectedDailyView => QueryStoreCorrectedDaily,
         TimescaleSupport.QueryStoreStatsIntervalDailyView => QueryStoreIntervalDaily,
         TimescaleSupport.QueryStoreStatsDayGrainDailyView => QueryStoreDayGrainDaily,
+        TimescaleSupport.QueryStatsIntervalHourlyView => QueryGrainIntervalHourly,
+        TimescaleSupport.ProcedureStatsIntervalHourlyView => ProcedureGrainIntervalHourly,
+        TimescaleSupport.QueryStatsDbIntervalHourlyView => DbGrainIntervalHourly,
         _ => false,
     };
 }
@@ -9424,20 +9865,84 @@ public sealed class RollupCoverage
 {
     private readonly IReadOnlyDictionary<string, DateTime> _floorsByView;
     private readonly IReadOnlyDictionary<string, DateTime> _oldestByRawTable;
+    private readonly RollupAvailability _availability;
 
     public RollupCoverage(
         IReadOnlyDictionary<string, DateTime> floorsByView,
         IReadOnlyDictionary<string, DateTime> oldestByRawTable)
+        : this(floorsByView, oldestByRawTable, RollupAvailability.None)
+    {
+    }
+
+    /// <summary>
+    /// The probe's own shape, carrying the <see cref="RollupAvailability"/> it was built from (#3653). Coverage
+    /// alone cannot tell "this rollup holds nothing" from "this rollup does not exist" — both are a null floor,
+    /// deliberately (see <see cref="TierCoverage"/>) — and <see cref="HourlyRelationFor"/> has to know the
+    /// difference, because naming an absent relation in a reader's SQL is a 42P01 at the user. The two-argument
+    /// constructor keeps every pre-#3653 caller and test where it was; it answers the legacy relation for every
+    /// pair, which is the safe reading when nothing has been proved present.
+    /// </summary>
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable,
+        RollupAvailability availability)
     {
         _floorsByView = floorsByView ?? throw new ArgumentNullException(nameof(floorsByView));
         _oldestByRawTable = oldestByRawTable ?? throw new ArgumentNullException(nameof(oldestByRawTable));
+        _availability = availability;
+    }
+
+    /// <summary>
+    /// THE HOURLY-TIER RELATION for a read whose window starts at <paramref name="windowStartUtc"/> (#3653, Q12):
+    /// <paramref name="legacyHourly"/>'s interval-honest successor when it exists on this store and reaches at
+    /// least as far back into the window as the legacy does, otherwise the legacy —
+    /// <see cref="TimescaleSupport.PrefersSuccessor"/> over the two materialized floors this probe measured.
+    /// For an hourly rollup that was never superseded (the Query Store family) the answer is the name it was
+    /// handed.
+    ///
+    /// <para><b>Called AFTER the tier is resolved, never instead of it.</b> The router decides whether the hourly
+    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — the legacy floor is the deeper of
+    /// the two by construction (an upgraded store's successor starts <c>WITH NO DATA</c>), so "can the hourly
+    /// tier serve this window" is the legacy's question. Only once the tier is Hourly does THIS choose which
+    /// hourly relation, and the successor is chosen only when the window loses nothing by it. A reader that
+    /// asked this first and routed on the successor's floor would fall to raw on the very stores where the
+    /// legacy still holds the answer.</para>
+    ///
+    /// <para><b>Absence beats coverage.</b> A store on a service that predates the successors
+    /// (<see cref="RollupAvailability.WithoutIntervalHourlies"/>) has a null successor floor AND no successor
+    /// relation; the supply rule alone would answer "successor" whenever the legacy is also empty, and the read
+    /// would name a relation that is not there. The availability this coverage was probed with is consulted
+    /// first, so an absent successor is never named — including from <see cref="Unknown"/>, which carries
+    /// <see cref="RollupAvailability.None"/> and therefore always answers the legacy.</para>
+    /// </summary>
+    public string HourlyRelationFor(string legacyHourly, DateTime windowStartUtc)
+    {
+        if (legacyHourly is null)
+        {
+            throw new ArgumentNullException(nameof(legacyHourly));
+        }
+
+        var successor = TimescaleSupport.SuccessorOf(legacyHourly);
+        if (successor is null || !_availability.Has(successor))
+        {
+            return legacyHourly;
+        }
+
+        return TimescaleSupport.PrefersSuccessor(
+                legacyExists: _availability.Has(legacyHourly),
+                legacyOldest: FloorOf(legacyHourly),
+                successorOldest: FloorOf(successor),
+                windowStart: windowStartUtc)
+            ? successor
+            : legacyHourly;
     }
 
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
     public static RollupCoverage Unknown { get; } = new(
         new Dictionary<string, DateTime>(StringComparer.Ordinal),
-        new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        RollupAvailability.None);
 
     /// <summary>The oldest bucket <paramref name="caggView"/> has materialized, or null when it holds nothing
     /// (or was never probed). Mirrors <see cref="RollupAvailability.Has"/>: an unknown name answers null.</summary>

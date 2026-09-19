@@ -104,34 +104,55 @@ public sealed partial class ViewerDataService
         return routed;
     }
 
-    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched.</summary>
+    /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched. The
+    /// one-argument form reads the legacy hourly; the callers below pass the relation they resolved (#3653).</summary>
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
+        DatabaseResourceUsageSqlFor(tier, TimescaleSupport.QueryStatsDbHourlyView);
+
+    /// <summary>
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the HOURLY relation the caller resolved
+    /// (#3653, Q12): <c>query_stats_db_hourly</c> or its interval-honest successor
+    /// <c>query_stats_db_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/>. Same column
+    /// names on both, so the CTE text differs in the relation and nothing else; the daily is not parameterised
+    /// because it has no successor (<see cref="TimescaleSupport.SupersededHourlyRollups"/>).
+    /// </summary>
+    public static string DatabaseResourceUsageSqlFor(RetentionTier tier, string hourlyRelation) =>
         tier == RetentionTier.Raw
             ? DatabaseResourceUsageSql
             : RouteOrThrow(
                 DatabaseResourceUsageSql,
                 WorkloadCteRaw,
-                WorkloadCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsDbHourlyView : TimescaleSupport.QueryStatsDbDailyView),
+                WorkloadCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDbDailyView),
                 "database resource usage");
 
-    /// <summary>Top consumers (by total) for <paramref name="tier"/>.</summary>
+    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy hourly.</summary>
     public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
+        TopResourceConsumersByTotalSqlFor(tier, TimescaleSupport.QueryStatsHourlyView);
+
+    /// <summary>Top consumers (by total) over the hourly relation the caller resolved (#3653, Q12) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, string)"/>.</summary>
+    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier, string hourlyRelation) =>
         tier == RetentionTier.Raw
             ? TopResourceConsumersByTotalSql
             : RouteOrThrow(
                 TopResourceConsumersByTotalSql,
                 ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDailyView),
                 "top consumers by total");
 
-    /// <summary>Top consumers (by average) for <paramref name="tier"/>.</summary>
+    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy hourly.</summary>
     public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
+        TopResourceConsumersByAvgSqlFor(tier, TimescaleSupport.QueryStatsHourlyView);
+
+    /// <summary>Top consumers (by average) over the hourly relation the caller resolved (#3653, Q12) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, string)"/>.</summary>
+    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier, string hourlyRelation) =>
         tier == RetentionTier.Raw
             ? TopResourceConsumersByAvgSql
             : RouteOrThrow(
                 TopResourceConsumersByAvgSql,
                 ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView),
+                ConsumerCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDailyView),
                 "top consumers by average");
 
     public const string DatabaseResourceUsageSql = @"
@@ -206,7 +227,8 @@ ORDER BY c.cpu_time_ms DESC";
             DateTime.UtcNow, cutoff, rollups.DbGrainHourly, rollups.DbGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbDailyView));
 
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsDbHourlyView, cutoff)));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
@@ -366,7 +388,8 @@ LIMIT $3";
             DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, cutoff)));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
@@ -433,7 +456,8 @@ LIMIT $3";
             DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, cutoff)));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });

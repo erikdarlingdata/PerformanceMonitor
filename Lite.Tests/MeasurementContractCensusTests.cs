@@ -87,13 +87,18 @@ namespace PerformanceMonitorLite.Tests;
 /// <item><description><b>Rollups aggregate interval &gt; 0 only.</b> A continuous aggregate or rollup that
 /// <c>sum()</c>s / <c>min()</c>s / <c>count()</c>s a delta family's rows carries
 /// <c>sample_interval_seconds IS DISTINCT FROM 0</c>, so a restart collection produces no sample rather
-/// than a quiet one. <b>ROSTERED</b> in the Darling twin, which reads <c>TimescaleSupport</c>: the two
-/// interval-honest successors #3698 landed (<c>perfmon_interval_baseline</c>, <c>wait_stats_interval_baseline</c>)
-/// carry it; <c>query_stats_baseline</c> carries the equivalent <c>delta_execution_count &gt; 0</c>; the
-/// superseded legacy pair (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c> — retiring through
-/// <c>SupersededBaselineRelations</c> once the successor covers the tier) and the three hourly rollups
-/// (<c>query_stats_hourly</c>, <c>procedure_stats_hourly</c>, <c>query_stats_db_hourly</c>) do NOT, and are
-/// the roster. The Compose raw tier's <c>FILTER (WHERE sample_interval_seconds IS DISTINCT FROM 0)</c> is
+/// than a quiet one. <b>ROSTERED</b> in the Darling twin, which reads <c>TimescaleSupport</c>: the
+/// five interval-honest successors carry it — #3698's baseline pair (<c>perfmon_interval_baseline</c>,
+/// <c>wait_stats_interval_baseline</c>) and #3653 Q12's hourly trio (<c>query_stats_interval_hourly</c>,
+/// <c>procedure_stats_interval_hourly</c>, <c>query_stats_db_interval_hourly</c>); <c>query_stats_baseline</c>
+/// carries the equivalent <c>delta_execution_count &gt; 0</c>; the superseded legacy pair (<c>perfmon_baseline</c>,
+/// <c>wait_stats_baseline</c> — retiring through <c>SupersededBaselineRelations</c> once the successor covers
+/// the tier) and the three legacy hourly rollups (<c>query_stats_hourly</c>, <c>procedure_stats_hourly</c>,
+/// <c>query_stats_db_hourly</c> — superseded for every hourly-tier read through
+/// <c>RollupCoverage.HourlyRelationFor</c>, but REGISTERED for good, because the indefinite daily tier is
+/// hierarchical from them; <c>SupersededHourlyRollups</c>) do NOT, and are the roster — every member of which
+/// now has a registered successor, which the Darling twin asserts pair by pair. The Compose raw tier's
+/// <c>FILTER (WHERE sample_interval_seconds IS DISTINCT FROM 0)</c> is
 /// #3695's and pinned in its own tests. Lite has no rollup tier; its baseline reads are raw and fall under
 /// rule 1's sweep.</description></item>
 /// <item><description><b>Per-second names are divided at comparison, not stored.</b> A column or key named
