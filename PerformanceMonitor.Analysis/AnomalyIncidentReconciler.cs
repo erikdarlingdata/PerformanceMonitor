@@ -309,6 +309,13 @@ public static class AnomalyIncidentReconciler
             return family is null ? Array.Empty<string>() : new[] { family };
         }
 
+        /* #3691 (v1 residue): the PostgreSQL wait profile gets the SQL Server profile's treatment above —
+           resolved per story from its dominant contributor, not from a static map — with the resolution
+           living beside the PostgreSQL vocabulary (WaitKey is the only thing that knows how a contributor
+           name becomes a PG_WAIT_* key). One arm here, so the wait family's shape stays in its own file. */
+        if (string.Equals(anomaly.RootFactKey, PgTargetFactKeys.AnomalyWaitProfile, StringComparison.Ordinal))
+            return PgTargetFactKeys.WaitProfileFamilies(anomaly.RootFactMetadata);
+
         if (AnomalyToFamilies.TryGetValue(anomaly.RootFactKey, out var families))
             return families;
 

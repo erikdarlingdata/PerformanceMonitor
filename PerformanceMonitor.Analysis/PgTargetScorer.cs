@@ -55,6 +55,9 @@ public static partial class PgTargetScorer
             PgTargetSources.QueriesSource => ScoreQueriesFact(fact),
             PgTargetSources.DatabaseSource => ScoreDatabaseFact(fact),
             PgTargetSources.CpuSource => ScoreCpuFact(fact),
+            PgTargetSources.IoSource => ScoreIoFact(fact),
+            PgTargetSources.ReplicationSource => ScoreReplicationFact(fact),
+            PgTargetSources.BloatSource => ScoreBloatFact(fact),
             _ => 0.0,
         };
     }
@@ -83,6 +86,10 @@ public static partial class PgTargetScorer
             PgTargetFactKeys.AutovacuumBacklog or PgTargetFactKeys.WraparoundTrend or PgTargetFactKeys.XminHold
                 or PgTargetFactKeys.ConfigAutovacuumOff or PgTargetFactKeys.ConfigMaintWorkMem => VacuumAmplifiers(key),
             PgTargetFactKeys.TempSpill or PgTargetFactKeys.ConfigWorkMem => TempAmplifiers(key),
+            /* v2 (#3691): one arm per new family, each to its own partial's stub. */
+            PgTargetFactKeys.IoReadLatencyMs or PgTargetFactKeys.IoWriteLatencyMs => IoAmplifiers(key),
+            PgTargetFactKeys.ReplicationLag or PgTargetFactKeys.SlotRetention or PgTargetFactKeys.SlotXmin => ReplicationAmplifiers(key),
+            PgTargetFactKeys.BloatTrend or PgTargetFactKeys.IndexBloatTrend => BloatAmplifiers(key),
             _ when key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) => ConfigAmplifiers(key),
             _ => [],
         };
@@ -123,4 +130,15 @@ public static partial class PgTargetScorer
     private static partial double ScoreCpuFact(Fact fact);
 
     private static partial List<AmplifierDefinition> AnomalyAmplifiers(string key);
+
+    /* v2 (#3691) families — stubbed in their own files, filled by lanes 11 / 12 / 13. */
+
+    private static partial double ScoreIoFact(Fact fact);
+    private static partial List<AmplifierDefinition> IoAmplifiers(string key);
+
+    private static partial double ScoreReplicationFact(Fact fact);
+    private static partial List<AmplifierDefinition> ReplicationAmplifiers(string key);
+
+    private static partial double ScoreBloatFact(Fact fact);
+    private static partial List<AmplifierDefinition> BloatAmplifiers(string key);
 }

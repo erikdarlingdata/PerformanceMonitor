@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Analysis;
 /// never edit this file, each other's chain files, or <see cref="RelationshipGraph"/>: the saturation
 /// chain (lane 3), the vacuum chain (lane 4), the write chain and the memory / I-O chain (lane 2, with
 /// lane 5 adding the wait-event edges into both), and the query chain (lane 7, with lane 6's temp edge).
-/// Lane 8's posture facts have NO chain by design (D6) — a posture card stands alone.</para>
+/// Lane 8's posture facts have NO chain by design (D6) — a posture card stands alone. v2 (#3691) adds the
+/// I/O chain (lane 11), the replication chain (lane 12) and the bloat chain (lane 13), each in its own file.</para>
 ///
 /// <para>The one engine-level rule every edge inherits: an edge's PREDICATE reads the fact set, never a
 /// bar of its own. Thresholds live in <see cref="PgTargetScorer"/> with their lineage; the graph asks
@@ -52,6 +53,10 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
         BuildWriteEdges();
         BuildMemoryEdges();
         BuildQueryEdges();
+        /* v2 (#3691): the three new chains, each an empty stub until its lane lands (11 / 12 / 13). */
+        BuildIoEdges();
+        BuildReplicationEdges();
+        BuildBloatEdges();
     }
 
     private partial void BuildSaturationEdges();
@@ -59,6 +64,9 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
     private partial void BuildWriteEdges();
     private partial void BuildMemoryEdges();
     private partial void BuildQueryEdges();
+    private partial void BuildIoEdges();
+    private partial void BuildReplicationEdges();
+    private partial void BuildBloatEdges();
 
     /// <summary>
     /// The shared active-edge read, with the bad-actor alias resolved — see the class summary. Every edge

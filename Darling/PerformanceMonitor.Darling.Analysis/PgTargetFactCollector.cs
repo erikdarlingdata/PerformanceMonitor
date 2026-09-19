@@ -115,7 +115,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     }
 
     /// <summary>
-    /// The v1 collect surface, in emission order. Every method below exists today; the ones a content lane
+    /// The collect surface (v1 + the v2 families of #3691), in emission order. Every method below exists today; the ones a content lane
     /// owns return immediately until that lane lands, and the census in <c>PgTargetFactCollectorTests</c>
     /// names this exact list so that adding, removing or renaming a family is a visible decision.
     /// </summary>
@@ -139,6 +139,12 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectWaitFactsAsync(context, facts);
         await CollectQueryFactsAsync(context, facts);
         await CollectCpuFactsAsync(context, facts);
+        /* v2 (#3691): the three new families, after every v1 family so a v2 fact composed at collect time can
+           read a v1 context fact already in the list (the Config-first rule, extended). Stubs until lanes 11 /
+           12 / 13 land. */
+        await CollectIoFactsAsync(context, facts);
+        await CollectReplicationFactsAsync(context, facts);
+        await CollectBloatFactsAsync(context, facts);
 
         return facts;
     }
@@ -187,4 +193,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     private partial Task CollectWaitFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectQueryFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectCpuFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectIoFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectReplicationFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectBloatFactsAsync(AnalysisContext context, List<Fact> facts);
 }

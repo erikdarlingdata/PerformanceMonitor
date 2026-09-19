@@ -36,7 +36,7 @@ public class FactScorer
     /// named in the amplifier context set below but no collector emits it, so it is NOT a member — a filter
     /// on it would always be empty, which is the outcome this registry exists to refuse.</para>
     ///
-    /// <para>The eleven <c>pg_</c> members are the PostgreSQL-TARGET vocabulary (#3542 D2), declared in
+    /// <para>The fourteen <c>pg_</c> members (eleven from #3542 v1, three from #3691 v2) are the PostgreSQL-TARGET vocabulary (D2), declared in
     /// <see cref="PgTargetSources"/> and registered here the day they were declared — before any content lane
     /// emits one — so the D2 rule (a PostgreSQL fact can never wear a SQL Server source) is enforced by the same
     /// sweep that guards the rest of the list rather than by convention.</para>
@@ -45,8 +45,9 @@ public class FactScorer
     {
         "anomaly", "bad_actor", "blocking", "config", "coverage", "cpu", "database_config", "disk", "io",
         "jobs", "memory",
-        PgTargetSources.BufferSource, PgTargetSources.ConfigSource, PgTargetSources.CpuSource,
-        PgTargetSources.DatabaseSource, PgTargetSources.PostureSource, PgTargetSources.QueriesSource,
+        PgTargetSources.BloatSource, PgTargetSources.BufferSource, PgTargetSources.ConfigSource,
+        PgTargetSources.CpuSource, PgTargetSources.DatabaseSource, PgTargetSources.IoSource,
+        PgTargetSources.PostureSource, PgTargetSources.QueriesSource, PgTargetSources.ReplicationSource,
         PgTargetSources.SessionsSource, PgTargetSources.TempSource, PgTargetSources.VacuumSource,
         PgTargetSources.WaitsSource, PgTargetSources.WriteSource,
         "queries", "sessions", "tempdb", "waits",
@@ -856,6 +857,9 @@ public class FactScorer
     ///     pre-#1743 / robust-less ratio trigger: <c>ratio &gt;= 3 x 4.0</c>. Never for <c>is_new</c> — a
     ///     first-occurrence profile's sentinel ratio (NoBaselineRatio, 100) is a scoring device, not a
     ///     measurement, and "no baseline" cannot be "extreme against baseline".</item>
+    ///   <item>ANOMALY_PG_WAIT_PROFILE (#3691): the same three readings through
+    ///     <see cref="PgTargetScorer.IsExtremeWaitProfileAnomaly"/>, with the ratio arm anchored on the
+    ///     PostgreSQL profile's own firing multiple; the PostgreSQL deadlock-rate ratio family stays capped.</item>
     /// </list>
     /// The ratio/count/delta families — blocking and deadlock spikes, day-over-day object growth and
     /// contention, the legacy per-type ANOMALY_WAIT_ facts — stay capped: none is graded in sigmas, so
@@ -876,6 +880,14 @@ public class FactScorer
             var escapeBar = Math.Min(ExtremeAnomalyMultiple * FireAnchor(fact), Baselines.AnomalyThresholds.SigmaDisplayCap);
             return fact.Metadata.GetValueOrDefault("deviation_sigma") >= escapeBar;
         }
+
+        /* #3691 (#3689 §5 residue): the PostgreSQL wait profile escapes the same way its SQL Server twin
+           below does — the one PG arm, delegating so the predicate sits beside the ramp it must agree with
+           (PgTargetScorer.ScoreRatioAnomaly): same is_new refusal, same 3x heavy-tail modified-z bar on a
+           robust bucket, and 3x ITS OWN ratio anchor (PgRatioAnomalyThreshold) otherwise, where the arm below
+           reads 3x WaitProfileRatioFloor. The multiple is passed so "extreme" is one number for both engines. */
+        if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))
+            return PgTargetScorer.IsExtremeWaitProfileAnomaly(fact, ExtremeAnomalyMultiple);
 
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
         {

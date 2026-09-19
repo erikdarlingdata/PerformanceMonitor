@@ -133,7 +133,64 @@ internal static class PgTargetToolRecommendations
             new("get_pg_deadlocks", "The captured deadlock graphs"),
         ],
         [PgTargetFactKeys.AnomalyWaitProfile] = WaitReads(),
+
+        /* v2 (#3691), pre-filled by the v2 plumbing as the v1 rows were: which get_pg_* read a family's table is
+           a fact about the product, not a threshold, and PgTargetMcpSurfaceTests requires a row for every key
+           the day it is declared. The content lanes (11 I/O, 12 replication, 13 bloat, 15 WAL) may sharpen a
+           reason in their own PR; the tool names are the tables' reads. */
+        [PgTargetFactKeys.IoReadLatencyMs] = IoReads(),
+        [PgTargetFactKeys.IoWriteLatencyMs] = IoReads(),
+        [PgTargetFactKeys.AnomalyIoLatency] =
+        [
+            new("get_pg_io_trend", "Read latency over the window against the usual level for this hour"),
+            new("get_pg_io_stats", "Reads, read time and evictions by backend type and context (PG 16+)"),
+        ],
+        [PgTargetFactKeys.ReplicationLag] =
+        [
+            new("get_pg_replication_stats", "Per-standby write, flush and replay lag over the window"),
+            new("get_pg_write_stats", "How much WAL the primary is producing for the standbys to replay"),
+        ],
+        [PgTargetFactKeys.SlotRetention] =
+        [
+            new("get_pg_replication_slots", "Each slot's retained WAL, activity and safe_wal_size"),
+            new("get_pg_server_config", "max_slot_wal_keep_size and wal_keep_size as configured"),
+        ],
+        [PgTargetFactKeys.SlotXmin] =
+        [
+            new("get_pg_replication_slots", "Each slot's xmin and catalog_xmin, and whether it is active"),
+            new("get_pg_xmin_horizon", "The horizon by holder — the slot against the other candidates"),
+        ],
+        [PgTargetFactKeys.AnomalyReplicationLag] =
+        [
+            new("get_pg_replication_stats", "Replay lag over the window against the usual level for this hour"),
+        ],
+        [PgTargetFactKeys.BloatTrend] =
+        [
+            new("get_pg_table_bloat", "Estimated table bloat by relation, sampled hourly"),
+            new("get_pg_autovacuum_health", "Whether autovacuum is keeping up on the growing tables"),
+        ],
+        [PgTargetFactKeys.IndexBloatTrend] =
+        [
+            new("get_pg_index_bloat", "Estimated index bloat by index, sampled daily"),
+            new("get_pg_index_usage", "Whether the bloated index is read at all"),
+        ],
+        [PgTargetFactKeys.AnomalyWalVolume] =
+        [
+            new("get_pg_write_stats", "WAL bytes per interval over the window against the usual level for this hour"),
+        ],
+        /* Wave 2: declared, nothing emits it yet; the read is the autovacuum health one it will hang on. */
+        [PgTargetFactKeys.MaintenanceShapeShift] =
+        [
+            new("get_pg_autovacuum_health", "Autovacuum worker activity by table over the window"),
+        ],
     };
+
+    private static List<ToolRecommendation> IoReads() =>
+    [
+        new("get_pg_io_stats", "Reads, writes and their timings by backend type and context (PG 16+)"),
+        new("get_pg_io_trend", "Read and write latency over the window"),
+        new("get_pg_server_config", "track_io_timing — without it the timings are zero, not fast"),
+    ];
 
     /// <summary>The reads for a story-path key, or null when no row and no prefix claims it.</summary>
     public static List<ToolRecommendation>? GetForKey(string key)

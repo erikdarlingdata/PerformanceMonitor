@@ -36,7 +36,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
     [Fact]
     public void EverySource_IsPgPrefixed_LowercaseSnakeCase_SortedOnce_AndNamedForTheRegistrySweep()
     {
-        Assert.Equal(11, PgTargetSources.All.Count);
+        /* Eleven v1 sources (#3542) plus the three v2 families (#3691: pg_io, pg_replication, pg_bloat). */
+        Assert.Equal(14, PgTargetSources.All.Count);
+        Assert.Contains(PgTargetSources.IoSource, PgTargetSources.All);
+        Assert.Contains(PgTargetSources.ReplicationSource, PgTargetSources.All);
+        Assert.Contains(PgTargetSources.BloatSource, PgTargetSources.All);
         Assert.All(PgTargetSources.All, s => Assert.StartsWith(PgTargetSources.Prefix, s, StringComparison.Ordinal));
         Assert.All(PgTargetSources.All, s => Assert.Matches("^[a-z_]+$", s));
         Assert.Equal(PgTargetSources.All.Order(StringComparer.Ordinal).ToArray(), PgTargetSources.All.ToArray());
@@ -148,6 +152,40 @@ public sealed class PgTargetSharedSwitchRoutingTests
             Assert.StartsWith(PgTargetFactKeys.MeasuredPrefix, k, StringComparison.Ordinal));
         Assert.Equal(new[] { PgTargetFactKeys.DeadlockRate }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyDeadlockRate]);
         Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyTps));
+
+        /* v2 (#3691): the three new anomalies fold onto the family they deviate from — and the WAL-volume one onto
+           CHECKPOINT pressure, not the WalVolumeShift fact it is the detector behind (§3.11: WAL volume is the
+           leading edge of checkpoint pressure; the operator's incident is the checkpoint one). */
+        Assert.Equal(new[] { PgTargetFactKeys.IoReadLatencyMs }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyIoLatency]);
+        Assert.Equal(new[] { PgTargetFactKeys.ReplicationLag }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyReplicationLag]);
+        Assert.Equal(new[] { PgTargetFactKeys.CheckpointPressure }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyWalVolume]);
+        /* The wait profile is resolved per story, never statically. */
+        Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyWaitProfile));
+    }
+
+    /// <summary>
+    /// #3691 (v1 residue): the PostgreSQL wait profile resolves its fold parent from its dominant contributor the
+    /// way the SQL Server profile does — the standout key first, the type rollup second (the wait scorer grades one
+    /// wait once, so exactly one of them can have fired), ordinal ties, empty without contributors.
+    /// </summary>
+    [Fact]
+    public void TheWaitProfile_ResolvesItsFamilyFromTheDominantContributor_StandoutThenRollup()
+    {
+        var lockStorm = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            ["contrib_Lock:relation"] = 900_000, ["contrib_IO:DataFileRead"] = 500_000, ["contrib_LWLock:WALWrite"] = 100_000, ["ratio"] = 6.0,
+        };
+        Assert.Equal(
+            new[] { PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.WaitKey("Lock", null) },
+            PgTargetFactKeys.WaitProfileFamilies(lockStorm));
+
+        /* A contributor without an event names the rollup alone; a tie breaks on the ordinal name. */
+        Assert.Equal(new[] { PgTargetFactKeys.WaitKey("Lock", null) }, PgTargetFactKeys.WaitProfileFamilies(new Dictionary<string, double> { ["contrib_Lock"] = 5 }));
+        Assert.Equal(
+            new[] { PgTargetFactKeys.WaitKey("IO", "DataFileRead"), PgTargetFactKeys.WaitKey("IO", null) },
+            PgTargetFactKeys.WaitProfileFamilies(new Dictionary<string, double> { ["contrib_Lock:relation"] = 5, ["contrib_IO:DataFileRead"] = 5 }));
+        Assert.Empty(PgTargetFactKeys.WaitProfileFamilies(new Dictionary<string, double> { ["ratio"] = 6.0 }));
+        Assert.Empty(PgTargetFactKeys.WaitProfileFamilies(null));
     }
 
     /* ── FactScorer: the source arm, the context set, the anomaly membership, the amplifier arm ── */
@@ -241,7 +279,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
            each delegate once. */
         Assert.Equal(1, Count(scorer, "_ when PgTargetSources.IsPgSource(fact.Source) => PgTargetScorer.ScoreBase(fact),"));
         Assert.Equal(1, Count(scorer, "PgTargetScorer.IsDeviationScoredAnomalyKey(key)"));
-        Assert.Equal(1, Count(scorer, "if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))"));
+        /* Two since #3691: the ratio-anomaly first line of ScoreAnomalyFact, and the wait profile's extremity-escape
+           arm in IsExtremeAnomaly (the v1 residue closed by the v2 plumbing) — each delegating to PgTargetScorer. */
+        Assert.Equal(2, Count(scorer, "if (PgTargetScorer.IsPgRatioAnomalyKey(fact.Key))"));
+        Assert.Equal(1, Count(scorer, "return PgTargetScorer.IsExtremeWaitProfileAnomaly(fact, ExtremeAnomalyMultiple);"));
 
         /* And the amplifier dispatcher answers something for every declared key without throwing. */
         var keys = typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
@@ -328,6 +369,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "relation")));
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "transactionid")));
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(7)));
+        /* v2 (#3691) stubs: null IS the delegation — the shared entry points answer exactly what the stub does (the
+           equality above), and no SQL Server composer claims the key. Each lane moves its own line to NotNull. */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.IoReadLatencyMs));        /* lane 11 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ReplicationLag));         /* lane 12 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));             /* lane 13 */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from
@@ -366,6 +412,26 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.Equal("inc-tps", tps.IncidentId);
         Assert.Equal("inc-other", otherDb.IncidentId);
         Assert.Equal("inc-parent", parent.IncidentId);
+
+        /* #3691: the wait profile folds onto the fired wait card its dominant contributor names — the standout when
+           it fired, the rollup when only the rollup did — and stays solo with no contributor metadata (v1's
+           behaviour for every profile story). Same-database only, as every fold. */
+        var profileMeta = new Dictionary<string, double>(StringComparer.Ordinal) { ["contrib_Lock:relation"] = 900_000, ["contrib_IO:DataFileRead"] = 100 };
+        var standout = Story(PgTargetFactKeys.WaitKey("Lock", "relation"), "inc-standout", severity: 0.8);
+        var profile = Story(PgTargetFactKeys.AnomalyWaitProfile, "inc-profile", severity: 0.6);
+        profile.RootFactMetadata = new Dictionary<string, double>(profileMeta);
+        AnomalyIncidentReconciler.Reconcile([standout, profile]);
+        Assert.Equal("inc-standout", profile.IncidentId);
+
+        var rollup = Story(PgTargetFactKeys.WaitKey("Lock", null), "inc-rollup", severity: 0.8);
+        var profileOntoRollup = Story(PgTargetFactKeys.AnomalyWaitProfile, "inc-profile-2", severity: 0.6);
+        profileOntoRollup.RootFactMetadata = new Dictionary<string, double>(profileMeta);
+        AnomalyIncidentReconciler.Reconcile([rollup, profileOntoRollup]);
+        Assert.Equal("inc-rollup", profileOntoRollup.IncidentId);
+
+        var bareProfile = Story(PgTargetFactKeys.AnomalyWaitProfile, "inc-bare", severity: 0.6);
+        AnomalyIncidentReconciler.Reconcile([Story(PgTargetFactKeys.WaitKey("Lock", "relation"), "inc-x", severity: 0.8), bareProfile]);
+        Assert.Equal("inc-bare", bareProfile.IncidentId);
 
         /* And the SQL Server map still folds its own — the lookup is a second map, not a replacement. */
         var sqlParent = Story("DEADLOCKS", "sql-parent", severity: 0.9);

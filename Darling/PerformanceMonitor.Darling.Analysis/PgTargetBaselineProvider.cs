@@ -50,7 +50,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// one applied to the other) would be the unit error adversarial item A names. When a sampled arm arrives it is
 /// its own metric name, never this one.</para>
 /// </summary>
-public sealed class PgTargetBaselineProvider : PgBaselineProvider
+public sealed partial class PgTargetBaselineProvider : PgBaselineProvider
 {
     public PgTargetBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null)
         : base(postgres, logger)
@@ -190,8 +190,20 @@ WITH clean AS (
     AND   acu_utilization_percent IS NOT NULL
 )," + RobustTierScaffold,
 
+        /* v2 (#3691): one arm per new metric, each to a partial in its own file (PgTargetBaselineProvider.{Io,
+           Replication,Wal}.cs) so lanes 11 / 12 / 15 never edit this switch. A stub answers null — the same
+           "no arm for this metric" the default below gives — so the shared reader reports no baseline for the
+           metric rather than a bucket built from nothing. pg_autovacuum_workers is wave 2: no arm, no stub. */
+        MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),
+        MetricNames.PgReplayLagBytes => ReplayLagBaselineQuery(),
+        MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),
+
         _ => null,
     };
+
+    private static partial string? IoReadLatencyBaselineQuery();
+    private static partial string? ReplayLagBaselineQuery();
+    private static partial string? WalBytesPerSecBaselineQuery();
 
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
 }
