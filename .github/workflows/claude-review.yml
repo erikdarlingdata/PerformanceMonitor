@@ -107,6 +107,10 @@ jobs:
               - 'PerformanceMonitor.Analysis/**/!(*.md)'
               - 'PerformanceMonitor.Collectors/**/!(*.md)'
               - 'PerformanceMonitor.Common/**/!(*.md)'
+              # #3710 review: six of the traps file's own citations (#3612 #3618 #3625 #3628 #3636 #3644) live
+              # in these two projects; a tier that reads them lightly would re-learn each one.
+              - 'PerformanceMonitor.Alerting/**/!(*.md)'
+              - 'PerformanceMonitor.Notifications/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Analysis/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
