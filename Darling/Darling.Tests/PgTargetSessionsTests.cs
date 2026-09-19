@@ -390,20 +390,31 @@ public sealed class PgTargetSessionsTests
         Assert.DoesNotContain("DateTime.UtcNow", code, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Lane 3 shipped this chain with NO edge and this pin held that; lane 5 (the wait family, #3542 step 5)
+    /// moved it deliberately when it wrote the saturation ↔ Lock-wait mesh into the file: saturation's only
+    /// edges are the two wait keys, in BOTH directions (a saturation root walks to a fired Lock wait, a Lock wait
+    /// root walks to fired saturation — one story whichever outranks), the permissions fact still has none, and
+    /// the v2 <c>PG_IDLE_IN_TRANSACTION</c> hook stays a comment. The wait-side pins (predicates, both walks) are
+    /// <c>PgTargetWaitTests</c>'.
+    /// </summary>
     [Fact]
-    public void TheSaturationChain_AddsNoEdgeInV1_AndSaysWhyInTheFile()
+    public void TheSaturationChain_MeshesWithTheLockWaitsOnly_AndThePermissionsFactHasNoEdge()
     {
         var graph = new PgTargetRelationshipGraph();
-        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.ConnectionSaturation));
+        Assert.Equal(
+            new[] { PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.WaitKey("Lock", "relation") }.Order(StringComparer.Ordinal),
+            graph.GetAllEdges(PgTargetFactKeys.ConnectionSaturation).Select(e => e.Destination).Order(StringComparer.Ordinal));
         Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.MonitoringPermissions));
+        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.IdleInTransaction));
 
         var source = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Saturation.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
-        Assert.DoesNotContain("AddEdge(", code, StringComparison.Ordinal);
-        /* The two hooks are written out for the lanes that own their destinations. */
+        Assert.Equal(4, Count(code, "AddEdge("));
+        /* The v2 hook is still written out, as a comment, for the lane that owns its destination. */
         Assert.Contains("PgTargetFactKeys.IdleInTransaction", source, StringComparison.Ordinal);
-        Assert.Contains("WaitKey(\"Lock\", null)", source, StringComparison.Ordinal);
-        Assert.Contains("No edge is added tonight, deliberately", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PgTargetFactKeys.IdleInTransaction", code, StringComparison.Ordinal);
+        Assert.Contains("Lane 3 added no edge of its own, deliberately", source, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── gated: the exit criterion ───────────────────────── */
