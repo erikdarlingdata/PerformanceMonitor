@@ -796,7 +796,10 @@ public sealed class AlertEngine
                    excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
                    backup of an excluded database still burns this server's CPU. Threshold 0 = every session
                    in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
-                   dead collector cannot dress an old backup up as a live one.
+                   dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
+                   passed as None for the same reason the five filters are off: an operator excludes their
+                   permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
+                   service login is still the thing burning this server's CPU.
 
                    Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
                    else — the alert already fired above this read in every sense that matters, and the empty
@@ -817,8 +820,9 @@ public sealed class AlertEngine
                         excludeMiscWaits: false,
                         excludeCdc: false,
                         Array.Empty<string>(),
+                        LongRunningQueryExclusions.None,
                         ct);
-                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions);
+                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -1700,7 +1704,13 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var longRunning = await _readAdapter.GetLongRunningQueriesAsync(       /* :346 */
+            /* #3653 (A5, Q5): the opt-out knob rides INTO the read, ahead of the row cap — see
+               LongRunningQueryExclusions for why a post-read filter would blind the alert. Normalised here
+               from the two raw settings lists on every sweep (trim, blanks dropped, case-insensitive dedupe)
+               so a Settings-window string and an MCP array mean the same thing to both stores. */
+            var exclusions = LongRunningQueryExclusions.From(
+                _settings.LongRunningQueryExcludedProgramNames, _settings.LongRunningQueryExcludedLogins);
+            var read = await _readAdapter.GetLongRunningQueriesAsync(              /* :346 */
                 key,
                 _settings.LongRunningQueryThresholdMinutes,
                 _settings.LongRunningQueryMaxResults,
@@ -1710,7 +1720,9 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeMiscWaits,
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
+                exclusions,
                 ct);
+            var longRunning = read.Sessions;
             readClock.Restart();
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -1807,6 +1819,19 @@ public sealed class AlertEngine
                     readClock.Restart();
 
                     var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
+
+                    /* #3653 (A5, Q5): the knob's own evidence on the card — how many candidates it removed this
+                       evaluation — so an operator can see it working; a setting whose only effect is a page
+                       NOT arriving is one nobody can verify. Only when the knob is SET: an "Excluded: 0" line
+                       on every card of every operator who never configured it would be noise about nothing.
+                       Appended, never prepended — the sessions are the alert; this is a footnote about the
+                       ones that are not. ANNOTATION, NEVER SUPPRESSION, like #3497's job names: the fire is
+                       decided above and this can only add a line. */
+                    if (!exclusions.IsEmpty && lrqContext is not null)
+                    {
+                        lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, read.ExcludedCount));
+                    }
+
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */

@@ -659,9 +659,19 @@ LIMIT 2000";
 
     /// <summary>
     /// Gets long-running queries from the latest collection snapshot.
-    /// Returns sessions whose total elapsed time exceeds the given threshold.
+    /// Returns sessions whose total elapsed time exceeds the given threshold, and — since #3653 (A5, Q5) — how
+    /// many over-threshold sessions the <paramref name="exclusions"/> opt-out knob removed from the same snapshot.
+    ///
+    /// <para><b>The knob is applied IN the read, ahead of <c>LIMIT</c>.</b> The read is longest-elapsed first and
+    /// capped at <paramref name="maxResults"/> (default 5); the sessions an operator excludes here are permanent
+    /// background requests, i.e. the longest-running on the server by construction, so a post-read filter would
+    /// let them fill the cap on every sweep and hide the real long-running query behind them. The <c>candidates</c>
+    /// CTE flags each over-threshold row, the outer query keeps the unflagged ones under the cap, and the excluded
+    /// count is an uncorrelated scalar over the same CTE — one statement, one snapshot, so the count and the rows
+    /// describe the same instant. With an empty knob the flag expression is the literal <c>FALSE</c> and the rows
+    /// are exactly what the pre-knob read returned.</para>
     /// </summary>
-    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         int serverId,
         int thresholdMinutes,
         int maxResults = 5,
@@ -669,8 +679,11 @@ LIMIT 2000";
         bool excludeWaitFor = true,
         bool excludeBackups = true,
         bool excludeMiscWaits = true,
-        bool excludeCdc = true)
+        bool excludeCdc = true,
+        LongRunningQueryExclusions? exclusions = null)
     {
+        exclusions ??= LongRunningQueryExclusions.None;
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -694,30 +707,56 @@ LIMIT 2000";
             ? "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE" : "";
         maxResults = Math.Clamp(maxResults, 1, 1000);
 
+        /* #3653 (A5, Q5): the opt-out knob's operands bind as $5 onward, after the four fixed parameters below;
+           the shared builder spells the ILIKE … ESCAPE predicate so this read and Darling's cannot drift. */
+        var (exclusionPredicate, exclusionOperands) = exclusions.BuildSqlPredicate("r.program_name", "r.login_name", firstParameterOrdinal: 5);
+        string excludedFlag = exclusionPredicate.Length == 0 ? "FALSE" : exclusionPredicate;
+
         command.CommandText = @$"
+                WITH candidates AS (
+                    SELECT
+                        r.session_id,
+                        r.database_name,
+                        SUBSTRING(r.query_text, 1, 300) AS query_text,
+                        r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+                        r.cpu_time_ms,
+                        r.reads,
+                        r.writes,
+                        r.wait_type,
+                        r.blocking_session_id,
+                        r.query_hash,
+                        r.program_name,
+                        r.login_name,
+                        r.total_elapsed_time_ms,
+                        {excludedFlag} AS excluded_by_knob
+                    FROM v_query_snapshots AS r
+                    WHERE r.server_id = $1
+                        AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
+                        AND r.collection_time >= $4
+                        AND r.session_id > 50
+                        {spServerDiagnosticsFilter}
+                        {waitForFilter}
+                        {backupsFilter}
+                        {miscWaitsFilter}
+                        {cdcFilter}
+                        AND r.total_elapsed_time_ms >= $2
+                )
                 SELECT
                     r.session_id,
                     r.database_name,
-                    SUBSTRING(r.query_text, 1, 300) AS query_text,
-                    r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+                    r.query_text,
+                    r.elapsed_seconds,
                     r.cpu_time_ms,
                     r.reads,
                     r.writes,
                     r.wait_type,
                     r.blocking_session_id,
                     r.query_hash,
-                    r.program_name
-                FROM v_query_snapshots AS r
-                WHERE r.server_id = $1
-                    AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
-                    AND r.collection_time >= $4
-                    AND r.session_id > 50
-                    {spServerDiagnosticsFilter}
-                    {waitForFilter}
-                    {backupsFilter}
-                    {miscWaitsFilter}
-                    {cdcFilter}
-                    AND r.total_elapsed_time_ms >= $2
+                    r.program_name,
+                    r.login_name,
+                    CAST((SELECT COUNT(*) FROM candidates AS x WHERE x.excluded_by_knob) AS INTEGER) AS excluded_count
+                FROM candidates AS r
+                WHERE NOT r.excluded_by_knob
                 ORDER BY r.total_elapsed_time_ms DESC
                 LIMIT $3;";
 
@@ -729,8 +768,13 @@ LIMIT 2000";
            comparison resolves the naive side in the host's TimeZone. East of UTC the floor lands in the
            future and this read returns nothing, so the long-running-query alert never fires at all. */
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - LatestSnapshotFreshness });
+        foreach (var operand in exclusionOperands)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = operand });
+        }
 
         var items = new List<LongRunningQueryInfo>();
+        int excludedCount = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -749,11 +793,15 @@ LIMIT 2000";
                 /* Phase-5 A reconciliation: populate ProgramName so the shared
                    BuildLongRunningQueryContext renders the ("Program", ...) detail item the
                    Dashboard's alert already had. */
-                ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10)
+                ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
             });
+            /* The same scalar on every row — read once is enough, and a read with no rows has nothing to
+               fire and therefore nothing to render the count beside (LongRunningQueryReadResult says why). */
+            excludedCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
         }
 
-        return items;
+        return new LongRunningQueryReadResult(items, excludedCount);
     }
 }
 

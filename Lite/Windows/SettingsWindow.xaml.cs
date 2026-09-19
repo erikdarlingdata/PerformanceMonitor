@@ -649,6 +649,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeMiscWaits;
         LrqExcludeCdcCheckBox.IsChecked = App.AlertLongRunningQueryExcludeCdc;
+        LrqExcludedProgramNamesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNames);
+        LrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
@@ -738,6 +740,10 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true;
+        /* #3653 (A5, Q5): comma-separated in the box, normalised through the shared rule (trim, blanks dropped,
+           case-insensitive dedupe, a bare * refused) so the list the engine reads is the list the card shows. */
+        App.AlertLongRunningQueryExcludedProgramNames = LongRunningQueryExclusions.Normalize(LrqExcludedProgramNamesBox.Text.Split(',')).ToList();
+        App.AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(LrqExcludedLoginsBox.Text.Split(',')).ToList();
         App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
             .Split(',')
             .Select(s => s.Trim())
@@ -837,6 +843,12 @@ public partial class SettingsWindow : Window
         var dbArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
         root["alert_excluded_databases"] = dbArray;
+        var lrqProgramArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var name in App.AlertLongRunningQueryExcludedProgramNames) lrqProgramArray.Add(name);
+        root["alert_long_running_query_excluded_program_names"] = lrqProgramArray;
+        var lrqLoginArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var login in App.AlertLongRunningQueryExcludedLogins) lrqLoginArray.Add(login);
+        root["alert_long_running_query_excluded_logins"] = lrqLoginArray;
         root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
         root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
         root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
@@ -913,6 +925,8 @@ public partial class SettingsWindow : Window
         AnalysisNotifySeverityBox.Text = "1.5";
         AnalysisNotifyCooldownBox.Text = "360";
         AlertExcludedDatabasesBox.Text = "";
+        LrqExcludedProgramNamesBox.Text = "";
+        LrqExcludedLoginsBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
     }

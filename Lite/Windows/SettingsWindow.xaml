@@ -300,6 +300,18 @@
                 <CheckBox x:Name="LrqExcludeCdcCheckBox"
                           Content="Exclude CDC capture jobs (sp__MScdc__capture__job, sp__cdc__scan)"
                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,0"/>
+                <!-- #3653 (A5, Q5): the opt-out knob for permanent background requests. Excluded sessions are
+                     not evaluated at all (not read, not counted, not fingerprinted) — unlike a mute rule, which
+                     silences a fire already decided. -->
+                <TextBlock Text="Exclude sessions by program name (comma-separated; trailing * matches any suffix):"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,6,0,4" FontSize="12"/>
+                <TextBox x:Name="LrqExcludedProgramNamesBox" Margin="20,0,0,4"/>
+                <TextBlock Text="Exclude sessions by login (comma-separated; trailing * matches any suffix):"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
+                <TextBox x:Name="LrqExcludedLoginsBox" Margin="20,0,0,4"/>
+                <TextBlock Text="e.g. SQLAgent - TSQL JobStep*, svc__replication — matched case-insensitively against the whole value; an excluded session is never evaluated, and the alert card counts how many were excluded"
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertTempDbSpaceCheckBox" Content="tempdb space usage over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>

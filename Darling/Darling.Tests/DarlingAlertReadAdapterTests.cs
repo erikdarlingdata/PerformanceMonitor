@@ -363,12 +363,13 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal(AlertSeverityLevel.Warning, storm.Severity);
 
             /* --- long-running queries: threshold + excluded-database drop --- */
-            var lrq = await adapter.GetLongRunningQueriesAsync(
+            var lrqRead = await adapter.GetLongRunningQueriesAsync(
                 TestServerKey, thresholdMinutes: 5, maxResults: 5,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb" }, ct);
-            var query = Assert.Single(lrq);
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(0, lrqRead.ExcludedCount);
+            var query = Assert.Single(lrqRead.Sessions);
             Assert.Equal(71, query.SessionId);
             Assert.Equal(600L, query.ElapsedSeconds);
             Assert.Equal("HammerDB", query.ProgramName);

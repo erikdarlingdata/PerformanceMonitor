@@ -439,28 +439,59 @@ ORDER BY accumulated_wait_ms DESC";
     /// <c>NOW() - INTERVAL '10 MINUTES'</c> becomes the parameterized naive-UTC $4 (a bare
     /// <c>now()</c> is timestamptz — wrong basis against naive-UTC timestamp columns), and the
     /// N'' literals in the opt-out filters (<c>{0}</c> placeholder) lose their N prefix.
-    /// $1 server_id, $2 elapsed-ms threshold, $3 max results, $4 staleness floor.
+    /// $1 server_id, $2 elapsed-ms threshold, $3 max results, $4 staleness floor; <c>{1}</c> is the #3653
+    /// (A5, Q5) opt-out knob's flag expression — <c>FALSE</c> for an empty knob, otherwise the shared
+    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicate"/> text whose operands bind as $5 onward.
+    ///
+    /// <para><b>Why a CTE and a flag rather than one more <c>AND NOT</c>.</b> The knob is applied ahead of
+    /// <c>LIMIT</c> (the sessions it removes are the longest-running by construction and would otherwise fill
+    /// the cap), and the fire payload wants to know how many it removed. Flagging every over-threshold row once
+    /// lets the outer query keep the unflagged ones under the cap AND count the flagged ones as an uncorrelated
+    /// scalar over the same CTE — one statement (Npgsql positional parameters do not survive a batch), one
+    /// snapshot, so the rows and the count describe the same instant. The outer alias is <c>r</c> like the
+    /// inner's so the pins on this text keep reading.</para>
     /// </summary>
     public const string LongRunningQueriesSqlTemplate = @"
+WITH candidates AS (
+    SELECT
+        r.session_id,
+        r.database_name,
+        SUBSTRING(r.query_text, 1, 300) AS query_text,
+        r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+        r.cpu_time_ms,
+        r.reads,
+        r.writes,
+        r.wait_type,
+        r.blocking_session_id,
+        r.query_hash,
+        r.program_name,
+        r.login_name,
+        r.total_elapsed_time_ms,
+        {1} AS excluded_by_knob
+    FROM query_snapshots AS r
+    WHERE r.server_id = $1
+        AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM query_snapshots AS vqs WHERE vqs.server_id = $1)
+        AND r.collection_time >= $4
+        AND r.session_id > 50
+        {0}
+        AND r.total_elapsed_time_ms >= $2
+)
 SELECT
     r.session_id,
     r.database_name,
-    SUBSTRING(r.query_text, 1, 300) AS query_text,
-    r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+    r.query_text,
+    r.elapsed_seconds,
     r.cpu_time_ms,
     r.reads,
     r.writes,
     r.wait_type,
     r.blocking_session_id,
     r.query_hash,
-    r.program_name
-FROM query_snapshots AS r
-WHERE r.server_id = $1
-    AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM query_snapshots AS vqs WHERE vqs.server_id = $1)
-    AND r.collection_time >= $4
-    AND r.session_id > 50
-    {0}
-    AND r.total_elapsed_time_ms >= $2
+    r.program_name,
+    r.login_name,
+    CAST((SELECT COUNT(*) FROM candidates AS x WHERE x.excluded_by_knob) AS integer) AS excluded_count
+FROM candidates AS r
+WHERE NOT r.excluded_by_knob
 ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
@@ -476,7 +507,7 @@ LIMIT $3";
     public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
     public const string CdcFilter = "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE";
 
-    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -486,11 +517,13 @@ LIMIT $3";
         bool excludeMiscWaits,
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
         var thresholdMs = (long)thresholdMinutes * 60 * 1000;
         maxResults = Math.Clamp(maxResults, 1, 1000);
+        ArgumentNullException.ThrowIfNull(exclusions);
 
         var filters = string.Join("\n    ", new[]
         {
@@ -501,15 +534,24 @@ LIMIT $3";
             excludeCdc ? CdcFilter : ""
         }.Where(f => f.Length > 0));
 
-        var sql = LongRunningQueriesSqlTemplate.Replace("{0}", filters);
+        /* #3653 (A5, Q5): the opt-out knob's operands bind as $5 onward, after the four fixed parameters. */
+        var (exclusionPredicate, exclusionOperands) = exclusions.BuildSqlPredicate("r.program_name", "r.login_name", firstParameterOrdinal: 5);
+        var sql = LongRunningQueriesSqlTemplate
+            .Replace("{0}", filters)
+            .Replace("{1}", exclusionPredicate.Length == 0 ? "FALSE" : exclusionPredicate);
 
         var items = new List<LongRunningQueryInfo>();
+        int excludedCount = 0;
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
         command.Parameters.AddWithValue(maxResults);
         command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-10));
+        foreach (var operand in exclusionOperands)
+        {
+            command.Parameters.AddWithValue(operand);
+        }
 
         using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -527,8 +569,12 @@ LIMIT $3";
                     WaitType = reader.IsDBNull(7) ? null : reader.GetString(7),
                     BlockingSessionId = reader.IsDBNull(8) ? null : (int?)reader.GetInt32(8),
                     QueryHash = reader.IsDBNull(9) ? null : reader.GetString(9),
-                    ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10)
+                    ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                    LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
                 });
+                /* The same scalar on every row — read once is enough; a read with no rows has nothing to
+                   fire and therefore nothing to render the count beside. */
+                excludedCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
             }
         }
 
@@ -541,7 +587,7 @@ LIMIT $3";
                 .ToList();
         }
 
-        return items;
+        return new LongRunningQueryReadResult(items, excludedCount);
     }
 
     /* ---------------- database file growth (#2349) ---------------- */

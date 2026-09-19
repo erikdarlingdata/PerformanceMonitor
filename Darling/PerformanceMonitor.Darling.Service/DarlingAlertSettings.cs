@@ -259,6 +259,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LongRunningQueryExcludeBackups => _config.Alerts.LongRunningQueryExcludeBackups;
     public bool LongRunningQueryExcludeMiscWaits => _config.Alerts.LongRunningQueryExcludeMiscWaits;
     public bool LongRunningQueryExcludeCdc => _config.Alerts.LongRunningQueryExcludeCdc;
+    /* #3653 (A5, Q5): the Long-Running Query opt-out knob is NOT YET a Darling setting. The store row is
+       authoritative for every alert knob (StoreConfigProvider.ApplyToConfig replaces config.Alerts wholesale on
+       every load, so a darling.json-only member would be reset to empty on the first store read and the knob
+       would be dead while looking configured — the #3314 by-halves shape). Two text[] columns on
+       config_alert_settings are the honest home and a migration rung; until that rung lands the engine sees an
+       empty knob here and evaluates every session, exactly as before. The MCP twins publish the knob on neither
+       SKU for the same reason (McpAlertSettingsKeyTests pins the two payloads to one shape). */
+    public IReadOnlyList<string> LongRunningQueryExcludedProgramNames => Array.Empty<string>();
+    public IReadOnlyList<string> LongRunningQueryExcludedLogins => Array.Empty<string>();
 
     /* ---------------- IAlertSettings (delivery) ---------------- */
 

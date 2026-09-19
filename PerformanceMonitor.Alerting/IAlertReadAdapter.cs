@@ -106,8 +106,15 @@ public interface IAlertReadAdapter
     /// <paramref name="maxResults"/> (clamped 1–1000), then rows in
     /// <paramref name="excludedDatabases"/> dropped client-side (case-insensitive; rows with no
     /// database name always pass) — the loop's post-fetch exclusion, moved behind the seam.
+    /// <para>
+    /// Since #3653 (A5, Q5) the <paramref name="exclusions"/> knob is applied IN THE READ, ahead of the row
+    /// cap — not client-side like the database list — because the sessions it removes are the longest-running
+    /// on the server by construction and would otherwise fill the cap on every sweep (see
+    /// <see cref="LongRunningQueryExclusions"/>). The result carries how many candidates the knob removed, so
+    /// the fire payload can show it. <see cref="LongRunningQueryExclusions.None"/> reads exactly as before.
+    /// </para>
     /// </summary>
-    Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -117,6 +124,7 @@ public interface IAlertReadAdapter
         bool excludeMiscWaits,
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default);
 
     /// <summary>

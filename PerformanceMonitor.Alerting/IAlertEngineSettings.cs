@@ -171,6 +171,27 @@ public interface IAlertEngineSettings
     /// <summary>Exclude CDC capture sessions (default true).</summary>
     bool LongRunningQueryExcludeCdc { get; }
 
+    /// <summary>
+    /// <c>program_name</c> patterns whose sessions the Long-Running Query alert does NOT EVALUATE (#3653 A5,
+    /// ruling Q5) — the opt-out knob for permanent background requests, which no duration threshold and no
+    /// persistence gate can separate from a runaway query because they are over any bar forever (measured on
+    /// one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90 of them seen
+    /// in 6,192 snapshots). Case-insensitive, whole-value, trailing <c>*</c> matches any suffix; see
+    /// <see cref="LongRunningQueryExclusions"/> for the rule and for why it is applied in the read ahead of
+    /// the row cap rather than after it. Empty = evaluate every session, the shipped default on both SKUs.
+    /// Distinct from a mute rule, which silences a fire already decided: an excluded session never reaches the
+    /// decision, is not fingerprinted and does not hold an incident open.
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedProgramNames { get; }
+
+    /// <summary>
+    /// <c>login_name</c> patterns whose sessions the Long-Running Query alert does not evaluate (#3653 A5, Q5)
+    /// — the second handle a background request reliably carries, for the service principals whose
+    /// <c>program_name</c> is a generic driver string. Same rule and same reasoning as
+    /// <see cref="LongRunningQueryExcludedProgramNames"/>; a session is excluded when EITHER list matches.
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedLogins { get; }
+
     /// <summary>Fire when tempdb reserved space is at/above this % of total.</summary>
     int TempDbSpaceThresholdPercent { get; }
 

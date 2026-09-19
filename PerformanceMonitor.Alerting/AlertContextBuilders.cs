@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Notifications;
@@ -702,6 +703,52 @@ public static class AlertContextBuilders
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
         AlertIncidentRenderer.Apply(context, Decorate(LongRunningQueryIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
+    }
+
+    /// <summary>The <c>Excluded Count</c> label on the Long-Running Query card's knob item (#3653 A5, Q5) — the
+    /// one field a reader of the card or of <c>get_alert_history</c>'s <c>context_json</c> looks up to see the
+    /// opt-out knob working. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string LongRunningQueryExcludedCountLabel = "Excluded Count";
+
+    /// <summary>
+    /// The Long-Running Query card's OPT-OUT KNOB item (#3653 A5, ruling Q5): how many over-threshold sessions
+    /// the <see cref="LongRunningQueryExclusions"/> knob removed from this evaluation, and the patterns that did
+    /// it. Appended by the engine after the session items, and only when the knob is set — a card that says
+    /// "Excluded Count: 0" to an operator who never configured the knob is a line about nothing.
+    ///
+    /// <para>Why the count is on the card at all: the knob's only effect is a page NOT arriving, and a setting
+    /// whose effect is an absence is one an operator cannot verify from the outside. The count is the knob's
+    /// receipt — "I removed 4 sessions before deciding this" — which is also how a pattern that is too broad
+    /// shows itself (a count that equals the whole snapshot). The patterns are listed so the card is
+    /// self-describing to whoever reads it in six months without the Settings window open.</para>
+    /// </summary>
+    /// <param name="exclusions">The knob as the engine applied it (normalised).</param>
+    /// <param name="excludedCount">The read's count of candidates the knob removed.</param>
+    public static AlertDetailItem BuildLongRunningQueryExclusionItem(LongRunningQueryExclusions exclusions, int excludedCount)
+    {
+        if (exclusions is null) throw new ArgumentNullException(nameof(exclusions));
+
+        var fields = new List<(string Label, string Value)>
+        {
+            (LongRunningQueryExcludedCountLabel, excludedCount.ToString(CultureInfo.InvariantCulture))
+        };
+        if (exclusions.ProgramNames.Count > 0)
+        {
+            fields.Add(("Excluded Programs", string.Join(", ", exclusions.ProgramNames)));
+        }
+
+        if (exclusions.Logins.Count > 0)
+        {
+            fields.Add(("Excluded Logins", string.Join(", ", exclusions.Logins)));
+        }
+
+        return new AlertDetailItem
+        {
+            Heading = excludedCount == 1
+                ? "1 session over the threshold was excluded by the opt-out knob"
+                : $"{excludedCount} sessions over the threshold were excluded by the opt-out knob",
+            Fields = fields
+        };
     }
 
     /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */

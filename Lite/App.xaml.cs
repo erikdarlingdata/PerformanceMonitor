@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
@@ -171,6 +172,12 @@ public partial class App : Application
     public static bool AlertLongRunningQueryExcludeBackups { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeMiscWaits { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeCdc { get; set; } = true;
+    /* #3653 (A5, Q5): the Long-Running Query opt-out knob — program_name / login_name patterns whose sessions
+       the alert does not evaluate (case-insensitive, trailing * = any suffix; LongRunningQueryExclusions is the
+       rule). Empty = evaluate every session, the shipped default. Persisted as two JSON arrays beside
+       alert_excluded_databases, edited on the Settings window's Alerts tab as comma-separated text. */
+    public static List<string> AlertLongRunningQueryExcludedProgramNames { get; set; } = new();
+    public static List<string> AlertLongRunningQueryExcludedLogins { get; set; } = new();
     public static List<string> AlertExcludedDatabases { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
@@ -1159,6 +1166,18 @@ public partial class App : Application
                     var db = elem.ValueKind == JsonValueKind.String ? elem.GetString() : null;
                     if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
                 }
+            }
+            /* #3653 (A5, Q5): the two opt-out lists, read with the same element-kind filter as the database list
+               above and normalised through the shared rule so a hand-edited file and the Settings window agree. */
+            if (read.TryGetProperty("alert_long_running_query_excluded_program_names", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedProgramNames = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
+            }
+            if (read.TryGetProperty("alert_long_running_query_excluded_logins", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
             }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);

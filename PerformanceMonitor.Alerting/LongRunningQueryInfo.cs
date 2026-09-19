@@ -19,6 +19,14 @@ public class LongRunningQueryInfo
     public string DatabaseName { get; set; } = "";
     public string QueryText { get; set; } = "";
     public string ProgramName { get; set; } = "";
+
+    /// <summary>The session's <c>login_name</c> as collected (#3653 A5, Q5) — projected so the Long-Running Query
+    /// opt-out knob's login arm has the value it matched on beside the row, and so a host that filters rows it
+    /// already holds can apply <see cref="LongRunningQueryExclusions.Excludes"/> to the same two handles the
+    /// read did. Empty for a producer that does not project it (the deprecated Dashboard's frozen read, every
+    /// pre-#3653 fixture); the exclusion itself is applied in the read, so an empty value here never changes a
+    /// decision.</summary>
+    public string LoginName { get; set; } = "";
     public long ElapsedSeconds { get; set; }
     public long CpuTimeMs { get; set; }
     public long Reads { get; set; }
