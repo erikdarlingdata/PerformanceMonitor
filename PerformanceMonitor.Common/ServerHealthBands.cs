@@ -1456,6 +1456,71 @@ namespace PerformanceMonitor.Common
             collectorName is not null && UserDatabaseEnumeratorNames.Contains(collectorName);
 
         /// <summary>
+        /// The collectors for which "zero rows over the whole window" is the DOCUMENTED resting state
+        /// (#3754): a row exists only when the monitored engine recorded an event or is inside a condition -
+        /// an XE / trace / ring-buffer / server-log capture (a deadlock, a blocked-process report, a long
+        /// completion, a system_health or default-trace event, a memory-pressure notification, a logged
+        /// PostgreSQL deadlock, log event or captured plan), or a chain / held horizon that exists only while
+        /// something is wrong (the SQL Server and PostgreSQL blocking captures, the xmin horizon). These are
+        /// the collectors <see cref="FormatOutputFinding"/>'s event-collector sentence - "zero is the
+        /// correct resting state on a well-behaved target and needs no action" - is TRUE of. It used to be
+        /// offered to every collector that stored nothing and left no note, and on the issue's Azure server
+        /// that put it on <c>database_scoped_config</c>, a configuration snapshot that returns a row per
+        /// setting per database and for which zero is never a resting state.
+        ///
+        /// <para><b>Why a name list here, when #3160 refused one for this exact sentence.</b> #3160's
+        /// objection was to a list of the PERIODIC collectors - the ones to withhold the sentence from -
+        /// because such a list goes stale in the direction that makes it pass: the next snapshot collector
+        /// to break gets the reassuring sentence until somebody remembers to add it. This list has the
+        /// opposite polarity. It names the collectors to OFFER the sentence to, so an omission fails loud:
+        /// a new event capture left off it gets the non-event sentence, which is not reassuring and says
+        /// the zero needs a look, and the operator who reads it is the one who adds the name. Kept as an
+        /// explicit set for the same reason <see cref="OnLoadCollectorNames"/> and
+        /// <see cref="UserDatabaseEnumeratorNames"/> are - this classifier does not depend on the collector
+        /// catalog - and pinned by both suites against the catalog's real names so a typo or a rename
+        /// cannot silently drop a collector from it.</para>
+        ///
+        /// <para><b>Deliberately NOT in it:</b> the polled snapshots of current activity (waiting_tasks,
+        /// query_snapshots, memory_grant_stats, running_jobs, job_history) whose zero on an idle
+        /// target is legitimate too. They are not event captures, and the non-event sentence is worded to
+        /// be honest for them without alarm - it says the source returned nothing on every run and that
+        /// this needs a look "on a target that has anything for it to report", which an operator reading
+        /// an idle development box can answer for themselves. Wrongly OMITTING a collector costs a
+        /// non-reassuring sentence; wrongly INCLUDING one costs the reassuring sentence over a broken zero,
+        /// which is the defect. So the list stays short.</para>
+        /// </summary>
+        private static readonly HashSet<string> EventCollectorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "deadlocks",
+            "blocked_process_report",
+            "long_query_completions",
+            "system_health_events",
+            "default_trace_events",
+            "memory_pressure_events",
+            "dmv_blocking_snapshot",
+            "pg_deadlocks",
+            "pg_log_events",
+            "pg_plan_capture",
+            "pg_blocking",
+            "pg_xmin_horizon",
+        };
+
+        /// <summary>
+        /// True when this collector stores a row only when an event occurred or a condition held, so a
+        /// zero-row window is its documented resting state (<see cref="EventCollectorNames"/>, #3754). False
+        /// for every other collector, and for a null name - absence of a name is not a claim about category.
+        /// </summary>
+        public static bool IsEventCollector(string? collectorName) =>
+            collectorName is not null && EventCollectorNames.Contains(collectorName);
+
+        /// <summary>
+        /// The names in <see cref="EventCollectorNames"/>, exposed read-only so both suites can pin the set
+        /// against the catalog's real collector names (every entry must be a collector that exists) and
+        /// against the four the <c>get_collection_health</c> description has always named as its examples.
+        /// </summary>
+        public static IReadOnlyCollection<string> EventCollectorNamesForPinning => EventCollectorNames;
+
+        /// <summary>
         /// The leading text of the shared empty-enumeration note
         /// (<c>EnumeratedCollectorDriver.EmptyEnumerationMessage</c>), matched to tell that note apart from
         /// the probe-failure summary — which names its own cause and needs no inventory qualifier.
@@ -1831,7 +1896,46 @@ namespace PerformanceMonitor.Common
         /// deliberate zero and a broken zero stay DISTINGUISHABLE, and neither branch is quieter than the
         /// text it replaces: the "SUCCESS with zero rows" sweep that surfaced #3030, #3109 and #3154 reads
         /// <c>rows_stored</c>, which nothing here touches.</para>
+        ///
+        /// <para><b>The fifth and sixth terms (#3754), and the case that showed the fourth was not
+        /// enough.</b> On an Azure SQL DB target two collectors failed on every monitored database every
+        /// sweep, the runners swallowed the per-item failures into <c>SUCCESS</c> rows with no note (the
+        /// runner-side half of #3754), and this method - seeing zero rows, no denial and no note - told the
+        /// reader they had "read and found nothing rather than being unable to read", that this "needs no
+        /// action", and that the reading rested on "no run recorded a note". Every clause was false, and
+        /// the last one named the bug as its own evidence. The runners now record those failures - as
+        /// <c>ERROR</c> / <c>PERMISSIONS</c> when every item fails, as a note when some do, as
+        /// <c>SESSION_MISSING</c> when an XE session could not be created - and this method has to READ
+        /// them, or the honest run record would sit beside the same false sentence.</para>
+        ///
+        /// <para><paramref name="faultedRuns"/> is the fifth term: runs in the window that recorded a
+        /// fault rather than a result - <c>ERROR</c> and <c>SESSION_MISSING</c>, the two statuses that mean
+        /// "could not read" and are not already a term here. PERMISSIONS is deliberately excluded because
+        /// its currency is the THIRD term's job (#3010): a denial that predates a later success is history,
+        /// and a collector that has read fine since must keep its resting-state reading (pg_deadlocks with
+        /// 15,885 old denials off a retired route is the measured case). EXTENSION_MISSING is excluded
+        /// because a Darling row in that band already suppresses this finding outright (#3240). ABANDONED
+        /// and YIELDED are excluded because each is a guard doing its job with its own count and, for
+        /// abandonment, its own WARNING band. Any fault at all withholds the resting-state reading: "read
+        /// and found nothing" is a claim about every run in the window, and one run that could not read
+        /// falsifies it - the sentence says how many, and what the rest did.</para>
+        ///
+        /// <para><paramref name="isEventCollector"/> is the sixth: whether the category sentence is TRUE of
+        /// this collector at all (<see cref="IsEventCollector"/>). Zero rows, no denial, no fault and no
+        /// note from a collector that stores a row only when an event occurs is that collector at rest;
+        /// the same four facts from a configuration or snapshot collector mean its source returned nothing
+        /// on every run, and the sentence says that instead. A bool computed by the caller from the name,
+        /// on <see cref="Classify"/>'s <c>isOnLoad</c> pattern, so this method still takes no string and
+        /// the note-text property above is preserved.</para>
         /// </summary>
+        /// <param name="faultedRuns">
+        /// <c>error_count + session_missing_count</c> for the same row - the fifth term. Runs that recorded
+        /// a fault rather than a result; see the remarks for which statuses count and why the rest do not.
+        /// </param>
+        /// <param name="isEventCollector">
+        /// <see cref="IsEventCollector"/> for the row's collector - the sixth term, deciding whether the
+        /// resting-state sentence may be offered when nothing else on the row explains the zero.
+        /// </param>
         /// <param name="rowsStored">Rows the window's runs stored (<c>rows_stored</c>). Positive = silent.</param>
         /// <param name="totalRuns">Runs in the window (<c>total_runs</c>) — the spend this qualifies.</param>
         /// <param name="deniedSinceLastSuccess">
@@ -1847,7 +1951,9 @@ namespace PerformanceMonitor.Common
             long rowsStored,
             long totalRuns,
             bool deniedSinceLastSuccess,
-            long noteCount)
+            long noteCount,
+            long faultedRuns,
+            bool isEventCollector)
         {
             if (rowsStored > 0 || totalRuns <= 0)
             {
@@ -1863,6 +1969,47 @@ namespace PerformanceMonitor.Common
                     + "spend bought nothing because nothing could be read. That is a grant, not a collector "
                     + "repair.",
                     totalRuns);
+            }
+
+            /* #3754: runs that recorded a FAULT. Ahead of the note branch because a fault is the louder
+               fact - a window can hold both (some cycles lost every database and classified ERROR, others
+               lost some and noted it), and the sentence then names both. Like the note branch it points at
+               the fields rather than restating them: errors and session_missing count the runs, last_error
+               carries the newest ERROR message, last_note the newest note. It does NOT restate the message,
+               for the reason the note branch does not - the copy that drifts is never the one being read.
+               Two shapes: every run faulted (nothing was read, action needed) and some did (the survivors
+               read and found nothing, but the resting-state reading is not offered over a window in which
+               any run could not read, because that reading is a claim about every run). */
+            if (faultedRuns > 0)
+            {
+                var allFaulted = faultedRuns >= totalRuns;
+                var noted = noteCount > 0
+                    ? string.Format(
+                        CultureInfo.InvariantCulture,
+                        " {0:N0} of the runs also recorded a note about what they found - last_note carries it.",
+                        noteCount)
+                    : string.Empty;
+
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                    + "false), but {1:N0} of those runs recorded a fault - an ERROR or SESSION_MISSING status; "
+                    + "errors and session_missing on this row count them and last_error carries the newest "
+                    + "ERROR message - so on those runs this collector was UNABLE to read rather than idle. "
+                    + "{2}{3} The event-collector resting-state reading is not offered over a window in which "
+                    + "any run could not read. "
+                    + ZeroOutputCaveat,
+                    totalRuns,
+                    faultedRuns,
+                    allFaulted
+                        ? "Every run in the window faulted: nothing was read at all, and this needs action - "
+                          + "read last_error (or the collection_log rows for a SESSION_MISSING run) for what "
+                          + "refused it."
+                        : string.Format(
+                            CultureInfo.InvariantCulture,
+                            "The other {0:N0} runs completed and stored nothing.",
+                            totalRuns - faultedRuns),
+                    noted);
             }
 
             /* #3160: the runs accounted for themselves, so this defers instead of categorising. It reports
@@ -1884,14 +2031,41 @@ namespace PerformanceMonitor.Common
                     noteCount);
             }
 
+            /* #3754: the category sentence, offered ONLY to a collector it is true of. Same tokens as before
+               ("read and found nothing", "correct resting state", "needs no action", "No run recorded a
+               note") so the reading an operator has learned keeps its shape; the precondition it states
+               now includes the fault term, because that is what it rests on too. */
+            if (isEventCollector)
+            {
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                    + "false), so this collector read and found nothing rather than being unable to read. "
+                    + "It stores a row only when an event occurs - a deadlock, a blocked-process report, a "
+                    + "long completion, a blocking chain, a held xmin - so zero is the correct resting state "
+                    + "on a well-behaved target and needs no action. No run recorded a note or a fault, "
+                    + "which is what that reading rests on. "
+                    + ZeroOutputCaveat,
+                    totalRuns);
+            }
+
+            /* #3754: NOT an event collector, and nothing on the row explains the zero. A configuration or
+               snapshot read returns rows whenever its source has any, so every run returning nothing is
+               not a resting state - it is the source coming back empty, and the sentence says so. Worded
+               without alarm on purpose: the polled activity snapshots (waiting_tasks, query_snapshots and
+               their kin) legitimately read zero on an idle target, and "on a target that has anything for
+               it to report" is the clause that lets the operator who knows the box is idle move on. What
+               it must not do is offer the reassurance it replaced: this branch exists because
+               database_scoped_config, a per-database configuration snapshot, was told its zero was the
+               correct resting state of an event capture. */
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
-                + "false), so this collector read and found nothing rather than being unable to read. "
-                + "For one that stores a row only when an event occurs - a deadlock, a blocked-process "
-                + "report, a blocking chain, a held xmin - zero is the correct resting state on a "
-                + "well-behaved target and needs no action. No run recorded a note, which is what that "
-                + "reading rests on. "
+                + "false), no recorded fault and no note, so every run completed and its source returned no "
+                + "rows. This is not an event-triggered collector - it is a snapshot or configuration read "
+                + "that returns rows whenever its source has any - so a persistent zero here is not a resting "
+                + "state: the source came back empty on every run, which on a target that has anything for "
+                + "it to report needs a look. "
                 + ZeroOutputCaveat,
                 totalRuns);
         }

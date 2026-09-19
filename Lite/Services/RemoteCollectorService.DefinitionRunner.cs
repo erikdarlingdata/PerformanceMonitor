@@ -745,6 +745,29 @@ public partial class RemoteCollectorService
                        query_store, so this argument leaves every other cycle untouched. */
                     perItemBudget: definition.PerItemWallClockBudget);
 
+                /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
+                   loop above treats its own (#2623) — and for the first time on this path. The driver used
+                   to hand each per-item exception to onItemError, that closure logged one warning per
+                   database, and nothing else happened: a collector whose every item threw returned Rows = 0
+                   and the cycle recorded SUCCESS with zero rows, the silent-empty shape this codebase keeps
+                   paying for (#1506, #1535, #2622). On Azure SQL DB database_scoped_config did exactly that
+                   on every monitored database every cycle.
+
+                   Same two outcomes as the sibling loop, from the driver's shared numbers rather than a
+                   second hand-rolled count: SOME items lost composes the partial note (the names, the
+                   count, the first error) onto the SUCCESS row, merged with whatever probe-failure note the
+                   enumeration already left; EVERY item lost rethrows the first failure so RunCollectorAsync
+                   classifies the cycle from the real exception (PERMISSIONS / transient / ERROR). Mirrors
+                   Darling's runner. */
+                telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, driverResult.PartialFailureNote);
+
+                if (driverResult.AllItemsFailed)
+                {
+                    _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
+                        definition.Name, driverResult.Attempted, server.DisplayName);
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
+                }
+
                 rowsWritten = driverResult.Rows;
                 sqlMs += driverResult.SqlMs;
                 storageMs += driverResult.StorageMs;

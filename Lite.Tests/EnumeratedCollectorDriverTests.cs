@@ -498,4 +498,149 @@ public sealed class EnumeratedCollectorDriverTests
         Assert.Equal("SUCCESS", ordinary);
         Assert.Contains(ordinary, EnumeratedCollectorDriver.FreshnessSuccessStatuses);
     }
+
+    /* ── #3754: the per-item failure ACCOUNT, returned on the result ──
+
+       Before this the driver handed each per-item exception to onItemError and forgot it, so a run in
+       which EVERY item threw came back as Rows = 0 and nothing else - and both hosts wrote SUCCESS. On
+       Azure SQL DB database_scoped_config did exactly that on every monitored database every sweep, and
+       get_collection_health reported it HEALTHY with a sentence saying it had read and found nothing. The
+       four pins below are the three shapes the hosts branch on (all / some / none failed) plus the budget
+       arm, which is the second producer of a failed item and must count like the first. */
+
+    /// <summary>
+    /// EVERY item threw: the result says so in a form a host can act on without re-deriving it - the count,
+    /// the names, the FIRST exception whole (its type is what the host classifies on), AllItemsFailed true,
+    /// and NO partial note, because the host rethrows and an ERROR row carries the error message instead.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_EveryItemFailing_IsAccountedOnTheResult_AsAllItemsFailed()
+    {
+        var items = new[] { "xedb1", "xedb2" };
+        var first = new InvalidOperationException("Reference to database and/or server name in 'xedb1.sys.sp_executesql' is not supported");
+        var second = new InvalidOperationException("Reference to database and/or server name in 'xedb2.sys.sp_executesql' is not supported");
+
+        var result = await EnumeratedCollectorDriver.RunAsync<int>(
+            items,
+            perItemWatermark: null,
+            readItem: (item, ct) => throw (item == "xedb1" ? first : second),
+            writeBatch: (batch, ct) => Task.CompletedTask,
+            onItemComplete: (item, count, sqlMs, storageMs) => { },
+            onItemError: (item, ex) => { },
+            CancellationToken.None);
+
+        Assert.Equal(0, result.Rows);
+        Assert.Equal(2, result.Attempted);
+        Assert.Equal(2, result.Failed);
+        Assert.Equal(items, result.FailedItems!);
+
+        /* The FIRST failure, by reference - not a wrapper, not the last one. The host rethrows this object
+           through ExceptionDispatchInfo so the classification arms see the original type. */
+        Assert.Same(first, result.FirstError);
+
+        Assert.True(result.AllItemsFailed);
+        Assert.Null(result.PartialFailureNote);
+    }
+
+    /// <summary>
+    /// SOME items threw: not all-failed, and the #2623 partial note is composed from the result's own
+    /// counts - N of M, the names, the first error - through the same composer the Azure per-database
+    /// loop uses, so the two fan-outs word one loss one way.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_SomeItemsFailing_ComposesThePartialNote_AndIsNotAllFailed()
+    {
+        var items = new[] { "a", "b", "c", "d" };
+
+        var result = await EnumeratedCollectorDriver.RunAsync<int>(
+            items,
+            perItemWatermark: null,
+            readItem: (item, ct) => item is "b" or "d"
+                ? throw new InvalidOperationException($"boom in {item}")
+                : Task.FromResult(new List<int> { 1 }),
+            writeBatch: (batch, ct) => Task.CompletedTask,
+            onItemComplete: (item, count, sqlMs, storageMs) => { },
+            onItemError: (item, ex) => { },
+            CancellationToken.None);
+
+        Assert.Equal(2, result.Rows);
+        Assert.Equal(4, result.Attempted);
+        Assert.Equal(2, result.Failed);
+        Assert.Equal(new[] { "b", "d" }, result.FailedItems!);
+        Assert.False(result.AllItemsFailed);
+
+        var note = result.PartialFailureNote;
+        Assert.NotNull(note);
+        Assert.Contains("2 of 4", note, StringComparison.Ordinal);
+        Assert.Contains("b, d", note, StringComparison.Ordinal);
+        Assert.Contains("boom in b", note, StringComparison.Ordinal);
+        Assert.Contains("survivors ONLY", note, StringComparison.Ordinal);
+
+        /* Byte-identical to what the sibling loop would compose from the same four facts. */
+        Assert.Equal(
+            EnumeratedCollectorDriver.BuildPartialFailureNote(2, 4, new[] { "b", "d" }, "boom in b"),
+            note);
+    }
+
+    /// <summary>
+    /// NOTHING threw: the account is zeros and nulls, so a host that merges PartialFailureNote onto its
+    /// note and branches on AllItemsFailed leaves the ordinary cycle byte-identical to before #3754.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_NothingFailing_LeavesTheAccountEmpty_SoTheOrdinaryCycleIsUnchanged()
+    {
+        var result = await EnumeratedCollectorDriver.RunAsync<int>(
+            new[] { "a", "b", "c" },
+            perItemWatermark: null,
+            readItem: (item, ct) => Task.FromResult(new List<int> { 1 }),
+            writeBatch: (batch, ct) => Task.CompletedTask,
+            onItemComplete: (item, count, sqlMs, storageMs) => { },
+            onItemError: (item, ex) => { },
+            CancellationToken.None);
+
+        Assert.Equal(3, result.Rows);
+        Assert.Equal(3, result.Attempted);
+        Assert.Equal(0, result.Failed);
+        Assert.Empty(result.FailedItems!);
+        Assert.Null(result.FirstError);
+        Assert.False(result.AllItemsFailed);
+        Assert.Null(result.PartialFailureNote);
+
+        /* And an EMPTY item list is not "all failed": nothing was attempted, so nothing can have failed. */
+        var nothing = new EnumeratedRunResult(0, 0, 0);
+        Assert.False(nothing.AllItemsFailed);
+        Assert.Null(nothing.PartialFailureNote);
+    }
+
+    /// <summary>
+    /// The #2150 budget arm is the SECOND producer of a failed item and has to count like the first - with
+    /// the budget exception, not the provider's cancellation artifact, as the recorded error, for the same
+    /// reason it is the logged one. Every item over budget is every item failed.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_ABudgetAbandonedItem_CountsAsFailed_WithTheBudgetExceptionRecorded()
+    {
+        var result = await EnumeratedCollectorDriver.RunAsync<int>(
+            new[] { "slow" },
+            perItemWatermark: null,
+            readItem: async (item, ct) =>
+            {
+                await Task.Delay(TimeSpan.FromMinutes(5), ct);
+                return new List<int>();
+            },
+            writeBatch: (batch, ct) => Task.CompletedTask,
+            onItemComplete: (item, count, sqlMs, storageMs) => { },
+            onItemError: (item, ex) => { },
+            CancellationToken.None,
+            perItemBudget: TimeSpan.FromMilliseconds(150));
+
+        Assert.Equal(1, result.Attempted);
+        Assert.Equal(1, result.Failed);
+        Assert.Equal(new[] { "slow" }, result.FailedItems!);
+        Assert.True(result.AllItemsFailed);
+
+        var recorded = Assert.IsType<TimeoutException>(result.FirstError);
+        Assert.Contains("wall-clock budget", recorded.Message, StringComparison.Ordinal);
+        Assert.Contains("0.15-second", recorded.Message, StringComparison.Ordinal);
+    }
 }

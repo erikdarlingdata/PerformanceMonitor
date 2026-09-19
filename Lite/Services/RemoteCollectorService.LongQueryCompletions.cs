@@ -31,6 +31,18 @@ public partial class RemoteCollectorService
        (disabled). */
     private readonly ConcurrentDictionary<string, bool> _longQueryTraceApplied = new();
 
+    /* #3754: the ENABLE failure the reconcile below caught, per server, kept until a later reconcile
+       succeeds. The reconcile runs from the per-server collection loop, OUTSIDE the collector's run - so
+       when the session could not be created (every monitored database refused it on Azure SQL DB; the
+       one CREATE refused on-prem) the run still went ahead, its tolerant ring-buffer read found no
+       session, returned zero rows exactly as a quiet session would, and the cycle recorded SUCCESS.
+       The blocked-process and deadlock collectors do not have this hole because their ensure runs
+       INSIDE RunCollectorAsync and throws XeSessionEnsureException straight into its classification;
+       this slot is how the long-query collector's out-of-run ensure reaches the same arm. The
+       exception is kept whole, not its message, because that arm classifies on the type and the inner
+       SqlException's number (PERMISSIONS for a denied ALTER ANY EVENT SESSION, ERROR otherwise). */
+    private readonly ConcurrentDictionary<string, Exception> _longQueryTraceFault = new();
+
     /// <summary>
     /// Reconciles the long-query completion XE session to the collector's enabled flag — Erik's
     /// dedicated switch (#1496), default OFF. ENABLED: ensure the session exists + running (re-ensured
@@ -55,6 +67,9 @@ public partial class RemoteCollectorService
             {
                 await EnsureLongQueryCompletionsXeSessionAsync(server, cancellationToken);
                 _longQueryTraceApplied[server.Id] = true;
+
+                /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
+                _longQueryTraceFault.TryRemove(server.Id, out _);
             }
             else if (_longQueryTraceApplied.GetValueOrDefault(server.Id, true))
             {
@@ -62,6 +77,10 @@ public partial class RemoteCollectorService
                    it is gone so the next cycles skip the connection entirely. */
                 await DropLongQueryCompletionsXeSessionAsync(server, cancellationToken);
                 _longQueryTraceApplied[server.Id] = false;
+
+                /* #3754: nothing to be honest about while disabled - the collector is not dispatched - and a
+                   fault left here would classify the first run after re-enabling before its reconcile ran. */
+                _longQueryTraceFault.TryRemove(server.Id, out _);
             }
         }
         catch (OperationCanceledException)
@@ -73,6 +92,15 @@ public partial class RemoteCollectorService
             /* Leave the applied state unchanged so the next cycle retries; a failed reconcile must
                never break the collection loop. */
             AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {ex.Message}");
+
+            /* #3754: and while ENABLING, remember it, so this cycle's run of the collector is classified
+               from this exception instead of reading an absent session as a quiet one. A DISABLING failure
+               records nothing: no run is dispatched while disabled, and the retry the unchanged applied
+               state already buys is the whole remedy. */
+            if (enabled)
+            {
+                _longQueryTraceFault[server.Id] = ex;
+            }
         }
     }
 
@@ -234,10 +262,24 @@ END;", connection);
     /// <summary>
     /// Collects long-query completions via the shared <see cref="LongQueryCompletionsCollector"/>
     /// definition. The session lifecycle stays in the reconcile above; a missing/inaccessible session
-    /// is tolerated here as zero rows, exactly like the blocked-process reader.
+    /// is tolerated here as zero rows, exactly like the blocked-process reader — EXCEPT (#3754) when the
+    /// reconcile has already recorded that the session could not be created: then the read is not
+    /// attempted and the reconcile's own exception is rethrown into <c>RunCollectorAsync</c>'s
+    /// classification, the way the blocked-process and deadlock ensures throw into it from inside the
+    /// run. Zero rows off a session that does not exist is not a collection; recording it as SUCCESS was
+    /// the defect.
     /// </summary>
     private async Task<int> CollectLongQueryCompletionsAsync(ServerConnection server, CancellationToken cancellationToken)
     {
+        if (_longQueryTraceFault.TryGetValue(server.Id, out var ensureFailure))
+        {
+            /* The original exception, with its original stack: RunCollectorAsync classifies an
+               XeSessionEnsureException on its inner SqlException's number (PERMISSIONS / ERROR) and anything
+               else through its general arms, so the type has to survive - a message alone would land every
+               refusal as ERROR. */
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();
+        }
+
         try
         {
             return await RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken);

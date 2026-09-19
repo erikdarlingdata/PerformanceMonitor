@@ -2188,6 +2188,36 @@ public sealed class DarlingCollectorRunner
                        non-null too. */
                     perItemBudget: definition.PerItemWallClockBudget);
 
+                /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
+                   loop above treats its own (#2623) - and for the first time. Until this the driver handed
+                   each per-item exception to onItemError, that closure logged one WARNING per database,
+                   and nothing else happened: a collector whose every item threw returned Rows = 0 and this
+                   method returned SUCCESS with zero rows. On Azure SQL DB database_scoped_config did that on
+                   every monitored database every sweep - the [db].sys.sp_executesql idiom is rejected there -
+                   and get_collection_health reported it HEALTHY with errors: 0 and a sentence saying it had
+                   read and found nothing, while the service log carried the real failure on every cycle.
+
+                   Same two outcomes as the sibling loop, from the driver's shared numbers rather than a
+                   second hand-rolled count: SOME items lost composes the partial note (the names, the
+                   count, the first error) onto the SUCCESS row, merged with whatever probe-failure note the
+                   enumeration already left; EVERY item lost rethrows the first failure so RunOneAsync
+                   classifies the run from the real exception (PERMISSIONS on a denial number, ERROR
+                   otherwise) - a note on a row about to carry an error message would only compete with it,
+                   which is why PartialFailureNote composes null in that case. The database name rides ON the
+                   exception (#2997) so the fault handler upstream can name the database it means rather
+                   than the runtime's connected one, which for an enumerated collector is never the one that
+                   failed. rowsWritten and the slices are assigned only on the surviving path: a run that
+                   read nothing has no rows to report and RunOneAsync's fault arm reports its own wall clock. */
+                collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, driverResult.PartialFailureNote);
+
+                if (driverResult.AllItemsFailed)
+                {
+                    _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
+                        definition.Name, driverResult.Attempted, server.Config.DisplayName);
+                    CollectorFaultDatabase.Stamp(driverResult.FirstError, driverResult.FailedItems?[0]);
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
+                }
+
                 rowsWritten = driverResult.Rows;
                 sqlMs += driverResult.SqlMs;
                 storageMs += driverResult.StorageMs;

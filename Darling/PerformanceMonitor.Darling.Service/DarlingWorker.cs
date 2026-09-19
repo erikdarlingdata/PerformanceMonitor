@@ -838,6 +838,32 @@ public sealed class DarlingWorker : BackgroundService
            sweep body and the connect path (both run on the pool thread, one at a time per server —
            INV-2), like the DateTime schedule fields above. */
         public bool? LongQueryTraceApplied { get; set; }
+
+        /* #3754: what the last long-query reconcile could NOT do, carried from the reconcile (which runs
+           before the collector sweep and outside any collector run) to the run record the collector sweep
+           writes. Two slots because they land on the run two different ways.
+
+           LongQueryTraceFault is set when the reconcile THREW while enabling: on-prem the one CREATE
+           failed; on Azure SQL DB the CREATE was refused in EVERY monitored database (DarlingXeSessions
+           throws the first failure for that case since #3754). The session exists nowhere the collector
+           would read, so RunOneAsync records the run SESSION_MISSING with this message instead of
+           dispatching a read that can only return zero rows - the tolerant ring-buffer read cannot tell an
+           absent session from a quiet one, which is exactly how the issue's runs recorded SUCCESS. Cleared
+           by the next reconcile that does not throw; LongQueryTraceApplied stays null on a throw (existing
+           behaviour), so that retry happens on the very next sweep.
+
+           LongQueryTracePartialNote is set when the Azure reconcile succeeded in some databases and was
+           refused in others: the run's read of the survivors is real and stays SUCCESS, and this - the
+           #2623 partial note naming the refused databases - is merged onto its row so the row cannot pass
+           for a server that is quiet. It persists while LongQueryTraceApplied is latched true, because the
+           refused databases are not retried until the next (re)connect resets the latch; the note is a
+           standing claim about the sessions as they were last reconciled, which is also what it says.
+
+           Both reset with the latch on every (re)connect, and both written only by the per-server body on
+           the pool thread (INV-2), like the latch itself. */
+        public string? LongQueryTraceFault { get; set; }
+
+        public string? LongQueryTracePartialNote { get; set; }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -2638,13 +2664,38 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, _logger, cancellationToken);
+            var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, _logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
+
+            /* #3754: a reconcile that returned is one the session exists after - everywhere, or (Azure)
+               everywhere it could. Clear the fault, and carry the partial note if there was one. Nulled
+               rather than left alone on the DISABLED arm: the collector is not dispatched while disabled,
+               so a stale note from an earlier enabled reconcile must not be waiting when it is re-enabled
+               and the next reconcile (which runs first, in this same sweep) has already replaced it. */
+            server.LongQueryTraceFault = null;
+            server.LongQueryTracePartialNote = enabled ? partialNote : null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
+
+            /* #3754: while ENABLING, a throw means the session could not be created where the collector
+               will read - the one CREATE on-prem, or every database on Azure SQL DB (the Azure arm throws
+               only for all-refused). Record it so this sweep's run of the collector is classified
+               SESSION_MISSING rather than dispatched to read an absent session as zero rows. The database
+               name rides on the exception where the Azure arm stamped one (#2997); on-prem there is no
+               database to name. A DISABLING failure records nothing here: the collector is not dispatched
+               while disabled, so there is no run to be honest on, and the retry the unchanged latch already
+               buys is the whole of the remedy. */
+            if (enabled)
+            {
+                var refusedIn = CollectorFaultDatabase.For(ex, fallback: null);
+                server.LongQueryTraceFault = refusedIn is null
+                    ? $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created, so no completions can be captured until it is: {ex.Message}"
+                    : $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {ex.Message}";
+                server.LongQueryTracePartialNote = null;
+            }
         }
     }
 
@@ -2988,6 +3039,17 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal static bool IsPlanCorrectionCollector(string collectorName) =>
         string.Equals(collectorName, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #3754: whether a dispatched collector name is <c>long_query_completions</c> — the one collector whose
+    /// XE session is reconciled OUTSIDE its run (per sweep, following its enabled flag both ways, #1496), so
+    /// the run has to be told what that reconcile could not do: <see cref="ServerLoopState.LongQueryTraceFault"/>
+    /// and <see cref="ServerLoopState.LongQueryTracePartialNote"/> are read for this collector alone.
+    /// Compared against the collector's OWN declared name rather than a literal, for the same renaming-safety
+    /// reason as <see cref="IsQueryStoreCollector"/>.
+    /// </summary>
+    internal static bool IsLongQueryCompletionsCollector(string collectorName) =>
+        string.Equals(collectorName, LongQueryCompletionsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #3604: whether a dispatched collector name is <c>pg_wait_sampling</c> — the third collector detached
@@ -6589,6 +6651,13 @@ LIMIT 1";
                otherwise skip restarting it. Cheap — the reconcile no-ops unless the desired state differs
                from what actually exists (ensure is IF-NOT-running START; drop is IF EXISTS). */
             server.LongQueryTraceApplied = null;
+            /* #3754: and the two run-record slots the reconcile fills, for the same reason - they describe
+               the sessions as of the LAST reconcile, and the next one is about to run against a fresh
+               connection. A fault left standing here would classify the first post-reconnect run
+               SESSION_MISSING before the reconcile had a chance to succeed; a stale partial note would
+               name databases the reconnect may have just fixed. */
+            server.LongQueryTraceFault = null;
+            server.LongQueryTracePartialNote = null;
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
                later read of server.Runtime.ServerId (the schedule resolve, the connection edge) would NRE. */
@@ -7922,7 +7991,34 @@ LIMIT 1";
 
         try
         {
+            /* #3754: the long-query completion session is ensured by the per-sweep reconcile, not by this
+               run, and until now nothing carried the reconcile's failure here. So on a target where the
+               CREATE was refused in every database the collector still ran, its tolerant ring-buffer read
+               found no session and returned zero rows - which is also what a quiet session returns - and
+               the run recorded SUCCESS, sweep after sweep, while the service log said why it could not
+               work. When the reconcile recorded that the session exists nowhere this collector would read,
+               the honest run is SESSION_MISSING with the reconcile's message, and the read is not worth
+               its connections: throwing the same exception RunXeTolerantAsync raises for a permission-
+               denied session lands in the same arm below, so the row, the log line and the classification
+               are the ones an operator already knows from the deadlock and blocked-process collectors. */
+            if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTraceFault is { } traceFault)
+            {
+                throw new DarlingXeSessionMissingException(traceFault);
+            }
+
             var result = await run(runner, runtime, cancellationToken);
+
+            /* #3754, the partial case: the Azure reconcile created the session in some databases and was
+               refused in others. The run just read the survivors and its SUCCESS is a real success - but
+               its row has to say that the refused databases are not in it, or a zero here reads as a quiet
+               server. The #2623 partial note the reconcile composed rides the same channel every other
+               partial loss uses (MergeNotes, so a probe-failure or per-database note the runner itself
+               composed is kept beside it). HostNote rather than Note: Note is computed from HostNote plus
+               the definition's measurements, and setting the composed value would lose the measurements. */
+            if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTracePartialNote is { } partialNote)
+            {
+                result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
+            }
 
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
                per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A
@@ -8046,7 +8142,12 @@ LIMIT 1";
                catch and the SqlException permissions filter below match disjoint types — their relative
                order is not load-bearing; it only needs to precede the general Exception catch (which would
                otherwise mislabel it ERROR). A non-XE 297 arrives as a plain SqlException and correctly
-               hits the permissions filter. */
+               hits the permissions filter.
+
+               #3754: the second producer is the pre-dispatch check at the top of the try, for
+               long_query_completions alone - the reconcile recorded that its session could not be created
+               anywhere this run would read, so the run is classified here without opening a connection.
+               Same type, same arm, same row shape; only the message's origin differs. */
             _logger.LogWarning("  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
@@ -8561,6 +8662,14 @@ LIMIT 1";
     private sealed class DarlingXeSessionMissingException : Exception
     {
         public DarlingXeSessionMissingException(string message, Exception inner) : base(message, inner) { }
+
+        /// <summary>
+        /// #3754: the reconcile-side case, where the session could not be CREATED (rather than read) and the
+        /// exception that said so was caught a sweep phase earlier in <c>ReconcileLongQueryTraceAsync</c>.
+        /// Only its message survives to the run, on <see cref="ServerLoopState.LongQueryTraceFault"/>, so
+        /// there is no inner exception to carry - and the arm that catches this reads the message alone.
+        /// </summary>
+        public DarlingXeSessionMissingException(string message) : base(message) { }
     }
 
     private static async Task<CollectorRunResult> RunXeTolerantAsync<TRow>(

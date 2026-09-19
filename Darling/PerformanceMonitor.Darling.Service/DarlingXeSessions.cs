@@ -30,6 +30,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// and the SESSION_MISSING classification + Capture Down self-alert own the capture-is-down
 /// story. Runs once per connect: a database created mid-run gets its sessions at the next
 /// reconnect (its reads tolerate the missing session as zero rows until then).
+///
+/// <para>The opt-in long-query completion session (<see cref="ReconcileLongQueryCompletionsAsync"/>) is
+/// the exception to "logged and tolerated" since #3754: its ensure failures are ACCOUNTED and handed back
+/// to the worker, because that collector has no self-alert of its own and a tolerated-and-forgotten
+/// ensure failure left its runs recording SUCCESS on a server where the session existed nowhere.</para>
 /// </summary>
 public static class DarlingXeSessions
 {
@@ -547,8 +552,24 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// its lifecycle FOLLOWS the flag both ways; the DarlingWorker state-tracks the last-applied value so
     /// this only opens a connection when the desired state actually changes. Failures propagate to the
     /// caller (the worker logs + leaves the applied state unchanged so the next sweep retries).
+    ///
+    /// <para><b>Returns the run-record note the reconcile owes the collector (#3754), or null.</b> On Azure
+    /// SQL DB the session is per database, so "reconciled" has a middle state a server-scoped session
+    /// cannot have: created in SOME monitored databases and refused in others. Before #3754 the Azure arm
+    /// caught every per-database failure, logged it, and returned as if it had succeeded — so the worker
+    /// latched the state as applied and never retried, and the collector's run then read the databases
+    /// whose session did not exist, found nothing (the tolerant ring-buffer read returns zero rows for an
+    /// absent session, by design), and recorded SUCCESS. On the issue's server that was EVERY database,
+    /// every sweep: the CREATE was rejected in each one and <c>get_collection_health</c> reported the
+    /// collector HEALTHY. Now: every database refused THROWS the first failure, exactly as the
+    /// server-scoped arm has always thrown its one CREATE failure and as the runners' per-database loops
+    /// throw when all databases fail (#2623), so the worker does not latch and the run is classified
+    /// <c>SESSION_MISSING</c>; some databases refused returns the #2623 partial note naming them, which the
+    /// worker merges onto the run's row. Null is the clean reconcile, and the disabled (DROP) arm's answer
+    /// either way — a drop failure is not a capture outage, the collector is not dispatched while disabled,
+    /// and the Lite sibling's drop swallows per database too.</para>
     /// </summary>
-    public static async Task ReconcileLongQueryCompletionsAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<string?> ReconcileLongQueryCompletionsAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
            reconcile), but this method constructs a SqlConnection from the engine-ambiguous connection
@@ -556,13 +577,12 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
            caller — the exact trust that put "Keyword not supported: 'host'" in the sweep log once a minute. */
         if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
         {
-            return;
+            return null;
         }
 
         if (server.Target.IsAzureSqlDb)
         {
-            await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, logger, cancellationToken);
-            return;
+            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, logger, cancellationToken);
         }
 
         using var connection = new SqlConnection(server.ConnectionString);
@@ -577,6 +597,9 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
             await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
             logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
         }
+
+        /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
+        return null;
     }
 
     private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
@@ -616,7 +639,13 @@ WHERE ses.name = @session_name;", connection))
         logger?.LogInformation("[{Server}] Created and started long-query completion XE session", server.Config.DisplayName);
     }
 
-    private static async Task ReconcileLongQueryCompletionsAzureAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>
+    /// The Azure SQL DB arm: one database-scoped session per monitored database. Returns the #2623 partial
+    /// note when the ENABLE was refused in some databases, throws the first failure when it was refused in
+    /// all of them, and returns null otherwise — see <see cref="ReconcileLongQueryCompletionsAsync"/> for
+    /// why the middle state exists only here and what each answer makes the worker do (#3754).
+    /// </summary>
+    private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
     {
         List<string> databases;
         try
@@ -629,8 +658,17 @@ WHERE ses.name = @session_name;", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning("[{Server}] Failed to enumerate databases for the long-query completion XE session: {Message}", server.Config.DisplayName, ex.Message);
-            return;
+            return null;
         }
+
+        /* #3754: the per-database account, in the shape both runners' Azure loops keep (#2623) - attempted
+           against failed, the names, the first exception whole. Only the ENABLE arm is scored: a database
+           whose session could not be created is a database whose completions will never be captured,
+           which is the fact the collector's run record has to carry. */
+        var attempted = 0;
+        var failed = 0;
+        var failedDatabases = new List<string>();
+        Exception? firstFailure = null;
 
         foreach (var databaseName in databases)
         {
@@ -640,6 +678,11 @@ WHERE ses.name = @session_name;", connection))
             if (string.Equals(databaseName, "master", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            if (enabled)
+            {
+                attempted++;
             }
 
             try
@@ -664,10 +707,43 @@ WHERE ses.name = @session_name;", connection))
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                /* Still tolerated per database - one database that cannot host the session must not stop
+                   the others from getting theirs - and still logged here, at the database, because this is
+                   the one line that names which database refused. #3754 adds the ACCOUNT beside the log so
+                   the failure reaches the run record and not only the service log. The database name rides
+                   on the exception (#2997) for the all-failed rethrow: the worker composes the run's
+                   SESSION_MISSING message from it, and its only other source of a name is the runtime's
+                   connected database, which is master here and never the one that refused. */
+                if (enabled)
+                {
+                    failed++;
+                    failedDatabases.Add(databaseName);
+                    CollectorFaultDatabase.Stamp(ex, databaseName);
+                    firstFailure ??= ex;
+                }
+
                 logger?.LogWarning("[{Server}] [{Database}] Failed to reconcile the long-query completion XE session: {Message}",
                     server.Config.DisplayName, databaseName, ex.Message);
             }
         }
+
+        /* Every database refused: capture is dead on this server, and returning normally here is what let the
+           worker latch "applied" and the collector record SUCCESS. Surface the first failure raw - its type
+           and number are what the worker's fault arms classify on - after the one summary line the runners'
+           all-failed arms also write. Mirrors Lite's EnsureDatabaseScopedXeSessionsAsync, which throws on
+           healthy == 0 for the same reason. */
+        if (attempted > 0 && failed == attempted && firstFailure is not null)
+        {
+            logger?.LogWarning("[{Server}] long_query_completions XE session could not be ensured in all {Count} database(s); surfacing the first failure",
+                server.Config.DisplayName, attempted);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
+        }
+
+        /* Some refused: the session exists where it could, and the run that reads those databases is a real
+           read - SUCCESS is right for it - but its row must say that the others are not in it. The shared
+           #2623 composer, so this loss is worded exactly as the runners word theirs; null when nothing
+           failed, which is the ordinary sweep. */
+        return EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);
     }
 
     private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, ILogger? logger, CancellationToken cancellationToken)
