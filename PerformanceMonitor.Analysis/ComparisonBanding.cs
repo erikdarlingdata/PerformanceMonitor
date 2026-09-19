@@ -32,9 +32,11 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para><b>Three bands, one rule per band, every rule stated in the payload.</b></para>
 /// <list type="bullet">
-///   <item><b>Baseline-banded</b> (<see cref="BandSourceBaseline"/>): a key whose value is measured in the
+///   <item><b>Baseline-banded</b> (<see cref="BandSourceBaseline"/>): a key whose reading is measured in the
 ///   same unit as one of the stored per-(server, metric, hour × day-of-week) baselines
-///   (<see cref="BaselinedMetricFor"/>) expresses its value delta in that bucket's robust sigma
+///   (<see cref="BaselinedMetricFor"/>; the reading is the value itself for every key but the PostgreSQL
+///   saturation fraction, whose peak count is read instead — <see cref="BaselinedValueFor"/>) expresses its
+///   delta in that bucket's robust sigma
 ///   (<see cref="BaselineBucket.EffectiveRobustSigma"/>, MAD-based with the model's own floors) and is
 ///   <c>stable</c> inside ±<see cref="StableWithinRobustSigmas"/>. Used only when the bucket is
 ///   <see cref="BaselineBucket.IsTrustworthy"/> — the never-blind rule the anomaly gate follows: an
@@ -155,6 +157,30 @@ public static class ComparisonBanding
     /// deliberately unmapped (the wait baselines are all-types totals, not per type), as are blocking and
     /// deadlock rates (their baselines are events per day with no robust statistics) and
     /// <c>IO_WRITE_LATENCY_MS</c> (no write-latency baseline exists).
+    ///
+    /// <para><b>The PostgreSQL-target keys (#3691 W1).</b> v1 shipped with only the SQL Server keys mapped, so
+    /// <c>compare_analysis</c> on a PostgreSQL target banded a 10 → 60 tps move "stable" (<c>band_source:
+    /// absolute</c>) in the same window whose anomaly detector called it 25σ — <c>PG_TPS</c>'s base severity is
+    /// 0 by design (throughput is context, not a grade), so the absolute rule's ladder arm can never move it,
+    /// and the only honest reading of a throughput change IS this server's own same-hour dispersion. The
+    /// four buckets <c>PgTargetBaselineProvider</c> stores are mapped where the fact's reading is in the
+    /// bucket's unit: <c>PG_TPS</c> is the window's transactions ÷ observed seconds and <c>pg_tps</c> is
+    /// per-collection transactions ÷ the collection's own gap (the averaged-key case: per-sample sigma is an
+    /// upper bound on the average's dispersion, so the band is conservative); <c>PG_DEADLOCK_RATE</c> is
+    /// deadlocks ÷ observed hours and <c>pg_deadlock_rate</c> is deadlocks × 3600 ÷ gap — the same unit, unlike
+    /// SQL Server's events-per-day deadlock baseline, and on a healthy server the bucket's median and MAD sit
+    /// at 0 so <see cref="BaselineBucket.EffectiveRobustSigma"/> is 0 and the key takes the absolute rule as
+    /// <see cref="Compare"/> already requires; <c>PG_CPU_PERCENT</c> is the peak <c>acu_utilization_percent</c>
+    /// when the window carried a capacity sample and <c>pg_cpu</c> is that column's buckets — a fact holding
+    /// the RAW <c>cpu_percent</c> instead (<c>capacity_measured = 0</c>) is in a different unit and
+    /// <see cref="BaselinedValueFor"/> withholds it. <c>PG_CONNECTION_SATURATION</c> is the one whose
+    /// <see cref="Fact.Value"/> is NOT the bucket's unit: the value is peak ÷ usable connections (a 0–1
+    /// fraction) and <c>pg_session_count</c> is <c>MAX(total_sessions)</c> per capture (a count), so the row is
+    /// banded on the fact's <c>peak_total_sessions</c> metadata — the very reading the bucket is built from and
+    /// the one <c>PgTargetAnomalyDetector</c> judges against it — never on the fraction in count-sigma. The
+    /// remaining PostgreSQL keys stay unmapped for the reasons the SQL Server ones do: the wait profile is
+    /// per-type shares against an all-types baseline, and no bucket exists for the buffer, write, vacuum, temp
+    /// or config readings.</para>
     /// </summary>
     public static string? BaselinedMetricFor(string key) => key switch
     {
@@ -162,7 +188,38 @@ public static class ComparisonBanding
         "CPU_SPIKE" => MetricNames.Cpu,
         "IO_READ_LATENCY_MS" => MetricNames.IoLatency,
         "SESSION_STATS" => MetricNames.SessionCount,
+        PgTargetFactKeys.Tps => MetricNames.PgTps,
+        PgTargetFactKeys.ConnectionSaturation => MetricNames.PgSessionCount,
+        PgTargetFactKeys.DeadlockRate => MetricNames.PgDeadlockRate,
+        PgTargetFactKeys.CpuPercent => MetricNames.PgCpu,
         _ => null
+    };
+
+    /// <summary>
+    /// The metadata key the PostgreSQL sessions collector (<c>PgTargetFactCollector.Sessions.cs</c>) and its
+    /// advice read the window's peak session COUNT from — the same literal, because the shared vocabulary file
+    /// declares fact keys and sources, not metadata names. The live compare pin proves the two agree end to end.
+    /// </summary>
+    private const string PgSessionPeakCountKey = "peak_total_sessions";
+
+    /// <summary>
+    /// The reading of <paramref name="fact"/> in its baseline metric's unit, or null when this fact cannot be
+    /// sigma-banded even though its key is mapped — the unit-reconciliation seam <see cref="BaselinedMetricFor"/>
+    /// describes. Every SQL Server key and three of the four PostgreSQL ones return <see cref="Fact.Value"/>
+    /// unchanged, so the SQL Server arithmetic is byte-for-byte what it was. <c>PG_CONNECTION_SATURATION</c>
+    /// returns its <c>peak_total_sessions</c> (null when the metadata is absent, as on a hand-built fact);
+    /// <c>PG_CPU_PERCENT</c> returns its value only when <c>capacity_measured</c> is stamped 1, because a fact
+    /// carrying the raw <c>cpu_percent</c> is percent of the capacity CURRENTLY allocated (#3281) and the
+    /// <c>pg_cpu</c> bucket is percent of the configured ceiling. A null routes the key to the absolute rule with
+    /// <c>baseline_metric</c> still naming the bucket that WOULD apply — the never-blind fallback, not silence.
+    /// </summary>
+    public static double? BaselinedValueFor(Fact fact) => fact.Key switch
+    {
+        PgTargetFactKeys.ConnectionSaturation =>
+            fact.Metadata.TryGetValue(PgSessionPeakCountKey, out var peak) ? peak : null,
+        PgTargetFactKeys.CpuPercent =>
+            fact.Metadata.GetValueOrDefault(PgTargetScorer.CpuCapacityMeasuredKey) >= 1 ? fact.Value : null,
+        _ => fact.Value
     };
 
     /// <summary>
@@ -285,8 +342,12 @@ public static class ComparisonBanding
 
             var metric = BaselinedMetricFor(key);
             var bucket = metric is not null ? dispersionByMetric.GetValueOrDefault(metric) : null;
+            /* Both sides must offer a reading in the bucket's unit (BaselinedValueFor) — a PostgreSQL
+               saturation fact without its peak count, or a CPU fact holding the raw percent, is not one. */
             rows.Add(bucket is { IsTrustworthy: true } && bucket.EffectiveRobustSigma > 0
-                ? BandBySigma(key, baseline, comparison, metric!, bucket, coverageCaveat)
+                     && BaselinedValueFor(baseline) is { } baselineReading
+                     && BaselinedValueFor(comparison) is { } comparisonReading
+                ? BandBySigma(key, baseline, comparison, baselineReading, comparisonReading, metric!, bucket, coverageCaveat)
                 : BandByLadder(key, baseline, comparison, coverageCaveat));
         }
 
@@ -329,21 +390,43 @@ public static class ComparisonBanding
         return new ComparisonResult(
             rows,
             families,
-            new PlanCacheChurn(appeared, disappeared, presentInBoth),
+            new PlanCacheChurn(appeared, disappeared, presentInBoth, IsPostgresTargetFactSet(baselineFacts, comparisonFacts)),
             coverageCaveat);
     }
 
-    private static ComparisonRow BandBySigma(string key, Fact baseline, Fact comparison, string metric, BaselineBucket bucket, bool coverageCaveat)
+    /// <summary>
+    /// Whether the compared facts came from a PostgreSQL target: any fact carrying a <see cref="PgTargetSources.Prefix"/>
+    /// source. The engine is resolved per call upstream (<c>servers.engine_kind</c>, #2530) and the collector
+    /// that ran is the engine's own, so a <c>pg_</c> source IS that resolution carried on the fact — the same
+    /// prefix the shared scorer routes on — and this class never has to be told the engine through a
+    /// parameter both SKUs' tool bodies would have to plumb. The coverage witness keeps its engine-neutral
+    /// source and is filtered out before the comparison, so a PostgreSQL window with any fact at all has a
+    /// <c>pg_</c> one; a SQL Server window never does, and its churn note is unchanged.
+    /// </summary>
+    private static bool IsPostgresTargetFactSet(IEnumerable<Fact> baselineFacts, IEnumerable<Fact> comparisonFacts) =>
+        baselineFacts.Concat(comparisonFacts).Any(f => f.Source.StartsWith(PgTargetSources.Prefix, StringComparison.Ordinal));
+
+    private static ComparisonRow BandBySigma(string key, Fact baseline, Fact comparison, double baselineReading, double comparisonReading, string metric, BaselineBucket bucket, bool coverageCaveat)
     {
+        /* value_delta stays in the fact's own unit (for PG_CONNECTION_SATURATION, the fraction); the band is
+           decided on the readings in the bucket's unit, which are the values themselves for every other key. */
         var valueDelta = comparison.Value - baseline.Value;
+        var readingDelta = comparisonReading - baselineReading;
         var sigma = bucket.EffectiveRobustSigma;
-        var rawDeltaSigma = valueDelta / sigma;
+        var rawDeltaSigma = readingDelta / sigma;
         /* Display-capped like the detectors' deviation_sigma (#1486): the band is decided on the raw
            value, the payload never renders a collapsed-variance thousand-sigma. */
         var deltaSigma = Math.Clamp(rawDeltaSigma, -AnomalyThresholds.SigmaDisplayCap, AnomalyThresholds.SigmaDisplayCap);
         var moved = Math.Abs(rawDeltaSigma) > StableWithinRobustSigmas;
-        /* Every baselined key is higher-is-worse (CPU %, read latency, connections). */
-        var status = !moved ? StatusStable : valueDelta > 0 ? StatusWorse : StatusBetter;
+        /* Every baselined key is higher-is-worse (CPU %, read latency, connections, deadlocks per hour). PG_TPS
+           is read the way its anomaly detector reads it — the high side is the flagged one: more transactions
+           than this server carries at this hour is more load, and the row says so as `worse` so a 6× surge
+           counts as a regression in the family rollup rather than vanishing into `stable`. A throughput FALL
+           therefore reads `better`, which is the same one-sided limit the detector has (it does not fire on a
+           collapse either); a reader is given the values and the sigma to see it, and the two-sided reading is
+           a v3 item on #3691, not something to fake here by inverting a key whose fall can be either an outage
+           or a quiet hour. */
+        var status = !moved ? StatusStable : readingDelta > 0 ? StatusWorse : StatusBetter;
 
         return new ComparisonRow
         {
@@ -546,15 +629,26 @@ public sealed record ChurnEntry(string Key, string? DatabaseName, double Value, 
     public object ToPayload() => new { key = Key, database = DatabaseName, value = Value, severity = Severity };
 }
 
-/// <summary>Plan-cache identity churn: what the top-5 cut held on one side and not the other.</summary>
-public sealed record PlanCacheChurn(IReadOnlyList<ChurnEntry> Appeared, IReadOnlyList<ChurnEntry> Disappeared, int PresentInBoth)
+/// <summary>Plan-cache identity churn: what the top-5 cut held on one side and not the other.
+///
+/// <para><paramref name="PostgresTarget"/> (#3691 W2) picks the note. The block itself is emitted for both engines
+/// — the payload shape is one shape — but on a PostgreSQL target the three counters are 0 by construction
+/// (<c>PG_BAD_ACTOR_*</c> has no shared prefix with <see cref="ComparisonBanding.PlanCacheIdentityPrefix"/> and
+/// takes the presence path; <c>PgTargetBetweenWavesTests</c> pins that), and the SQL Server sentence beside them
+/// told a PostgreSQL operator that keys their payload does not contain are plan-cache identities. The PostgreSQL
+/// sentence says what the keys they DO see are and where a new or resolved statement is counted.</para></summary>
+public sealed record PlanCacheChurn(IReadOnlyList<ChurnEntry> Appeared, IReadOnlyList<ChurnEntry> Disappeared, int PresentInBoth, bool PostgresTarget = false)
 {
+    public const string SqlServerNote = "BAD_ACTOR_<hash> keys are plan-cache identities: a hash present in one window only means the cache held a different plan for the top-5 cut, not that a problem began or ended. Not counted in new_issues / resolved_issues.";
+
+    public const string PostgresNote = "PG_BAD_ACTOR_<queryid> keys are statement identities from pg_stat_statements (queryid is stable for the life of a PostgreSQL major), not plan-cache identities: no churn arithmetic runs for a PostgreSQL target and these lists are empty by construction. A statement present in one window only is compared like every other key and, when it clears the presence bar, IS counted in new_issues / resolved_issues.";
+
     public object ToPayload() => new
     {
         appeared = Appeared.Select(e => e.ToPayload()).ToList(),
         disappeared = Disappeared.Select(e => e.ToPayload()).ToList(),
         present_in_both = PresentInBoth,
-        note = "BAD_ACTOR_<hash> keys are plan-cache identities: a hash present in one window only means the cache held a different plan for the top-5 cut, not that a problem began or ended. Not counted in new_issues / resolved_issues."
+        note = PostgresTarget ? PostgresNote : SqlServerNote
     };
 }
 
