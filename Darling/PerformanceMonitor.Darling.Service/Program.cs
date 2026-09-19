@@ -275,6 +275,22 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
         addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verbs: --enable-collector / --disable-collector <name> [--server <name>] [--config <path>] (#3752) — flip one
+   collector's enabled flag in config.config_collector_schedules, fleet-wide or for one server, and print the rows
+   read back from the store. The one collector that ships OFF (long_query_completions, whose enabling is what
+   creates its XE session on the monitored servers) had no headless opt-in: the flag was written only from the WPF
+   Viewer's Collector Schedules window, which needs an interactive desktop and the admin role. The verb owns no SQL
+   — it builds the same command row the store's command plane carries and executes the executor's own plan
+   (DarlingCommandExecutor.ResolvePlan -> ExecuteStoreWriteAsync), so validation and the upsert stay one
+   implementation. Same platform posture as --add-server directly above: NO Windows guard here, because Windows is
+   needed only for a MANAGED store credential (DPAPI), which the verb checks itself. The trailing arguments are
+   parsed STRICTLY inside the verb (never guess — #1581's posture), so the grammar pins as a unit. */
+if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || DarlingCliCommands.IsDisableCollectorVerb(args[0])))
+{
+    return await DarlingCliCommands.ToggleCollectorAsync(
+        enable: DarlingCliCommands.IsEnableCollectorVerb(args[0]), args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --backfill-rollups (#1759 Phase 2) — materialize the query-acceleration rollups back over
    pre-existing history so the #1680 arming gate can release the held raw retention policies by itself. An
    OPERATOR verb, deliberately not a startup step: the gate is all-or-nothing, so a store with a year of raw
