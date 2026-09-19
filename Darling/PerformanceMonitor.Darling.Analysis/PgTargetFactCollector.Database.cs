@@ -20,8 +20,10 @@ public sealed partial class PgTargetFactCollector
     /// The per-database counters of the window, differenced per <c>database_name</c> series and summed —
     /// one row per database, spilled bytes first. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC),
     /// <c>$4</c> the window's midpoint (naive UTC) — the transactions and intervals of the SECOND half ride as two
-    /// extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) for lane 3's
-    /// offered-vs-delivered co-fire, without a second scan.
+    /// extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) as a reader's
+    /// figure in its metadata, without a second scan. Nothing in the engine reads the trend since #3747 retired the
+    /// raw-trend co-fire hook it was first stamped for; the columns stay because the figure is cheap here and
+    /// useful on the fact.
     ///
     /// <para><b>The differencing is <c>DarlingPgDatabaseReader.PgDatabaseSql</c>'s, verbatim</b>: per-series
     /// <c>LAG</c>, <c>GREATEST(raw, 0)</c>, and the explicit reset as <c>ROW_NUMBER() OVER series &gt; 1 AND
@@ -127,9 +129,9 @@ AND   collection_time <= $3";
     /// <para><b><c>PG_TPS</c></b> is context (base 0): <c>xact_commit + xact_rollback</c> per observed second,
     /// with the rollback share stamped so the advice for a busier fact can say what kind of busy, and
     /// <c>tps_trend</c> — the second half of the window's rate minus the first half's, each over its own
-    /// observed time — for lane 3's offered-vs-delivered co-fire (sessions climbing while throughput is flat or
-    /// falling is queueing at the cliff, design §3.6 / D7). On any server doing work it is also this family's
-    /// witness that the read ran: a pass with a <c>PG_TPS</c> and no <c>PG_TEMP_SPILL</c> means "nothing
+    /// observed time — as a reader's figure: the offered-vs-delivered co-fire it was stamped for reads the
+    /// anomaly pair since #3747, and nothing in the engine reads the trend. On any server doing work it is also
+    /// this family's witness that the read ran: a pass with a <c>PG_TPS</c> and no <c>PG_TEMP_SPILL</c> means "nothing
     /// spilled", not "not collected".</para>
     ///
     /// <para><b><c>PG_DEADLOCK_RATE</c></b> is the COUNTER's deadlocks per observed hour — never a
@@ -258,9 +260,10 @@ AND   collection_time <= $3";
                 },
             };
 
-            /* The trend, for lane 3's offered-vs-delivered co-fire (sessions climbing while TPS is flat or
-               falling): each half's rate over ITS OWN observed seconds, apportioned by the intervals that fell in
-               it (one-minute cadence, so intervals ARE the observed minutes), so a half the collector missed is
+            /* The trend — a reader's figure on the fact since #3747 retired the raw-trend co-fire hook it was first
+               stamped for; nothing in the engine reads it. Each half's rate over ITS OWN observed seconds,
+               apportioned by the intervals that fell in it (one-minute cadence, so intervals ARE the observed
+               minutes), so a half the collector missed is
                not read as a quiet half. Stamped only when both halves were observed — a trend over one half is
                not a trend. */
             var intervalsFirstHalf = intervals - intervalsSecondHalf;

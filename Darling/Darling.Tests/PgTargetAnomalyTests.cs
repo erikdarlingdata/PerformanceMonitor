@@ -109,7 +109,8 @@ public sealed class PgTargetAnomalyTests
         Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.Cpu));
         Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery("nope"));
 
-        /* The seam: one protected override, nothing else of the base machinery redeclared. */
+        /* The seam: a protected override, nothing else of the base machinery redeclared (the second seam, the clock
+           read #3691 added, is pinned beside it in PgTargetClockTests — exactly two overrides, no state). */
         var resolve = typeof(PgTargetBaselineProvider).GetMethod("ResolveBaselineQuery", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(resolve);
         Assert.Equal(typeof(PgTargetBaselineProvider), resolve!.DeclaringType);

@@ -47,9 +47,10 @@ public static partial class PgTargetScorer
     public const string TpsRollbacksKey = "xact_rollback";
     public const string TpsRollbackShareKey = "rollback_share";
     /// <summary>Transactions per observed second over the first / second half of the window, and their difference
-    /// (second minus first): the trend lane 3's offered-vs-delivered co-fire reads (<c>PgTargetScorer.Sessions.cs</c>,
-    /// the v2 hook — sessions climbing while <c>tps_trend ≤ 0</c> is queueing at the cliff). Absent when only one
-    /// half of the window was observed.</summary>
+    /// (second minus first). A READER's figure, stamped on <c>PG_TPS</c> for whoever pulls the fact: nothing in the
+    /// engine reads it since #3747 — the offered-vs-delivered co-fire (<c>PgTargetScorer.Sessions.cs</c>) it was
+    /// stamped for reads the anomaly PAIR instead, the raw in-window trend having measured as noise on every
+    /// cluster in the 2026-09-19 calibration. Absent when only one half of the window was observed.</summary>
     public const string TpsFirstHalfKey = "tps_first_half";
     public const string TpsSecondHalfKey = "tps_second_half";
     public const string TpsTrendKey = "tps_trend";
