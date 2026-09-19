@@ -328,7 +328,49 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.Contains("r.PvsSizeMb is { } pvsMb && r.DatabaseDataSizeMb is > 0", body, StringComparison.Ordinal);
         Assert.Contains("pvs_measured = r.PvsSizeMb.HasValue", body, StringComparison.Ordinal);
         Assert.Contains("pct_of_database_reason = PctReason(", body, StringComparison.Ordinal);
+        /* #3653: the TREND arm carries the same flag per point, on both SKUs. Lite's landed in #3666; the
+           Darling twin read the column as a bare double with `IsDBNull ? 0`, so an unmeasured pass was
+           published as pvs_size_mb: 0 in the series — a cliff drawn into a series that had none. */
+        Assert.Contains("pvs_measured = p.PvsSizeMb.HasValue,", body, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The Darling service reader behind the trend arm (#3653): <c>PvsTrendPoint.PvsSizeMb</c> is nullable and
+    /// the trend read keeps a NULL as null. Pinned as the record signature and the read expression, the same
+    /// two shapes <c>ViewerTrendRoutingPortTests.PvsTrend_BothSkus_NeverPlotAnUnmeasuredPointAsZero</c> pins on
+    /// Lite's shared reader, so the two SKUs' MCP trend payloads are built from the same nullable.
+    /// </summary>
+    [Fact]
+    public void TheDarlingPvsTrendReader_CarriesAnUnmeasuredPointAsNull_NeverZero()
+    {
+        var source = ReadRepoFile(DarlingMcp.Split('/').Append("DarlingPvsReader.cs").ToArray());
+        Assert.Contains("double? PvsSizeMb,", source[source.IndexOf("public sealed record PvsTrendPoint(", StringComparison.Ordinal)..], StringComparison.Ordinal);
+
+        var trend = source[source.IndexOf("GetPvsTrendAsync(", StringComparison.Ordinal)..];
+        trend = trend[..trend.IndexOf("return rows;", StringComparison.Ordinal)];
+        Assert.Contains("reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),", trend, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsDBNull(2) ? 0", trend, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One tool, one contract: the two SKUs' <c>get_pvs_stats</c> descriptions are byte-identical and both
+    /// teach <c>pvs_measured</c>, so a client learns the same thing about the flag — on the snapshot rows and
+    /// on the trend points — whichever SKU answered.
+    /// </summary>
+    [Fact]
+    public void BothSkusPvsDescriptions_StayByteIdentical_AndTeachPvsMeasured()
+    {
+        var darling = ToolDescription(ToolBody(ReadRepoFile(DarlingMcp.Split('/').Append("DarlingMcpPvsTools.cs").ToArray()), "get_pvs_stats"));
+        var lite = ToolDescription(ToolBody(ReadRepoFile(LiteMcp.Split('/').Append("McpPvsTools.cs").ToArray()), "get_pvs_stats"));
+        Assert.False(string.IsNullOrEmpty(darling), "could not locate Darling's get_pvs_stats description");
+        Assert.Equal(darling, lite);
+        Assert.Contains("pvs_measured says whether the DMV reported a size", darling, StringComparison.Ordinal);
+    }
+
+    /// <summary>The string literal of a tool body's <c>Description("…")</c> attribute; the PVS tools spell it
+    /// on its own line after the attribute's opening, so the match is anchored on the closing <c>")]</c>.</summary>
+    private static string ToolDescription(string body) =>
+        Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""\)\]", RegexOptions.Singleline).Groups[1].Value;
 
     [Fact]
     public void ThePvsReason_IsNullOnlyWhenTheShareIsDefined_IncludingADefinedZero()
@@ -615,6 +657,12 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var t = MinutesAgo(5);
+            /* #3653: an EARLIER pass on which BusyDb's size was not read. The old trend shape published it as
+               pvs_size_mb: 0 beside the newest 912.82 — a cliff in a series that had none. */
+            var earlier = MinutesAgo(65);
+            await SeedPvsAsync(connection, ct, earlier, "CleanDb", pvsSizeMb: 0m, dataSizeMb: 1280m);
+            await SeedPvsAsync(connection, ct, earlier, "UnreadDb", pvsSizeMb: null, dataSizeMb: 1280m);
+            await SeedPvsAsync(connection, ct, earlier, "BusyDb", pvsSizeMb: null, dataSizeMb: 1280m);
             await SeedPvsAsync(connection, ct, t, "CleanDb", pvsSizeMb: 0m, dataSizeMb: 1280m);
             await SeedPvsAsync(connection, ct, t, "UnreadDb", pvsSizeMb: null, dataSizeMb: 1280m);
             await SeedPvsAsync(connection, ct, t, "BusyDb", pvsSizeMb: 912.82m, dataSizeMb: 1280m);
@@ -638,6 +686,39 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             var busy = byDb["BusyDb"];
             Assert.True(busy.GetProperty("pvs_measured").GetBoolean());
             Assert.Equal(71.31, busy.GetProperty("pct_of_database").GetDouble(), 2);
+
+            /* The trend (#3653): the same three verdicts per POINT. BusyDb's unmeasured earlier pass is null
+               and flagged, not 0; CleanDb's measured zeros are 0 and flagged measured; UnreadDb is null on
+               both. The payload's keys are Lite's (#3666) byte for byte. */
+            var withTrend = JsonDocument.Parse(await DarlingMcpPvsTools.GetPvsStats(postgres, ServerName, trend_hours_back: 24)).RootElement;
+            Assert.Equal(24, withTrend.GetProperty("trend_hours_back").GetInt32());
+            var series = withTrend.GetProperty("trend").EnumerateArray().ToDictionary(s => s.GetProperty("database_name").GetString()!);
+
+            var busyPoints = series["BusyDb"].GetProperty("points").EnumerateArray().ToArray();
+            Assert.Equal(2, busyPoints.Length);
+            Assert.Equal(JsonValueKind.Null, busyPoints[0].GetProperty("pvs_size_mb").ValueKind);
+            Assert.False(busyPoints[0].GetProperty("pvs_measured").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, busyPoints[0].GetProperty("pct_of_database").ValueKind);
+            Assert.Equal(912.82, busyPoints[1].GetProperty("pvs_size_mb").GetDouble(), 2);
+            Assert.True(busyPoints[1].GetProperty("pvs_measured").GetBoolean());
+            Assert.Equal(71.31, busyPoints[1].GetProperty("pct_of_database").GetDouble(), 2);
+
+            var cleanPoints = series["CleanDb"].GetProperty("points").EnumerateArray().ToArray();
+            Assert.Equal(2, cleanPoints.Length);
+            Assert.All(cleanPoints, p =>
+            {
+                Assert.Equal(0, p.GetProperty("pvs_size_mb").GetDouble());
+                Assert.True(p.GetProperty("pvs_measured").GetBoolean());
+                Assert.Equal(0.0, p.GetProperty("pct_of_database").GetDouble());
+            });
+
+            var unreadPoints = series["UnreadDb"].GetProperty("points").EnumerateArray().ToArray();
+            Assert.Equal(2, unreadPoints.Length);
+            Assert.All(unreadPoints, p =>
+            {
+                Assert.Equal(JsonValueKind.Null, p.GetProperty("pvs_size_mb").ValueKind);
+                Assert.False(p.GetProperty("pvs_measured").GetBoolean());
+            });
 
             bodySucceeded = true;
         }

@@ -122,11 +122,17 @@ ORDER BY p.database_name, p.collection_time";
         DateTime? OffrowCleanerEndTimeUtc,
         DateTime CollectionTime);
 
-    /// <summary>One trend point (per database, per collection).</summary>
+    /// <summary>One trend point (per database, per collection). <see cref="PvsSizeMb"/> is null for an
+    /// UNMEASURED collection (#3653) — the DMV reported no size that pass — never coerced to 0. The first
+    /// version of this reader read the column as a bare <c>double</c> with <c>IsDBNull ? 0</c>, so a pass on
+    /// which <c>sys.dm_tran_persistent_version_store_stats</c> had nothing to say for a database was published
+    /// as <c>pvs_size_mb: 0</c> in the trend series and plotted as a cliff in a series that had none. Lite's
+    /// shared reader (<c>LocalDataService.FinOps.Pvs.cs</c>) carries the same nullable since #3666; this is its
+    /// Darling twin, with the same field name so the cross-SKU payload pins hold.</summary>
     public sealed record PvsTrendPoint(
         string DatabaseName,
         DateTime CollectionTime,
-        double PvsSizeMb,
+        double? PvsSizeMb,
         double? PctOfDatabase);
 
     public static async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(
@@ -174,7 +180,9 @@ ORDER BY p.database_name, p.collection_time";
             rows.Add(new PvsTrendPoint(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                /* #3653: null stays null. A measured 0 MB is a measurement (the healthy, fully-cleaned state)
+                   and travels as 0; an unmeasured pass has no size and must not borrow one. */
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
                 reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3))));
         }
 
