@@ -206,20 +206,23 @@ public class BaselineSupplyTests
     /// no rollup at all, so their user-editable schedule default was the only thing covering the window.
     /// Four v1 sources, plus the three v2 arms' tables (<c>pg_replication_stats</c> since lane 12; <c>pg_io_stats</c>
     /// and <c>pg_write_stats</c> since the #3691 between-waves batch, lanes 11 and 15 having reported theirs as out
-    /// of their files). The count is the SQL Server pair plus whatever the provider reads — the PostgreSQL half is
-    /// derived (<see cref="PgTargetBaselineSources"/>), so a new arm moves this pin by itself.
+    /// of their files; <c>pg_blocking_edges</c> since lane 17, whose <c>pg_blocked_sessions</c> arm reads it). The
+    /// count is the SQL Server pair plus whatever the provider reads — the PostgreSQL half is derived
+    /// (<see cref="PgTargetBaselineSources"/>), so a new arm moves this pin by itself. Membership is by COLLECTOR
+    /// name (the purge resolves a schedule row, not a table), so each derived table is mapped to its collector through
+    /// the catalog before the lookup — <c>pg_blocking_edges</c> is the one member whose two names differ.
     /// </summary>
     [Fact]
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
         var pgSources = PgTargetBaselineSources();
-        Assert.Equal(7, pgSources.Count);   /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats */
+        Assert.Equal(8, pgSources.Count);   /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) */
         Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
         foreach (var table in pgSources)
         {
-            Assert.Contains(table, DarlingRetention.BaselineServingRawCollectors);
+            Assert.Contains(CollectorNameFor(table), DarlingRetention.BaselineServingRawCollectors);
         }
 
         /* Every member is a real collector with a schedule row — a misspelt member would floor nothing and the
@@ -261,14 +264,24 @@ public class BaselineSupplyTests
         return tablesRead.OrderBy(t => t, StringComparer.Ordinal).ToList();
     }
 
-    /// <summary>The derivation itself, pinned: the seven tables the arms read today, by name, so a table quietly
+    /// <summary>The purge floors by COLLECTOR name (<c>CollectorScheduleDefaults</c> keys), the derivation yields TABLE
+    /// names; for every member but <c>pg_blocking</c> / <c>pg_blocking_edges</c> the two are the same string. Resolved
+    /// through the catalog so the test drives the seam with the name the purge actually passes.</summary>
+    private static string CollectorNameFor(string table) =>
+        CollectorCatalog.All.Single(c => c.TargetTable == table).Name;
+
+    /// <summary>The derivation itself, pinned: the eight tables the arms read today, by name, so a table quietly
     /// leaving an arm (or a regex that stopped matching) is a visible change and not a smaller floor.</summary>
     [Fact]
     public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
     {
         Assert.Equal(
-            new[] { "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_replication_stats", "pg_session_states", "pg_wait_stats", "pg_write_stats" },
+            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_replication_stats", "pg_session_states", "pg_wait_stats", "pg_write_stats" },
             PgTargetBaselineSources());
+        /* Lane 17's arm reads the log for its zero samples too; the log is not a collector table and needs no floor of
+           this kind (DarlingRetentionHorizons.CollectionLogRetentionDays, twice the base, already covers the window). */
+        Assert.Contains("FROM collection_log", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgBlockedSessions)!, StringComparison.Ordinal);
+        Assert.True(DarlingRetentionHorizons.CollectionLogRetentionDays >= BaselineMath.BaselineWindowDays);
         /* Every derived table is a real collector table (the regex cannot admit a CTE named pg_something). */
         Assert.All(PgTargetBaselineSources(), t => Assert.True(CollectorCatalog.All.Any(c => c.TargetTable == t), $"{t} is not a collector table"));
     }
@@ -295,12 +308,16 @@ public class BaselineSupplyTests
 
         foreach (var table in PgTargetBaselineSources())
         {
-            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(table, shortened));
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(CollectorNameFor(table), shortened));
         }
+        /* The one name split: the purge knows the collector, and the table alone would floor nothing. */
+        Assert.Equal("pg_blocking", CollectorNameFor("pg_blocking_edges"));
+        Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays("pg_blocking", shortened));
 
         /* Not baseline-serving: the operator's number stands, clamped at one. */
         Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", shortened));
-        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("pg_blocking", shortened));
+        /* pg_lock_stats, not pg_blocking: the latter joined the floored set with lane 17's pg_blocked_sessions arm. */
+        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("pg_lock_stats", shortened));
         Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", 0));
         Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", -5));
     }

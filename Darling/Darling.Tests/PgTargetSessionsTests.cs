@@ -492,7 +492,10 @@ public sealed class PgTargetSessionsTests
     /// the idle fact's are saturation and the two wait keys, <c>PG_XMIN_HOLD</c> gains one edge into the idle fact
     /// (declared from this file, the vacuum chain's category), and the permissions fact still has none. The
     /// wait-side pins (a Lock wait's edges: saturation, and since the #3691 between-waves batch the idle leaf too)
-    /// are <c>PgTargetWaitTests</c>'; the file's <c>AddEdge</c> count moved 9 → 11 with that pair.
+    /// are <c>PgTargetWaitTests</c>'; the file's <c>AddEdge</c> count moved 9 → 11 with that pair. Lane 17 moved it
+    /// 11 → 14 and the idle fact's destinations 3 → 4: the two Lock keys and the idle fact each walk INTO
+    /// <c>PG_BLOCKING_CHAIN</c> (declared from this file because it owns those source nodes' edges; the chain's own
+    /// edges and the traversal pins are <c>PgTargetBlockingTests</c>').
     /// </summary>
     [Fact]
     public void TheSaturationChain_MeshesWithTheLockWaits_AndTheIdleInTransactionLeaf_AndThePermissionsFactHasNoEdge()
@@ -502,16 +505,17 @@ public sealed class PgTargetSessionsTests
             new[] { PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(PgTargetFactKeys.ConnectionSaturation).Select(e => e.Destination).Order(StringComparer.Ordinal));
         Assert.Equal(
-            new[] { PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.ConnectionSaturation }.Order(StringComparer.Ordinal),
+            new[] { PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.BlockingChain }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(PgTargetFactKeys.IdleInTransaction).Select(e => e.Destination).Order(StringComparer.Ordinal));
         Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.MonitoringPermissions));
         var xminLeaf = Assert.Single(graph.GetAllEdges(PgTargetFactKeys.XminHold), e => e.Destination == PgTargetFactKeys.IdleInTransaction);
         Assert.Equal("vacuum_starvation", xminLeaf.Category);
-        Assert.All(graph.GetAllEdges(PgTargetFactKeys.IdleInTransaction), e => Assert.Equal("connection_saturation", e.Category));
+        Assert.All(graph.GetAllEdges(PgTargetFactKeys.IdleInTransaction).Where(e => e.Destination != PgTargetFactKeys.BlockingChain), e => Assert.Equal("connection_saturation", e.Category));
+        Assert.Equal("blocking", Assert.Single(graph.GetAllEdges(PgTargetFactKeys.IdleInTransaction), e => e.Destination == PgTargetFactKeys.BlockingChain).Category);
 
         var source = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Saturation.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
-        Assert.Equal(11, Count(code, "AddEdge("));
+        Assert.Equal(14, Count(code, "AddEdge("));
         Assert.Contains("PgTargetFactKeys.IdleInTransaction", code, StringComparison.Ordinal);
         /* Every predicate reads a verdict (BaseSeverity) or the saturation fact's own share — never a bar of its own. */
         Assert.DoesNotContain("Severity > 0.", code, StringComparison.Ordinal);

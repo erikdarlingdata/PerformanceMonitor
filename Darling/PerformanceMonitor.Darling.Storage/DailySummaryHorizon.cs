@@ -76,7 +76,10 @@ public static class DarlingRetentionHorizons
     /// (lane 15's <c>pg_wal_bytes_per_sec</c>). Until then a 7-day PostgreSQL retention would have starved
     /// <c>ANOMALY_PG_IO_LATENCY</c> and <c>ANOMALY_PG_WAL_VOLUME</c> the same silent way. <c>BaselineSupplyTests</c>
     /// now DERIVES the expected membership from the provider's own query text (every <c>FROM pg_*</c> the arms
-    /// name), so the next arm without a floor fails there rather than starving quietly.</para>
+    /// name), so the next arm without a floor fails there rather than starving quietly. Lane 17 (wave 3) added
+    /// <c>pg_blocking</c> — the COLLECTOR name, which is what the purge resolves by, for the table
+    /// <c>pg_blocking_edges</c> its <c>pg_blocked_sessions</c> arm reads; the one member whose schedule name and
+    /// table name differ, so the test maps the derived table back to its collector through the catalog.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -84,6 +87,7 @@ public static class DarlingRetentionHorizons
             "cpu_utilization", "file_io_stats",
             "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
             "pg_replication_stats", "pg_io_stats", "pg_write_stats",
+            "pg_blocking",
         };
 
     /// <summary>

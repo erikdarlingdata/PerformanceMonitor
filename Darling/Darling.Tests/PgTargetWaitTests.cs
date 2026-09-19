@@ -421,15 +421,16 @@ public sealed class PgTargetWaitTests
         var quiet = new List<Fact> { Aurora(LockRelation, 0.6), Saturation(fired: false) };
         new FactScorer().ScoreAll(quiet);
         Assert.Empty(graph.GetActiveEdges(LockRelation, quiet.ToFactLookup()));
-        /* A Lock wait's own edges: saturation (lane 5) and, since the #3691 between-waves batch, the direct
-           PG_IDLE_IN_TRANSACTION blocking leaf lane 14 reported out-of-lane (the Single pin this replaces, moved
-           deliberately; PgTargetBetweenWavesV2Tests drives the traversal). With no idle fact in the set the second edge
-           is inactive and the wait's story is byte-identical to lane 5's — the Single path assertion below still holds. */
+        /* A Lock wait's own edges: saturation (lane 5); since the #3691 between-waves batch the direct
+           PG_IDLE_IN_TRANSACTION blocking leaf lane 14 reported out-of-lane; and since lane 17 the sampled
+           PG_BLOCKING_CHAIN (the reading that names the head — the two-destination pin this replaces, moved
+           deliberately; PgTargetBlockingTests drives the traversal). With neither fact in the set both extra edges are
+           inactive and the wait's story is byte-identical to lane 5's — the Single path assertion below still holds. */
         Assert.Equal(
-            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
+            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.BlockingChain }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(LockRelation).Select(e => e.Destination).Order(StringComparer.Ordinal));
         Assert.Equal(
-            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
+            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.BlockingChain }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(Lock).Select(e => e.Destination).Order(StringComparer.Ordinal));
         /* Both directions of the mesh are declared from saturation too — plus, since lane 14 of #3691, the
            PG_IDLE_IN_TRANSACTION leaf (gated on the saturation fact's own parked share; PgTargetSessionsTests pins it). */

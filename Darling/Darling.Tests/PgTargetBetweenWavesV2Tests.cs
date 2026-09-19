@@ -44,7 +44,9 @@ public sealed class PgTargetBetweenWavesV2Tests
         Assert.Contains("pg_io_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
         Assert.Contains("pg_write_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
         Assert.Contains("pg_replication_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
-        Assert.Equal(9, DarlingRetentionHorizons.BaselineServingRawCollectors.Count);
+        /* Lane 17's pg_blocked_sessions arm reads pg_blocking_edges: its collector, pg_blocking, joined (9 → 10). */
+        Assert.Contains("pg_blocking", DarlingRetentionHorizons.BaselineServingRawCollectors);
+        Assert.Equal(10, DarlingRetentionHorizons.BaselineServingRawCollectors.Count);
         /* The doc the floor falsified is gone from the provider's root: it no longer says the PostgreSQL tables lack one. */
         var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.cs");
         Assert.DoesNotContain("out of this lane's files", provider, StringComparison.Ordinal);
@@ -182,8 +184,10 @@ public sealed class PgTargetBetweenWavesV2Tests
         var saturation = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Saturation.cs");
         /* Three edges INTO the idle fact in this category: saturation's (lane 14) and the two Lock waits' (this batch). */
         Assert.Equal(3, Count(saturation, "PgTargetFactKeys.IdleInTransaction, \"connection_saturation\""));
-        Assert.Equal(2, Count(saturation, "AddEdge(PgTargetFactKeys.WaitKey(\"Lock\", \"relation\")"));
-        Assert.Equal(2, Count(saturation, "AddEdge(PgTargetFactKeys.WaitKey(\"Lock\", null)"));
+        /* Three per Lock key since lane 17: saturation, the idle leaf, and the sampled chain (moved from two, deliberately;
+           the blocking file still declares none FROM a Lock wait — PgTargetBlockingTests pins that). */
+        Assert.Equal(3, Count(saturation, "AddEdge(PgTargetFactKeys.WaitKey(\"Lock\", \"relation\")"));
+        Assert.Equal(3, Count(saturation, "AddEdge(PgTargetFactKeys.WaitKey(\"Lock\", null)"));
     }
 
     /* ───────────────────────── item 5: the idle fact's next reads ───────────────────────── */
@@ -201,8 +205,15 @@ public sealed class PgTargetBetweenWavesV2Tests
 
     /* ───────────────────────── item 6: the wave-3 blocking stubs ───────────────────────── */
 
+    /// <summary>
+    /// Item 6 as shipped pinned the wave-3 blocking family INERT through every shared entry point; lane 17 filled it,
+    /// so this pin moved deliberately to the filled shape (the vocabulary, the routing, the marker in six files) and
+    /// the family's own behaviour is <c>PgTargetBlockingTests</c>'. What stays pinned here is what the between-waves
+    /// batch decided: the names, the fold, the deviation-scored membership, the tool rows, the marker, and that the
+    /// anomaly's ComposeAnomaly arm delegates to the family file (never the SQL Server "Anomalous spike" composer).
+    /// </summary>
     [Fact]
-    public void TheBlockingFamily_ExistsAsReachableInertStubs_EachNamingLane17()
+    public void TheBlockingFamily_IsRoutedThroughEverySharedEntryPoint_AndKeepsLane17sMarker()
     {
         Assert.Equal("pg_blocking", PgTargetSources.BlockingSource);
         Assert.Contains(PgTargetSources.BlockingSource, PgTargetSources.All);
@@ -216,7 +227,8 @@ public sealed class PgTargetBetweenWavesV2Tests
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
         Assert.False(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
 
-        /* Inert through every shared entry point: base 0, no amplifier, no advice, no edge, no baseline, no next-read gap. */
+        /* Filled (lane 17): a bare fact with no graded metadata still scores 0 — the family self-gates on its own keys —
+           but every shared entry point now answers the family's block, edges and baseline rather than null. */
         var facts = new[] { PgTargetFactKeys.BlockingChain, PgTargetFactKeys.LockWaitEvents, PgTargetFactKeys.LongRunningQuery }
             .Select(k => new Fact { Source = PgTargetSources.BlockingSource, Key = k, Value = 42, ServerId = 1 }).ToList();
         new FactScorer().ScoreAll(facts);
@@ -224,19 +236,18 @@ public sealed class PgTargetBetweenWavesV2Tests
         foreach (var fact in facts)
         {
             Assert.Equal(0.0, fact.BaseSeverity);
-            Assert.Empty(fact.AmplifierResults);
-            Assert.Null(PgTargetAdvice.Compose(fact.Key, facts.ToFactLookup()));
-            Assert.Null(FactAdvice.GetForFactKey(fact.Key));
-            Assert.Empty(graph.GetAllEdges(fact.Key));
+            Assert.NotNull(PgTargetAdvice.Compose(fact.Key, facts.ToFactLookup()));
+            Assert.NotNull(FactAdvice.GetForFactKey(fact.Key));
             Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(fact.Key)!);
         }
-        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyBlocking));
-        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.AnomalyBlocking));
-        Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgBlockedSessions));
+        Assert.NotEmpty(graph.GetAllEdges(PgTargetFactKeys.BlockingChain));
+        Assert.NotNull(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyBlocking));
+        Assert.Single(graph.GetAllEdges(PgTargetFactKeys.AnomalyBlocking));
+        Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgBlockedSessions));
         Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgBlockedSessions));
         Assert.Equal(new[] { "get_pg_blocking", "get_pg_lock_stats", "get_pg_log_events" }, PgTargetToolRecommendations.GetForKey(PgTargetFactKeys.AnomalyBlocking)!.Select(r => r.Tool));
 
-        /* Six stub files, each carrying the exact marker lane 17's brief quotes. */
+        /* Six family files, each still carrying the exact marker lane 17's brief quoted (a filled family keeps it, as v1's did). */
         foreach (var (dir, file) in new[]
         {
             ("PerformanceMonitor.Analysis", "PgTargetScorer.Blocking.cs"), ("PerformanceMonitor.Analysis", "PgTargetAdvice.Blocking.cs"), ("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Blocking.cs"),
@@ -248,7 +259,7 @@ public sealed class PgTargetBetweenWavesV2Tests
             Assert.DoesNotContain("aurora_stat_", text, StringComparison.Ordinal);
         }
 
-        /* The ComposeAnomaly hook is plumbing's, so lane 17 never edits the anomaly partial (lanes 12 and 15 each had to). */
+        /* The ComposeAnomaly hook is plumbing's, so lane 17 never edited the anomaly partial (lanes 12 and 15 each had to). */
         var anomalyAdvice = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetAdvice.Anomaly.cs"));
         Assert.Contains("case PgTargetFactKeys.AnomalyBlocking:", anomalyAdvice, StringComparison.Ordinal);
         Assert.Contains("return ComposeBlockingAnomaly(factsByKey);", anomalyAdvice, StringComparison.Ordinal);
