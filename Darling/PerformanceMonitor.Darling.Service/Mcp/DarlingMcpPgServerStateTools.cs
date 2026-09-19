@@ -105,7 +105,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL buffer usage failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_buffer_usage", ex);
         }
     }
 
@@ -388,7 +388,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL extension availability failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_extensions", ex);
         }
     }
 
@@ -469,7 +469,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL lock stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_lock_stats", ex);
         }
     }
 
@@ -597,7 +597,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL write stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_write_stats", ex);
         }
     }
 
@@ -694,7 +694,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL server config failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_server_config", ex);
         }
     }
 
@@ -761,7 +761,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL config changes failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }
     }
 

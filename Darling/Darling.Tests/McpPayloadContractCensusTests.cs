@@ -31,13 +31,19 @@ namespace Darling.Tests;
 /// <c>Aggregate_CountsEveryResultOnce_AndTheCountersSumToRequested</c>). This file takes the remainder:
 ///
 /// <list type="bullet">
-/// <item><b>errors one shape</b> — census-able as "every catch returns through a SHARED shape, never an
-/// ad-hoc one", and pinned that way (the one ad-hoc site, <c>list_servers</c>, went through <c>FormatError</c>
-/// in #3653's vocabulary lane, so the ad-hoc roster is empty); but the shared shapes are TWO
-/// (<c>McpHelpers.FormatError</c> is a bare string, <c>McpHelpers.Status("error", …)</c> is a JSON envelope),
-/// so the rule itself is NOT met today. Collapsing them is one helper change with a fleet-wide wire effect
-/// (~212 tools' failures become an envelope) and is held for the maintainer's ruling (#3653 Q11); the split
-/// stays pinned as a file-grain inventory until then.</item>
+/// <item><b>errors one shape</b> — census-able as "every catch returns through ONE helper", and pinned that
+/// way: every <c>catch</c> in every tool body on both SKUs returns <c>McpHelpers.FormatError</c>, which since
+/// #3653 Q11 is the <c>{"status":"error", message, hints}</c> JSON envelope (a WIRE CHANGE for the 214 tools
+/// that answered with the bare sentence <c>Error during …</c> until then). The history this file used to
+/// carry as an inventory: the shared shapes were TWO — the bare sentence on every Lite file and every SQL
+/// Server-family Darling file, <c>McpHelpers.Status("error", "Reading X failed: …")</c> on 21 PostgreSQL-side
+/// files — and a <c>status</c>-keyed client read the first group's failures as successful text. The one ad-hoc
+/// site (<c>list_servers</c>) went through <c>FormatError</c> in the vocabulary lane; the ruling then routed
+/// the 30 PostgreSQL-side catches through the same helper, so ONE helper owns the shape AND the grammar, the
+/// file-grain inventory (<c>FilesReturningTheJsonErrorEnvelope</c>) is retired, and a direct
+/// <c>Status("error", …)</c> inside a catch is now classified AD-HOC — it is the retired dialect coming back,
+/// and it fails by name. The envelope is executed here as a positive control, not trusted from its
+/// doc comment.</item>
 /// <item><b>refuse what you cannot honor</b> — census-able: every bounded parameter reaches a shared validator
 /// (<c>McpHelpers.ValidateDaysBack</c> now covers the day-grained span, so the inline-refusal roster is
 /// empty), and no parameter is clamped against a ceiling. The <c>Math.Abs</c> arm is
@@ -124,67 +130,47 @@ public sealed class McpPayloadContractCensusTests
     /* ───────────────────────── rule: errors one shape ───────────────────────── */
 
     /// <summary>
-    /// The catches in a tool method whose return is neither shared shape. Empty: the one there was
+    /// The catches in a tool method whose return is not the one helper. Empty: the one there was
     /// (<c>list_servers</c> returned an interpolated sentence of its own) went through <c>McpHelpers.FormatError</c>
-    /// in #3653's vocabulary lane. Kept as a roster rather than a bare "zero" so a new ad-hoc return fails
-    /// by name and a deliberate exception has somewhere to state its reason.
+    /// in #3653's vocabulary lane, and the 30 PostgreSQL-side catches that called <c>McpHelpers.Status("error", …)</c>
+    /// directly — the retired second dialect — went through it under #3653 Q11. Kept as a roster rather than a
+    /// bare "zero" so a new ad-hoc return fails by name and a deliberate exception has somewhere to state its
+    /// reason.
     /// </summary>
     public static readonly (string File, string Tool)[] AdHocErrorReturns = [];
 
     /// <summary>
-    /// The files whose tool catches return the JSON envelope (<c>McpHelpers.Status("error", …)</c>) rather
-    /// than the bare string (<c>McpHelpers.FormatError</c>). Every one is a PostgreSQL tool file plus the
-    /// collector-cost tool; every Lite file and every SQL Server-family Darling file uses the bare string.
-    /// This is the INVENTORY of the split, pinned at file grain so a new tool in an existing file that keeps
-    /// its file's dialect changes nothing, while a new file must declare which side it is on — and the lane
-    /// that collapses the two shapes into one empties this roster (or fills it with every file) and says
-    /// which shape won.
+    /// The floor under the one-helper count. 243 catch returns route through <c>FormatError</c> at the time of
+    /// writing (the remaining seven are the write tools' <c>Outcome("invalid", …)</c> and the gates); a sweep
+    /// that found fewer has a helper marker that stopped matching — a renamed helper would otherwise pass as
+    /// "no ad-hoc returns" for free.
     /// </summary>
-    public static readonly string[] FilesReturningTheJsonErrorEnvelope =
-    [
-        "DarlingMcpCollectorCostTools.cs",
-        "DarlingMcpPgAutovacuumTools.cs",
-        "DarlingMcpPgBlockingTools.cs",
-        "DarlingMcpPgCpuUtilizationTools.cs",
-        "DarlingMcpPgDeadlockTools.cs",
-        "DarlingMcpPgIndexTools.cs",
-        "DarlingMcpPgIoTools.cs",
-        "DarlingMcpPgKernelStatsTools.cs",
-        "DarlingMcpPgLogEventTools.cs",
-        "DarlingMcpPgLoggingAuditTools.cs",
-        "DarlingMcpPgPlanTools.cs",
-        "DarlingMcpPgPredicateTools.cs",
-        "DarlingMcpPgReplicationStatsTools.cs",
-        "DarlingMcpPgServerStateTools.cs",
-        "DarlingMcpPgSlotTools.cs",
-        "DarlingMcpPgStatementTools.cs",
-        "DarlingMcpPgTrendTools.cs",
-        "DarlingMcpPgWaitSamplingTools.cs",
-        "DarlingMcpPgWaitTools.cs",
-        "DarlingMcpPgWraparoundTools.cs",
-        "DarlingMcpPgXminTools.cs",
-    ];
+    private const int EnvelopeReturnFloor = 200;
 
     /// <summary>
-    /// Every <c>return</c> inside a <c>catch</c> in a tool method, on both SKUs, is one of the shared shapes:
-    /// the bare-string helper (directly or through <c>Task.FromResult</c> on the synchronous tools), the JSON
-    /// envelope, the write tools' <c>Outcome("invalid", …)</c> for a body that would not parse (#3615's
-    /// write contract), or a gate computed above the catch (<c>gated</c> / <c>capability</c> /
-    /// <c>precondition</c> — a <c>Status</c> envelope already built). Anything else is an ad-hoc error and
-    /// must be in <see cref="AdHocErrorReturns"/> exactly.
+    /// Every <c>return</c> inside a <c>catch</c> in a tool method, on both SKUs, is one of: the ONE error
+    /// helper (<c>McpHelpers.FormatError</c>, directly or through <c>Task.FromResult</c> on the synchronous
+    /// tools — the <c>{"status":"error", message, hints}</c> envelope since #3653 Q11), the write tools'
+    /// <c>Outcome("invalid", …)</c> for a body that would not parse (#3615's write contract), or a gate
+    /// computed above the catch (<c>gated</c> / <c>capability</c> / <c>precondition</c> — a <c>Status</c>
+    /// envelope already built). Anything else is an ad-hoc error and must be in <see cref="AdHocErrorReturns"/>
+    /// exactly — INCLUDING a direct <c>McpHelpers.Status("error", …)</c>, which reaches the same wire shape by
+    /// a second path and is exactly how the "Reading X failed" grammar drifted away from "Error during X" the
+    /// first time. One helper owns the shape and the grammar; the census holds the helper, not the shape.
     ///
     /// <para>Bound: catch blocks are located on the comments-and-strings-stripped text (a description that
     /// says "catch-all rows" is prose, not a keyword), brace-balanced there, and the return expressions read
-    /// off the same span of the real source with comments removed. 254 catch returns at the time of writing;
-    /// the floor is 200.</para>
+    /// off the same span of the real source with comments removed. 250 catch returns at the time of writing;
+    /// the floor is 200, and the helper-routed count has its own floor (<see cref="EnvelopeReturnFloor"/>) so
+    /// the classifier's first arm cannot silently stop matching while the ad-hoc roster stays empty.</para>
     /// </summary>
     [Fact]
     public void EveryToolCatch_ReturnsThroughASharedErrorShape_AndTheAdHocRosterIsExact()
     {
         var returns = 0;
+        var envelopes = 0;
         var adHoc = new List<(string File, string Tool)>();
         var offenders = new List<string>();
-        var envelopeFiles = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var (file, tool, span, _) in ToolMethods())
         {
@@ -192,9 +178,9 @@ public sealed class McpPayloadContractCensusTests
             {
                 returns++;
                 var shape = ClassifyErrorReturn(expression);
-                if (shape == ErrorShape.JsonEnvelope)
+                if (shape == ErrorShape.Envelope)
                 {
-                    envelopeFiles.Add(file);
+                    envelopes++;
                 }
 
                 if (shape == ErrorShape.AdHoc)
@@ -206,68 +192,96 @@ public sealed class McpPayloadContractCensusTests
         }
 
         Assert.True(returns >= 200, $"only {returns} catch returns were examined across both SKUs; the catch marker has stopped matching");
+        Assert.True(envelopes >= EnvelopeReturnFloor, $"only {envelopes} catch returns route through McpHelpers.FormatError; the helper marker has stopped matching");
 
         Assert.True(
             AdHocErrorReturns.ToHashSet().SetEquals(adHoc.Distinct()),
-            "the ad-hoc error roster no longer matches the tree — new ad-hoc: ["
+            "the ad-hoc error roster no longer matches the tree — new ad-hoc (a catch that does not return McpHelpers.FormatError; a direct Status(\"error\") is the retired dialect): ["
             + string.Join("; ", offenders.Where(o => !AdHocErrorReturns.Any(r => o.StartsWith($"{r.File} {r.Tool}:", StringComparison.Ordinal))))
             + "]; rostered but gone (shrink the roster): ["
             + string.Join(", ", AdHocErrorReturns.Except(adHoc).Select(r => $"{r.File} {r.Tool}"))
             + "]");
-
-        Assert.True(
-            FilesReturningTheJsonErrorEnvelope.ToHashSet(StringComparer.Ordinal).SetEquals(envelopeFiles),
-            "the JSON-envelope inventory no longer matches the tree — files now returning Status(\"error\") from a tool catch that are not rostered: ["
-            + string.Join(", ", envelopeFiles.Except(FilesReturningTheJsonErrorEnvelope).Order())
-            + "]; rostered files that no longer do (shrink the roster): ["
-            + string.Join(", ", FilesReturningTheJsonErrorEnvelope.Except(envelopeFiles).Order())
-            + "]");
     }
 
     /// <summary>
-    /// The two shared shapes are two WIRE shapes, executed: one is a sentence, the other is JSON an agent can
-    /// branch on. That difference is the finding the inventory above exists to carry to the vocabulary lane
-    /// — 200-odd tools answer an exception with prose and 30-odd with <c>{"status":"error"}</c>, and a client
-    /// that keys on <c>status</c> sees the first group's failures as successful text.
+    /// The one error shape, EXECUTED rather than read off a doc comment: <c>FormatError</c>'s output parses as
+    /// JSON, its <c>status</c> is <c>error</c>, its <c>message</c> is the unchanged sentence (so a log grep for
+    /// "Error during" still finds every failure), its <c>hints.operation</c> is the tool name verbatim, and it is
+    /// byte-for-byte what <c>Status("error", sentence, new { operation })</c> builds — the same serializer, the
+    /// same key order — so there is one envelope, not a look-alike. Before #3653 Q11 this fact asserted the
+    /// opposite (that the sentence would NOT parse), which is the wire change in one line.
     /// </summary>
     [Fact]
-    public void TheTwoSharedErrorShapes_AreASentenceAndAnEnvelope()
+    public void TheOneErrorShape_IsTheEnvelope_ExecutedThroughFormatError()
     {
-        var sentence = McpHelpers.FormatError("reading x", new InvalidOperationException("boom"));
-        Assert.Equal("Error during reading x: boom", sentence);
-        Assert.ThrowsAny<JsonException>(() => JsonDocument.Parse(sentence));
+        var wire = McpHelpers.FormatError("reading x", new InvalidOperationException("boom"));
 
-        using var envelope = JsonDocument.Parse(McpHelpers.Status("error", "boom"));
+        using var envelope = JsonDocument.Parse(wire);
         Assert.Equal("error", envelope.RootElement.GetProperty("status").GetString());
-        Assert.Equal("boom", envelope.RootElement.GetProperty("message").GetString());
+        Assert.Equal("Error during reading x: boom", envelope.RootElement.GetProperty("message").GetString());
+        Assert.Equal("reading x", envelope.RootElement.GetProperty("hints").GetProperty("operation").GetString());
+        Assert.Equal(3, envelope.RootElement.EnumerateObject().Count());
+
+        Assert.Equal(McpHelpers.Status("error", "Error during reading x: boom", new { operation = "reading x" }), wire);
+        Assert.Equal("Error during reading x: boom", McpHelpers.ErrorSentence("reading x", new InvalidOperationException("boom")));
     }
 
-    /// <summary>The classifier, witnessed against each shape as it appears in the tree.</summary>
+    /// <summary>
+    /// The recognizer the consumers branch on (the web surface's HTTP mapping, the test guards that used to
+    /// read <c>StartsWith("Error during")</c>), executed against the producer: it fires on <c>FormatError</c>'s
+    /// output and on a validation refusal built with <c>Status("error", …)</c>, tolerates leading whitespace
+    /// the way the web sniff does, and does NOT fire on a miss envelope, on a data payload whose first key
+    /// begins with <c>status</c>, or on the retired bare sentence. <c>ErrorMessageOf</c> unwraps the sentence
+    /// from the envelope and hands anything else back untouched.
+    /// </summary>
+    [Fact]
+    public void TheErrorEnvelopeRecognizer_FiresOnTheProducer_AndNotOnItsNeighbours()
+    {
+        var wire = McpHelpers.FormatError("get_x", new InvalidOperationException("boom"));
+        Assert.StartsWith(McpHelpers.ErrorEnvelopePrefix, wire, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsErrorEnvelope(wire));
+        Assert.True(McpHelpers.IsErrorEnvelope(McpHelpers.Status("error", "Invalid limit value '0'.")));
+        Assert.True(McpHelpers.IsErrorEnvelope("  " + wire));
+
+        Assert.False(McpHelpers.IsErrorEnvelope(McpHelpers.Status("empty", "nothing")));
+        Assert.False(McpHelpers.IsErrorEnvelope(McpHelpers.Status("precondition", "Query Store is off", new { statement = "ALTER DATABASE" })));
+        Assert.False(McpHelpers.IsErrorEnvelope("{\"status_counts\":{\"error\":2}}"));
+        Assert.False(McpHelpers.IsErrorEnvelope("{\"status\":\"error_count\",\"message\":\"x\"}"));
+        Assert.False(McpHelpers.IsErrorEnvelope("Error during get_x: boom"));
+        Assert.False(McpHelpers.IsErrorEnvelope(null));
+        Assert.False(McpHelpers.IsErrorEnvelope(""));
+
+        Assert.Equal("Error during get_x: boom", McpHelpers.ErrorMessageOf(wire));
+        Assert.Equal("Invalid limit value '0'.", McpHelpers.ErrorMessageOf(McpHelpers.Status("error", "Invalid limit value '0'.")));
+        Assert.Equal("Could not resolve server.", McpHelpers.ErrorMessageOf("Could not resolve server."));
+        Assert.Equal("{\"status\":\"error\",oops", McpHelpers.ErrorMessageOf("{\"status\":\"error\",oops"));
+    }
+
+    /// <summary>The classifier, witnessed against each shape as it appears in the tree — and against the one
+    /// that no longer does: a direct <c>Status("error", …)</c> in a catch is the retired PostgreSQL dialect and
+    /// is AD-HOC now, so its return fails as THE regression rather than as a roster surprise.</summary>
     [Theory]
-    [InlineData("McpHelpers.FormatError(\"get_x\", ex)", ErrorShape.Sentence)]
-    [InlineData("Task.FromResult(McpHelpers.FormatError(\"validate_custom_view\", ex))", ErrorShape.Sentence)]
-    [InlineData("McpHelpers.Status(\"error\", $\"Reading PostgreSQL deadlocks failed: {ex.Message}\")", ErrorShape.JsonEnvelope)]
+    [InlineData("McpHelpers.FormatError(\"get_x\", ex)", ErrorShape.Envelope)]
+    [InlineData("McpHelpers.FormatError(\"get_pg_deadlocks\", ex)", ErrorShape.Envelope)]
+    [InlineData("Task.FromResult(McpHelpers.FormatError(\"validate_custom_view\", ex))", ErrorShape.Envelope)]
+    [InlineData("McpHelpers.Status(\"error\", $\"Reading PostgreSQL deadlocks failed: {ex.Message}\")", ErrorShape.AdHoc)]
     [InlineData("Outcome(\"invalid\", $\"settings_json is not valid JSON: {ex.Message}\")", ErrorShape.WriteOutcome)]
     [InlineData("gated", ErrorShape.Gate)]
     [InlineData("$\"Could not read the servers registry from the Postgres store: {ex.Message}\"", ErrorShape.AdHoc)]
+    [InlineData("$\"Error during get_x: {ex.Message}\"", ErrorShape.AdHoc)]
     [InlineData("JsonSerializer.Serialize(new { error = ex.Message })", ErrorShape.AdHoc)]
     [InlineData("McpHelpers.Status(\"empty\", \"nothing\")", ErrorShape.AdHoc)]
     public void TheErrorShapeClassifier_NamesEachShape(string expression, ErrorShape expected) =>
         Assert.Equal(expected, ClassifyErrorReturn(expression));
 
-    public enum ErrorShape { Sentence, JsonEnvelope, WriteOutcome, Gate, AdHoc }
+    public enum ErrorShape { Envelope, WriteOutcome, Gate, AdHoc }
 
     private static ErrorShape ClassifyErrorReturn(string expression)
     {
         if (expression.StartsWith("McpHelpers.FormatError(", StringComparison.Ordinal)
             || expression.StartsWith("Task.FromResult(McpHelpers.FormatError(", StringComparison.Ordinal))
         {
-            return ErrorShape.Sentence;
-        }
-
-        if (expression.StartsWith("McpHelpers.Status(\"error\"", StringComparison.Ordinal))
-        {
-            return ErrorShape.JsonEnvelope;
+            return ErrorShape.Envelope;
         }
 
         if (expression.StartsWith("Outcome(\"invalid\"", StringComparison.Ordinal))

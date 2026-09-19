@@ -81,7 +81,7 @@ public sealed class DarlingMcpPgLoggingAuditTools
                 return gated;
             }
 
-            return McpHelpers.Status("error", $"Reading the PostgreSQL logging audit failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_logging_audit", ex);
         }
     }
 

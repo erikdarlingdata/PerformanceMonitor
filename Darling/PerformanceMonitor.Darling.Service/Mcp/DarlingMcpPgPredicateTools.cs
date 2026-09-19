@@ -117,7 +117,7 @@ public sealed class DarlingMcpPgPredicateTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL predicate stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_predicate_stats", ex);
         }
     }
 }

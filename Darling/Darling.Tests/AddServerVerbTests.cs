@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -159,10 +160,30 @@ public sealed class AddServerVerbTests
     }
 
     /// <summary>
-    /// A store failure AFTER the request parsed does not arrive as JSON at all: <c>AddServersAsync</c>'s
-    /// catch-all returns <c>McpHelpers.FormatError</c>, which is plain text. That text IS the message the
-    /// operator needs, so it must be surfaced verbatim rather than buried under a "could not parse" wrapper —
-    /// which is what happened before, precisely when the verb is being used as a deployment gate.
+    /// A store failure AFTER the request parsed: <c>AddServersAsync</c>'s catch-all returns
+    /// <c>McpHelpers.FormatError</c>, which since #3653 Q11 is the <c>{status:"error", message}</c> envelope —
+    /// executed here through the REAL helper, so the verb's rendering follows the wire shape rather than a
+    /// literal that could go stale. It lands in the whole-payload branch as <c>[ERROR] Error during
+    /// add_servers: …</c>, exit 1: the sentence the operator needs, with the store's own error code intact,
+    /// and no "could not parse" wrapper.
+    /// </summary>
+    [Fact]
+    public void TheCaughtExceptionEnvelope_RendersItsSentence_WithExitOne()
+    {
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(
+            McpHelpers.FormatError("add_servers", new InvalidOperationException("57P01: terminating connection due to administrator command")));
+
+        Assert.Equal(1, exit);
+        Assert.Contains(lines, l => l.Contains("[ERROR] Error during add_servers: 57P01", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("Could not parse", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.Contains("\"status\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The plain-text arm, kept honest: before #3653 Q11 this was what <c>FormatError</c> produced, and any
+    /// non-JSON text that still reaches the verb must be surfaced verbatim rather than buried under a "could
+    /// not parse" wrapper — which is what happened before, precisely when the verb is being used as a
+    /// deployment gate.
     /// </summary>
     [Fact]
     public void APlainTextStoreError_IsSurfacedVerbatim_NotWrapped()

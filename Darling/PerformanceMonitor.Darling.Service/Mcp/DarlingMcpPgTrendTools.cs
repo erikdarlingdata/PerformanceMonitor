@@ -120,7 +120,7 @@ public sealed class DarlingMcpPgTrendTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL wait trend failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_wait_trend", ex);
         }
     }
 
@@ -226,7 +226,7 @@ public sealed class DarlingMcpPgTrendTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading the PostgreSQL query duration trend failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_query_duration_trend", ex);
         }
     }
 

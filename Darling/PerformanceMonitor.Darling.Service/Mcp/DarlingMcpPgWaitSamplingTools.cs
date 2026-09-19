@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL sampled waits failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_wait_sampling", ex);
         }
     }
 

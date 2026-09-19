@@ -176,7 +176,7 @@ public sealed class DarlingMcpPgBlockingTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL blocking chains failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_blocking", ex);
         }
     }
 

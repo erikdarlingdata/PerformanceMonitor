@@ -467,17 +467,118 @@ internal static class McpHelpers
     }
 
     /// <summary>
-    /// Formats an exception as a user-friendly error message.
+    /// The ONE wire shape a tool FAILURE takes, on both SKUs: the same JSON envelope <see cref="Status"/> builds
+    /// for a miss, with <c>status</c> = <c>error</c>, the sentence <c>Error during {operation}: {ex.Message}</c> as
+    /// <c>message</c>, and the operation named again under <c>hints.operation</c> so a client can branch on
+    /// WHICH read failed without parsing the sentence. Every <c>catch</c> in every tool body returns through
+    /// here (#3653 Q11); the census that holds that line is
+    /// <c>McpPayloadContractCensusTests.EveryToolCatch_ReturnsThroughASharedErrorShape_AndTheAdHocRosterIsExact</c>.
+    ///
+    /// <para><b>The two-shape history.</b> Until #3653 this returned the bare sentence, and it was the error
+    /// shape of every Lite tool and every SQL Server-family Darling tool — 214 call sites. The PostgreSQL tool
+    /// files, written later, answered their catches with <c>Status("error", "Reading X failed: …")</c> instead:
+    /// 30 catches in 21 files (twenty PostgreSQL tool files plus the collector-cost tool). #3699's census
+    /// inventoried the split at file grain
+    /// and #3703's vocabulary lane routed the one ad-hoc sentence (<c>list_servers</c>) through here, which left
+    /// exactly TWO shared shapes on the wire — a sentence and an envelope — and a client keyed on <c>status</c>
+    /// read two hundred tools' failures as successful prose. The maintainer's ruling (#3653 Q11) collapsed
+    /// them onto this helper: one helper owns the shape AND the grammar, so the PostgreSQL catches now call
+    /// this too and their "Reading X failed" dialect is retired. This is a WIRE CHANGE for every tool that
+    /// used the sentence, including the frozen Dashboard twin, which links this assembly.</para>
+    ///
+    /// <para><b>What a client branches on.</b> <c>status</c>. <c>error</c> is a failure to answer — the read
+    /// threw — and is the only status a caller should retry or report; the four miss words
+    /// (<c>empty</c> / <c>not_collected</c> / <c>unavailable</c> / <c>precondition</c>) are answers ABOUT the
+    /// data and are never produced here. The message text is unchanged from the sentence era so log greps
+    /// and any pinned message string survive; <c>hints.operation</c> is the <paramref name="operation"/>
+    /// verbatim — every call site passes its tool name. Data results keep their own shape and never carry a
+    /// top-level <c>message</c>, which is what lets a consumer tell the envelope from data without a schema
+    /// (the web dashboard's <c>classifyResponse</c> relies on exactly that).</para>
+    ///
+    /// <para><b>What it does NOT cover.</b> Validation refusals that are not caught exceptions — a bad
+    /// <c>hours_back</c>, an unresolvable <c>server_name</c> — are still the validators' bare sentences on
+    /// both SKUs, roughly four hundred return sites (a handful of PostgreSQL refusals wrap theirs in
+    /// <c>Status("error", …)</c>; most do not); that is a separate vocabulary question (which status word
+    /// distinguishes a client-correctable refusal from a failure, and how the web surface's 400/500 split
+    /// reads it) and is not decided here.</para>
     /// </summary>
+    /// <param name="operation">The tool name (every call site passes it); echoed in the sentence and as <c>hints.operation</c>.</param>
+    /// <param name="ex">The caught exception; only its <see cref="Exception.Message"/> reaches the wire.</param>
     public static string FormatError(string operation, Exception ex)
     {
-        return $"Error during {operation}: {ex.Message}";
+        return Status("error", ErrorSentence(operation, ex), new { operation });
+    }
+
+    /// <summary>
+    /// The failure grammar itself — <c>Error during {operation}: {ex.Message}</c> — for the surfaces that
+    /// render an error as TEXT rather than put it on the MCP wire (the triage page's per-section
+    /// <c>error</c> field, the web surface's <c>{"error": …}</c> body). <see cref="FormatError"/> wraps this
+    /// sentence in the envelope; nothing else spells the sentence, so the words a web card shows and the
+    /// words an MCP client reads cannot drift.
+    /// </summary>
+    public static string ErrorSentence(string operation, Exception ex) => $"Error during {operation}: {ex.Message}";
+
+    /// <summary>
+    /// The bytes every error envelope begins with. <see cref="Status"/> serializes its anonymous object with
+    /// <see cref="JsonOptions"/> (compact) and <c>status</c> first, so <c>{"status":"error",</c> is exact against
+    /// the one producer — the closing quote and comma are part of it so a data payload whose first key merely
+    /// starts with <c>status</c>, or a status of <c>error_count</c>, cannot match. Pinned against
+    /// <see cref="FormatError"/>'s and <see cref="Status"/>'s real output rather than trusted.
+    /// </summary>
+    public const string ErrorEnvelopePrefix = "{\"status\":\"error\",";
+
+    /// <summary>
+    /// Whether a tool result is the error envelope (a caught exception, or a PostgreSQL tool's validation
+    /// refusal). A prefix test rather than a parse: the callers are the HTTP status mapping on the web surface
+    /// and the test guards that used to read <c>StartsWith("Error during")</c>, both on the hot path of every
+    /// response, and a parse of a record-heavy data page to learn it is not an error would cost more than the
+    /// data did. Leading whitespace is tolerated the way the web surface's <c>{</c>-sniff tolerates it.
+    /// </summary>
+    public static bool IsErrorEnvelope(string? result) =>
+        result is not null
+        && result.AsSpan().TrimStart().StartsWith(ErrorEnvelopePrefix.AsSpan(), StringComparison.Ordinal);
+
+    /// <summary>
+    /// The sentence a human should read for a tool result: the envelope's <c>message</c> when the result is
+    /// the error envelope, the result itself otherwise (a bare validation refusal is already the sentence).
+    /// For the consumers that render an error as TEXT — the web surface's <c>{"error": …}</c> body, the
+    /// triage page's per-section error strip — so a failure is shown as the words that explain it rather than
+    /// as the JSON that carried them. An envelope that will not parse falls back to the raw result rather
+    /// than to nothing: hiding the payload is the one thing an error renderer must never do.
+    /// </summary>
+    public static string ErrorMessageOf(string result)
+    {
+        if (!IsErrorEnvelope(result))
+        {
+            return result;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(result);
+            if (document.RootElement.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+            {
+                return message.GetString()!;
+            }
+        }
+        catch (JsonException)
+        {
+            /* Fall through to the raw result: the prefix matched but the body did not parse, which is not a
+               shape this helper produces — show what arrived rather than guess. */
+        }
+
+        return result;
     }
 
     /// <summary>
     /// Builds a consistent JSON envelope for a NON-DATA outcome — a legitimate miss — so an LLM
     /// consumer can branch on the kind of nothing it got back. Data-bearing results keep their own
     /// shape and must NOT use this.
+    ///
+    /// <para>The fifth status word, <c>error</c>, is a FAILURE rather than a miss and has its own builder:
+    /// a tool's <c>catch</c> returns <see cref="FormatError"/>, never this method directly, so one helper owns
+    /// the failure grammar. The direct <c>Status("error", …)</c> call survives only for a validation refusal
+    /// computed above the catch (a <c>limit</c> the tool cannot honor), which is a sentence, not an exception.</para>
     /// </summary>
     /// <param name="status">
     /// One word from the small miss vocabulary:

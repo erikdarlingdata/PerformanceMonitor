@@ -114,7 +114,7 @@ public sealed class DarlingMcpPgPlanTools
                 return gated;
             }
 
-            return McpHelpers.Status("error", $"Reading PostgreSQL plans failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_plans", ex);
         }
     }
 
@@ -164,7 +164,7 @@ public sealed class DarlingMcpPgPlanTools
                 return gated;
             }
 
-            return McpHelpers.Status("error", $"Reading PostgreSQL plan-capture readiness failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_plan_capture_readiness", ex);
         }
     }
 

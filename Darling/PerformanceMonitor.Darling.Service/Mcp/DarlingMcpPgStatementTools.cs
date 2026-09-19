@@ -112,7 +112,7 @@ public sealed class DarlingMcpPgStatementTools
                 return gated;
             }
 
-            return McpHelpers.Status("error", $"Reading PostgreSQL query stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_top_queries", ex);
         }
     }
 

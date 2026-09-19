@@ -961,7 +961,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
 
     private static JsonElement Parse(string json)
     {
-        Assert.False(json.StartsWith("Error during", StringComparison.Ordinal), $"tool returned an error: {json}");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
         var root = JsonDocument.Parse(json).RootElement.Clone();
         Assert.False(root.TryGetProperty("status", out _), "expected a data-bearing payload, got a status envelope: " + json);
         return root;

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -124,7 +125,7 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
     }
 
-    /* ── response-kind mapping (the '{'-sniff, error -> 500, status-envelope -> 200) ── */
+    /* ── response-kind mapping (the error envelope -> 500, the '{'-sniff -> 200, miss envelope -> 200) ── */
 
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
@@ -132,9 +133,38 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("[]")]
     [InlineData("[{\"a\":1}]")]
     [InlineData("{\"status\":\"empty\",\"message\":\"nothing\"}")] // the miss envelope passes through as 200
+    [InlineData("{\"status\":\"precondition\",\"message\":\"Query Store is off\",\"hints\":{\"statement\":\"ALTER DATABASE\"}}")]
+    [InlineData("{\"status_counts\":{\"error\":2}}")]      // a data key that merely begins with "status" is data
     public void ClassifyToolResponse_JsonPassesThrough(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough, DarlingWebEndpoints.ClassifyToolResponse(result));
 
+    /// <summary>
+    /// The tools' caught exception is the <c>{"status":"error", ...}</c> envelope since #3653 Q11 (a WIRE CHANGE
+    /// for the 214 tools that answered with the bare sentence), and it is a 500 — tested against the REAL
+    /// producer, not a hand-written literal, so a change to <c>McpHelpers.FormatError</c>'s serialization
+    /// that the recognizer did not follow fails here rather than as every failure quietly becoming a 200.
+    /// The PostgreSQL tools already answered with this envelope before the ruling, and the '{'-sniff was
+    /// passing their failures through as 200 — the ordering this pins is the fix for that too.
+    ///
+    /// <para>Stated rather than hidden: seven PostgreSQL VALIDATION refusals (<c>limit</c> on the deadlock,
+    /// log-event and server-config reads; <c>family</c> / <c>min_severity</c> on <c>get_pg_log_events</c>) are
+    /// hand-built <c>Status("error", …)</c> envelopes too, so they now answer 500 here where they answered
+    /// 200 before — neither code is the 400 a client-correctable refusal deserves. The envelope carries no
+    /// word that tells a refusal from a failure; choosing one is the vocabulary ruling this lane does not
+    /// make, and the third case below pins the present behaviour so that ruling changes it knowingly.</para>
+    /// </summary>
+    [Fact]
+    public void ClassifyToolResponse_TheErrorEnvelope_IsServerError()
+    {
+        var wire = McpHelpers.FormatError("get_wait_stats", new InvalidOperationException("connection reset"));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse(wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse("  " + wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError,
+            DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.Status("error", "Invalid limit value '0'. Must be a positive integer (1-1000).")));
+    }
+
+    /// <summary>The pre-#3653 bare sentence is still a 500: an un-migrated producer must not fall through to
+    /// the client-correctable 400 arm, which would tell a caller to fix a request that was fine.</summary>
     [Fact]
     public void ClassifyToolResponse_ErrorDuring_IsServerError() =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError,
@@ -243,10 +273,19 @@ public sealed class DarlingWebEndpointsTests
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
 
     [Fact]
-    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
-        /* The cores swallow their own exceptions into "Error during ..." — the same shape the read surface
-           maps to 500, classified by the same ClassifyToolResponse. */
+    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError()
+    {
+        /* The cores swallow their own exceptions into McpHelpers.FormatError — the {"status":"error"} envelope
+           since #3653 Q11 — the same shape the read surface maps to 500, classified by the same
+           ClassifyToolResponse BEFORE the verb-status switch, so "error" is never read as a verb outcome and
+           handed the route's success code. The bare sentence the cores produced before the ruling still
+           maps the same way. */
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus(
+            McpHelpers.FormatError("update_mute_rule", new InvalidOperationException("connection reset")), 200));
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus(
+            McpHelpers.FormatError("create_mute_rule", new InvalidOperationException("connection reset")), 201));
         Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus("Error during update_mute_rule: connection reset", 200));
+    }
 
     [Fact]
     public void MuteRuleEnvelopeStatus_ABareString_IsAClientError() =>

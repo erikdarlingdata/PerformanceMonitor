@@ -167,7 +167,7 @@ public sealed class DarlingMcpPgLogEventTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL log events failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_log_events", ex);
         }
     }
 

@@ -385,7 +385,7 @@ public sealed class DarlingMcpPgIndexTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL index bloat failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_index_bloat", ex);
         }
     }
 
@@ -491,7 +491,7 @@ public sealed class DarlingMcpPgIndexTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL column stats failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_column_stats", ex);
         }
     }
 }

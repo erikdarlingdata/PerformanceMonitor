@@ -267,7 +267,7 @@ public sealed class DarlingMcpPgAutovacuumTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.Status("error", $"Reading PostgreSQL autovacuum health failed: {ex.Message}");
+            return McpHelpers.FormatError("get_pg_autovacuum_health", ex);
         }
     }
 
