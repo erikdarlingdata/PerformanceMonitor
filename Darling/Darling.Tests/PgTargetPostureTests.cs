@@ -343,7 +343,9 @@ public sealed class PgTargetPostureTests
                 var advice = fsync.GetProperty("advice");
                 var text = advice.GetProperty("headline").GetString() + " " + advice.GetProperty("investigation").GetString() + " " + advice.GetProperty("remediation").GetString();
                 Assert.Contains("fsync = off", text, StringComparison.Ordinal);
-                Assert.Contains("taken 40 minutes before the end of the analysis window", text, StringComparison.Ordinal);
+                /* The tool's window ends at ITS now, a minute or two past the collector run above, so the exact
+                   figure is pinned there (40, against a controlled TimeRangeEnd) and only the shape is pinned here. */
+                Assert.Matches(new System.Text.RegularExpressions.Regex(@"taken 4\d minutes before the end of the analysis window"), text);
                 foreach (var word in OptimisationVocabulary)
                     Assert.DoesNotContain(word, text, StringComparison.OrdinalIgnoreCase);
 
