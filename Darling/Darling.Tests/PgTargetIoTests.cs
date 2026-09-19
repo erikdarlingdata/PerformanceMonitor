@@ -298,11 +298,12 @@ public sealed class PgTargetIoTests
         Assert.DoesNotContain(graph.GetActiveEdges(standout, quiet), e => e.Destination == PgTargetFactKeys.IoReadLatencyMs);
         Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.IoReadLatencyMs, quiet));
 
-        /* Latency fired: both wait edges lead to it; it leads on to the cache composite and to each knob at its default. */
+        /* Latency fired: the standout's edge leads to it (the IO rollup has none — lane 5's rule, pinned in PgTargetWaitTests);
+           it leads on to the cache composite and to each knob at its default. */
         var fired = Lookup(ReadFact(25.0, ops: 26_400), Wait(standout, fired: true), Wait(rollup, fired: true), BufferPressure(fired: true), Knob(PgTargetFactKeys.ConfigEffectiveCacheSize, fired: true), Knob(PgTargetFactKeys.ConfigRandomPageCost, fired: false));
         new FactScorer().ScoreAll(fired.Values.ToList());
         Assert.Contains(graph.GetActiveEdges(standout, fired), e => e.Destination == PgTargetFactKeys.IoReadLatencyMs && e.Category == "io_latency");
-        Assert.Single(graph.GetActiveEdges(rollup, fired));
+        Assert.Empty(graph.GetAllEdges(rollup));
         var onward = graph.GetActiveEdges(PgTargetFactKeys.IoReadLatencyMs, fired).Select(e => e.Destination).Order(StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { PgTargetFactKeys.ConfigEffectiveCacheSize, PgTargetFactKeys.BufferCachePressure }.Order(StringComparer.Ordinal).ToArray(), onward);
 
