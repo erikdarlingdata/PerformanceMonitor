@@ -1354,8 +1354,9 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>24 columns since #3017 (16 at #2460, plus #2472's four fan-out columns, #2804's
-    /// abandoned_count, #3010's last_denied_time and #3017's rows_stored/runs_with_rows) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// <para>26 columns since #3754 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
+    /// extension_missing_count and #3754's session_missing_count) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1518,7 +1519,18 @@ internal static class DarlingDataReader
             -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
             -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, like
             -- every column since #2472, because this result set is read positionally.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3754: runs whose XE session was missing or could not be created - the SESSION_MISSING status
+            -- the tolerant XE readers write for a permission-denied session read and, since #3754, the
+            -- long-query reconcile writes for a session refused in every database. Until now this status
+            -- reached this surface as total_runs and NOTHING else: not an error, not a success, not a
+            -- denial, so a collector whose every run was SESSION_MISSING banded FAILING on the never-
+            -- succeeded clock while the row said errors 0 and the output finding said it had read and
+            -- found nothing. Counted apart from error_count on purpose - it is not fed to the band, whose
+            -- capture-down story belongs to the self-alert - and fed with error_count to the output
+            -- finding as the runs that could not read. APPENDED, like every column since #2472, because
+            -- this result set is read positionally and Lite's DuckDB read mirrors the ordinals.
+            SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1621,6 +1633,8 @@ internal static class DarlingDataReader
                 RunsWithRows = reader.IsDBNull(23) ? 0 : Convert.ToInt64(reader.GetValue(23)),
                 /* Appended (#3240), for the same reason every column before it was. */
                 ExtensionMissingCount = reader.IsDBNull(24) ? 0 : Convert.ToInt64(reader.GetValue(24)),
+                /* Appended (#3754), for the same reason every column before it was. */
+                SessionMissingCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
             });
         }
 
@@ -2245,6 +2259,17 @@ internal sealed class CollectorHealth
     public long ExtensionMissingCount { get; set; }
 
     /// <summary>
+    /// Runs recorded <c>SESSION_MISSING</c> (#3754): the XE session the collector reads was missing or could
+    /// not be created, so nothing was read. Counted apart from <see cref="ErrorCount"/> because it is not
+    /// an input to <see cref="HealthStatus"/> - the capture-down story belongs to the self-alert - and
+    /// apart from <see cref="PermissionDeniedCount"/> because a missing session is not a grant. Fed with
+    /// the error count to <see cref="OutputFinding"/> as the runs that could not read; before this the
+    /// status reached this surface as <see cref="TotalRuns"/> and nothing else. Always 0 for a collector
+    /// that reads no XE session.
+    /// </summary>
+    public long SessionMissingCount { get; set; }
+
+    /// <summary>
     /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
     /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
     /// data LOSS: the cycle stored nothing and advanced no watermark. Feeds
@@ -2375,12 +2400,17 @@ internal sealed class CollectorHealth
     /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
     /// formatter instead of each writing the branch out, so the two cannot answer differently.
     ///
-    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
-    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
-    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
-    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
-    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
-    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term,
+    /// <see cref="NoteCount"/> the fourth, and (#3754) the faulted-run count and the collector's category
+    /// the fifth and sixth. Zero output with a current denial is a collector that could not read; zero
+    /// output with faulted runs (<see cref="ErrorCount"/> plus <see cref="SessionMissingCount"/>) is one
+    /// that could not read on those runs and the finding says so instead of offering the resting-state
+    /// reading; zero output whose runs recorded a note is one that already said why, and the finding defers
+    /// to <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero
+    /// output with none of those is the event collector at rest - if it IS an event collector
+    /// (<see cref="CollectorHealthClassifier.IsEventCollector"/>), and a snapshot whose source came back
+    /// empty if it is not. Every predicate is READ here and still not banded — <c>HealthStatus</c> does not
+    /// call this, and this returns display text.</para>
     /// </summary>
     public string? OutputFinding =>
         /* #3240: an all-extension-missing window read NOTHING, so both of the formatter's zero-output
@@ -2389,7 +2419,10 @@ internal sealed class CollectorHealth
            carry the whole story, extension named. */
         string.Equals(HealthStatus, CollectorHealthClassifier.ExtensionMissing, StringComparison.Ordinal)
             ? null
-            : CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+            : CollectorHealthClassifier.FormatOutputFinding(
+                    RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount,
+                    faultedRuns: ErrorCount + SessionMissingCount,
+                    isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName))
                 is { Length: > 0 } finding
                 ? finding
                 : null;

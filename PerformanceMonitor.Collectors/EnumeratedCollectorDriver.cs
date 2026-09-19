@@ -18,14 +18,74 @@ using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Collectors;
 
-/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.
+/// <summary>Per-run outcome of the enumeration driver: rows written, the summed SQL/storage slice times,
+/// and — since #3754 — the per-item FAILURE account the run's collection_log row is classified from.
 ///
 /// <para><see cref="SqlMs"/> is the SLICE, not a target-side total (#3192): it is the sum of each item's
 /// stopwatch around <c>perItemWatermark</c> plus <c>readItem</c>, and both of those legitimately touch the
 /// HOST STORE. See <c>RunAsync</c>'s <c>readItem</c> parameter for the measured magnitude and for the
 /// <see cref="CollectorContext"/> stamps that let a host attribute it.</para>
+///
+/// <para><b>Why the failure account rides the result rather than each host's <c>onItemError</c> closure
+/// (#3754).</b> The driver owns the per-item catch SHAPE — that is the seam #1556 drew — and until #3754
+/// the shape was: hand the exception to <c>onItemError</c>, leave the batch null, continue. Both hosts'
+/// closures then LOGGED it and nothing else, so a collector whose every item threw returned here with
+/// <see cref="Rows"/> = 0 and no other evidence, and each host recorded that as <c>SUCCESS</c> with zero
+/// rows. On Azure SQL DB <c>database_scoped_config</c> did exactly that on every monitored database every
+/// sweep — the per-item query is rejected there — and <c>get_collection_health</c> then reported it
+/// HEALTHY with <c>errors: 0</c> and a sentence saying it had read and found nothing. The SIBLING fan-out,
+/// each host's Azure per-database connection loop, had already been given the three things this needed
+/// (#2623): a count of attempted against failed, a partial-failure note naming the losers, and an
+/// all-failed rethrow so the run classifies ERROR / PERMISSIONS / SESSION_MISSING. The enumerated path
+/// never got them because its per-item catch lives HERE, where no host code runs. So the account is kept
+/// here, in the one place that sees every item's outcome, and handed back on the result: a host cannot
+/// forget to count what the driver counted for it, and the two hosts cannot drift on what "all failed"
+/// means. <c>onItemError</c> is unchanged and still fires per item — it remains the hosts' log line and
+/// query_store's adaptive-shrink stamp.</para>
 /// </summary>
-public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
+/// <param name="Rows">Rows written across every item whose read AND flush succeeded.</param>
+/// <param name="SqlMs">Summed per-item read slices — see the type remarks for what that includes.</param>
+/// <param name="StorageMs">Summed per-item flush slices.</param>
+/// <param name="Attempted">Items the loop reached. Equal to the item list's count unless cancellation
+/// stopped the sweep, in which case the run is already propagating an exception and nothing reads this.</param>
+/// <param name="Failed">Items whose read faulted and were skipped — the routine per-item catch AND the #2150
+/// budget-expiry catch, both. OOM and cancellation propagate and are not counted: they end the run.</param>
+/// <param name="FailedItems">Those items by name, in loop order — the names <see cref="PartialFailureNote"/>
+/// spells out (capped) so an operator can see WHICH database was lost, not merely how many.</param>
+/// <param name="FirstError">The first failed item's exception, kept whole so the all-failed host rethrow
+/// (<see cref="AllItemsFailed"/>) surfaces the ORIGINAL type and stack for classification — a SqlException
+/// still classifies PERMISSIONS on its number, a TimeoutException still reads as a timeout. Null when
+/// nothing failed.</param>
+public readonly record struct EnumeratedRunResult(
+    int Rows,
+    long SqlMs,
+    long StorageMs,
+    int Attempted = 0,
+    int Failed = 0,
+    IReadOnlyList<string>? FailedItems = null,
+    Exception? FirstError = null)
+{
+    /// <summary>
+    /// True when the loop reached at least one item and EVERY item it reached faulted — the run stored
+    /// nothing because it could read nothing, which must not land as <c>SUCCESS</c> (#3754). Each host
+    /// rethrows <see cref="FirstError"/> on this, exactly as its Azure per-database loop already does, so
+    /// the run is classified from the real exception. The <c>FirstError is not null</c> clause is
+    /// belt-and-braces: a failed item always records its exception, but a host rethrowing null would
+    /// trade a classified fault for a NullReferenceException.
+    /// </summary>
+    public bool AllItemsFailed => Attempted > 0 && Failed == Attempted && FirstError is not null;
+
+    /// <summary>
+    /// The #2623 partial-failure note for this run — <see cref="EnumeratedCollectorDriver.PartialDatabaseFailureNoteFormat"/>
+    /// composed from this result's own counts — or null when nothing failed or when EVERYTHING did (the
+    /// all-failed case rethrows and an ERROR row carries the error message instead). Composed HERE rather
+    /// than at each host so the enumerated fan-out and the Azure per-database fan-out cannot come to word
+    /// the same loss differently: one format string, one composer, two paths.
+    /// </summary>
+    public string? PartialFailureNote =>
+        EnumeratedCollectorDriver.BuildPartialFailureNote(
+            Failed, Attempted, FailedItems ?? Array.Empty<string>(), FirstError?.Message);
+}
 
 /// <summary>
 /// What a per-database fan-out cost, rolled up to the one thing a blended <c>collection_log</c> row cannot
@@ -173,8 +233,10 @@ public sealed class CycleProbeFailures
 /// removes the duplicate that let the same defect live in two runners.
 ///
 /// <para>
-/// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE, the
-/// per-item flush, and the interleaved SQL/storage timing. Everything app-specific stays in the
+/// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE (and, since
+/// #3754, the per-item failure ACCOUNT that shape produces: attempted, failed, which items, the first
+/// error — see <see cref="EnumeratedRunResult"/>), the per-item flush, and the interleaved SQL/storage
+/// timing. Everything app-specific stays in the
 /// caller's delegates: the SQL connection and per-item query (readItem), the storage engine
 /// (writeBatch), the host store's per-database watermark read and its catch-up clamp (perItemWatermark),
 /// and the log text / display name (onItemComplete / onItemError). This is the seam the plan required:
@@ -694,9 +756,22 @@ public static class EnumeratedCollectorDriver
         long sqlMs = 0;
         long storageMs = 0;
 
+        /* #3754: the per-item failure account, kept beside the per-item catch that produces it. Before
+           this the two catch arms below handed the exception to onItemError and forgot it, so a run in
+           which EVERY item faulted returned Rows = 0 and nothing else, and both hosts wrote SUCCESS. The
+           Azure per-database loop in each host already counts attempted/failed/firstFailure for its own
+           fan-out (#2623); this is the enumerated fan-out's copy of the same three facts, returned on the
+           result so the hosts compose the note and rethrow from shared numbers instead of each re-deriving
+           them inside a closure. */
+        var attempted = 0;
+        var failed = 0;
+        var failedItems = new List<string>();
+        Exception? firstError = null;
+
         foreach (var item in items)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            attempted++;
 
             List<TRow>? batch = null;
             long itemSqlMs = 0;
@@ -738,13 +813,29 @@ public static class EnumeratedCollectorDriver
                    in favour of the budget message: whatever the provider raised on cancellation is an
                    artifact of HOW it was cancelled, not why. */
                 _ = ex;
-                onItemError(item, ItemBudgetException(perItemBudget!.Value));
+                var budgetFailure = ItemBudgetException(perItemBudget!.Value);
+                /* #3754: counted as a failed item like the generic arm below, with the BUDGET exception as
+                   the recorded error for the same reason it is the logged one — it says why, where the
+                   provider's cancellation artifact says only how. Named before the hook so the account
+                   cannot depend on what the host's closure does with the exception. */
+                failed++;
+                failedItems.Add(item);
+                firstError ??= budgetFailure;
+                onItemError(item, budgetFailure);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* One item failing is routine (an offline/mid-restore database, a permissions oddity, a
                    timeout) — skip it and keep collecting the rest, matching the original per-item loop.
-                   OCE and OOM deliberately propagate (they are not per-item faults). */
+                   OCE and OOM deliberately propagate (they are not per-item faults).
+
+                   #3754: and COUNTED. Skipping the item is still right; skipping it with no trace on the
+                   run is what let an every-item failure record SUCCESS. The exception is kept whole (not
+                   its message) so the host's all-failed rethrow surfaces the original type for
+                   classification. */
+                failed++;
+                failedItems.Add(item);
+                firstError ??= ex;
                 onItemError(item, ex);
             }
             finally
@@ -776,7 +867,7 @@ public static class EnumeratedCollectorDriver
             onItemComplete(item, batch.Count, itemSqlMs, itemStorageMs);
         }
 
-        return new EnumeratedRunResult(totalRows, sqlMs, storageMs);
+        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError);
     }
 
     /// <summary>
