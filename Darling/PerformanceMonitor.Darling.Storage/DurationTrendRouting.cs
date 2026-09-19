@@ -260,14 +260,16 @@ public static class DurationTrendRouting
     }
 
     /// <summary>The query-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>query_stats</c>. The
-    /// viewer's <c>QueryDurationTrendSql</c> is this text with the filter; the MCP reader's raw const is its
-    /// alias-in-waiting without it (see the builder remarks).</summary>
+    /// viewer's <c>QueryDurationTrendSql</c> is this text with the filter; the MCP reader's
+    /// <c>DarlingTrendReader.QueryDurationTrendSql</c> is this text without it, by alias since #3653 (it was
+    /// the LAG-only copy between #3695 and that alias; see the builder remarks).</summary>
     public static string QueryDurationTrendRawSql(bool withDatabaseFilter)
         => BuildRawTrendSql("query_stats", withDatabaseFilter);
 
     /// <summary>The procedure-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>procedure_stats</c>:
-    /// the V128 idiom the two hand-kept procedure consts already carry, produced by the builder so a test can
-    /// pin that the builder IS that idiom and a later alias of those consts is provably a no-op.</summary>
+    /// the V128 idiom the two procedure consts carried by hand, produced by the builder so a test could pin
+    /// that the builder IS that idiom before both consts became its aliases (#3653; the viewer's with the
+    /// filter, the MCP reader's without) — a provable no-op, because the pin passed first.</summary>
     public static string ProcedureDurationTrendRawSql(bool withDatabaseFilter)
         => BuildRawTrendSql("procedure_stats", withDatabaseFilter);
 

@@ -27,8 +27,10 @@ namespace PerformanceMonitorLite.Tests;
 /// buffer samples": the ring buffer (<c>RING_BUFFER_SCHEDULER_MONITOR</c>) writes one record per minute; the
 /// 15-second cadence is <c>sys.dm_db_resource_stats</c>, the Azure SQL DB source, which is not a ring buffer. The
 /// plan tools' "top operators" was a silent <c>Take(10)</c> with a ranking basis that switched between a
-/// measurement and an estimate. The Darling twins are pinned in <c>Darling.Tests</c>
-/// (<c>DarlingMcpToolsTests</c>, <c>McpPlanAnalysisEnvelopeTests</c>).</para>
+/// measurement and an estimate. The Darling twins of the first and third are pinned in <c>Darling.Tests</c>
+/// (<c>DarlingMcpToolsTests</c>, <c>McpPlanAnalysisEnvelopeTests</c>); the CPU note's Darling twin is pinned
+/// HERE, beside Lite's, because the two notes are one sentence on two SKUs and the pin that matters is that
+/// they stay byte-identical (#3653 — Darling's copy was ported one lane after Lite's).</para>
 /// </summary>
 public sealed class McpDescriptionTruthPinTests
 {
@@ -54,18 +56,15 @@ public sealed class McpDescriptionTruthPinTests
         Assert.DoesNotContain("edition-aware", instructions, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void GetCpuUtilization_NamesBothSourceCadences_AndNotAFifteenSecondRingBuffer()
+    /// <summary>Both SKUs' <c>get_cpu_utilization</c> notes, one theory: the same tokens on each, and the two
+    /// wire strings byte-identical — the one-record-per-minute ring buffer is the same source on both, and a
+    /// note that drifted on one SKU would be the #3696 lie told once more, to half the callers.</summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpCpuTools.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")]
+    public void GetCpuUtilization_NamesBothSourceCadences_AndNotAFifteenSecondRingBuffer(string file)
     {
-        var source = File.ReadAllText(RepoPath("Lite", "Mcp", "McpCpuTools.cs"));
-        var start = source.IndexOf("Name = \"get_cpu_utilization\"", StringComparison.Ordinal);
-        Assert.True(start > 0);
-        var body = source[start..source.IndexOf("FormatError(\"get_cpu_utilization\"", StringComparison.Ordinal)];
-
-        /* The wire string itself (the comment above it may quote the old wording as history). */
-        var noteStart = body.IndexOf("note = \"", StringComparison.Ordinal);
-        Assert.True(noteStart > 0);
-        var note = body[noteStart..body.IndexOf("\",", noteStart, StringComparison.Ordinal)];
+        var note = CpuUtilizationNote(file, out var body);
 
         Assert.DoesNotContain("15-second ring buffer", note, StringComparison.Ordinal);
         Assert.Contains("one RING_BUFFER_SCHEDULER_MONITOR record per minute", note, StringComparison.Ordinal);
@@ -73,6 +72,24 @@ public sealed class McpDescriptionTruthPinTests
         /* The note defers to the measured count the payload already carries per bucket. */
         Assert.Contains("samples_in_bucket is the measured count", note, StringComparison.Ordinal);
         Assert.Contains("samples_in_bucket = g.Count()", body, StringComparison.Ordinal);
+
+        /* The twin pin: the sentence is ONE sentence. Asserted from both rows of the theory so a drift on
+           either file reds under that file's name. */
+        Assert.Equal(CpuUtilizationNote("Lite/Mcp/McpCpuTools.cs", out _), CpuUtilizationNote("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", out _));
+    }
+
+    /// <summary>The wire string of <c>get_cpu_utilization</c>'s <c>note</c> in <paramref name="file"/> (the
+    /// comment above it may quote the old wording as history, so the pin reads the literal, not the body).</summary>
+    private static string CpuUtilizationNote(string file, out string body)
+    {
+        var source = File.ReadAllText(RepoPath(file.Split('/')));
+        var start = source.IndexOf("Name = \"get_cpu_utilization\"", StringComparison.Ordinal);
+        Assert.True(start > 0, $"{file}: get_cpu_utilization is not declared here");
+        body = source[start..source.IndexOf("FormatError(\"get_cpu_utilization\"", StringComparison.Ordinal)];
+
+        var noteStart = body.IndexOf("note = \"", StringComparison.Ordinal);
+        Assert.True(noteStart > 0, $"{file}: the tool publishes no note");
+        return body[noteStart..body.IndexOf("\",", noteStart, StringComparison.Ordinal)];
     }
 
     [Fact]

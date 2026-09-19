@@ -334,7 +334,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
 
         /* The raw reads keep a LAG — since #3653 A11 only as the fallback for a pre-V128 collection whose stored
            interval is NULL; the stored-interval read itself is pinned by
-           RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheProcedureConstsAreItsIdiom below. */
+           RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheRawConstsAreItsAliases below. */
         Assert.Contains("LAG(collection_time)", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
     }
@@ -350,20 +350,29 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would fall back to a fabricated interval on
     /// exactly the restart row the marker flags.
     ///
-    /// <para>The builder IS the established idiom, proven rather than claimed: its procedure output equals the
-    /// two hand-kept procedure consts (line-trimmed; the MCP copy minus the viewer's filter line), so a later
-    /// alias of those consts is a no-op. The MCP reader's own <c>QueryDurationTrendSql</c> const is OUTSIDE
-    /// this PR's file boundary and still carries the LAG-only shape; the last assertion names that residual
-    /// and MUST be deleted by the PR that makes the const an alias — a deliberate must-move pin, so the
-    /// follow-up cannot land without touching the record of why.</para>
+    /// <para><b>Equality became identity (#3653, the #3684 idiom).</b> #3695 proved the builder IS the
+    /// established idiom before anything was aliased to it: its procedure output was pinned line-equal to the
+    /// two hand-kept procedure consts, and the MCP reader's own <c>QueryDurationTrendSql</c> — outside that
+    /// lane's file boundary, still the LAG-only text — was named here as the residual with a must-move pin
+    /// (<c>DoesNotContain("sample_interval_seconds")</c> on the const). That pin is retired by the PR that made
+    /// the const an alias, and what stands in its place is stronger than the equality it grew from: the three
+    /// raw consts (the MCP reader's query and procedure texts, the viewer's procedure text) are DECLARED as the
+    /// builder's output, read off the source because that is the only place an alias is visible — a static
+    /// readonly bound to a builder call is a fresh string each time, so a value comparison cannot tell an alias
+    /// from a faithful copy, which is exactly why the equality pins could not prevent the drift they measured.
+    /// The value comparisons that survive below pin the alias's ARGUMENT (the MCP text is the builder's output
+    /// WITHOUT the viewer's filter, the viewer's WITH it), which a source pin names but only a value proves the
+    /// builder honours. The negative half is the one that bites: the two files must carry NONE of the retired
+    /// definition text, because a restatement beside an alias is drift with a head start.</para>
     /// </summary>
     [Fact]
-    public void RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheProcedureConstsAreItsIdiom()
+    public void RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheRawConstsAreItsAliases()
     {
         foreach (var sql in new[]
         {
             DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false),
             DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true),
+            DarlingTrendReader.QueryDurationTrendSql,
             ViewerDataService.QueryDurationTrendSql,
             ViewerDataService.ExecutionCountTrendSql,
         })
@@ -383,16 +392,49 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)).Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray(),
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
 
-        /* The builder's procedure output is the two procedure consts, modulo indentation and the filter line. */
-        Assert.Equal(Lines(ViewerDataService.ProcedureDurationTrendSql), Lines(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)));
-        Assert.Equal(Lines(DarlingTrendReader.ProcedureDurationTrendSql), Lines(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)));
+        /* The alias's ARGUMENT, by value: the MCP reader's two raw texts are the builder's output WITHOUT the
+           viewer's filter, byte for byte (line endings aside) — not line-trimmed, because an alias has no
+           indentation of its own to forgive — and the viewer's procedure text is the builder's output WITH it. */
+        Assert.Equal(Lf(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)), Lf(DarlingTrendReader.QueryDurationTrendSql));
+        Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)), Lf(DarlingTrendReader.ProcedureDurationTrendSql));
+        Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)), Lf(ViewerDataService.ProcedureDurationTrendSql));
+        Assert.DoesNotContain("$4", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains("$4::text[]", ViewerDataService.ProcedureDurationTrendSql, StringComparison.Ordinal);
 
-        /* The residual, named: the MCP reader's raw query-stats const (outside this PR's fence) is still the
-           LAG-only read. DELETE these two lines in the PR that makes it
-           `DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)` by alias. */
-        Assert.DoesNotContain("sample_interval_seconds", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
-        Assert.NotEqual(Lines(DarlingTrendReader.QueryDurationTrendSql), Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
+        /* Identity, read off the declarations (the #3684 idiom: ViewerTrendRoutingPortTests pins the hourly and
+           ladder aliases the same way). Each anchor spans the declaration's line break, so the source is
+           LF-normalised first — the positive half would fail loudly on CRLF, which is why it is asserted on
+           the normalised text rather than left to a DoesNotContain that could never fire. */
+        var reader = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs"));
+        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false);", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false);", reader, StringComparison.Ordinal);
+        var viewer = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs"));
+        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
+
+        /* None of the retired definitions survive as text. The MCP reader's file held two raw trend bodies
+           (query LAG-only, procedure three-state) and now holds neither: no summed-elapsed projection, no
+           LAG over collection_time (the Query Store read LAGs over point_time), no NULLIF on a stored interval
+           (the file-IO trend reads the interval, but never through NULLIF(MAX(...))). The viewer's file keeps
+           its own ExecutionCountTrendSql body over query_stats — a different projection, not a copy — and no
+           body over procedure_stats at all. Single-line anchors, so they fire on raw or normalised text. */
+        Assert.DoesNotContain("SUM(delta_elapsed_time) / 1000.0", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("AS total_elapsed_ms", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(collection_time) OVER", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF(MAX(sample_interval_seconds), 0)", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM procedure_stats\n", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain("public const string ProcedureDurationTrendSql", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain("public const string QueryDurationTrendSql", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("public const string ProcedureDurationTrendSql", reader, StringComparison.Ordinal);
+
+        /* And the tool still reaches the read under the name it always used: the alias is public, the reader
+           passes it as command text, and the viewer's procedure query keeps its $4 (DatabaseFilterTests). */
+        Assert.Contains("QueryDurationTrendSql, QueryDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
     }
+
+    private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     private static string[] Lines(string sql) => sql
         .Replace("\r\n", "\n", StringComparison.Ordinal)
@@ -659,6 +701,105 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #3653 (A11, the MCP half): <c>get_query_duration_trend</c>'s raw route rates a planted three-state
+    /// <c>sample_interval_seconds</c> series the way the viewer's chart does, THROUGH THE REAL READER — the
+    /// routed <see cref="DarlingTrendReader.GetQueryDurationTrendAsync"/> and the tool's own payload — not
+    /// the builder text run by hand (DeltaFamilyIntervalCompletionLivePostgresTests already runs that). The
+    /// same four collections as that test: t1/t2 recorded no interval (NULL) — t1 no prior, unrated; t2 the
+    /// LAG's 300 s, 600 ms → 2.0 ms/sec. t3 a restart — every row 0 — unrated: THIS is the row the LAG-only
+    /// const divided into a confident 0.00 ms/sec and 0.00 executions/sec on dev between #3695 and this alias, after the viewer
+    /// stopped (0 delta over a real 300 s). t4 a steady pass with a readmitted plan (0) beside a measured
+    /// 120 s row: MAX 120 wins over the LAG's 300, 1,200 ms → 10.0 ms/sec, 24 → 0.2 executions/sec (the LAG
+    /// would have said 4.0 and 0.08). Two unrated points, both KEPT, both null on the wire — and the payload's
+    /// <c>unrated_points</c> counts both. Reproduced on a PG18 + TimescaleDB 2.28.1 rig before this was
+    /// written; the pre-alias const was run against the same rows there and published 0.00 at t3.
+    /// </summary>
+    [Fact]
+    public async Task QueryDurationTrend_RawRoute_RatesAThreeStateSeriesLikeTheViewer_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live trend-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t1 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-2));
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
+
+            await QueryStatWithIntervalAsync(connection, t1, "0xA", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null, ct);
+            await QueryStatWithIntervalAsync(connection, t2, "0xA", 30, 600_000, null, ct);
+            await QueryStatWithIntervalAsync(connection, t3, "0xA", 0, 0, 0, ct);
+            await QueryStatWithIntervalAsync(connection, t4, "0xA", 24, 1_200_000, 120, ct);
+            await QueryStatWithIntervalAsync(connection, t4, "0xNEW", 0, 0, 0, ct);
+
+            /* The reader, down the raw route (nowUtc pinned inside the raw horizon so the ladder cannot send a
+               two-hour window to the rollup on a store whose CAGGs exist). */
+            var now = t4.AddMinutes(1);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(t1.AddMinutes(-1), RollupAvailability.All, RollupCoverage.Unknown, nowUtc: now);
+            Assert.Equal(RetentionTier.Raw, route.Tier);
+            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, t1.AddMinutes(-1), now, route, ct);
+
+            Assert.Equal(new[] { t1, t2, t3, t4 }, result.Points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(t1, result.EffectiveStartUtc);                       /* the unrated row is KEPT and anchors the window */
+            Assert.False(result.Points[0].HasRate);                          /* no prior collection: unknowable */
+            Assert.Equal(2.0, result.Points[1].Value!.Value, precision: 6);  /* 600 ms / LAG 300 s */
+            Assert.Equal(0.1, result.Points[1].ExecutionsPerSecond!.Value, precision: 6);
+            Assert.False(result.Points[2].HasRate);                          /* the restart: NOT 0.00 */
+            Assert.Null(result.Points[2].ExecutionCount);
+            Assert.Null(result.Points[2].ExecutionsPerSecond);
+            Assert.Equal(10.0, result.Points[3].Value!.Value, precision: 6); /* 1,200 ms / STORED 120 s, not the LAG's 4.0 */
+            Assert.Equal(0.2, result.Points[3].ExecutionsPerSecond!.Value, precision: 6);
+
+            /* The tool over the same rows (its 24-hour default window resolves raw on this store): the two
+               unrated points are on the wire as null, counted, and never 0. */
+            var payload = await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(payload, ServerName, "trend");
+            using var doc = JsonDocument.Parse(payload);
+            Assert.Equal("raw", doc.RootElement.GetProperty("source").GetString());
+            Assert.Equal(2, doc.RootElement.GetProperty("unrated_points").GetInt32());
+            var trend = doc.RootElement.GetProperty("trend").EnumerateArray().ToArray();
+            Assert.Equal(4, trend.Length);
+            Assert.Equal(JsonValueKind.Null, trend[0].GetProperty("elapsed_ms_per_second").ValueKind);
+            Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("elapsed_ms_per_second").ValueKind);
+            Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("executions_per_second").ValueKind);
+            Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("execution_count").ValueKind);
+            Assert.Equal(2.0, trend[1].GetProperty("elapsed_ms_per_second").GetDouble(), precision: 6);
+            Assert.Equal(10.0, trend[3].GetProperty("elapsed_ms_per_second").GetDouble(), precision: 6);
+            Assert.Equal(0.2, trend[3].GetProperty("executions_per_second").GetDouble(), precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>A <c>query_stats</c> row with an explicit stored interval (NULL, 0 or n), the three states the
+    /// raw read distinguishes; the round-trip test above leaves the column at its default because it plants
+    /// the two-collection LAG case only.</summary>
+    private static async Task QueryStatWithIntervalAsync(
+        NpgsqlConnection connection, DateTime t, string queryHash, long deltaExecutions, long deltaElapsedUs, int? interval, System.Threading.CancellationToken ct)
+    {
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle, query_text, execution_count, total_worker_time, total_elapsed_time, delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,0,$11,0,$12,$13)",
+            CollectionIdGenerator.Next(), t, ServerId, ServerName, Db, queryHash, "0xPLANHASH", "0xSQLH", "0xPLANH", "SELECT * FROM Posts",
+            deltaExecutions, deltaElapsedUs, interval);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, bool keepServer = false)

@@ -134,7 +134,10 @@ public sealed partial class ViewerDataService
         DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: true);
 
     /// <summary>
-    /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot.
+    /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot —
+    /// <see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/> with the viewer's $4 database filter,
+    /// by alias (#3653). Until then this was a hand-kept copy of the text the builder now produces; #3695
+    /// pinned the two line-equal before the alias replaced the copy, so the chart draws what it always did.
     ///
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
     /// over the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150)
@@ -143,33 +146,11 @@ public sealed partial class ViewerDataService
     /// rates are NULL and the reader drops the point rather than rendering 0.00 ms/sec. NULL (a pre-V128
     /// collection that never recorded one) falls back to the LAG over collection_time this read always
     /// used, so history renders exactly as it did. No <c>ELSE 0</c>: the first row of a pre-V128 series is
-    /// absent rather than a fabricated 0.0, the same correction V127 made for the wait trends.</para>
+    /// absent rather than a fabricated 0.0, the same correction V127 made for the wait trends. The rule is
+    /// stated once, on the builder; <see cref="QueryDurationTrendSql"/> reads it the same way.</para>
     /// </summary>
-    public const string ProcedureDurationTrendSql = """
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                SUM(delta_execution_count) AS total_executions,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM procedure_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY collection_time
-        )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
-        ORDER BY collection_time
-        """;
+    public static readonly string ProcedureDurationTrendSql =
+        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true);
 
     /// <summary>The hourly-tier twin of <see cref="ProcedureDurationTrendSql"/> (#3653) over
     /// <c>procedure_stats_hourly</c> — <see cref="DurationTrendRouting.ProcedureDurationTrendHourlySql"/> with
