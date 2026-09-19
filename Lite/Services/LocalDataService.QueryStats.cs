@@ -1129,11 +1129,26 @@ LEFT JOIN LATERAL (
 
     /// <summary>
     /// Gets query duration trend — elapsed ms per second per collection snapshot, the summed
-    /// <c>delta_elapsed_time</c> divided by the seconds since the PREVIOUS collection (the LAG epoch idiom).
-    /// <para><b>The first collection in the window has no rate (#3541 A12, #3540 A8).</b> Its LAG is NULL —
-    /// no previous collection inside the window to difference against — so its rate is unknowable, and the
-    /// <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0: every trend chart
-    /// and every MCP duration series began with a fabricated quiet instant. Contract rule 5 — zero is a
+    /// <c>delta_elapsed_time</c> divided by the collection's interval.
+    /// <para><b>The interval is the one the store HAS (#3653 A11).</b> <c>query_stats</c> has carried
+    /// <c>sample_interval_seconds</c> since its first schema, stamped per row by the shared delta calculator
+    /// from the same two collection instants a LAG over <c>collection_time</c> re-derives — on a steady series
+    /// the two agree to the second, and they differ exactly where they must: a row the calculator could not
+    /// difference (first sighting, counter reset, a gap past the delta policy — in practice a restart) stores
+    /// <c>0</c> beside a <c>0</c> delta, and the LAG this read used to recompute divided that fabricated 0 by
+    /// the real elapsed seconds into a confident <c>0.00 ms/sec</c> at exactly the instant nothing was
+    /// knowable. Read the way <see cref="GetProcedureDurationTrendAsync"/> has read since v61: <c>MAX</c> over
+    /// the collection's rows (a plan the TOP (150) just readmitted stores 0 beside its siblings' real interval
+    /// and contributes 0 to the sums, so MAX is the measured interval and is 0 only when EVERY row was
+    /// unknowable), <c>NULLIF(…, 0)</c> so the restart collection is UNRATED, and the LAG only for a
+    /// pre-v61 collection (NULL) that never recorded one, so history renders exactly as it did.
+    /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the wrong spelling — it falls back
+    /// to a fabricated interval on precisely the restart row. Darling's twin is
+    /// <c>DurationTrendRouting.BuildRawTrendSql</c>.</para>
+    /// <para><b>An unrated collection is a point with no rate, not a missing point (#3541 A12, #3540 A8).</b>
+    /// The first collection of a pre-v61 stretch has a NULL LAG, a restart collection a NULL interval; either
+    /// way the <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0, and every
+    /// trend chart and MCP duration series began with a fabricated quiet instant. Contract rule 5 — zero is a
     /// measurement — so the CASE has no ELSE and the rate columns are NULL for that row (and for the
     /// two-collections-in-one-second case, whose denominator is 0 and whose rate is equally undefined). The
     /// row is KEPT rather than filtered: the collection happened, the MCP payload's <c>effective_start</c> is
@@ -1158,7 +1173,12 @@ WITH raw AS
         collection_time,
         SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
         SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
+           the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1167,8 +1187,8 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    /* No ELSE: the first collection's LAG is NULL and its rate unknowable, so the rate is NULL — never a
-       fabricated 0 (#3541 A12). */
+    /* No ELSE: a restart collection's interval is NULL, as is the LAG of the first pre-v61 collection, and the
+       rate is unknowable either way, so the rate is NULL — never a fabricated 0 (#3541 A12). */
     CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
@@ -1184,8 +1204,9 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* NULL stays NULL (#3541 A12): no rate for the window's first collection, and coercing that to 0
-               here would be the fabricated quiet the SQL stopped producing. */
+            /* NULL stays NULL (#3541 A12): no rate for a restart collection (stored interval 0, #3653 A11) or
+               for the first collection of a pre-v61 stretch, and coercing that to 0 here would be the
+               fabricated quiet the SQL stopped producing. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
@@ -1293,8 +1314,11 @@ ORDER BY collection_time";
     }
 
     /// <summary>
-    /// Gets execution count trend — executions per second per collection snapshot from query_stats. The first
-    /// collection in the window carries a NULL rate, not 0 — see <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).
+    /// Gets execution count trend — executions per second per collection snapshot from query_stats: the
+    /// executions column of <see cref="GetQueryDurationTrendAsync"/> on its own, reading the interval the
+    /// same way (#3653 A11 — the stored <c>sample_interval_seconds</c>, 0 → unrated, LAG only for a pre-v61
+    /// collection). An unrated collection carries a NULL rate, not 0 — see
+    /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetExecutionCountTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
@@ -1310,7 +1334,11 @@ WITH raw AS
     SELECT
         collection_time,
         SUM(delta_execution_count) AS total_executions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1319,7 +1347,7 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    /* No ELSE: the first collection's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+    /* No ELSE: an unrated collection (restart, or the first of a pre-v61 stretch) has a NULL rate — never a
        fabricated 0 (#3541 A12). */
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM raw
@@ -1335,7 +1363,7 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. */
+            /* NULL stays NULL (#3541 A12; a restart collection since #3653 A11) — see GetQueryDurationTrendAsync. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),

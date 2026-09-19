@@ -38,12 +38,16 @@ public sealed class ViewerQueryTrendsSqlTests
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "query_stats")]
     [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql), "procedure_stats")]
     [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "query_stats")]
-    public void TrendSql_ComputesPerSecondRate_ViaLagInterval_BaseTable(string sqlName, string table)
+    public void TrendSql_ComputesPerSecondRate_OverTheStoredInterval_BaseTable(string sqlName, string table)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"v_{table}", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        /* The seconds-since-previous-snapshot interval (per-second rate denominator). */
+        /* The per-second rate denominator is the collection's STORED interval (#3540 V128 for the procedure
+           trend, #3653 A11 for the two query-stats trends): MAX(sample_interval_seconds), 0 → NULL (unrated),
+           and the seconds-since-previous-snapshot LAG only where a pre-V128 collection recorded none. */
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
@@ -60,8 +64,8 @@ public sealed class ViewerQueryTrendsSqlTests
     /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
     /// falls back to the LAG derivation only for a pre-V128 collection (NULL). No ELSE 0 anywhere in it: the
     /// rate is NULL when the interval is unknowable or absent and the reader drops the point. Its
-    /// query-stats sibling deliberately keeps the LAG-only form (the A11a residual, reported not rewritten) —
-    /// and since #3653 has no ELSE 0 either (the theory above).
+    /// query-stats siblings kept the LAG-only form until #3653 A11 (the residual #3540 reported rather than
+    /// rewrote); the theory above now pins all three to this read.
     /// </summary>
     [Fact]
     public void ProcedureDurationTrendSql_PrefersTheStoredInterval_AndNeverFabricatesZero()
@@ -417,18 +421,28 @@ public sealed class ViewerQueriesRestLivePostgresTests
             var series = await viewer.GetQueryDurationTrendAsync(TrendServerId, start, end);
             var points = series.Points;
 
-            /* #3653: the first collection's LAG is NULL, its rate unknowable, and it is NOT plotted — no
-               fabricated 0.0 opening the series (#3642's correction, ported). One point survives. */
-            var point = Assert.Single(points);
+            /* #3653 A11: BOTH rows were seeded with a STORED sample_interval_seconds of 60, so both collections
+               have a knowable rate and both are plotted. Until #3653 this pin held one point: the read LAG-
+               recomputed the interval from row spacing and the first collection's LAG was NULL — the LAG idiom's
+               rule applied to a row whose interval the store had carried all along. Now the interval is read:
+               t1 is 60 ms over its stored 60 s (1 ms/sec, 10 executions -> 0.17/sec, truncated to 0), t2 is 120 ms
+               over 60 s. A collection whose stored interval is 0 (a restart) or a pre-V128 collection with
+               nothing to LAG against would still be unrated and skipped — DeltaFamilyIntervalCompletionLivePostgresTests
+               pins those rows. */
+            Assert.Equal(2, points.Count);
+            Assert.Equal(t1, points[0].CollectionTime);
+            Assert.Equal(1.0, points[0].Value, 3);       /* 60_000 us = 60 ms over the STORED 60 s -> 1 ms/sec */
+            Assert.Equal(0, points[0].ExecutionCount);   /* 10 execs over 60 s -> 0.17/sec (truncated) */
+            var point = points[1];
             Assert.Equal(t2, point.CollectionTime);
             Assert.Equal(2.0, point.Value, 3);          /* 120_000 us = 120 ms over 60 s -> 2 ms/sec */
             Assert.Equal(2, point.ExecutionCount);       /* 120 execs over 60 s -> 2/sec (truncated) */
 
-            /* A 24-hour window routes raw, and the series says so; its head is the first SERVED point (t2,
-               61 minutes past the start — inside the 90-minute slack, so not truncated). */
+            /* A 24-hour window routes raw, and the series says so; its head is the first SERVED point (t1,
+               60 minutes past the start — inside the 90-minute slack, so not truncated). */
             Assert.Equal(RetentionTier.Raw, series.Tier);
             Assert.Equal("raw", series.Source);
-            Assert.Equal(t2, series.EffectiveStartUtc);
+            Assert.Equal(t1, series.EffectiveStartUtc);
             Assert.False(series.Truncated);
 
             bodySucceeded = true;

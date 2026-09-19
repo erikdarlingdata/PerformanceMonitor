@@ -204,6 +204,10 @@ public sealed class McpZeroIsAMeasurementTests
         yield return (nameof(DarlingTrendReader.QueryStoreDurationTrendSql), DarlingTrendReader.QueryStoreDurationTrendSql);
         yield return ("BuildRollupTrendSql(false)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false));
         yield return ("BuildRollupTrendSql(true)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true));
+        /* #3653 A11: the raw query-stats trend the viewer runs (and the MCP raw const's alias-in-waiting) — its
+           LAG is the pre-V128 fallback arm of the three-state interval, and the rule below still holds. */
+        yield return ("QueryDurationTrendRawSql(false)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false));
+        yield return ("QueryDurationTrendRawSql(true)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true));
     }
 
     [Fact]
@@ -224,17 +228,33 @@ public sealed class McpZeroIsAMeasurementTests
             Assert.DoesNotContain("WHERE interval_seconds > 0", sql, StringComparison.Ordinal);
         }
 
-        /* Lite's four differenced trends, read from source: every `AS interval_seconds` statement rates
-           through a no-ELSE CASE and none carries the fabricated 0. */
+        /* Lite's four differenced trends, read from source: every `AS interval_seconds` statement — the
+           LAG-only Query Store shape (`))) AS interval_seconds`) and the three-state delta-family shape whose
+           LAG is the pre-v61 fallback arm (`END AS interval_seconds`, #3540 / #3653 A11) — rates through a
+           no-ELSE CASE and none carries the fabricated 0. */
         foreach (var file in new[] { "LocalDataService.QueryStats.cs", "LocalDataService.QueryStore.cs" })
         {
             var lite = ReadRepoFile("Lite", "Services", file);
             Assert.DoesNotMatch(FabricatedFirstPoint, lite);
-            var lagged = Regex.Matches(lite, @"\)\)\) AS interval_seconds").Count;
+            var lagged = Regex.Matches(lite, @"(\)\)\)|END) AS interval_seconds").Count;
             var rated = Regex.Matches(lite, @"CASE WHEN interval_seconds > 0 THEN [^\n]*? END AS \w+_per_second").Count;
-            Assert.True(lagged >= 1, $"{file}: the LAG idiom is gone, so this pin is looking at nothing");
+            Assert.True(lagged >= 1, $"{file}: the differenced-interval idiom is gone, so this pin is looking at nothing");
             Assert.True(rated >= lagged, $"{file}: {lagged} differenced statement(s) but only {rated} no-ELSE rate column(s)");
         }
+
+        /* #3653 A11: Lite's three delta-family trends read the interval the store HAS — the three-state
+           MAX(sample_interval_seconds) shape, 0 → NULL, LAG only for a pre-v61 collection — and only the
+           Query Store trend (no interval column on its source) keeps the LAG-only shape. */
+        var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
+        Assert.Equal(3, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
+        Assert.Equal(3, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
+        Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteQueryStats);
+        /* The wrong spelling, in its SQL shape (a COALESCE whose fallback is the LAG derivation): it would fall
+           back to a fabricated interval on exactly the restart row the 0 marker flags. */
+        Assert.DoesNotMatch(new Regex(@"COALESCE\(NULLIF\(sample_interval_seconds, 0\),\s*(CAST\()?extract"), liteQueryStats);
+        var liteQueryStore = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStore.cs");
+        Assert.Single(Regex.Matches(liteQueryStore, @"\)\)\) AS interval_seconds"));
+        Assert.DoesNotMatch(new Regex(@"MAX\(sample_interval_seconds\)"), liteQueryStore);
 
         /* The readers carry the null through instead of re-fabricating it. */
         var point = typeof(DarlingTrendReader.QueryDurationTrendPoint);

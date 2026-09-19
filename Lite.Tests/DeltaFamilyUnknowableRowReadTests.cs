@@ -284,6 +284,80 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
+    /// #3653 (A11): the query duration trend — the read that LAG-recomputed an interval <c>query_stats</c> has
+    /// stored from its first schema, and so divided a restart row's fabricated 0 delta by the real elapsed
+    /// seconds into a confident 0.00 ms/sec. The procedure fixture's four collections, on query_stats: t1/t2
+    /// pre-v61 (NULL interval) — t1 has no prior and is UNRATED, t2 divides by the LAG's 300 s; t3 a restart
+    /// (every row 0) — unrated, where the LAG-only read said 0.00; t4 a steady pass with a readmitted plan (0)
+    /// beside a measured 120 s row — the STORED 120 wins over the LAG's 300, and the readmitted plan adds
+    /// nothing to the sums. Same rows, same expectations as the procedure test, on purpose: the two reads are
+    /// one idiom now.
+    /// </summary>
+    [Fact]
+    public async Task QueryDurationTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        var t2 = t1.AddMinutes(5);
+        var t3 = t2.AddMinutes(5);
+        var t4 = t3.AddMinutes(5);
+
+        await SeedQueryStatAsync(t1, "0xA", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null);
+        await SeedQueryStatAsync(t2, "0xA", deltaExecutions: 30, deltaElapsedUs: 600_000, interval: null);
+        await SeedQueryStatAsync(t3, "0xA", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+        await SeedQueryStatAsync(t4, "0xA", deltaExecutions: 24, deltaElapsedUs: 1_200_000, interval: 120);
+        await SeedQueryStatAsync(t4, "0xNEW", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+
+        var points = await _dataService.GetQueryDurationTrendAsync(ServerId, hoursBack: 3);
+
+        Assert.Equal(new[] { t1, t2, t3, t4 }, points.Select(p => p.CollectionTime).ToArray());
+
+        /* t1 (no prior) and t3 (restart marker): present, unrated — null, never 0. */
+        Assert.False(points[0].HasRate);
+        Assert.Null(points[0].Value);
+        Assert.Null(points[0].ExecutionsPerSecond);
+        Assert.False(points[2].HasRate);
+        Assert.Null(points[2].Value);
+        Assert.Null(points[2].ExecutionCount);
+
+        /* t2 (pre-v61): 600 ms / 300 s = 2.0 ms/sec; 30 / 300 = 0.1 executions/sec. */
+        Assert.Equal(2.0, points[1].Value!.Value, precision: 6);
+        Assert.Equal(0.1, points[1].ExecutionsPerSecond!.Value, precision: 6);
+
+        /* t4: the STORED 120 s — 1200 / 120 = 10.0, not the LAG's 1200 / 300 = 4.0; 24 / 120 = 0.2. */
+        Assert.Equal(10.0, points[3].Value!.Value, precision: 6);
+        Assert.Equal(0.2, points[3].ExecutionsPerSecond!.Value, precision: 6);
+    }
+
+    /// <summary>
+    /// #3653 (A11): the execution-count trend is the duration trend's executions column on its own and reads
+    /// the interval the same way. Same fixture: t1 unrated (no prior), t2 the LAG's 300 s (30 / 300 = 0.1),
+    /// t3 the restart marker — unrated, where the LAG-only read published 0.00 executions/sec — and t4 the
+    /// stored 120 s (24 / 120 = 0.2, not the LAG's 24 / 300 = 0.08).
+    /// </summary>
+    [Fact]
+    public async Task ExecutionCountTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        var t2 = t1.AddMinutes(5);
+        var t3 = t2.AddMinutes(5);
+        var t4 = t3.AddMinutes(5);
+
+        await SeedQueryStatAsync(t1, "0xE", 5, 100_000, interval: null);
+        await SeedQueryStatAsync(t2, "0xE", 30, 600_000, interval: null);
+        await SeedQueryStatAsync(t3, "0xE", 0, 0, interval: 0);
+        await SeedQueryStatAsync(t4, "0xE", 24, 1_200_000, interval: 120);
+        await SeedQueryStatAsync(t4, "0xNEW", 0, 0, interval: 0);
+
+        var points = await _dataService.GetExecutionCountTrendAsync(ServerId, hoursBack: 3);
+
+        Assert.Equal(new[] { t1, t2, t3, t4 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Null(points[0].Value);
+        Assert.Equal(0.1, points[1].Value!.Value, precision: 6);
+        Assert.Null(points[2].Value);
+        Assert.Equal(0.2, points[3].Value!.Value, precision: 6);
+    }
+
+    /// <summary>
     /// #3540 (v61): the procedure history grid's "Interval (sec)" column shows the row's STORED interval where
     /// it has one — the marker's 0 INCLUDED, which is what the query-stats history has always shown for an
     /// unknowable row (a displayed interval is not a rate, so 0 is honest here where it would be a lie in a
@@ -403,6 +477,24 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
              delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
             VALUES ($1, $2, $3, $4, 'AppDb', 'dbo', $5, 'PROCEDURE', 0, 0, 0, 0, 0, 0, $6, 0, $7, $8)";
         foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, objectName, deltaExecutions, deltaElapsedUs, IntervalValue(interval) })
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedQueryStatAsync(DateTime at, string queryHash, long deltaExecutions, long deltaElapsedUs, int? interval)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO query_stats
+            (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+             execution_count, total_worker_time, total_elapsed_time,
+             delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+            VALUES ($1, $2, $3, $4, 'AppDb', $5, '0xPLAN', '0xSQL', '0xPLANH', 0, 0, 0, $6, 0, $7, $8)";
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, queryHash, deltaExecutions, deltaElapsedUs, IntervalValue(interval) })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }

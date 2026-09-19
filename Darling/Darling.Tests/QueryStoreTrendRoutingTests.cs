@@ -111,6 +111,41 @@ public sealed class QueryStoreTrendRoutingTests
     }
 
     /// <summary>
+    /// #3653 (measurement A8): the two point classes are rated over two denominators. A rollup point is one
+    /// corrected-hourly bucket and is divided by the bucket WIDTH — the same literal the query-stats hourly
+    /// tier divides by, bound to the constant rather than restated so a bucket change cannot leave this SQL
+    /// saying 3,600 — and a raw point (a Query Store interval placed at its start; the store holds no interval
+    /// length for it) keeps the spacing to the previous point. The pre-#3653 shape LAGged every point, so a
+    /// bucket with no rows — a quiet hour — made the next bucket's denominator 7,200 and halved its rate; that
+    /// shape is pinned by absence (no bare <c>LAG ... AS interval_seconds</c>), the class-gated CASE by
+    /// presence. The live test in <c>QueryStoreTrendRoutingLiveTests</c> proves the arithmetic on a store.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RollupTrendSql_RatesRollupPointsOverTheBucketWidth_AndRawPointsOverTheirSpacing(bool withDatabaseFilter)
+    {
+        var sql = QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter);
+
+        /* Each united point carries its class; the CASE below rates on it. */
+        Assert.Contains("TRUE AS from_rollup FROM rollup_points", sql, StringComparison.Ordinal);
+        Assert.Contains("FALSE AS from_rollup FROM raw_points", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "CASE WHEN from_rollup\n             THEN " + DurationTrendRouting.HourlyBucketSecondsSql + "\n             ELSE extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))\n        END AS interval_seconds",
+            sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Equal(TimescaleSupport.HourlyBucket.TotalSeconds, double.Parse(DurationTrendRouting.HourlyBucketSecondsSql, System.Globalization.CultureInfo.InvariantCulture));
+
+        /* The old every-point LAG is gone: the only LAG left is the raw arm of the CASE. */
+        Assert.DoesNotContain("OVER (ORDER BY point_time)))) AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"LAG\(point_time\)"));
+
+        /* The rate columns keep the no-ELSE CASE (#3541 A12): a raw point that opens the window is unrated. */
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// THE #2736 pin: the routed SQL's raw scan is bounded to the tail it serves. The old shape's fixed
     /// slab — <c>$2 - interval '1 day'</c> below and <c>$3 + interval '30 days'</c> above — is what made
     /// cost independent of the requested window; its absence here IS the fix, so it is pinned by absence

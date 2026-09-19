@@ -85,14 +85,17 @@ public sealed partial class ViewerDataService
        (LocalDataService.QueryStore.cs:582) ported to Postgres. The SQL is byte-identical to Lite's
        apart from the table name (Lite reads the v_* views; the viewer reads the base tables, matching
        W1f-1's Top-Queries read) — every operator Lite uses (date_trunc('second', …), the
-       LAG() OVER (ORDER BY collection_time) per-interval rate, extract(epoch FROM interval),
+       LAG() OVER (ORDER BY collection_time) fallback interval, extract(epoch FROM interval),
        CAST(… AS double precision), the positional $1/$2/$3 placeholders) is native Postgres, so no
        dialect rewrite is needed here (unlike the heatmap's time_bucket/ARG_MAX). The per-snapshot
-       rate = summed delta over the seconds since the previous snapshot; the first row's LAG is NULL,
-       so interval_seconds is NULL and the CASE yields NULL — the rate is unknowable, and the reader skips
-       the point rather than plotting the fabricated 0 it used to (#3653; the MCP readers stopped in
-       #3642, the procedure copy in #3630). Summed bigint deltas come back as Postgres numeric, so the
-       reads go through Convert tolerantly.
+       rate = summed delta over the collection's interval: the STORED sample_interval_seconds where the
+       rows have one (#3653 A11 — the three delta-family trends read the interval the store has, with
+       0 meaning unknowable and NULL meaning pre-V128; the LAG over collection_time stands in only for
+       NULL), and a NULL interval_seconds — a restart pass, or the first row of a pre-V128 stretch — makes
+       the CASE yield NULL: the rate is unknowable, and the reader skips the point rather than plotting
+       the fabricated 0 it used to (#3653; the MCP readers stopped in #3642, the procedure copy in
+       #3630). Summed bigint deltas come back as Postgres numeric, so the reads go through Convert
+       tolerantly.
        $1 server_id, $2 window start, $3 window end (naive UTC), $4 the #1319 database filter.
 
        #3653: the query-stats and procedure-stats trends are ROUTED (DurationTrendRouting, the ladder the
@@ -106,31 +109,18 @@ public sealed partial class ViewerDataService
        chart-side disclosure (the floor the rollup has materialized to, which the MCP tool has published as
        routing.unserved_before since #2736) rides its own series type, QueryStoreTrendSeries. */
 
-    /// <summary>Query-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot. The
-    /// first collection in the window has NO rate — its LAG is NULL and the CASE has no ELSE (#3653, the
-    /// #3642 correction the MCP copy carries) — and the reader skips it.</summary>
-    public const string QueryDurationTrendSql = """
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                SUM(delta_execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY collection_time
-        )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
-        ORDER BY collection_time
-        """;
+    /// <summary>
+    /// Query-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot —
+    /// <see cref="DurationTrendRouting.QueryDurationTrendRawSql"/> with the viewer's $4 database filter (#3653
+    /// A11). The denominator is the collection's STORED <c>sample_interval_seconds</c> (MAX over its rows;
+    /// 0 → NULL, so a restart pass is unrated and the reader skips it rather than plotting 0.00 ms/sec), and
+    /// the LAG over <c>collection_time</c> this read used to recompute stands in only for a pre-V128 collection
+    /// that never recorded one — the same three-state read <see cref="ProcedureDurationTrendSql"/> has carried
+    /// since V128; the builder's remarks state the rule once. A static readonly rather than a const because
+    /// the Storage side is a builder (one text with and one without the filter), as for the hourly twin below.
+    /// </summary>
+    public static readonly string QueryDurationTrendSql =
+        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true);
 
     /// <summary>
     /// The hourly-tier twin of <see cref="QueryDurationTrendSql"/> (#3653): the SAME text the MCP reader's
@@ -311,15 +301,23 @@ public sealed partial class ViewerDataService
     public static readonly string QueryStoreDurationTrendRollupSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
 
-    /// <summary>Execution-count trend: executions/sec per collection snapshot from query_stats. The first
-    /// collection's rate is NULL, not 0 (#3653), and the reader skips it.</summary>
+    /// <summary>Execution-count trend: executions/sec per collection snapshot from query_stats — the
+    /// executions column of <see cref="QueryDurationTrendSql"/> on its own, so it reads the interval the same
+    /// way (#3653 A11): the collection's stored <c>sample_interval_seconds</c>, 0 → NULL (unrated, skipped),
+    /// and the LAG over <c>collection_time</c> only for a pre-V128 collection. The first collection of such a
+    /// stretch has a NULL rate, not 0 (#3541 A12), and the reader skips it. Kept as its own text rather than
+    /// reading the duration statement's second column (as the hourly route does) because the raw tier's
+    /// elapsed sum is a cost this chart does not need paid.</summary>
     public const string ExecutionCountTrendSql = """
         WITH raw AS
         (
             SELECT
                 collection_time,
                 SUM(delta_execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END AS interval_seconds
             FROM query_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -427,9 +425,10 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* #3541 A12: the shared builder returns NULL rates for the window's first united point (its LAG
-               has nothing to difference against). A chart has nowhere to draw "unknown", so the point is
-               skipped here rather than coerced to the 0 it used to be plotted as. */
+            /* #3541 A12: the shared builder returns NULL rates for a raw-arm point that opens the window (its
+               LAG has nothing to difference against); a rollup point is always rated over its bucket width
+               (#3653 A8). A chart has nowhere to draw "unknown", so the point is skipped here rather than
+               coerced to the 0 it used to be plotted as. */
             if (reader.IsDBNull(1))
                 continue;
 
@@ -473,9 +472,10 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* A NULL rate is an unknowable interval — the window's first collection, whose LAG has nothing to
-               difference against (#3653, every raw trend here since the ELSE 0 came out), or a collection whose
-               stored interval was unknowable (a restart pass, #3540 V128). The point is SKIPPED, not read as 0
+            /* A NULL rate is an unknowable interval — a collection whose stored sample_interval_seconds is 0 (a
+               restart pass, #3540 V128; every raw trend here reads the stored interval since #3653 A11), or the
+               first collection of a pre-V128 stretch, whose LAG has nothing to difference against (#3653, every
+               raw trend here since the ELSE 0 came out). The point is SKIPPED, not read as 0
                and not interpolated across: a chart has nowhere to draw "unknown", and the fabricated quiet
                instant it used to plot dragged every series' opening toward zero. The hourly tier never
                produces one (its denominator is the bucket width), so this is a no-op on that route. */

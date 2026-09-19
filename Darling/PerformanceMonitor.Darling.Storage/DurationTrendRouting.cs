@@ -12,7 +12,8 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Where an unkeyed duration trend (query-stats, procedure-stats) reads from, and what it says about what it
-/// served — the tier decision, the hourly-tier SQL, and the coverage description that the MCP reader
+/// served — the tier decision, the hourly-tier SQL, the raw-tier SQL (<see cref="BuildRawTrendSql"/>, #3653
+/// A11), and the coverage description that the MCP reader
 /// (<c>DarlingTrendReader</c>, #3590) and the desktop viewer's Performance Trends tab
 /// (<c>ViewerDataService.QueryTrends</c>, #3653) share, so the two apps cannot disagree about which relation
 /// answers a window or about what a served series covers.
@@ -185,6 +186,90 @@ public static class DurationTrendRouting
     /// <see cref="TimescaleSupport.QueryStatsHourlyView"/>.</summary>
     public static string QueryDurationTrendHourlySql(bool withDatabaseFilter)
         => BuildHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView, withDatabaseFilter);
+
+    /// <summary>
+    /// The raw-tier (per-collection) duration trend over <paramref name="rawTable"/> — <c>query_stats</c> or
+    /// <c>procedure_stats</c>, the two plan-cache delta families — with the interval the store HAS (#3653,
+    /// measurement A11): per collection, the summed <c>delta_elapsed_time</c> (→ ms) and
+    /// <c>delta_execution_count</c> divided by that collection's <c>sample_interval_seconds</c>, and the
+    /// gap-to-previous-collection LAG only where the store never recorded one. Projects the same three
+    /// columns under the same aliases as <see cref="BuildHourlyTrendSql"/> so one mapper serves both tiers.
+    ///
+    /// <para><b>The interval is read, not recomputed.</b> Both tables have carried <c>sample_interval_seconds</c>
+    /// since their first rung (the #3540 keystone's own words: "perfmon/query_stats already have the column"),
+    /// stamped per row by the shared delta calculator from the SAME two collection instants a LAG over
+    /// <c>collection_time</c> re-derives — so on a steady series the two agree to the second, and the
+    /// difference is exactly the rows where they must not: a row the calculator could not difference (first
+    /// sighting, counter reset, a gap past the delta policy — in practice a restart) stores <c>0</c> beside a
+    /// <c>0</c> delta, and the LAG happily divided that fabricated 0 by the real elapsed seconds into a confident
+    /// <c>0.00 ms/sec</c> at exactly the instant nothing was knowable. The query-stats copies of this read
+    /// (the MCP reader's raw const, the viewer's, Lite's two) kept the LAG-only shape after the procedure
+    /// copies moved to the stored interval in V128 — the A11 residual #3540 reported rather than rewrote —
+    /// and this builder is where it is rewritten once for both apps.</para>
+    ///
+    /// <para><b>Three states per collection, read distinctly</b> (the #2234 / #3540 contract): <c>MAX</c> over
+    /// the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150) readmission)
+    /// stores 0 beside its siblings' real interval and contributes 0 to the sums, so MAX is the collection's
+    /// measured interval and is 0 only when EVERY row was unknowable (a restart). That 0 becomes NULL through
+    /// <c>NULLIF</c>, so the rates are NULL — an UNRATED point, never <c>0.00</c>. A NULL MAX is a pre-V128
+    /// collection that never recorded an interval, and only there does the LAG stand in, so history renders
+    /// exactly as it did. <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the WRONG spelling:
+    /// it falls back to a fabricated interval on precisely the restart row the marker exists to flag.</para>
+    ///
+    /// <para>No <c>ELSE 0</c>: the first collection of a pre-V128 stretch has a NULL LAG and no rate, and a
+    /// restart collection has no rate — both rows are KEPT with NULL rate columns (#3541 A12: the collection
+    /// happened, <c>effective_start</c> is truthfully its instant, and a lone collection is "no rate yet", not
+    /// an empty window). The MCP reader publishes such a point as null with the reason; the viewer's chart
+    /// reader skips it. With <paramref name="withDatabaseFilter"/>, $4 is the viewer's guarded <c>text[]</c>
+    /// database filter (#1319); without it the text is what the MCP reader runs. $1 server_id, $2/$3 window
+    /// (naive UTC). Reads the BASE table (no text columns are projected, so the payload-resolving
+    /// <c>v_*</c> view is not needed).</para>
+    /// </summary>
+    public static string BuildRawTrendSql(string rawTable, bool withDatabaseFilter)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
+
+        var filter = withDatabaseFilter
+            ? "\n    AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+            : "";
+
+        return $"""
+            WITH raw AS
+            (
+                SELECT
+                    collection_time,
+                    SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
+                    SUM(delta_execution_count) AS total_executions,
+                    CASE WHEN MAX(sample_interval_seconds) IS NULL
+                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                         ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                    END AS interval_seconds
+                FROM {rawTable}
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3{filter}
+                GROUP BY collection_time
+            )
+            SELECT
+                collection_time,
+                CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+            FROM raw
+            ORDER BY collection_time
+            """;
+    }
+
+    /// <summary>The query-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>query_stats</c>. The
+    /// viewer's <c>QueryDurationTrendSql</c> is this text with the filter; the MCP reader's raw const is its
+    /// alias-in-waiting without it (see the builder remarks).</summary>
+    public static string QueryDurationTrendRawSql(bool withDatabaseFilter)
+        => BuildRawTrendSql("query_stats", withDatabaseFilter);
+
+    /// <summary>The procedure-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>procedure_stats</c>:
+    /// the V128 idiom the two hand-kept procedure consts already carry, produced by the builder so a test can
+    /// pin that the builder IS that idiom and a later alias of those consts is provably a no-op.</summary>
+    public static string ProcedureDurationTrendRawSql(bool withDatabaseFilter)
+        => BuildRawTrendSql("procedure_stats", withDatabaseFilter);
 
     /// <summary>The procedure-stats hourly trend — <see cref="BuildHourlyTrendSql"/> over
     /// <see cref="TimescaleSupport.ProcedureStatsHourlyView"/>.</summary>

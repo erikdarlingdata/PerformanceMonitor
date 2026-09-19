@@ -659,19 +659,84 @@ public static class ComposeCompiler
         /* The aggregated column: the delta for a cumulative counter, the column itself otherwise. */
         var aggColumn = measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!;
         var qualified = FactAlias + "." + aggColumn;
+        var measured = MeasuredDeltaFilter(measure);
 
         var nativeExpr = aggregate switch
         {
-            ComposeAggregate.Sum => $"CAST(SUM({qualified}) AS double precision)",
-            ComposeAggregate.Avg => $"CAST(AVG({qualified}) AS double precision)",
-            ComposeAggregate.Min => $"CAST(MIN({qualified}) AS double precision)",
-            ComposeAggregate.Max => $"CAST(MAX({qualified}) AS double precision)",
+            ComposeAggregate.Sum => $"CAST(SUM({qualified}){measured} AS double precision)",
+            ComposeAggregate.Avg => $"CAST(AVG({qualified}){measured} AS double precision)",
+            ComposeAggregate.Min => $"CAST(MIN({qualified}){measured} AS double precision)",
+            ComposeAggregate.Max => $"CAST(MAX({qualified}){measured} AS double precision)",
             ComposeAggregate.PercentileCont =>
                 $"percentile_cont({FormatDouble(ComposeLimits.DefaultPercentile)}) WITHIN GROUP (ORDER BY {qualified})",
             _ => throw new InvalidOperationException($"Unhandled aggregate {aggregate}"),
         };
 
         return ApplyUnitConversion(nativeExpr, measure.UnitFamily, measure.NativeUnit, unit);
+    }
+
+    /// <summary>
+    /// The predicate every row's <c>sample_interval_seconds</c> must pass before its delta joins an aggregate
+    /// (#3653, the Compose Cumulative-archetype item; #2234 / #3540 for the contract it enforces). Emitted as
+    /// the aggregate's own <c>FILTER (WHERE …)</c> clause — parameter-free, so it cannot shift the $n order the
+    /// filter clauses bind in.
+    /// </summary>
+    private const string MeasuredDeltaPredicate = "sample_interval_seconds IS DISTINCT FROM 0";
+
+    /// <summary>
+    /// The <c>FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0)</c> clause a raw-tier aggregate over a
+    /// per-interval DELTA column carries, or the empty string when the measure is not one.
+    ///
+    /// <para><b>Why a row filter at all.</b> A delta-family collector stores, beside every row's <c>delta_*</c>
+    /// columns, the interval those deltas were measured over — and stores <c>0</c> for a row it could NOT
+    /// difference (first sighting, counter reset, a gap past the delta policy; in practice a service restart),
+    /// with a <c>0</c> delta beside it. That pair is a marker meaning "nothing knowable", not a measurement of
+    /// nothing (the #2234 contract: 0 is the unknowable marker, NULL a pre-upgrade row, <c>n</c> measured).
+    /// <c>SUM(delta)</c> is indifferent to it (adding 0), but <c>AVG(delta)</c> averaged the marker in as a
+    /// measured zero — a per-sample mean dragged toward 0 by every restart in the window — and <c>MIN(delta)</c>
+    /// read 0 at exactly the sample that measured nothing, every time a restart sat inside the window. The
+    /// rest of the read layer already excludes the marker (<c>NULLIF(sample_interval_seconds, 0)</c> in the
+    /// rate reads, <c>IS DISTINCT FROM 0</c> in the file-IO and PG trend aggregates); since V128 all ten
+    /// delta families carry the column, so the Compose compiler can say it once for every delta aggregate.</para>
+    ///
+    /// <para><b>Which measures.</b> Any scalar measure whose aggregated column is a per-interval delta on a
+    /// source that stores the interval: the <see cref="MeasureArchetype.Cumulative"/> measures (their
+    /// <c>DeltaColumn</c> is the delta) and the <see cref="MeasureArchetype.Delta"/> measures that read a
+    /// <c>delta_*</c> column as a first-class measure on the SAME tables (<c>wait_time_delta_ms</c> compiles to
+    /// the very column <c>wait_time_ms</c> does — filtering one and not the other would have two names for one
+    /// column disagree about one row). "Stores the interval" is <see cref="CollectorDeltaCalculator.IsDeltaFamily"/>
+    /// — the collector set the delta calculator stamps, which <c>DeltaFamilyIntervalColumnTests</c> pins carries
+    /// <c>sample_interval_seconds</c> in both directions — rather than a second list here that could drift from
+    /// it. Query Store's <c>qs_executions</c> is a Delta measure on a table OUTSIDE that set (a per-interval
+    /// snapshot with no interval column), so it compiles unfiltered, as it must: naming an absent column fails
+    /// at parse time. Gauges, PerEvent columns, ratios and <c>COUNT(*)</c> are untouched — a gauge read at a
+    /// restart pass is a real reading, and a row is a row.</para>
+    ///
+    /// <para><b>Why the aggregate's FILTER and not the statement's WHERE.</b> One compiled statement aggregates
+    /// its primary measure and its overlay (#1606) over the SAME fact rows, and a Cumulative primary can sit
+    /// beside a Gauge overlay on one table (<c>memory_grant_stats</c>: <c>grant_timeouts</c> beside
+    /// <c>grant_waiters</c>). A WHERE would drop the restart row from BOTH — the gauge's valid reading with the
+    /// delta's marker — and a Gauge primary beside a Cumulative overlay would filter neither. The FILTER clause
+    /// is scoped to the one aggregate whose column the marker poisons, and the RankedTimeSeries rank CTE
+    /// inherits it through the same expression builder, so membership is ranked over measured rows only.</para>
+    ///
+    /// <para><b>Raw tier only.</b> A CAGG route reads pre-aggregated <c>_sum</c>/<c>_min</c>/<c>_max</c> columns
+    /// through <see cref="ComposeCaggValueMapper"/>; the row is gone by then, and excluding the marker from a
+    /// continuous aggregate is the aggregate definition's job (#3653's A6 item: a new aggregate with the
+    /// predicate baked in, because a CAGG cannot be altered in place).</para>
+    /// </summary>
+    private static string MeasuredDeltaFilter(ComposeMeasure measure)
+    {
+        var aggregatesADelta = measure.Archetype switch
+        {
+            MeasureArchetype.Cumulative => true,
+            MeasureArchetype.Delta => true,
+            _ => false,
+        };
+
+        return aggregatesADelta && CollectorDeltaCalculator.IsDeltaFamily(measure.SourceTable)
+            ? $" FILTER (WHERE {FactAlias}.{MeasuredDeltaPredicate})"
+            : "";
     }
 
     /// <summary>Scales <paramref name="expr"/> (already a double) from <paramref name="nativeUnit"/> to
