@@ -177,6 +177,40 @@ public static partial class PgTargetScorer
     /// measured bars above).</summary>
     public const double ConnectionSaturationCoFireBoost = 0.25;
 
+    /// <summary>Metadata stamp (0 / 1) the offered-vs-delivered amplifier writes on
+    /// <see cref="PgTargetFactKeys.ConnectionSaturation"/>: 1 when <c>ANOMALY_PG_SESSION_SPIKE</c> fired this pass
+    /// and <c>ANOMALY_PG_TPS</c> did not — more connections than this hour of the week usually carries, doing no
+    /// more work than usual. Stamped on every fired saturation fact (0 otherwise), so <c>get_analysis_facts</c>
+    /// shows the verdict either way; absent on a saturation fact the amplifier pass never reached (base 0).</summary>
+    public const string OfferedVsDeliveredKey = "offered_vs_delivered";
+
+    /// <summary>Metadata: the session-count anomaly's peak over its bucket's robust centre (median when the bucket
+    /// has one, else mean) — "connections rose to N× this hour's norm" in the advice. 0 when the anomaly is absent
+    /// or did not fire, or when the bucket's centre is 0 (no ratio to state).</summary>
+    public const string SessionSpikeRatioKey = "session_spike_ratio";
+
+    /// <summary>Metadata: the TPS anomaly's peak over its bucket's robust centre, on the same terms as
+    /// <see cref="SessionSpikeRatioKey"/>. 0 when no TPS anomaly fired — which is the shape the amplifier fires on.</summary>
+    public const string TpsAnomalyRatioKey = "tps_anomaly_ratio";
+
+    /// <summary>
+    /// The boost the offered-vs-delivered pair adds to a fired saturation fact (×1.3): the session-count anomaly
+    /// fired against this server's own hour-of-week baseline while the transaction-rate anomaly did not. Why the
+    /// pair and not a raw trend: design §3.6 / D7 named "sessions climbing while TPS is flat or falling", and lane 3
+    /// parked a hook reading the window's first-half-vs-second-half TPS trend for it; the 2026-09-19 calibration
+    /// (measurements §A1) read routine 20–50× TPS bursts on every cluster (per-server 5-minute maximum median
+    /// 1,710 against a p50 of 31), so an in-window trend would amplify saturation on every batch job's shoulder
+    /// and miss real queueing at low absolute TPS. The honest offered-vs-delivered signal is the hour-of-week
+    /// pair lane 9 built: sessions anomalous HIGH (the offer rose) while throughput is NOT anomalous high (nothing
+    /// more was delivered) — arrivals are queueing at the cliff, not working. Larger than the sibling co-fires'
+    /// 0.25 because it is two baselined instruments agreeing, and 1.0 × 1.3 = 1.3 leaves the second co-fire to
+    /// carry a CRITICAL pool to the 1.5 notify line — one corroborator is WARNING, two page (#3584's rule).
+    /// unmeasured: chosen, not measured — calibrate against analysis_findings co-fire rates before the next
+    /// release. A boost is not a bar the base was graded on, so the fact's threshold_lineage (1) does not move —
+    /// the rule <see cref="ConnectionSaturationCoFireBoost"/> rests on.
+    /// </summary>
+    public const double OfferedVsDeliveredBoost = 0.3;
+
     /// <summary>
     /// The share of the PEAK capture's sessions that were <c>idle in transaction</c> at or above which the pool is
     /// being filled by PARKED connections rather than work — design §3.6's named amplifier ("parked connections
@@ -272,6 +306,16 @@ public static partial class PgTargetScorer
     /// only — absent on stock, so inert there): the instance is CPU-bound while the pool is near its ceiling —
     /// arrivals are stacking up on a saturated CPU, the D7 "queueing at the cliff" shape, and a pooler will not
     /// buy back the CPU.</description></item>
+    /// <item><description><b>Offered vs delivered</b> (v2 — #3691 lane 18, design §3.6 / D7): <c>ANOMALY_PG_SESSION_SPIKE</c>
+    /// fired while <c>ANOMALY_PG_TPS</c> did not — more connections than this hour of the week usually carries,
+    /// doing no more work than usual. Reads the two ANOMALY facts (the <c>anomaly</c> source is in
+    /// <c>FactScorer.ScoreAll</c>'s lookup, the pattern lane 15's checkpoint trigger set), never a raw in-window
+    /// trend — see <see cref="OfferedVsDeliveredBoost"/> for why. Both anomalies fired is a load surge (the
+    /// anomaly family's own corroboration), not queueing, and the arm stays quiet; a stock target with no
+    /// baseline yet has neither anomaly and the arm is inert. This is the ONE amplifier whose predicate writes
+    /// metadata (<see cref="OfferedVsDeliveredKey"/> and the two ratios): the verdict needs the fact SET, which
+    /// the base-severity seam never sees, and the predicate is the only seam that has both the set and the fact;
+    /// the stamp is a pure function of the set, so evaluating it twice writes the same values.</description></item>
     /// </list>
     /// <para><b>The one amplifier on <see cref="PgTargetFactKeys.IdleInTransaction"/></b> (v2, lane 14) is
     /// RECURRENCE: one holder identity seen over the duration floor in <see cref="IdleInTransactionRecurrenceCaptures"/>
@@ -280,15 +324,15 @@ public static partial class PgTargetScorer
     /// not a bar on purpose: the duration alone grades, so the fact's lineage is the measured bars' and the
     /// unmeasured capture count can only lift a finding that already exists.</para>
     ///
-    /// <para><b>v2 hooks, deliberately commented rather than written against an inert predicate:</b> (a) the
-    /// offered-vs-delivered co-fire the design names — sessions climbing across the window while <c>PG_TPS</c>
-    /// is flat or falling — reads the trend lane 6 stamps under <see cref="TpsTrendKey"/>, but the trend's
-    /// stability has not been judged (the 2026-09-19 calibration saw routine 50× TPS bursts on every cluster),
-    /// so it stays parked; (b) the <c>PG_IDLE_IN_TRANSACTION</c> co-fire is NOT enabled here even though the fact
-    /// now exists: the self-metadata parked-connections arm above already fires on the same evidence (the peak
-    /// capture's idle-in-transaction share), and a second +0.25 for the same sessions counted twice would be
+    /// <para><b>One v2 hook stays deliberately commented rather than written against an inert predicate:</b> the
+    /// <c>PG_IDLE_IN_TRANSACTION</c> co-fire is NOT enabled here even though the fact now exists: the
+    /// self-metadata parked-connections arm above already fires on the same evidence (the peak capture's
+    /// idle-in-transaction share), and a second +0.25 for the same sessions counted twice would be
     /// double-counting, not corroboration. The idle fact reaches the saturation story through the graph edge
-    /// (<c>PgTargetRelationshipGraph.Saturation.cs</c>) instead, gated on the same share bar.</para>
+    /// (<c>PgTargetRelationshipGraph.Saturation.cs</c>) instead, gated on the same share bar. The OTHER hook lane
+    /// 3 parked — the raw <see cref="TpsTrendKey"/> trend — is RETIRED, replaced by the anomaly-pair arm above on
+    /// the calibration's evidence; the trend itself is still stamped on <c>PG_TPS</c> by the database family as a
+    /// reader's figure, and nothing here reads it.</para>
     /// </summary>
     private static partial List<AmplifierDefinition> SessionsAmplifiers(string key)
     {
@@ -330,18 +374,17 @@ public static partial class PgTargetScorer
             Predicate = facts =>
                 facts.TryGetValue(PgTargetFactKeys.CpuPercent, out var cpu) && cpu.BaseSeverity > 0,
         },
-        /* v2 — offered vs delivered (design §3.6, D7 verbatim): sessions climbing while PG_TPS is flat or falling.
-           Reads the trend the database family stamps on the PG_TPS fact (second half − first half of the window's
-           rate, PgTargetScorer.TpsTrendKey — shipped by lane 6 in PgTargetScorer.Database.cs); parked until the
-           co-fire is wired and pinned, and the key is named by its constant so the uncomment cannot drift:
         new()
         {
-            Description = "Sessions climbed across the window while transactions per second did not — queueing at the cliff",
-            Boost = ConnectionSaturationCoFireBoost,
-            Predicate = facts =>
-                facts.TryGetValue(key, out var self) && self.Metadata.GetValueOrDefault("peak_is_late") > 0
-                && facts.TryGetValue(PgTargetFactKeys.Tps, out var tps) && tps.Metadata.GetValueOrDefault(TpsTrendKey) <= 0,
+            Description = "ANOMALY_PG_SESSION_SPIKE fired while ANOMALY_PG_TPS did not — more connections than this hour usually carries, doing no more work than usual: arrivals are queueing at the cliff, not working",
+            /* unmeasured: OfferedVsDeliveredBoost, chosen, not measured — see its declaration. */
+            Boost = OfferedVsDeliveredBoost,
+            Predicate = facts => OfferedVsDeliveredFired(facts, key),
         },
+        /* v2 — the raw-trend offered-vs-delivered hook lane 3 parked here (PG_TPS's TpsTrendKey, second half − first
+           half of the window's rate, gated on peak_is_late) is RETIRED, not merely still parked: the 2026-09-19
+           calibration (§A1) showed the in-window TPS trend is noise on every cluster, and the anomaly-pair arm above
+           is its replacement. Do not resurrect it — see OfferedVsDeliveredBoost's declaration for the argument.
            PG_IDLE_IN_TRANSACTION fired (the fact exists since lane 14 of #3691): a duration-qualified parked
            claim. Left parked because the self-metadata share arm above already counts the same sessions —
            enabling this would be the same evidence boosted twice (see the summary); the story-level join is the
@@ -354,4 +397,56 @@ public static partial class PgTargetScorer
                 facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0,
         }, */
     ];
+
+    /// <summary>
+    /// The offered-vs-delivered verdict for the saturation fact under <paramref name="key"/>, stamped on it and
+    /// returned: <see cref="PgTargetFactKeys.AnomalySessionSpike"/> FIRED (its own scorer put its base above zero —
+    /// the same "fired" every sibling predicate asks) while <see cref="PgTargetFactKeys.AnomalyTps"/> did not fire,
+    /// or fired with its peak at or under its bucket's centre. The second clause is defensive, not a second bar:
+    /// <c>AnomalyGate</c> fires only on <c>peak − centre ≥ threshold × dispersion</c>, so a fired TPS anomaly
+    /// always sits above its centre and the clause is vacuous today; it is written so a future two-sided TPS
+    /// detector (a throughput DROP against the baseline, which is also "delivered less") reads as offered-vs-
+    /// delivered rather than silencing the arm. Writes <see cref="OfferedVsDeliveredKey"/> (0 / 1),
+    /// <see cref="SessionSpikeRatioKey"/> and <see cref="TpsAnomalyRatioKey"/> every time it runs, so a fired
+    /// saturation fact always shows the verdict and the two figures the advice states; a set without the saturation
+    /// fact stamps nothing and returns false.
+    /// </summary>
+    public static bool OfferedVsDeliveredFired(IReadOnlyDictionary<string, Fact> facts, string key)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        if (!facts.TryGetValue(key, out var self)) return false;
+
+        var sessionRatio = facts.TryGetValue(PgTargetFactKeys.AnomalySessionSpike, out var spike) && spike.BaseSeverity > 0
+            ? AnomalyPeakOverCentre(spike)
+            : 0.0;
+        var tpsFired = facts.TryGetValue(PgTargetFactKeys.AnomalyTps, out var tps) && tps.BaseSeverity > 0;
+        var tpsRatio = tpsFired ? AnomalyPeakOverCentre(tps!) : 0.0;
+
+        /* Sessions HIGH: the anomaly fired (presence is the gate; the ratio is the reader's figure and may be 0 on
+           a zero-centred bucket). Throughput NOT high: no TPS anomaly, or one whose computable ratio is at or under
+           1.0 — a fired anomaly with no computable ratio (centre 0) is high by construction (peak > 0 = centre). */
+        var sessionsHigh = spike is not null && spike.BaseSeverity > 0;
+        var throughputHigh = tpsFired && !(tpsRatio > 0 && tpsRatio <= 1.0);
+        var fired = sessionsHigh && !throughputHigh;
+
+        self.Metadata[SessionSpikeRatioKey] = sessionRatio;
+        self.Metadata[TpsAnomalyRatioKey] = tpsRatio;
+        self.Metadata[OfferedVsDeliveredKey] = fired ? 1 : 0;
+        return fired;
+    }
+
+    /// <summary>
+    /// A z-score anomaly's peak (<see cref="Fact.Value"/>) over its bucket's robust centre — <c>baseline_median</c>
+    /// when the bucket carries one, else <c>baseline_mean</c>: the centre the deviation prose names, so the advice's
+    /// "N× this hour's norm" and its "σ above the median/mean" are one number (lane 15's <c>baseline_ratio</c>
+    /// convention). 0 when the centre is 0 or negative — there is no multiple of nothing to state, and a metadata
+    /// double must stay finite (the finding is persisted as JSON).
+    /// </summary>
+    public static double AnomalyPeakOverCentre(Fact anomaly)
+    {
+        ArgumentNullException.ThrowIfNull(anomaly);
+        var median = anomaly.Metadata.GetValueOrDefault("baseline_median");
+        var centre = median > 0 ? median : anomaly.Metadata.GetValueOrDefault("baseline_mean");
+        return centre > 0 ? anomaly.Value / centre : 0.0;
+    }
 }
