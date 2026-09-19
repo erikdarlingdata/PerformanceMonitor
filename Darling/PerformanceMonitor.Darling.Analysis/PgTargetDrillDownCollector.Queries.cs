@@ -26,6 +26,61 @@ public sealed partial class PgTargetDrillDownCollector
     /// </summary>
     internal const int StatementTextCap = 2000;
 
+    /// <summary>How many temp-writing statements a spill-rooted finding carries — the offenders, not the
+    /// catalogue; <c>get_pg_top_queries</c> is one call away for the rest.</summary>
+    internal const int TempSpillStatementCap = 5;
+
+    /// <summary>
+    /// The statements that wrote the most temp blocks in the window, for a <c>PG_TEMP_SPILL</c> root (lane 6 of
+    /// #3542): <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap, <c>$5</c> the
+    /// text cap. <c>temp_blks_written</c> is a lifetime counter on <c>pg_statement_stats</c>, so it is
+    /// differenced the way <see cref="PgTargetBadActorDetailSql"/> differences the block counters —
+    /// <c>GREATEST(x − LAG(x), 0)</c> over the full series identity — and summed per <c>queryid</c>; the calls
+    /// and time beside it are the stored deltas, so the reader can see whether the spill is one heavy report or
+    /// a hot statement spilling a little every call. <c>temp_blks_read</c> rides along: a statement that writes
+    /// temp blocks and reads them back is a sort or hash that overflowed; one that only writes is a
+    /// materialize. Blocks are 8 kB pages, and the C# states bytes beside them.
+    ///
+    /// <para>The text is <c>pg_statement_text</c>'s — normalised, captured hourly, never live SQL (the V86
+    /// privacy design) — NULL when none has been captured yet. Only shapes that wrote at least one temp block
+    /// in the window are returned (<c>HAVING</c>): a statement with no spill is not an offender.</para>
+    /// </summary>
+    public const string PgTargetTempSpillStatementsSql = @"
+WITH stmt_series AS (
+    SELECT
+        queryid,
+        database_id,
+        delta_calls,
+        delta_total_exec_time_ms,
+        GREATEST(temp_blks_written - LAG(temp_blks_written) OVER identity, 0) AS d_temp_blks_written,
+        GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER identity, 0) AS d_temp_blks_read
+    FROM pg_statement_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    WINDOW identity AS (
+        PARTITION BY queryid, database_id, user_id, toplevel
+        ORDER BY collection_time
+    )
+)
+SELECT
+    s.queryid,
+    CAST(COALESCE(SUM(s.d_temp_blks_written), 0) AS bigint)      AS temp_blks_written,
+    CAST(COALESCE(SUM(s.d_temp_blks_read), 0) AS bigint)         AS temp_blks_read,
+    CAST(COALESCE(SUM(s.delta_calls), 0) AS bigint)              AS calls,
+    CAST(COALESCE(SUM(s.delta_total_exec_time_ms), 0) AS bigint) AS total_exec_ms,
+    COUNT(DISTINCT s.database_id)                                AS database_count,
+    LEFT(MAX(t.query_text), $5)                                  AS query_text,
+    hashtext(MAX(t.query_text))                                  AS text_hash
+FROM stmt_series AS s
+LEFT JOIN pg_statement_text AS t
+       ON  t.server_id = $1
+       AND t.queryid = s.queryid
+GROUP BY s.queryid
+HAVING SUM(s.d_temp_blks_written) > 0
+ORDER BY SUM(s.d_temp_blks_written) DESC
+LIMIT $4";
+
     /// <summary>
     /// One statement's window, for a <c>PG_BAD_ACTOR_&lt;queryid&gt;</c> root or leaf: the deltas the fact was
     /// graded on, the block figures the fact does not carry, the per-database breakdown, and the normalised
@@ -116,10 +171,12 @@ HAVING COUNT(*) > 0";
     /// (<c>CreationTimeClockFrameDisciplineTests</c> lists the SQL Server twins by path and not these files,
     /// and that is correct).</para>
     ///
-    /// <para><c>PG_TEMP_SPILL</c> on the path without a bad actor: the per-statement <c>temp_blks_written</c>
-    /// offenders are lane 6's arm of this method — <c>/* filled by lane 6 */</c> below marks the seam. Until
-    /// then a spill-rooted story gets no statement detail, which is honest: lane 6's collector decides what
-    /// "offender" means for its family.</para>
+    /// <para><c>PG_TEMP_SPILL</c> on the path: the per-statement <c>temp_blks_written</c> offenders are lane 6's
+    /// arm of this method (filled by lane 6 of #3542) — one list under <c>pg_temp_spill_statements</c>, heaviest
+    /// first, from <see cref="PgTargetTempSpillStatementsSql"/>. It runs whenever the spill is on the path,
+    /// beside any bad-actor detail rather than instead of it: the two answer different questions ("what is this
+    /// statement's window" and "which statements spilled"), and a story that has both deserves both. "Offender"
+    /// means wrote at least one temp block in the window; an empty list is not written.</para>
     /// </summary>
     private async partial Task CollectTopStatementsAsync(AnalysisFinding finding, AnalysisContext context, HashSet<string> pathKeys)
     {
@@ -147,7 +204,52 @@ HAVING COUNT(*) > 0";
                 finding.DrillDown!["pg_bad_actor_statements"] = details;
         }
 
-        /* filled by lane 6 — PG_TEMP_SPILL on the path: the top temp_blks_written offenders over the window. */
+        if (pathKeys.Contains(PgTargetFactKeys.TempSpill))
+        {
+            var offenders = await ReadTempSpillStatementsAsync(context);
+            if (offenders.Count > 0)
+                finding.DrillDown!["pg_temp_spill_statements"] = offenders;
+        }
+    }
+
+    private async Task<List<object>> ReadTempSpillStatementsAsync(AnalysisContext context)
+    {
+        var offenders = new List<object>(TempSpillStatementCap);
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+        using var cmd = new NpgsqlCommand(PgTargetTempSpillStatementsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(TempSpillStatementCap);
+        cmd.Parameters.AddWithValue(StatementTextCap);
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var queryId = Convert.ToInt64(reader.GetValue(0));
+            var tempBlksWritten = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+            var calls = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
+            offenders.Add(new
+            {
+                /* A string, as get_pg_top_queries returns it and as the bad-actor detail above does. */
+                queryid = queryId.ToString(CultureInfo.InvariantCulture),
+                temp_blks_written = tempBlksWritten,
+                /* 8 kB pages, stated in bytes so the figure sits beside the spill fact's temp_bytes on one axis. */
+                temp_bytes_written = tempBlksWritten * 8192L,
+                temp_blks_read = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)),
+                calls,
+                total_exec_ms = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                /* Null, not 0, for a mean over no calls. */
+                temp_blks_written_per_call = calls > 0 ? Math.Round((double)tempBlksWritten / calls, 2) : (double?)null,
+                database_count = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                /* Null when no text has been captured for this queryid yet — never "". */
+                query_text = reader.IsDBNull(6) ? null : reader.GetString(6),
+                text_hash = reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),
+            });
+        }
+
+        return offenders;
     }
 
     private async Task<object?> ReadBadActorDetailAsync(NpgsqlConnection connection, AnalysisContext context, long queryId)

@@ -56,9 +56,11 @@ public static partial class PgTargetScorer
     /// 0.4 when the setting is at (or below) its shipped default and 0 otherwise — a convention check (D5).
     /// Context keys (<c>checkpoint_timeout</c>, <c>wal_compression</c>, <c>max_connections</c>,
     /// <c>superuser_reserved_connections</c>, the registry major) score 0 here and are read by the advice
-    /// and by lane 3's saturation arm. <c>work_mem</c> / <c>maintenance_work_mem</c> / <c>autovacuum</c> are
-    /// lanes 6 and 4's arms (evidence-gated and the 0.9-band posture respectively) and fall to the default 0
-    /// until those lanes fill them, so the fact exists as context and roots nothing.
+    /// and by lane 3's saturation arm. <c>work_mem</c> is lane 6's arm — evidence-gated (D5), delegated to
+    /// <c>ScoreConfigWorkMem</c> in <c>PgTargetScorer.Temp.cs</c>, which grades the spill evidence the collector
+    /// stamped onto the fact and is 0 without it. <c>maintenance_work_mem</c> / <c>autovacuum</c> are lane 4's
+    /// arms (evidence-gated and the 0.9-band posture respectively) and fall to the default 0 until that lane
+    /// fills them, so the fact exists as context and roots nothing.
     /// </summary>
     private static partial double ScoreConfigFact(Fact fact)
     {
@@ -86,6 +88,11 @@ public static partial class PgTargetScorer
                Query-Store-advisory analogue. Value is 0/1. */
             case PgTargetFactKeys.ConfigTrackIoTiming:
                 return fact.Value == 0 ? ConfigAdvisoryBase : 0.0;
+
+            /* D5, evidence-gated (lane 6): the value is not graded; the stamped spill evidence is. The arm lives
+               in PgTargetScorer.Temp.cs beside the floor it shares with PG_TEMP_SPILL. */
+            case PgTargetFactKeys.ConfigWorkMem:
+                return ScoreConfigWorkMem(fact);
 
             default:
                 return 0.0;

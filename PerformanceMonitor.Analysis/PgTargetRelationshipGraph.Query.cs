@@ -12,7 +12,16 @@ namespace PerformanceMonitor.Analysis;
 /// The query chain (lane 7, with lane 6): <c>PG_BAD_ACTOR_*</c> is the leaf wherever a statement is the answer;
 /// <c>PG_TEMP_SPILL</c> → { <c>CONFIG_PG_WORK_MEM</c>, <c>PG_BAD_ACTOR_*</c> } is lane 6's edge.
 ///
-/// <para><b>Empty in v1, deliberately (lane 7).</b> A bad actor is a LEAF: nothing in the v1 vocabulary is
+/// <para><b>Lane 6's edge: <c>PG_TEMP_SPILL → CONFIG_PG_WORK_MEM</c>.</b> The spill is the workload evidence and
+/// the knob is its leaf (D5): the edge fires when the knob FIRED — <c>Severity &gt; 0</c>, which for this
+/// evidence-gated key means the collector stamped this very spill onto it at or above the floor — so the story
+/// reads spill → knob and the knob never roots a card of its own. No edge into <c>PG_BAD_ACTOR_*</c> from the
+/// spill tonight: the destination problem below is unsolved (an exact key is needed and the family's keys are
+/// dynamic), so the offending statements reach the reader through the drill-down
+/// (<c>pg_temp_spill_statements</c>, <c>PgTargetDrillDownCollector.Queries.cs</c>) and the spill's amplifier
+/// names that a temp-writing bad actor exists, rather than through a path node.</para>
+///
+/// <para><b>No edges OUT of a bad actor in v1, deliberately (lane 7).</b> A bad actor is a LEAF: nothing in the v1 vocabulary is
 /// downstream of "this one statement holds the time" — the regression fact that would be
 /// (<c>PG_QUERY_REGRESSION</c>, window-over-window <c>mean_exec_ms</c> step corroborated by a
 /// <c>pg_plan_capture</c> plan-hash change) is v2 content and has no key yet. The edges INTO a bad actor
@@ -32,6 +41,16 @@ public sealed partial class PgTargetRelationshipGraph
 {
     private partial void BuildQueryEdges()
     {
+        /* Lane 6: the spill leads to the knob when the knob fired on the spill's own evidence. The predicate reads
+           the knob's verdict, never a size of its own; the bar is PgTargetScorer.Temp.cs's with its lineage. */
+        AddEdge(PgTargetFactKeys.TempSpill, PgTargetFactKeys.ConfigWorkMem, TempCategory,
+            "work_mem is the per-sort budget these temp files exceeded — the knob fired on this spill's evidence (D5)",
+            facts => facts.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var knob) && knob.Severity > 0);
+
         /* No edges out of a bad actor in v1 — see the class summary. */
     }
+
+    /// <summary>The edge category of the temp chain (the audit label; a story's category is its root fact's
+    /// source, so a spill-rooted finding files under <c>pg_temp</c> regardless).</summary>
+    private const string TempCategory = "temp_spill";
 }
