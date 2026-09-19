@@ -373,7 +373,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
            equality above), and no SQL Server composer claims the key. Each lane moves its own line to NotNull. */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.IoReadLatencyMs));        /* lane 11 */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ReplicationLag));         /* lane 12 */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));             /* lane 13 */
+        /* Lane 13 filled the bloat family: both keys compose their own block (the static shape when no fact is
+           in the lookup), and the delegation equality above proves the shared entry points answer that block. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));          /* lane 13 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.IndexBloatTrend));     /* lane 13 */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from
