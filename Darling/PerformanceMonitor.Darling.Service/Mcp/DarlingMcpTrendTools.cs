@@ -765,14 +765,17 @@ public sealed class DarlingMcpTrendTools
            measure (stored 0 → NULL). The hourly route divides by the bucket width and produces none, and a
            Query Store rollup bucket is rated over its width too (#3695); only a raw Query Store point is
            LAG-rated. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
-           it byte-identical, pinned by McpMissMessageParityPinTests), and it still names only the
-           first-collection case; widening it to the restart case is a both-SKU edit of one sentence and its
-           parity pin, not this file's alone. */
+           it byte-identical, pinned by McpMissMessageParityPinTests) and names BOTH ways a denominator goes
+           unknowable — the stored-0 restart (#3695 / #3700) and the first-in-window LAG (#3541 A12) — in one
+           sentence, because the three tools serialize through this one helper and a per-tool note would put
+           three sentences on one shape. The Query Store trend can only hit the second arm (it stores no
+           interval), and the sentence stays true there: every one of its points is "a collection where no
+           interval was stored". */
         var unrated = points.Count(p => !p.HasRate);
         envelope["unrated_points"] = unrated;
         envelope["unrated_note"] = unrated == 0
             ? null
-            : $"{unrated} point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
+            : $"{unrated} point(s) carry null rates: a rate is the point's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the point is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),

@@ -628,7 +628,7 @@ public sealed class McpQueryTools
     private static string InvalidHeatmapMetric(string metric) =>
         $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up.")]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -679,7 +679,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up.")]
     public static async Task<string> GetProcedureDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -828,13 +828,15 @@ public sealed class McpQueryTools
         };
         WriteDisclosure(envelope, points.Count > 0 ? points[0].CollectionTime : null, startUtc, windowEndUtc, bucket);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
-           and why — the window's first collection has no previous one to difference against. Same keys and
-           the same sentence as Darling's twin. */
+           and why. Two whys since #3695 / v61 (#3653 A11): the plan-cache trends read the STORED interval,
+           so a restart collection (stored 0) is unrated beside the first-in-window LAG case; the Query Store
+           trend stores no interval and only hits the second arm, and the sentence stays true there. Same keys
+           and the same sentence as Darling's twin, byte-identical — pinned by McpMissMessageParityPinTests. */
         var unrated = points.Count(p => !p.HasRate);
         envelope["unrated_points"] = unrated;
         envelope["unrated_note"] = unrated == 0
             ? null
-            : $"{unrated} point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
+            : $"{unrated} point(s) carry null rates: a rate is the point's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the point is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),

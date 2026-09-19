@@ -204,7 +204,7 @@ public sealed class McpMissMessageParityPinTests
            history note. Each is emitted by a helper or envelope builder that lives once per SKU. */
         " is null: no_baseline — ",
         " is 0, so the ratio has no denominator; this is NOT 0% change. Compare ",
-        " point(s) carry null rates: a per-collection rate is the work since the PREVIOUS collection divided by the seconds between them, and the window's first collection has no previous one inside the window (a collection landing in the same second as its predecessor has no denominator either). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.",
+        " point(s) carry null rates: a rate is the point's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the point is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.",
         "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.",
         "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.",
         "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.",

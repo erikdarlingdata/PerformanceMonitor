@@ -31,14 +31,29 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// The Dashboard's per-class <c>severity</c> / <c>description</c> / <c>recommendation</c> (latch) and
 /// <c>description</c> (spinlock) are the Dashboard view's own CASE derivations, not collected columns; they are
 /// reproduced verbatim in <see cref="DarlingLatchSpinlockReader"/> so these tools serve the full Dashboard
-/// result shape. The per-second rate is derived in SQL from the per-class LAG interval, because Darling's
-/// delta collectors store no <c>sample_interval_seconds</c>.
+/// result shape. The per-second rate is derived in SQL from the latest interval's STORED
+/// <c>sample_interval_seconds</c> (V127, #3595 — both delta collectors have stamped it since; the per-class
+/// LAG interval is the fallback for a pre-V127 row only), and is null when that interval was unknowable.
+/// </para>
+///
+/// <para>
+/// <b>The unknowable row is spelled one way on both SKUs (#3653 A16).</b> A restart / first-sample
+/// collection stores <c>sample_interval_seconds = 0</c> beside deltas of 0 that were never measured
+/// (#3540's marker). Both tools on both SKUs publish that row as: the per-second rates null,
+/// <c>interval_seconds</c> null beside them (the why — a bare null rate cannot say whether the interval was
+/// unknowable or the class was quiet), and the latest delta null rather than the fabricated 0 (#3642's rule,
+/// the shape both viewers' snapshot grids render since #3702 and Lite's twins publish since the same PR).
+/// Darling's rows are window AGGREGATES and Lite's are the newest snapshot, so the rows as a whole are not the
+/// same shape and never were; the KEYS that spell this one fact are, and
+/// <c>McpPageContractTests.TheSameToolName_SpellsTheUnknowableRowTheSameWay_OnBothSkus</c> holds them so.
+/// The <c>severity</c> band is a function of the latest delta, so it is null on the same row — "LOW" banded
+/// from a 0 nobody measured is the same lie in a word.
 /// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpLatchSpinlockTools
 {
-    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE indicates TempDB allocation contention. TWO CLOCKS PER ROW, NAMED: total_delta_* SUM every collection in the window; severity, waits_per_second and wait_ms_per_second are banded/derived from the LATEST interval only - the severity_banded_from block names that interval (its delta wait, the seconds it accrued over, and the collection it ended at, which is also latest_collection_time). A LOW severity beside a large window total is a class that was hot earlier in the window and is quiet now, not a contradiction.")]
+    [McpServerTool(Name = "get_latch_stats"), Description("Gets top latch contention by class. Shows latch waits, wait time, and per-second rates. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE indicates TempDB allocation contention. TWO CLOCKS PER ROW, NAMED: total_delta_* SUM every collection in the window; severity, waits_per_second and wait_ms_per_second are banded/derived from the LATEST interval only - interval_seconds is the seconds that interval accrued over, and the severity_banded_from block names it in full (its delta wait, the same seconds, and the collection it ended at, which is also latest_collection_time). A LOW severity beside a large window total is a class that was hot earlier in the window and is quiet now, not a contradiction. When the latest interval was unknowable (a restart or first sample, stored as 0), interval_seconds, both per-second rates, severity and severity_banded_from.delta_wait_time_ms are all null - unknowable, never a quiet 0.00 or a LOW banded from a zero nobody measured; the window totals beside them still stand.")]
     public static async Task<string> GetLatchStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -74,13 +89,25 @@ public sealed class DarlingMcpLatchSpinlockTools
                 /* null when the latest interval was unknowable (#3540) — a restart, not a quiet latch. */
                 waits_per_second = r.WaitsPerSecond is double waits ? Math.Round(waits, 2) : (double?)null,
                 wait_ms_per_second = r.WaitMsPerSecond is double waitMs ? Math.Round(waitMs, 2) : (double?)null,
-                severity = DarlingLatchSpinlockReader.LatchSeverity(r.LatestDeltaWaitTimeMs),
+                /* #3653 A16: the seconds the two rates divide by, beside them — the one why-key for a null rate
+                   on both tools and both SKUs. Also restated inside severity_banded_from below, the way that
+                   block restates captured_at beside latest_collection_time: the block is the band's
+                   provenance in one place, this is the rates' denominator in its place. */
+                interval_seconds = r.LatestIntervalSeconds is double intervalSeconds ? Math.Round(intervalSeconds, 0) : (double?)null,
+                /* #3653 A16: no band from an unknowable interval. The reader stores the marker's delta as 0 and
+                   LatchSeverity(0) reads LOW — a quiet latch, asserted from a number nobody measured. Null
+                   here is what the shared row already says on Lite and on both viewers' grids (#3702). */
+                severity = r.LatestIntervalSeconds is null
+                    ? null
+                    : DarlingLatchSpinlockReader.LatchSeverity(r.LatestDeltaWaitTimeMs),
                 /* #3541 A10: the band above is a function of ONE interval's delta, published beside window
                    totals it is not a function of. Naming the interval — its delta, its length, its end — is
-                   what lets a reader tell "LOW now, 40 s of waits over the day" from "LOW all day". */
+                   what lets a reader tell "LOW now, 40 s of waits over the day" from "LOW all day". The delta
+                   is null on the unknowable row for the same reason the band is (#3642: the stored 0 was the
+                   calculator's marker, not a measurement). */
                 severity_banded_from = new
                 {
-                    delta_wait_time_ms = r.LatestDeltaWaitTimeMs,
+                    delta_wait_time_ms = r.LatestIntervalSeconds is null ? (long?)null : r.LatestDeltaWaitTimeMs,
                     interval_seconds = r.LatestIntervalSeconds is double seconds ? Math.Round(seconds, 0) : (double?)null,
                     captured_at = r.LatestCollectionTime.ToString("o")
                 },
@@ -103,7 +130,7 @@ public sealed class DarlingMcpLatchSpinlockTools
         }
     }
 
-    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets top spinlock contention. Shows collisions, spins, backoffs, and per-second rates. High spinlock contention indicates CPU-bound internal contention that doesn't appear in wait stats.")]
+    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets top spinlock contention. Shows collisions, spins, backoffs, and per-second rates. High spinlock contention indicates CPU-bound internal contention that doesn't appear in wait stats. total_delta_* SUM every collection in the window; collisions_per_second and spins_per_second are derived from the LATEST interval only, and interval_seconds is the seconds that interval accrued over. When the latest interval was unknowable (a restart or first sample, stored as 0), interval_seconds and both per-second rates are null - unknowable, never a quiet 0.00; the window totals beside them still stand.")]
     public static async Task<string> GetSpinlockStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -140,6 +167,9 @@ public sealed class DarlingMcpLatchSpinlockTools
                 /* null when the latest interval was unknowable (#3540) — a restart, not a quiet spinlock. */
                 collisions_per_second = r.CollisionsPerSecond is double collisions ? Math.Round(collisions, 2) : (double?)null,
                 spins_per_second = r.SpinsPerSecond is double spins ? Math.Round(spins, 2) : (double?)null,
+                /* #3653 A16: the seconds those rates divide by, beside them — null when unknowable, the same
+                   why-key the latch row and both of Lite's twins carry. */
+                interval_seconds = r.LatestIntervalSeconds is double intervalSeconds ? Math.Round(intervalSeconds, 0) : (double?)null,
                 description = DarlingLatchSpinlockReader.SpinlockDescription(r.SpinlockName),
                 latest_collection_time = r.LatestCollectionTime.ToString("o")
             });

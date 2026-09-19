@@ -151,14 +151,20 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(2, trend.GetArrayLength());
 
         /* #3541 A12: the first snapshot has nothing to difference against, so its rates are null — not the
-           0 this series used to fabricate — and the envelope counts it and says why. Same keys as Darling. */
+           0 this series used to fabricate — and the envelope counts it and says why. Same keys as Darling.
+           The note names BOTH unrated reasons (#3653: the stored-0 restart beside this first-in-window LAG
+           case) in one sentence shared byte-for-byte with Darling (McpMissMessageParityPinTests); the two
+           fragments below are the reason this seed exercises and the reason it does not, so a rewording
+           that drops either is caught here rather than only in the parity pin. */
         var first = trend[0];
         Assert.Equal(JsonValueKind.Null, first.GetProperty("value").ValueKind);
         Assert.Equal(JsonValueKind.Null, first.GetProperty("elapsed_ms_per_second").ValueKind);
         Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
         Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
         Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());
-        Assert.Contains("no previous one inside the window", root.GetProperty("unrated_note").GetString()!, StringComparison.Ordinal);
+        var unratedNote = root.GetProperty("unrated_note").GetString()!;
+        Assert.Contains("rated against the PREVIOUS one and has none inside the window", unratedNote, StringComparison.Ordinal);
+        Assert.Contains("STORED sample interval is 0", unratedNote, StringComparison.Ordinal);
 
         var second = trend[1];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
