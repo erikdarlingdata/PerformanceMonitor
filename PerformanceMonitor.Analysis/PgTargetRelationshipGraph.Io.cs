@@ -20,12 +20,14 @@ public sealed partial class PgTargetRelationshipGraph
     /// The I/O chain, filled by lane 11. Read latency sits BETWEEN the wait a backend felt and the reason the read
     /// happened at all:
     /// <list type="bullet">
-    /// <item><description><c>PG_WAIT_IO</c> / <c>PG_WAIT_IO_*</c> → <c>PG_IO_READ_LATENCY_MS</c>: the IO wait standout
-    /// (or the type rollup — <c>PgTargetScorer.Waits.cs</c> grades one wait once, so exactly one of them fired) leads
-    /// to the latency fact when the storage was measurably slow per operation: these waits are long because each
-    /// read is slow, not merely because there are many. Only <c>DataFileRead</c> is named as a standout edge
-    /// (the read-path wait <c>pg_stat_io</c>'s <c>read_time</c> measures); the rollup edge carries every other IO
-    /// event the engine may name.</description></item>
+    /// <item><description><c>PG_WAIT_IO_DATAFILEREAD</c> → <c>PG_IO_READ_LATENCY_MS</c>: the data-file-read wait
+    /// standout leads to the latency fact when the storage was measurably slow per operation — these waits are long
+    /// because each read is slow, not merely because there are many. Only the standout has an edge, never the
+    /// <c>IO</c> type rollup: lane 5's rule (<c>PgTargetRelationshipGraph.Memory.cs</c>, pinned by
+    /// <c>PgTargetWaitTests</c>) is that a rollup roots nothing of its own — it scores 0 whenever its named standout
+    /// fired (<c>PgTargetScorer.Waits.cs</c> grades one wait once), so the standout is the root and an edge from the
+    /// rollup would be a second door into the same room. The rollup still COUNTS as a corroborator on the latency
+    /// fact's amplifiers (<c>PgTargetScorer.Io.cs</c>), which is a predicate, not a story edge.</description></item>
     /// <item><description><c>PG_IO_READ_LATENCY_MS</c> → <c>PG_BUFFER_CACHE_PRESSURE</c>: slow reads matter in
     /// proportion to how many there are, and the composite says the cache is sending them — a working set larger
     /// than <c>shared_buffers</c> is the lever that removes reads rather than speeding them up. That edge continues
@@ -51,10 +53,6 @@ public sealed partial class PgTargetRelationshipGraph
 
         AddEdge(PgTargetFactKeys.WaitKey("IO", "DataFileRead"), PgTargetFactKeys.IoReadLatencyMs, "io_latency",
             "Data-file reads were slow per operation over the window — these waits are long because each read is slow, not only because there are many",
-            facts => Fired(facts, PgTargetFactKeys.IoReadLatencyMs));
-
-        AddEdge(PgTargetFactKeys.WaitKey("IO", null), PgTargetFactKeys.IoReadLatencyMs, "io_latency",
-            "Data-file reads were slow per operation over the window — the IO waits behind this rollup are waiting on slow storage",
             facts => Fired(facts, PgTargetFactKeys.IoReadLatencyMs));
 
         AddEdge(PgTargetFactKeys.IoReadLatencyMs, PgTargetFactKeys.BufferCachePressure, "io_latency",
