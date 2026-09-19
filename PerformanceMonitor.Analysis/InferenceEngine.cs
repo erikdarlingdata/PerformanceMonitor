@@ -227,6 +227,15 @@ public class InferenceEngine
         var definedAmplifiers = amplifierResults?.Count ?? 0;
         var matchedAmplifiers = amplifierResults?.Count(r => r.Matched) ?? 0;
 
+        /* #3691: the hops this traversal CONSUMED whose fact names a thing, so the root's card can say who was
+           behind it. Consumption is the whole reason: a PG_IDLE_IN_TRANSACTION at 1.2 walked under a saturation
+           root at 1.25 roots no card of its own, and the holder it named (application, role, database) reached no
+           surface at all — the exit check's grep over the payload found nothing. Recorded HERE, off the raw path
+           (the THREADPOOL relabel touches only the root, and the root is excluded — its own advice names it), from
+           the same >0 working set the traversal walked; FactAdvice.PopulateStoryText renders the sentences.
+           Which keys name something is FactIdentity's roster, per engine, so this line is engine-neutral. */
+        var namedHops = FactIdentity.NamedHopsOf(path, factsByKey);
+
         return new AnalysisStory
         {
             RootFactKey = rootKey,
@@ -251,7 +260,8 @@ public class InferenceEngine
             IsAbsolution = false,
             RootFactMetadata = rootFact?.Metadata,
             // Carry the root fact's database through so findings/recommendation cards can show it.
-            DatabaseName = rootFact?.DatabaseName
+            DatabaseName = rootFact?.DatabaseName,
+            NamedHops = namedHops
         };
     }
 

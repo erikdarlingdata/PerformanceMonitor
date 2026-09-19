@@ -252,9 +252,37 @@ public static class FactAdvice
             if (story is null || story.IsAbsolution)
                 continue;
             var advice = Compose(story.RootFactKey, byKey);
-            if (advice is not null)
-                story.StoryText = SerializeForStoryText(advice);
+            if (advice is null)
+                continue;
+            advice = WithNamedHops(advice, story, byKey);
+            story.StoryText = SerializeForStoryText(advice);
         }
+    }
+
+    /// <summary>
+    /// #3691: appends one sentence per identity-bearing hop the engine recorded on the story
+    /// (<see cref="AnalysisStory.NamedHops"/>) to the root's INVESTIGATION — "Behind it: `PG_IDLE_IN_TRANSACTION`
+    /// (severity 1.20) — billing-worker as billing idle in transaction for 15 min …" — so the operator reading the
+    /// root card learns WHO was behind the chain without opening a card the traversal never made. Investigation,
+    /// not Remediation: the hop's name is where to look; the hop's own remediation stays the hop's (the reverse
+    /// links the symptom composers already carry — LinkedJobClause, the PostgreSQL co-fire clauses — keep saying
+    /// what to do about the sibling in their own family's words). Each hop's composed headline is read from the
+    /// FULL fact set here, the one place both are in scope, the same way the root's values are. A story with no
+    /// named hops returns the block untouched — the byte-identity pin for every chain this does not concern.
+    /// </summary>
+    private static AdviceBlock WithNamedHops(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
+    {
+        if (story.NamedHops is null || story.NamedHops.Count == 0)
+            return advice;
+        var investigation = new StringBuilder(advice.Investigation ?? string.Empty);
+        foreach (var hop in story.NamedHops)
+        {
+            var sentence = FactIdentity.Sentence(hop, Compose(hop.Key, byKey)?.Headline);
+            if (investigation.Length == 0)
+                sentence = sentence.TrimStart();
+            investigation.Append(sentence);
+        }
+        return advice with { Investigation = investigation.ToString() };
     }
 
     /// <summary>Serializes an advice block's prose to the compact {h,i,r} JSON stored in StoryText.</summary>

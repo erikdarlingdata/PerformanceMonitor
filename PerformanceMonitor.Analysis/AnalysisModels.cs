@@ -126,6 +126,18 @@ public class AnalysisStory
     /// finding so recommendation cards can show a database. Null for server-scope stories.
     /// </summary>
     public string? DatabaseName { get; set; }
+
+    /// <summary>
+    /// The hops AFTER the root whose fact names a thing — the parked application, the lead blocker, the job, the
+    /// table — highest severity first, at most <see cref="FactIdentity.MaxNamedHops"/> of them, as
+    /// <see cref="InferenceEngine.BuildStories"/> recorded them off the traversal path (#3691). FactAdvice's
+    /// PopulateStoryText composes one sentence per entry onto the root's frozen advice, which is how the name
+    /// reaches every card, e-mail and MCP payload without any of them changing; this list is the typed record of
+    /// WHICH hops were named, for the composer and for tests. Ephemeral like <see cref="RootFactMetadata"/> — the
+    /// sentence in StoryText is what persists. Empty for a one-node story, an absolution, or a chain none of
+    /// whose hops names anything (that story's text is byte-identical to what it was).
+    /// </summary>
+    public List<NamedHop> NamedHops { get; set; } = [];
 }
 
 /// <summary>
