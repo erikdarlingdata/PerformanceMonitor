@@ -164,11 +164,16 @@ public sealed class DarlingAnalysisService
     public string? InsufficientDataMessage { get; private set; }
 
     /// <summary>
-    /// Set after AnalyzeAsync when the server PASSED the data-span gate but the analysis window itself
-    /// produced zero facts (#3524). Null otherwise. The gate measures TOTAL history, so a server whose
-    /// collection died still sails through it and lands on an empty window — which is a dead collector
-    /// or an unreachable target, not a healthy server. Callers must not render an empty findings list
-    /// as an all-clear while this is set; nothing was measured.
+    /// Set after AnalyzeAsync when the server PASSED the data-span gate but the collector observed NONE
+    /// of the analysis window (#3524, #3538 A2): the coverage witness found no collection interval inside
+    /// it. Null otherwise. The gate measures TOTAL history, so a server whose collection died still sails
+    /// through it and lands on an unobserved window — which is a dead collector or an unreachable target,
+    /// not a healthy server. Callers must not render an empty findings list as an all-clear while this is
+    /// set; nothing was measured.
+    ///
+    /// <para>#3653: this is the UNOBSERVED-window message and nothing else. An observed window over which
+    /// the collector emitted no fact leaves it null and runs the pass — that is a measurement with nothing
+    /// in it, and <see cref="LastWindowCoverage"/> says how much of the window the all-clear rests on.</para>
     /// </summary>
     public string? WindowEmptyMessage { get; private set; }
 
@@ -344,7 +349,7 @@ public sealed class DarlingAnalysisService
             var facts = await engine.Collector.CollectFactsAsync(context);
             LastWindowCoverage = context.Coverage;
 
-            if (facts.Count == 0 || context.ObservedDurationMs <= 0)
+            if (context.ObservedDurationMs <= 0)
             {
                 /* #3524: the span gate above passed on LIFETIME history, so an empty WINDOW here means
                    collection stopped producing rows for it — not that the server is healthy. Say so,
@@ -355,7 +360,20 @@ public sealed class DarlingAnalysisService
                    (server config, trace flags, hardware) — read from the latest row regardless of
                    window — and scoring those alone would produce a pass whose every windowed rate is
                    absent and whose all-clear (or config-only findings) still reads as "analyzed this
-                   window". Nothing was measured over the window; the same envelope says so. */
+                   window". Nothing was measured over the window; the same envelope says so.
+
+                   #3653: the branch is gated on the coverage witness ALONE. Until then it read
+                   `facts.Count == 0 || context.ObservedDurationMs <= 0`, and the first half — the original
+                   #3524 test, written before any collector stamped coverage — made an OBSERVED window that
+                   happened to produce no fact wear this envelope too: "collection appears to have stopped"
+                   over a window the witness proves the collector was up for, rendered `unavailable` by both
+                   analyze_server tools with a pointer at collection health, and persisted by the worker as
+                   the dead-collector marker the Viewer renders. That case falls through to the branch below.
+                   This envelope is now for exactly the case its prose is true of: no collection interval
+                   landed inside the window. Every collector stamps the witness before its first windowed
+                   read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
+                   "unstamped" is not a third state here — Coverage is null only when collection threw, and
+                   that unwinds through the catch below, never through this test. */
                 /* True when the WINDOW went unobserved but point-in-time facts (config, trace flags,
                    hardware) still read — the case that used to slip past the facts.Count == 0 check. */
                 var hasPointInTimeFactsOnly = facts.Count > 0;
@@ -379,6 +397,36 @@ public sealed class DarlingAnalysisService
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
+            }
+
+            if (facts.Count == 0)
+            {
+                /* #3653: the collector OBSERVED the window — the witness found collection intervals inside
+                   it — and emitted no fact over it. Nothing rose to a fact: no wait accrued time, no event
+                   table has a row in the window, and no point-in-time family had a latest row to read. That
+                   is not the dead-collector shape above, and it must not wear its envelope: WindowEmptyMessage
+                   stays null, so both analyze_server tools render whatever this pass returns as `empty` with
+                   the coverage block rather than `unavailable`, the worker clears the analysis_state marker
+                   instead of writing "collection appears broken", and neither Viewer points at collection
+                   health for a collector that is up.
+
+                   The pass CONTINUES rather than returning [] here, because "the collector emitted no fact"
+                   is a statement about the collector's reads, not the detector's: the anomaly detector reads
+                   the store on its own and still gets its say, and whatever survives scoring is the answer.
+                   A zero-finding pass out of here is an all-clear AT THE STATED COVERAGE — the coverage block
+                   every tool payload carries says which fraction of the window it rests on, and the line
+                   below says the same for the scheduled pass, which has no payload to put it in.
+
+                   Partial coverage cannot arrive here. The collector adds the COLLECTION_GAP context fact
+                   whenever the observed fraction is under WindowCoverage.PartialThreshold, so zero facts with
+                   observed time means coverage at or above the bar; the partial caveat below is therefore
+                   unreachable from this branch by construction, not by luck. Information rather than Warning:
+                   nothing is wrong with the collector, and a Warning here would be the old lie at a lower
+                   volume. */
+                _logger?.LogInformation(
+                    "[DarlingAnalysisService] The collector observed the analysis window for {Server} ({Start} to {End}) " +
+                    "but emitted no fact over it — {Coverage}; nothing rose to a fact, and an all-clear from this pass rests on that coverage",
+                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, context.Coverage!.Describe());
             }
 
             if (context.Coverage is { IsPartial: true } partial)

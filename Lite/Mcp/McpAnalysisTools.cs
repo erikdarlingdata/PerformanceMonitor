@@ -66,10 +66,12 @@ public sealed class McpAnalysisTools
 
             if (analysisService.WindowEmptyMessage != null)
             {
-                /* #3524: zero facts in the window is a DEAD-COLLECTOR shape, not a clean bill of
+                /* #3524: an UNOBSERVED window is a DEAD-COLLECTOR shape, not a clean bill of
                    health — the data-span gate passes on lifetime history, so a server whose
                    collection broke last week lands here, and the "empty" all-clear below would tell
                    the caller in prose that all metrics are normal when nothing was measured at all.
+                   Since #3653 the service sets this message on the coverage witness alone: an observed
+                   window that produced no fact is a measurement, and takes the `empty` arm below.
                    Same miss vocabulary as get_analysis_facts' zero-facts case; same hints block as
                    the all-clear, because an anchored empty-window run still owes the caller the
                    persistence disclosure. */
@@ -98,9 +100,11 @@ public sealed class McpAnalysisTools
             if (findings.Count == 0)
             {
                 /* A successful analysis that found nothing wrong: a true negative ("all clear"),
-                   surfaced with the shared miss vocabulary so callers branch on it uniformly. Facts
-                   WERE collected and scored this time — the window-collected-nothing case returned
-                   above as unavailable instead (#3524). With partial coverage the all-clear is scoped
+                   surfaced with the shared miss vocabulary so callers branch on it uniformly. The
+                   window WAS observed this time — the unobserved-window case returned above as
+                   unavailable instead (#3524) — whether facts were scored and nothing fired or the
+                   collector emitted no fact at all over an observed window (#3653); the coverage block
+                   says how much of the window either rests on. With partial coverage the all-clear is scoped
                    to the time that was seen (#3538 A2): the same status, because facts were scored and
                    nothing fired, but prose that no longer claims the whole window. */
                 return McpHelpers.Status(
