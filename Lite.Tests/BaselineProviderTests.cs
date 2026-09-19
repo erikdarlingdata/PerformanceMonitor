@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -264,16 +265,19 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
     [Fact]
     public async Task GetBaseline_BatchRequests_ExcludesRestartDrop()
     {
-        // Seed batch requests with a restart-shaped drop in the middle
+        // Seed batch requests with a restart in the middle — as the collector actually writes one (#3653):
+        // the counter went backwards, so the delta is unknowable and the row carries delta 0 WITH interval 0.
+        // Every row sits INSIDE the analysed hour (5-minute spacing): the earlier shape of this test put the
+        // restart at +60 and +70 minutes, one bucket over, where nothing it asserted could see it.
         var baseDay = AnalysisTime.AddDays(-7);
         var normalValues = new[] { 5000, 5100, 4900, 5200, 5050, 4950 };
 
         for (int i = 0; i < normalValues.Length; i++)
-            await SeedPerfmonAsync(baseDay.AddMinutes(i * 10), "Batch Requests/sec", normalValues[i]);
+            await SeedPerfmonAsync(baseDay.AddMinutes(i * 5), "Batch Requests/sec", normalValues[i]);
 
-        // Restart drop: value falls to 0 then recovers
-        await SeedPerfmonAsync(baseDay.AddMinutes(60), "Batch Requests/sec", 0);     // Restart
-        await SeedPerfmonAsync(baseDay.AddMinutes(70), "Batch Requests/sec", 5100);  // Recovery
+        // Restart: value falls to 0 over NO measured interval, then recovers
+        await SeedPerfmonAsync(baseDay.AddMinutes(30), "Batch Requests/sec", 0, intervalSeconds: 0);     // Restart
+        await SeedPerfmonAsync(baseDay.AddMinutes(35), "Batch Requests/sec", 5100);  // Recovery
 
         // Add enough more samples on other days to reach threshold
         for (int d = 2; d <= 4; d++)
@@ -287,9 +291,49 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.BatchRequests, AnalysisTime);
 
         // #3527: the baseline is per-second now — deltas of ~5000 over 10s intervals are ~500/sec.
-        // The restart drop (0) should be excluded, so the mean should sit near 500, not pulled toward 0.
-        Assert.True(baseline.Mean > 400, $"Mean {baseline.Mean} should not be poisoned by restart drop");
+        // The restart (0 over interval 0) is excluded by the knowability filter, so the mean sits near 500
+        // and the sample count is every row but that one: 7 + 15 = 22.
+        Assert.Equal(22, baseline.SampleCount);
+        var expectedMean = (normalValues.Sum() + 5100 + Enumerable.Range(0, 5).Sum(i => 5000 + i * 50) * 3) / 10.0 / 22.0;
+        Assert.Equal(expectedMean, baseline.Mean, 3);
         Assert.InRange(baseline.Mean, 400, 600);
+    }
+
+    /// <summary>
+    /// #3653 (A10, the mechanical half): a zero over a MEASURED interval is a real idle sample and stays in the
+    /// population whatever the sample before it read. The retired QUALIFY heuristic dropped exactly this row
+    /// (delta 0 after a prior > 1000) as a "restart signature", but the collector writes a restart as interval
+    /// 0, which the WHERE already removes — so the only rows the heuristic ever reached were genuine idle
+    /// minutes after busy ones, and it was biasing the baseline upward by removing them. Same fixture as the
+    /// restart test, the zero now carrying its 10 s interval: one more sample, and the mean moves toward zero by
+    /// exactly that sample's weight.
+    /// </summary>
+    [Fact]
+    public async Task GetBaseline_BatchRequests_KeepsAMeasuredIdleZero_AfterABusySample()
+    {
+        var baseDay = AnalysisTime.AddDays(-7);
+        var normalValues = new[] { 5000, 5100, 4900, 5200, 5050, 4950 };
+
+        for (int i = 0; i < normalValues.Length; i++)
+            await SeedPerfmonAsync(baseDay.AddMinutes(i * 5), "Batch Requests/sec", normalValues[i]);
+
+        // A measured idle interval: nothing ran for 10 s right after a 495/sec sample. Real, and kept.
+        await SeedPerfmonAsync(baseDay.AddMinutes(30), "Batch Requests/sec", 0, intervalSeconds: 10);
+        await SeedPerfmonAsync(baseDay.AddMinutes(35), "Batch Requests/sec", 5100);
+
+        for (int d = 2; d <= 4; d++)
+        {
+            var day = AnalysisTime.AddDays(-7 * d);
+            for (int i = 0; i < 5; i++)
+                await SeedPerfmonAsync(day.AddMinutes(i * 10), "Batch Requests/sec", 5000 + i * 50);
+        }
+
+        _provider.ClearCache();
+        var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.BatchRequests, AnalysisTime);
+
+        Assert.Equal(23, baseline.SampleCount);
+        var expectedMean = (normalValues.Sum() + 0 + 5100 + Enumerable.Range(0, 5).Sum(i => 5000 + i * 50) * 3) / 10.0 / 23.0;
+        Assert.Equal(expectedMean, baseline.Mean, 3);
     }
 
     [Fact]
@@ -340,6 +384,63 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.True(baseline.SampleCount > 0);
         // Mean should be ~180 (100+50+30 per collection)
         Assert.InRange(baseline.Mean, 150, 210);
+    }
+
+    /// <summary>
+    /// #3653 (A10, the mechanical half) — the three interval states a wait-stats collection can be in, and what
+    /// the WaitStats baseline does with a ZERO total in each: a pre-v60 collection (NULL interval) keeps the
+    /// magnitude heuristic, so its zero after a busy collection is dropped as the restart signature it might
+    /// be; a collection with a MEASURED interval is authoritative, so its zero after a busy collection is a real
+    /// idle sample and stays; a restart as the collector writes it (every row 0 over interval 0) forms no
+    /// per-collection row at all. Forty plain collections carry the bucket past the Full-tier threshold; the
+    /// three planted pairs then move the count by exactly the rows each rule admits.
+    /// </summary>
+    [Fact]
+    public async Task GetBaseline_WaitStats_ThreeIntervalStates_HeuristicOnlyWhereTheIntervalIsUnknown()
+    {
+        for (int week = 0; week < 4; week++)
+        {
+            var day = AnalysisTime.AddDays(-7 * (week + 1));
+            for (int i = 0; i < 10; i++)
+            {
+                var t = day.AddMinutes(i * 5);
+                await SeedWaitStatAsync(t, "SOS_SCHEDULER_YIELD", 150);
+                await SeedWaitStatAsync(t, "WRITELOG", 50);
+            }
+        }
+
+        var week1 = AnalysisTime.AddDays(-7);
+        var week2 = AnalysisTime.AddDays(-14);
+        var week3 = AnalysisTime.AddDays(-21);
+
+        // Pre-v60: a busy collection then a zero — only the heuristic can judge it, and it drops it.
+        await SeedWaitStatAsync(week1.AddMinutes(50), "SOS_SCHEDULER_YIELD", 60000);
+        await SeedWaitStatAsync(week1.AddMinutes(55), "SOS_SCHEDULER_YIELD", 0);
+
+        // Measured: the same shape with the interval recorded — the zero is a real idle collection and stays.
+        await SeedWaitStatAsync(week2.AddMinutes(50), "SOS_SCHEDULER_YIELD", 60000, intervalSeconds: 300);
+        await SeedWaitStatAsync(week2.AddMinutes(55), "SOS_SCHEDULER_YIELD", 0, intervalSeconds: 300);
+
+        // Restart: the collector's own verdict (interval 0) on every row — no per-collection row forms.
+        await SeedWaitStatAsync(week3.AddMinutes(50), "SOS_SCHEDULER_YIELD", 60000, intervalSeconds: 300);
+        await SeedWaitStatAsync(week3.AddMinutes(55), "SOS_SCHEDULER_YIELD", 0, intervalSeconds: 0);
+        await SeedWaitStatAsync(week3.AddMinutes(55), "WRITELOG", 0, intervalSeconds: 0);
+
+        _provider.ClearCache();
+        var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.WaitStats, AnalysisTime);
+
+        // 40 plain + 3 busy + the one measured idle zero = 44; the heuristic-dropped zero and the restart are out.
+        Assert.Equal(BaselineTier.Full, baseline.Tier);
+        Assert.Equal(44, baseline.SampleCount);
+        Assert.Equal((40 * 200.0 + 3 * 60000.0 + 0) / 44.0, baseline.Mean, 2);
+
+        // The rate arm over the same rows: pre-v60 collections rate off the LAG gap, measured ones off their
+        // stored interval; the same three verdicts hold there (week 1's zero after 200 ms/s drops on the
+        // heuristic, week 2's measured zero stays, week 3's restart never forms a row). Only the window's very
+        // FIRST collection lacks a prior and drops; each later week's first collection rates off its 7-day gap.
+        var rate = await _provider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, AnalysisTime);
+        Assert.Equal(BaselineTier.Full, rate.Tier);
+        Assert.Equal(43, rate.SampleCount);
     }
 
     // ── Session count: per-collection aggregation ──
@@ -489,7 +590,9 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs)
+    /// <summary>intervalSeconds null plants a pre-v60 row (interval never recorded); 0 plants the collector's
+    /// unknowable-delta marker (a restart); n plants a measured interval (#3653).</summary>
+    private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? intervalSeconds = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -497,13 +600,14 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         cmd.CommandText = @"INSERT INTO wait_stats
             (collection_id, collection_time, server_id, server_name, wait_type,
              waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
-             delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-            VALUES ($1, $2, $3, 'TestServer', $4, 0, 0, 0, 0, $5, 0)";
+             delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+            VALUES ($1, $2, $3, 'TestServer', $4, 0, 0, 0, 0, $5, 0, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = time });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = waitType });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaWaitMs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = intervalSeconds.HasValue ? intervalSeconds.Value : DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 

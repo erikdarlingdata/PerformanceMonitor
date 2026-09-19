@@ -362,7 +362,11 @@ public static class TimescaleSupport
        INSIDE. Baking is safe because every baseline filter is a literal constant or an immutable sanity
        bound -- the provider takes no settings dependency at all, so nothing here can freeze a configurable
        behavior. The restart-exclusion prior_* predicates deliberately stay in the provider: they apply
-       AFTER the collapse, over the collapsed series.
+       AFTER the collapse, over the collapsed series. Since #3653 the perfmon and wait-stats supplies also
+       bake in the collector's own restart verdict (sample_interval_seconds IS DISTINCT FROM 0) and carry the
+       interval, so for a collection with a measured interval the provider's prior_* heuristic is redundant
+       and is applied only to pre-column (NULL-interval) collections -- see SupersededBaselineRelations for
+       why that took a new aggregate under a new name rather than an edit.
 
        file_io is the one family whose unit is NOT the collection: IoLatency averages a per-FILE ratio
        across file rows, so a per-collection total would be a different statistic. It stores that ratio's
@@ -377,8 +381,25 @@ public static class TimescaleSupport
     /// <summary><see cref="TimeSpan"/> twin of <see cref="BaselineRetentionInterval"/>, pinned equal by test.</summary>
     public static readonly TimeSpan BaselineRetentionSpan = TimeSpan.FromDays(35);
 
-    public const string PerfmonBaselineView = "perfmon_baseline";
-    public const string WaitStatsBaselineView = "wait_stats_baseline";
+    /// <summary>The INTERVAL-HONEST perfmon and wait-stats baseline supplies (#3653, A6): the registered,
+    /// live relations. "interval" names the <c>sample_interval_seconds</c> column they carry and filter on — the
+    /// collector's own per-row verdict on whether a delta was knowable — and has nothing to do with the Query
+    /// Store <c>runtime_stats_interval</c> that <see cref="QueryStoreStatsIntervalHourlyView"/> is named for.</summary>
+    public const string PerfmonIntervalBaselineView = "perfmon_interval_baseline";
+    public const string WaitStatsIntervalBaselineView = "wait_stats_interval_baseline";
+
+    /// <summary>
+    /// The SUPERSEDED perfmon and wait-stats baseline supplies (#1757 shape, replaced by #3653's interval-honest
+    /// pair). Not registered: they are no longer in <see cref="BaselineAggregates"/>, so the ensure sweep never
+    /// creates or re-creates them, the phase grid does not phase them and the retention list does not arm them.
+    /// They exist only on stores that ran a build before #3653, where they hold up to <see cref="BaselineRetentionInterval"/>
+    /// of materialized history their successors were backfilled with at most the raw horizon of — which is why
+    /// <see cref="SupersededBaselineRelations"/> retires them by a COVERAGE condition rather than on sight, and
+    /// why <c>PgBaselineProvider</c> still reads them for the part of its window the successor does not yet reach.
+    /// </summary>
+    public const string LegacyPerfmonBaselineView = "perfmon_baseline";
+    public const string LegacyWaitStatsBaselineView = "wait_stats_baseline";
+
     public const string SessionStatsBaselineView = "session_stats_baseline";
     public const string QueryStatsBaselineView = "query_stats_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
@@ -402,11 +423,119 @@ public static class TimescaleSupport
         "file_io_baseline",
     };
 
-    /// <summary>BatchRequests baseline supply -- the counter_name and non-negative filters bake in. Unlike
-    /// cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single instance)
-    /// rather than something the collector guarantees -- it applies no object_name/instance_name predicate.
-    /// sum() over a one-row group is that row, so this stays exact either way.</summary>
-    public const string CreatePerfmonBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_baseline
+    /// <summary>
+    /// Baseline relations SUPERSEDED by an interval-honest successor (#3653, A6): each legacy aggregate is
+    /// dropped only once its successor COVERS the baseline tier, and <see cref="DropRetiredBaselineAggregatesAsync"/>
+    /// evaluates that condition on every service start until it holds.
+    ///
+    /// <para><b>Why a condition and not the #2007 list.</b> <see cref="RetiredBaselineRelations"/> drops on
+    /// sight, which was right for aggregates nothing read. These two ARE read: they hold up to
+    /// <see cref="BaselineRetentionInterval"/> (35 days) of per-collection history, while a successor created
+    /// <c>WITH NO DATA</c> and backfilled by <see cref="BackfillBaselineAggregatesAsync"/> starts with at most
+    /// what raw still holds (30 days by the collectors' default horizon) and reaches the tier only after five
+    /// more days of live refresh. Dropping the legacy relation on day one would forfeit exactly the history
+    /// #3527 declined to forfeit when it left <c>perfmon_baseline</c> un-rebuilt. So the drop waits for
+    /// <c>min(bucket)</c> of the successor to reach the tier horizon (the host clock minus
+    /// <see cref="BaselineRetentionSpan"/>, bound as a parameter — never <c>now()</c> in store SQL), which
+    /// on a store with the default raw horizon is about five days after the first start that carries this
+    /// build. Until then <c>PgBaselineProvider</c> reads whichever of the pair covers its window.</para>
+    ///
+    /// <para><b>A legacy relation that is a PLAIN VIEW drops as soon as its successor exists.</b> On a
+    /// plain-PostgreSQL store both are ordinary views over the same raw table; neither holds history of its
+    /// own, so there is nothing to wait for and the tier condition (which a raw-backed view can never meet at a
+    /// 30-day raw horizon) would leave the old name standing forever.</para>
+    ///
+    /// <para><b>The transitional cost, stated rather than hidden.</b> The legacy aggregate's own refresh,
+    /// retention and compression jobs stay on the store until the drop cascades them, on the minute and hour the
+    /// registry gave that position — the same minute its successor now takes. For those days two light
+    /// refreshes (sub-3 s each on the measured fleet) hold <c>AccessShareLock</c> on the same raw hypertable
+    /// at the same minute, and two small materializations compress in the same nightly hour. That is the
+    /// lock-ADJACENCY the phase grid separates, but it is two share locks that both clear inside the
+    /// 4-minute compression guard, not the exclusive-lock convoy #3012 recorded; it was preferred to removing
+    /// the legacy policies on sight, which would leave the legacy relation frozen at its watermark and make
+    /// every provider read of it union in up to five days of raw <c>wait_stats</c>.</para>
+    ///
+    /// <para><b>Why the successors REPLACED the legacy pair in <see cref="BaselineAggregates"/> instead of
+    /// joining it.</b> Appending two members moves the hourly refresh phase grid: <see cref="HourlyRefreshPhaseOrder"/>
+    /// derives from that list, so the light band widens by two minutes, <see cref="HeaviestRefreshStartMinute"/>
+    /// moves 15→17, <see cref="HeaviestRefreshWindowMinutes"/> shrinks 21→19 and <see cref="RefreshSlotWarningSeconds"/>
+    /// drops from 1,050 s to 950 s against the 896 s recorded ceiling — a permanent 100 s of lost lead time on
+    /// the one refresh with a measured growth series, bought for a five-day transition. Replacing in place
+    /// keeps every position, minute and hour where it was.</para>
+    ///
+    /// <para>Once the fleet has passed the condition these names can move to <see cref="RetiredBaselineRelations"/>
+    /// as pure hygiene (so no future aggregate reuses them); nothing depends on that move, because a dropped
+    /// legacy relation is never re-created — the ensure sweep no longer knows its name.</para>
+    /// </summary>
+    public static readonly (string Legacy, string Successor)[] SupersededBaselineRelations =
+    {
+        (LegacyPerfmonBaselineView,   PerfmonIntervalBaselineView),
+        (LegacyWaitStatsBaselineView, WaitStatsIntervalBaselineView),
+    };
+
+    /// <summary>BatchRequests baseline supply (#3653, A6/A10) -- the counter_name and non-negative filters bake in,
+    /// and so does the collector's own knowability verdict: <c>sample_interval_seconds IS DISTINCT FROM 0</c>
+    /// drops the rows whose delta was never knowable (first sighting, counter reset -- a restart -- or a gap
+    /// past the policy), which the collector marks with a stored 0 (<c>CollectorDeltaCalculator</c>: interval
+    /// 0 &lt;=&gt; no delta knowable). A restart collection therefore produces NO row here rather than a
+    /// <c>delta_cntr_value = 0</c> row that reads as a quiet sample. Pre-column rows (NULL interval) pass the
+    /// filter, which is the three-state rule: 0 = unknowable, NULL = never recorded (keep, and the provider's
+    /// magnitude heuristic still guards it), n = measured and authoritative.
+    /// <para>The interval itself is carried -- <c>max(sample_interval_seconds)</c> over the collection, which
+    /// for this counter is the one row's own value -- so the provider divides by the MEASURED interval, in
+    /// Lite's unit, rather than deriving one from <c>LAG(collection_time)</c> as it had to over
+    /// <see cref="LegacyCreatePerfmonBaselineSql"/>.</para>
+    /// <para>Unlike cpu, one row per collection here is a property of the DMV (Batch Requests/sec is a single
+    /// instance) rather than something the collector guarantees -- it applies no object_name/instance_name
+    /// predicate. sum() over a one-row group is that row, so this stays exact either way.</para></summary>
+    public const string CreatePerfmonIntervalBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_interval_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_cntr_value) AS delta_cntr_value,
+    max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.perfmon_stats
+WHERE counter_name = 'Batch Requests/sec'
+AND   delta_cntr_value >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10). Both families share this source and
+    /// share the identical row-level filter (delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT
+    /// FROM 0), which is what lets one aggregate serve both; Darling.Tests pins that sharing so a future
+    /// family-specific filter cannot silently poison its sibling's supply.
+    /// <para>The interval filter is the collector's knowability verdict baked in (see
+    /// <see cref="CreatePerfmonIntervalBaselineSql"/>): a restart collection, whose every row is (0, 0),
+    /// produces no per-collection row at all instead of a <c>total_wait_ms = 0</c> sample that drags the mean
+    /// down and the stddev up -- the contamination #3653 A6 names. It is Lite's <c>BaselineProvider</c> WHERE,
+    /// verbatim, which <see cref="LegacyCreateWaitStatsBaselineSql"/> could not carry: a continuous aggregate's
+    /// query cannot be altered in place, and a rebuild forfeits the 35-day tier. The interval is carried too
+    /// (<c>max</c> over the collection's rows, Lite's WaitMsPerSec idiom) so the rate arm divides by the
+    /// measured interval and falls back to <c>LAG(collection_time)</c> only for pre-column collections.</para></summary>
+    public const string CreateWaitStatsIntervalBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_interval_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_wait_time_ms) AS total_wait_ms,
+    max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.wait_stats
+WHERE delta_wait_time_ms >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>The SUPERSEDED BatchRequests supply, as every pre-#3653 store still carries it: no interval
+    /// filter, so a restart's fabricated zero is summed and counted as a quiet sample, and no interval column,
+    /// so the provider derived one from <c>LAG(collection_time)</c>. Retained, not registered: nothing in the
+    /// product runs this CREATE any more. It is the record of what <see cref="LegacyPerfmonBaselineView"/>
+    /// computes on the fleet, the text the live retirement test builds its fixture from, and what
+    /// <c>PgBaselineProvider</c>'s legacy arm is written against.</summary>
+    public const string LegacyCreatePerfmonBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.perfmon_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
     server_id,
@@ -419,12 +548,10 @@ AND   delta_cntr_value >= 0
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
-    /// <summary>WaitStats AND WaitMsPerSec baseline supply. Both families share this source and share the
-    /// identical row-level filter (delta_wait_time_ms >= 0), which is what lets one aggregate serve both;
-    /// Darling.Tests pins that sharing so a future family-specific filter cannot silently poison its
-    /// sibling's supply. WaitMsPerSec's interval_sec comes from LAG(collection_time) over the COLLAPSED
-    /// series, so the provider computes it and nothing extra is stored here.</summary>
-    public const string CreateWaitStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_baseline
+    /// <summary>The SUPERSEDED WaitStats/WaitMsPerSec supply (#1757 shape; see <see cref="LegacyCreatePerfmonBaselineSql"/>
+    /// for why the text is retained). Its <c>delta_wait_time_ms >= 0</c> filter admits the restart
+    /// collection's zeros, which is the defect #3653 A6 records.</summary>
+    public const string LegacyCreateWaitStatsBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
     server_id,
@@ -538,7 +665,10 @@ WITH NO DATA";
             {
                 var source = SourceTableFor(view);
 
-                var probeSql = BaselineBackfillProbeSql(view, source);
+                /* Coverage off the materialization hypertable when there is one (#3653): through the view a
+                   fresh WITH NO DATA aggregate reports raw's whole reach and the gate never fires on the start
+                   that created it — see BaselineBackfillProbeSql. */
+                var probeSql = BaselineBackfillProbeSql(view, source, await ResolveMaterializationAsync(connection, view, cancellationToken));
 
                 DateTime? sourceOldest = null;
                 DateTime? coverageOldest = null;
@@ -795,15 +925,72 @@ WITH NO DATA";
     /// west of UTC it over-asks and materializes buckets the tier's own retention policy then drops. The
     /// caller passes <see cref="BaselineRetentionSpan"/> off the service clock, the same clock that stamped
     /// every <c>collection_time</c> it is compared against.</para>
+    ///
+    /// <para><b>COVERAGE IS READ OFF THE MATERIALIZATION, NOT THROUGH THE VIEW (#3653).</b> Measured on a
+    /// TimescaleDB 2.28.1 rig while proving the interval-honest successors' rollout: a continuous aggregate
+    /// created <c>WITH NO DATA</c> has a watermark of <c>-infinity</c>, so its real-time branch serves EVERY
+    /// raw row and <c>min(bucket)</c> through the view is raw's own oldest bucket. The gate then reads
+    /// "already covers" on the very start that created the aggregate and skips the backfill; one policy
+    /// refresh later the watermark jumps to the trailing window's end and everything older than that window is
+    /// served by neither branch — nineteen of twenty planted days went invisible on the rig — until the NEXT
+    /// start's gate, now looking at a real materialized floor, finally backfills. Every #1757 aggregate
+    /// rolled out through that two-start delay. The <paramref name="materialization"/> overload reads the
+    /// floor from the materialization hypertable itself, which is empty (NULL) on a fresh aggregate and is
+    /// exactly the region a refresh can no longer reach back over, so the gate fires on the first start. The
+    /// two-argument form remains for the plain-view shape, where there is no materialization and the view IS
+    /// the coverage.</para>
     /// </summary>
     public static string BaselineBackfillProbeSql(string view, string source)
-        => $@"
+        => BaselineBackfillProbeSql(view, source, materialization: null);
+
+    /// <summary>
+    /// <see cref="BaselineBackfillProbeSql(string, string)"/> with the aggregate's materialization hypertable
+    /// (<c>timescaledb_information.continuous_aggregates.materialization_hypertable_schema/_name</c>) as the
+    /// coverage relation. Null means "no materialization to read" and the view is probed instead.
+    /// </summary>
+    public static string BaselineBackfillProbeSql(string view, string source, (string Schema, string Name)? materialization)
+    {
+        var coverage = materialization is { } m
+            ? $"{QuoteIdentifier(m.Schema)}.{QuoteIdentifier(m.Name)}"
+            : $"collect.{view}";
+
+        return $@"
 SELECT
     (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
-    (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
+    (SELECT min(bucket) FROM {coverage}) AS coverage_oldest,
     time_bucket('1 hour', GREATEST(
         (SELECT min(collection_time) FROM collect.{source}),
         $1)) AS need_from";
+    }
+
+    /// <summary>The materialization hypertable behind a continuous aggregate, or null when the relation is not
+    /// one (a plain fallback view, or a store without the extension). Two statements so the information view
+    /// is only named once the extension is known to exist — the <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// reasoning.</summary>
+    public static async Task<(string Schema, string Name)?> ResolveMaterializationAsync(
+        NpgsqlConnection connection, string view, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            return null;
+        }
+
+        using var probe = new NpgsqlCommand(
+            $"SELECT materialization_hypertable_schema, materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{view}'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+        {
+            return null;
+        }
+
+        return (reader.GetString(0), reader.GetString(1));
+    }
 
     /// <summary>
     /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the
@@ -887,9 +1074,28 @@ $do$";
     /// views, and on fresh stores it no-ops. Failure-isolated per relation, like every other
     /// startup sweep — a failed drop is retried on the next start and never kills the service.
     /// Returns how many relations were actually dropped.
+    ///
+    /// <para>Since #3653 the same pass also walks <see cref="SupersededBaselineRelations"/>, dropping each
+    /// legacy relation ONLY when its successor covers the baseline tier (see
+    /// <see cref="SupersededBaselineRelationDropsAt"/>). The two lists ride one sweep because they need the
+    /// same connection, the same ordering against the ensure (before it) and the same failure isolation; the
+    /// worker's call site is unchanged. This overload takes the host clock itself, which is what the
+    /// production call site wants; the tests pass a clock to walk the condition across time.</para>
+    /// </summary>
+    public static Task<int> DropRetiredBaselineAggregatesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => DropRetiredBaselineAggregatesAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+
+    /// <summary>
+    /// <see cref="DropRetiredBaselineAggregatesAsync(NpgsqlConnection, ILogger?, CancellationToken)"/> with the
+    /// clock the superseded pass judges coverage against. <paramref name="utcNow"/> is the service's UTC clock,
+    /// the clock that stamped every <c>collection_time</c> the successor's buckets derive from; the horizon it
+    /// implies is bound as a parameter, never written as <c>now()</c> in store SQL (the
+    /// <see cref="BaselineBackfillProbeSql"/> reasoning: <c>now()::timestamp</c> renders in the session zone,
+    /// <c>bucket</c> is naive UTC, and PostgreSQL would compare the two without a word).
     /// </summary>
     public static async Task<int> DropRetiredBaselineAggregatesAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -897,6 +1103,45 @@ $do$";
         }
 
         var dropped = 0;
+
+        foreach (var (legacy, successor) in SupersededBaselineRelations)
+        {
+            try
+            {
+                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, successor, utcNow, cancellationToken);
+                if (verdict.Decision != SupersededBaselineDecision.Drop)
+                {
+                    if (verdict.Decision == SupersededBaselineDecision.SuccessorShort)
+                    {
+                        logger?.LogInformation(
+                            "Superseded baseline relation {Legacy} stays for now (#3653): its successor {Successor} covers from {SuccessorOldest} and the baseline tier's horizon is {Horizon} — the legacy aggregate still holds history the successor has not yet materialized, and this start's read of it is what the provider falls back on for that part of its window. Re-judged on every start; expected to drop about five days after the first start that carried the successor.",
+                            legacy, successor, verdict.SuccessorOldest, verdict.Horizon);
+                    }
+
+                    continue;
+                }
+
+                using (var drop = new NpgsqlCommand(DropRetiredBaselineRelationSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                dropped++;
+                logger?.LogInformation(
+                    "Dropped superseded baseline relation {Legacy} (#3653) — its interval-honest successor {Successor} {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
+                    legacy, successor,
+                    verdict.LegacyIsContinuousAggregate
+                        ? $"covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
+                        : "exists and, like this plain view, reads raw directly");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not judge or drop superseded baseline relation {Legacy} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
+                    legacy, ex.Message);
+            }
+        }
+
         foreach (var view in RetiredBaselineRelations)
         {
             try
@@ -933,11 +1178,147 @@ $do$";
         return dropped;
     }
 
+    /// <summary>What the superseded pass decided for one legacy relation, and why.</summary>
+    public enum SupersededBaselineDecision
+    {
+        /// <summary>The legacy relation does not exist on this store (fresh store, or already retired).</summary>
+        LegacyAbsent,
+
+        /// <summary>The successor does not exist yet, so there is nothing to hand the readers over to. On the
+        /// first start that carries this build the drop pass runs BEFORE the ensure that creates the successor,
+        /// so this is the expected verdict of that one start; the next start finds the successor.</summary>
+        SuccessorAbsent,
+
+        /// <summary>The legacy relation is a continuous aggregate and the successor's oldest bucket is later than
+        /// the tier horizon (or the successor is empty) — the legacy still holds history the successor lacks.</summary>
+        SuccessorShort,
+
+        /// <summary>Drop: the successor covers the tier, or the legacy relation is a plain view (nothing of its
+        /// own to lose).</summary>
+        Drop,
+    }
+
+    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the three facts it
+    /// rests on, so the log line can show its working and the live test can assert each fact.</summary>
+    public readonly record struct SupersededBaselineVerdict(
+        SupersededBaselineDecision Decision,
+        bool LegacyIsContinuousAggregate,
+        DateTime? SuccessorOldest,
+        DateTime Horizon);
+
+    /// <summary>
+    /// THE RETIREMENT CONDITION (#3653), as a pure predicate so the tests can walk it across time without a
+    /// store: a legacy CONTINUOUS AGGREGATE drops once its successor's oldest bucket is at or before the tier
+    /// horizon (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); a legacy PLAIN VIEW drops as
+    /// soon as a successor exists (<paramref name="successorOldest"/> is not consulted — a raw-backed view has
+    /// nothing of its own to hand over). An EMPTY successor (<c>null</c> oldest) never releases a legacy
+    /// aggregate: an un-backfilled successor covers nothing, whatever the clock says.
+    ///
+    /// <para><b>Why the TIER horizon and not the provider's 30-day window.</b> The window is the weaker sufficient
+    /// condition — once the successor reaches it, nothing reads the legacy relation — but "covers the tier" is
+    /// the claim that dropping the legacy loses NOTHING it held, and that is the claim a retirement should be
+    /// able to make. On a store with the collectors' default 30-day raw horizon the two conditions are met
+    /// about one and five days after the successor's backfill respectively; the provider switches on the
+    /// first, the drop waits for the second.</para>
+    ///
+    /// <para><b>Chunk-edge arithmetic, so the condition is known to be REACHABLE and STABLE.</b> The successor's
+    /// retention policy drops whole materialization chunks whose END is older than the horizon, so the oldest
+    /// surviving chunk always straddles it and <c>min(bucket)</c> sits at or before the horizon from the first
+    /// day the successor has held a full tier onward — the condition, once true, stays true, and a one-shot drop
+    /// on any start is enough. <c>&lt;=</c> rather than <c>&lt;</c> so a bucket that lands exactly on the horizon
+    /// counts as coverage.</para>
+    /// </summary>
+    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, DateTime? successorOldest, DateTime utcNow)
+    {
+        if (!legacyIsContinuousAggregate)
+        {
+            return true;
+        }
+
+        return successorOldest is DateTime oldest && oldest <= utcNow - BaselineRetentionSpan;
+    }
+
+    /// <summary>
+    /// Reads the three facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
+    /// verdict. Four small catalog reads at most, once per start; the only one that touches data is the
+    /// successor's <c>min(bucket)</c>, the same probe <see cref="BaselineBackfillProbeSql"/> already runs for
+    /// every registered aggregate on every start.
+    ///
+    /// <para>The continuous-aggregate question is asked in two statements on purpose:
+    /// <c>timescaledb_information</c> does not exist on a store that never created the extension, and a
+    /// reference to it fails at PARSE time regardless of any short-circuit in the same statement — the reason
+    /// <see cref="DropRetiredBaselineRelationSql"/> reaches it through <c>EXECUTE</c>. Here the extension is
+    /// probed first (<c>pg_extension</c>, the authoritative per-database check <see cref="DetectAsync"/> uses)
+    /// and the information view is read only when it resolves.</para>
+    /// </summary>
+    public static async Task<SupersededBaselineVerdict> JudgeSupersededBaselineRelationAsync(
+        NpgsqlConnection connection, string legacy, string successor, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var horizon = utcNow - BaselineRetentionSpan;
+
+        using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, null, horizon);
+            }
+        }
+
+        using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, null, horizon);
+            }
+        }
+
+        var legacyIsContinuousAggregate = false;
+        if (await DetectAsync(connection, cancellationToken))
+        {
+            using var probe = new NpgsqlCommand(BaselineRelationIsContinuousAggregateSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
+            legacyIsContinuousAggregate = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
+        DateTime? successorOldest = null;
+        if (legacyIsContinuousAggregate)
+        {
+            using var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds };
+            successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+        }
+
+        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, successorOldest, utcNow)
+            ? SupersededBaselineDecision.Drop
+            : SupersededBaselineDecision.SuccessorShort;
+
+        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, successorOldest, horizon);
+    }
+
+    /// <summary>Is this baseline relation a CONTINUOUS AGGREGATE (as opposed to the plain fallback view a
+    /// TimescaleDB-less store creates under the same name)? Valid only once <see cref="DetectAsync"/> has
+    /// answered true: the information view it reads does not exist before the extension is created.</summary>
+    public static string BaselineRelationIsContinuousAggregateSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{view}')";
+
+    /// <summary>How far back a baseline relation reaches — its oldest hourly bucket, or NULL when it holds
+    /// nothing. On a continuous aggregate with real-time aggregation this is the materialized floor when the
+    /// materialization is non-empty, which is the coverage question the superseded pass asks.</summary>
+    public static string BaselineCoverageOldestSql(string view)
+        => $"SELECT min(bucket) FROM collect.{view}";
+
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
     public static string SourceTableFor(string view) => view switch
     {
-        PerfmonBaselineView => "perfmon_stats",
-        WaitStatsBaselineView => "wait_stats",
+        PerfmonIntervalBaselineView => "perfmon_stats",
+        WaitStatsIntervalBaselineView => "wait_stats",
+        /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
+           over a legacy relation resolve without a second map. */
+        LegacyPerfmonBaselineView => "perfmon_stats",
+        LegacyWaitStatsBaselineView => "wait_stats",
         SessionStatsBaselineView => "session_stats",
         QueryStatsBaselineView => "query_stats",
         BlockedProcessBaselineView => "blocked_process_reports",
@@ -972,11 +1353,17 @@ $do$";
     };
 
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
-    /// retention list and the tests read one list rather than three hand-kept copies.</summary>
+    /// retention list and the tests read one list rather than three hand-kept copies.
+    /// <para>The perfmon and wait-stats entries are the INTERVAL-HONEST pair (#3653), which took the positions
+    /// of the legacy pair they supersede rather than joining behind them: <see cref="HourlyRefreshPhaseOrder"/>,
+    /// <see cref="AggregateCompressionTargets"/> and <see cref="RetentionPolicies"/> all derive from this list by
+    /// position and count, so a replacement leaves the phase grid, the compression hours and the policy count
+    /// exactly where they were, where an append would have re-derived all three (the arithmetic is on
+    /// <see cref="SupersededBaselineRelations"/>). The legacy pair is retired by that list's coverage condition.</para></summary>
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
-        (CreatePerfmonBaselineSql,        PerfmonBaselineView),
-        (CreateWaitStatsBaselineSql,      WaitStatsBaselineView),
+        (CreatePerfmonIntervalBaselineSql,   PerfmonIntervalBaselineView),
+        (CreateWaitStatsIntervalBaselineSql, WaitStatsIntervalBaselineView),
         (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
         (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),

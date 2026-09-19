@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -46,11 +47,43 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <para>
 /// The arc's only genuine dialect work lives in <see cref="GetBaselineQuery"/>:
 /// DuckDB's QUALIFY clause (used at four sites for restart-poisoning / rate
-/// exclusion) does not exist in Postgres. Each site is rewritten as
+/// exclusion when this port was made; three since #3653 retired Lite's
+/// BatchRequests heuristic — the rewrite numbering below is historical) does
+/// not exist in Postgres. Each site is rewritten as
 /// window-function-in-a-CTE + the identical predicate in an OUTER where — the
 /// same idiom the Dashboard twin (SqlServerBaselineProvider) uses for T-SQL —
 /// with the original DuckDB form preserved in a comment block and the
 /// row-selection equivalence argued site-by-site.
+/// </para>
+///
+/// <para>
+/// <b>Two supplies for the perfmon and wait-stats families (#3653, A6/A10).</b> Their baseline
+/// aggregates were replaced by interval-honest successors (<c>perfmon_interval_baseline</c>,
+/// <c>wait_stats_interval_baseline</c>: <c>sample_interval_seconds IS DISTINCT FROM 0</c> baked in and
+/// the measured interval carried), but a successor created <c>WITH NO DATA</c> and backfilled from raw
+/// starts with less history than the legacy aggregate holds. So <see cref="GetBaselineQuery"/> is
+/// written against the SUCCESSOR, <see cref="GetLegacyBaselineQuery"/> keeps the pre-#3653 text against
+/// the legacy relation, and <see cref="ChooseSupplyAsync"/> picks per compute: the successor whenever it
+/// reaches as far back into this server's window as the legacy does (or the legacy is gone), the legacy
+/// otherwise. The choice is a catalog read plus two indexed <c>min(bucket)</c> probes, bounded by the
+/// 1-hour bucket cache above it; the retirement that ends the choice is
+/// <c>TimescaleSupport.SupersededBaselineRelations</c>.
+/// </para>
+///
+/// <para>
+/// <b>The three-state rule the successor arms apply</b> (Lite's since #3540): a stored interval of 0 is
+/// the collector saying "no delta knowable" (first sighting, counter reset — a restart — or a gap past
+/// the policy) and the aggregate's WHERE has already dropped it; NULL is a pre-column collection whose
+/// interval was never recorded, kept, and for it the <c>LAG &gt; N</c> magnitude heuristic remains the
+/// only restart guard there is; n is a measured interval and is AUTHORITATIVE — the row stays whatever
+/// its magnitude, because a 0 over a measured interval is a real idle sample, not a restart. The
+/// heuristic is therefore gated on <c>sample_interval_seconds IS NULL</c> at every successor site rather
+/// than deleted: the fleet's raw tables carried NULL-interval rows until the V127/V128 rows aged out, and
+/// a bring-your-own store may still. <c>PlanCacheAnomalyDetector.IsRealDeltaRow</c> is the same predicate
+/// stated over in-memory rows (a prior row for the same key after this row's <c>server_start_time</c>);
+/// here the collector's stored verdict is the stronger witness, because it saw the counter go backwards
+/// and the detector can only infer it, so the SQL tier reads the column and the in-memory tier keeps the
+/// predicate.
 /// </para>
 /// </summary>
 public class PgBaselineProvider
@@ -176,6 +209,125 @@ public class PgBaselineProvider
         || ex is TimeoutException
         || ex.InnerException is TimeoutException;
 
+    /// <summary>
+    /// The (legacy, successor) supply pair a metric reads, or <c>null</c> for the metrics whose supply was
+    /// never superseded. Keyed on the METRIC, not the relation: three arms read the two superseded relations
+    /// (BatchRequests → perfmon; WaitStats and WaitMsPerSec → wait_stats), and the choice has to be made
+    /// per arm because each arm's legacy text differs from its successor text.
+    /// </summary>
+    internal static (string Legacy, string Successor)? SupersededSupplyFor(string metricName) => metricName switch
+    {
+        MetricNames.BatchRequests => (TimescaleSupport.LegacyPerfmonBaselineView, TimescaleSupport.PerfmonIntervalBaselineView),
+        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.LegacyWaitStatsBaselineView, TimescaleSupport.WaitStatsIntervalBaselineView),
+        _ => null,
+    };
+
+    /// <summary>
+    /// THE SUPPLY RULE (#3653), pure so the tests can walk it: read the successor when the legacy relation is
+    /// absent, or when the successor reaches at least as far back into THIS server's window as the legacy
+    /// does. <paramref name="windowStart"/> bounds what "as far back" can mean — history older than the
+    /// window is never read, so a legacy relation reaching 35 days back buys nothing over a successor reaching
+    /// 30 when the question is a 30-day window.
+    ///
+    /// <para><b>Compared against the legacy's OWN reach for this server, not against the window alone.</b> A
+    /// server registered three days ago has three days in BOTH relations; a rule of "successor covers the
+    /// window" would send that server to the legacy, contaminated supply for twenty-seven days for no gain.
+    /// The comparison is <c>successorOldest &lt;= GREATEST(legacyOldest, windowStart)</c>: the successor must
+    /// reach the later of the legacy's first bucket and the window's start, which is exactly the first instant
+    /// the legacy could contribute a row the successor cannot.</para>
+    ///
+    /// <para>An EMPTY successor (<c>null</c> oldest — created but not yet backfilled) never wins while a legacy
+    /// with rows exists; an empty legacy always loses. Both empty: successor, since there is nothing to read
+    /// either way and the successor is the relation that will fill.</para>
+    /// </summary>
+    internal static bool PrefersSuccessor(bool legacyExists, DateTime? legacyOldest, DateTime? successorOldest, DateTime windowStart)
+    {
+        if (!legacyExists || legacyOldest is null)
+        {
+            return true;
+        }
+
+        if (successorOldest is null)
+        {
+            return false;
+        }
+
+        var legacyReach = legacyOldest.Value > windowStart ? legacyOldest.Value : windowStart;
+        return successorOldest.Value <= legacyReach;
+    }
+
+    /// <summary>
+    /// One server's oldest bucket in a baseline relation. <c>WHERE server_id = $1</c> is what keeps this cheap on a
+    /// real-time continuous aggregate: the materialized half answers off its <c>(server_id, bucket)</c> group
+    /// index, and the un-materialized tail (raw past the watermark) is one server's last hour or two of rows
+    /// rather than the whole fleet's.
+    /// </summary>
+    internal static string SupplyOldestBucketSql(string relation)
+        => $"SELECT min(bucket) FROM {relation} WHERE server_id = $1";
+
+    /// <summary>
+    /// Picks the SQL to run for this compute: <paramref name="query"/> unchanged for every metric without a
+    /// superseded supply, and for the three that have one, either the successor text it was handed or the
+    /// legacy text, by <see cref="PrefersSuccessor"/>. Only swaps when <paramref name="query"/> IS this class's
+    /// own successor text for the metric — a derived provider that resolved its own SQL for a metric of the same
+    /// name (the <see cref="ResolveBaselineQuery"/> seam) keeps what it resolved.
+    ///
+    /// <para>Two probes, sequential on purpose: the legacy relation is absent on every store first installed at
+    /// or after this build and on every store that has retired it, and a statement naming a relation that does
+    /// not exist fails at parse time — so its existence is asked first and its <c>min(bucket)</c> only when it
+    /// answered yes. The successor always exists once the ensure sweep has run (as a continuous aggregate or
+    /// the plain fallback view), so a failure there is a real failure and is left to the caller's catch, which
+    /// already degrades this metric to no baseline for the pass.</para>
+    /// </summary>
+    private async Task<string> ChooseSupplyAsync(
+        NpgsqlConnection connection, int serverId, string metricName, string query, DateTime windowStart, CancellationToken cancellationToken)
+    {
+        var pair = SupersededSupplyFor(metricName);
+        if (pair is null || !string.Equals(query, GetBaselineQuery(metricName), StringComparison.Ordinal))
+        {
+            return query;
+        }
+
+        var legacyQuery = GetLegacyBaselineQuery(metricName);
+        if (legacyQuery is null)
+        {
+            return query;
+        }
+
+        var (legacy, successor) = pair.Value;
+
+        bool legacyExists;
+        using (var probe = new NpgsqlCommand(TimescaleSupport.BaselineRelationExistsSql(legacy), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+        {
+            legacyExists = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
+        if (!legacyExists)
+        {
+            return query;
+        }
+
+        var legacyOldest = await OldestBucketAsync(connection, legacy, serverId, cancellationToken);
+        var successorOldest = await OldestBucketAsync(connection, successor, serverId, cancellationToken);
+
+        var prefersSuccessor = PrefersSuccessor(legacyExists, legacyOldest, successorOldest, windowStart);
+        if (!prefersSuccessor)
+        {
+            _logger?.LogDebug(
+                "[PgBaselineProvider] {MetricName} for server {ServerId} reads the superseded {Legacy} supply this pass: it reaches back to {LegacyOldest} where {Successor} reaches only {SuccessorOldest} against a window from {WindowStart} (#3653; the successor takes over once its backfill and live refresh reach as far).",
+                metricName, serverId, legacy, legacyOldest, successor, successorOldest, windowStart);
+        }
+
+        return prefersSuccessor ? query : legacyQuery;
+    }
+
+    private static async Task<DateTime?> OldestBucketAsync(NpgsqlConnection connection, string relation, int serverId, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand(SupplyOldestBucketSql(relation), connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        probe.Parameters.AddWithValue(serverId);
+        return await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
+    }
+
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBucketsAsync(
         int serverId, string metricName, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
@@ -188,6 +340,8 @@ public class PgBaselineProvider
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+            query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
 
             using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
@@ -338,7 +492,7 @@ JOIN tier_mads AS m
  AND m.day_of_week = t.day_of_week";
 
     /// <summary>
-    /// The eleven per-metric baseline queries — Lite's, verbatim, except the four QUALIFY
+    /// The eleven per-metric baseline queries — Lite's, verbatim, except the QUALIFY
     /// sites rewritten for Postgres (no QUALIFY support). Internal (not private like Lite's)
     /// so Darling.Tests can pin every query's dialect and the rewrites' structure ungated.
     /// <para>#1743: the nine non-event metrics route their cleaned rowsets through
@@ -400,29 +554,32 @@ WITH clean AS (
                following another zero keeps LAG = 0 and SURVIVES (genuine idle, not a restart).
                Row selection is exactly the original's.
 
-               #3527 divisor: this arm reads the perfmon_baseline supply (the #1757 CAGG / fallback
-               view), which materializes only (collection_time, delta_cntr_value) — it does NOT carry
-               sample_interval_seconds, and a continuous aggregate cannot grow a column without a
-               drop-and-rebuild that would forfeit the 31 days of baseline history the 4-day raw tier
-               can no longer refill. So the interval is DERIVED from the gap between consecutive
-               collections — LAG(collection_time) over the collapsed series, byte-for-byte the
-               WaitMsPerSec arm's idiom (see CreateWaitStatsBaselineSql's note: the provider computes
-               interval_sec, nothing extra is stored). Same requests/sec unit as Lite and as the
-               detector's window read; the first row of the window has no prior (interval NULL) and is
-               skipped, exactly like WaitMsPerSec. The ::DOUBLE PRECISION cast is the io-arm rule:
-               STDDEV_SAMP over numeric can overflow System.Decimal at materialization. */
+               #3527 divisor, re-taken by #3653: this arm reads the perfmon_interval_baseline supply
+               (CreatePerfmonIntervalBaselineSql), which carries the collection's MEASURED
+               sample_interval_seconds and has already dropped every interval-0 (unknowable) row. So v is
+               delta / the stored interval — Lite's exact unit — and the LAG(collection_time) gap the
+               legacy arm had to derive (GetLegacyBaselineQuery) is now only the fallback for a
+               pre-column collection whose interval is NULL. Two row-selection consequences, both
+               deliberate: (a) the window's FIRST collection is no longer skipped when it has a stored
+               interval (only a NULL-interval first row still lacks a divisor); (b) the > 1000 heuristic is
+               GATED on sample_interval_seconds IS NULL — a measured zero after a busy sample is a real
+               idle sample (a restart writes interval 0 and never reaches this text), so the heuristic
+               guards only the rows for which the collector left no verdict. The ::DOUBLE PRECISION cast
+               is the io-arm rule: STDDEV_SAMP over numeric can overflow System.Decimal at
+               materialization. */
             MetricNames.BatchRequests => @"
 WITH windowed AS (
-    SELECT collection_time, delta_cntr_value,
+    SELECT collection_time, delta_cntr_value, sample_interval_seconds,
            COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
-    FROM perfmon_baseline
+           COALESCE(sample_interval_seconds::DOUBLE PRECISION,
+                    extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))) AS interval_sec
+    FROM perfmon_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 clean AS (
     SELECT collection_time, delta_cntr_value::DOUBLE PRECISION / interval_sec AS v
     FROM windowed
-    WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)
+    WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000 AND sample_interval_seconds IS NULL)
     AND   interval_sec > 0
 )," + RobustTierScaffold,
 
@@ -430,8 +587,10 @@ clean AS (
                wait type): aggregate to total wait ms per collection FIRST, then restart
                exclusion. Lite's DuckDB original applied QUALIFY inside the grouped CTE (since #3540
                Lite's WHERE also carries sample_interval_seconds IS DISTINCT FROM 0, dropping the
-               calculator's unknowable rows before the sum; this arm reads the wait_stats_baseline
-               aggregate, which cannot carry that filter without a rebuild — V127's rung note):
+               calculator's unknowable rows before the sum; since #3653 this arm reads the
+               wait_stats_interval_baseline aggregate, which bakes that same WHERE in and carries the
+               interval — the legacy wait_stats_baseline could not, and GetLegacyBaselineQuery keeps the
+               text that reads it for the window it still covers):
 
                    WITH per_collection AS (
                        SELECT collection_time,
@@ -451,22 +610,30 @@ clean AS (
                serves as its successor's LAG value — and the outer WHERE applies the identical
                predicate. Only the first 0-total immediately after a >10000ms collection (the
                restart signature) is excluded; consecutive zeros (genuine idle) survive because
-               their LAG is 0, not >10000. Row selection is exactly the original's. */
+               their LAG is 0, not >10000. Row selection is exactly the original's for every
+               NULL-interval collection.
+
+               #3653: the heuristic is GATED on sample_interval_seconds IS NULL. A collection with a
+               measured interval that survived the supply's IS DISTINCT FROM 0 filter is, by the
+               collector's own verdict, a real sample — its zero is idle, not a restart (a restart's rows
+               carry interval 0 and never form a per-collection row here) — so the magnitude test is
+               redundant for it and would wrongly drop a real quiet minute after a busy one. The gate
+               keeps the heuristic exactly where it is still the only guard: pre-column history. */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
-    SELECT collection_time, total_wait_ms
-    FROM wait_stats_baseline
+    SELECT collection_time, total_wait_ms, sample_interval_seconds
+    FROM wait_stats_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
-    SELECT collection_time, total_wait_ms,
+    SELECT collection_time, total_wait_ms, sample_interval_seconds,
            COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms
     FROM per_collection
 ),
 clean AS (
     SELECT collection_time, total_wait_ms AS v
     FROM with_lag
-    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
+    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
             // Point-in-time, multiple rows per collection (per program_name) —
@@ -570,10 +737,11 @@ WITH clean AS (
             /* QUALIFY rewrite 4 of 4 — wait ms per second (chart unit). Lite's DuckDB original (as it stood
                when this rewrite was made; since #3540 Lite's per_collection takes the collection's STORED
                sample_interval_seconds — MAX over its rows — and falls back to this LAG only for pre-v60
-               rows, so a restart collection's 0 becomes NULL and is dropped by with_rate's WHERE. This arm
-               cannot follow yet: it reads wait_stats_baseline, which materializes only (collection_time,
-               total_wait_ms) and cannot grow the interval without the drop-and-rebuild the #3527 note below
-               declines — see V127's rung note for the new-aggregate follow-up):
+               rows, so a restart collection's 0 becomes NULL and is dropped by with_rate's WHERE. Since
+               #3653 this arm follows: wait_stats_interval_baseline carries that same MAX and has already
+               dropped the restart collection, so per_collection reads the stored interval and derives
+               one from LAG(collection_time) only where it is NULL — the legacy text, which had no
+               interval to read, is GetLegacyBaselineQuery's):
 
                    WITH per_collection AS (
                        SELECT collection_time,
@@ -605,7 +773,108 @@ WITH clean AS (
                    post-WHERE rowset, then applies the identical predicate in the outer WHERE.
                    As in rewrites 1-3, LAG sees rows the filter drops, so only the first 0-rate
                    after a >100 ms/sec sample (restart signature) is excluded and idle zeros
-                   after zeros survive. Row selection is exactly the original's. */
+                   after zeros survive. Row selection is exactly the original's for NULL-interval
+                   collections; for measured ones the > 100 heuristic is gated off (the WaitStats
+                   arm's reasoning) and the window's first collection is rated off its stored
+                   interval rather than dropped for lacking a prior. */
+            MetricNames.WaitMsPerSec => @"
+WITH per_collection AS (
+    SELECT collection_time,
+           total_wait_ms::DOUBLE PRECISION AS total_wait_ms,
+           sample_interval_seconds,
+           CASE WHEN sample_interval_seconds IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE sample_interval_seconds
+           END AS interval_sec
+    FROM wait_stats_interval_baseline
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+),
+with_rate AS (
+    SELECT collection_time, sample_interval_seconds,
+           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END AS ms_per_sec
+    FROM per_collection
+    WHERE interval_sec IS NOT NULL
+),
+with_lag AS (
+    SELECT collection_time, ms_per_sec, sample_interval_seconds,
+           COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec
+    FROM with_rate
+),
+clean AS (
+    SELECT collection_time, ms_per_sec AS v
+    FROM with_lag
+    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
+)," + RobustTierScaffold,
+
+            // Blocking events per minute (chart shows event bars bucketed by minute)
+            MetricNames.BlockingPerMinute => @"
+WITH per_minute AS (
+    SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
+           SUM(event_count)::DOUBLE PRECISION AS event_count
+    FROM blocked_process_baseline
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    GROUP BY minute_bucket
+),
+clean AS (
+    SELECT minute_bucket AS collection_time, event_count AS v
+    FROM per_minute
+)," + RobustTierScaffold,
+
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// The pre-#3653 text of the three arms whose supply was superseded, VERBATIM, against the legacy relations
+    /// (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c>). Run by <see cref="ChooseSupplyAsync"/> only while a
+    /// legacy relation still reaches further back into a server's window than its successor — on a store
+    /// upgraded with the default 30-day raw horizon, roughly the first day after the upgrade — and never on a
+    /// store that was first installed at or after this build. <c>null</c> for every other metric.
+    ///
+    /// <para>What this text does that the successor arms no longer do, which is why it is retained rather than
+    /// generated: it has no interval to read, so it derives one from <c>LAG(collection_time)</c> (BatchRequests,
+    /// WaitMsPerSec) and skips the window's first collection for lacking a prior; and it applies the
+    /// <c>LAG &gt; N</c> heuristic to EVERY collection, because over a supply that summed the restart's zeros a
+    /// magnitude test was the only restart guard there was. The row-selection arguments for the QUALIFY
+    /// rewrites (window-before-filter, LAG over the unfiltered series) are the ones on <see cref="GetBaselineQuery"/>
+    /// and hold here unchanged.</para>
+    /// </summary>
+    internal static string? GetLegacyBaselineQuery(string metricName)
+    {
+        return metricName switch
+        {
+            MetricNames.BatchRequests => @"
+WITH windowed AS (
+    SELECT collection_time, delta_cntr_value,
+           COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta,
+           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
+    FROM perfmon_baseline
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+),
+clean AS (
+    SELECT collection_time, delta_cntr_value::DOUBLE PRECISION / interval_sec AS v
+    FROM windowed
+    WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)
+    AND   interval_sec > 0
+)," + RobustTierScaffold,
+
+            MetricNames.WaitStats => @"
+WITH per_collection AS (
+    SELECT collection_time, total_wait_ms
+    FROM wait_stats_baseline
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+),
+with_lag AS (
+    SELECT collection_time, total_wait_ms,
+           COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms
+    FROM per_collection
+),
+clean AS (
+    SELECT collection_time, total_wait_ms AS v
+    FROM with_lag
+    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
+)," + RobustTierScaffold,
+
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -629,20 +898,6 @@ clean AS (
     SELECT collection_time, ms_per_sec AS v
     FROM with_lag
     WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)
-)," + RobustTierScaffold,
-
-            // Blocking events per minute (chart shows event bars bucketed by minute)
-            MetricNames.BlockingPerMinute => @"
-WITH per_minute AS (
-    SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
-           SUM(event_count)::DOUBLE PRECISION AS event_count
-    FROM blocked_process_baseline
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    GROUP BY minute_bucket
-),
-clean AS (
-    SELECT minute_bucket AS collection_time, event_count AS v
-    FROM per_minute
 )," + RobustTierScaffold,
 
             _ => null

@@ -291,14 +291,21 @@ WITH clean AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 )," + RobustTierScaffold,
 
-            // Cumulative counter — restart exclusion via subquery with QUALIFY.
-            // Excludes samples where delta drops to 0 when prior sample was > 1000
-            // (restart signature for cumulative counters).
-            // #3527: v is the per-second rate — the per-interval delta divided by the row's measured
-            // sample_interval_seconds — so the baseline population is in the same requests/sec unit as
-            // the detector's window statistic. Interval <= 0 rows (unknowable delta) are skipped, never
-            // read as 0. The restart signature stays on the RAW delta: its > 1000 bar predates the
-            // division and marks a counter reset regardless of cadence.
+            // Cumulative counter. #3527: v is the per-second rate — the per-interval delta divided by the
+            // row's measured sample_interval_seconds — so the baseline population is in the same
+            // requests/sec unit as the detector's window statistic. Interval <= 0 rows (unknowable delta:
+            // first sighting, counter reset, gap past the policy — the collector's stored 0) are skipped,
+            // never read as 0.
+            /* #3653 (A10): the QUALIFY restart heuristic this arm carried — NOT (delta = 0 AND LAG(delta) > 1000)
+               — is RETIRED here, because every row that survives `sample_interval_seconds > 0` has a measured
+               interval, and the interval is the collector's own verdict on the restart question: a counter
+               reset (which is what a restart is to a cumulative counter) is written as delta 0 WITH interval 0
+               (CollectorDeltaCalculator: interval 0 <=> no delta knowable), so it never reaches this text. A
+               delta-0 row that does reach it, whatever the prior sample, is a MEASURED idle interval — a real
+               sample the heuristic was wrongly dropping whenever it followed a busy one. perfmon_stats has
+               carried the column since Lite's first schema, so there is no pre-column (NULL) state for the
+               heuristic to keep guarding, unlike the wait-stats arms below. Darling's twin arm over its
+               interval-honest supply gates the same heuristic on NULL for the same reason. */
             MetricNames.BatchRequests => @"
 WITH clean AS (
     SELECT collection_time, delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) AS v
@@ -307,8 +314,6 @@ WITH clean AS (
     AND   counter_name = 'Batch Requests/sec'
     AND   delta_cntr_value >= 0
     AND   sample_interval_seconds > 0
-    QUALIFY NOT (delta_cntr_value = 0
-        AND COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) > 1000)
 )," + RobustTierScaffold,
 
             // Cumulative counter, multiple rows per collection (per wait type) —
@@ -318,8 +323,16 @@ WITH clean AS (
                collection whose every row is (0, 0) produces no per-collection row at all rather than a
                total_wait_ms = 0 sample that drags the mean down and the stddev up. Pre-v60 rows (NULL,
                interval never recorded) are kept, and for them the QUALIFY restart signature below remains
-               the guard it always was. Darling's twin reads the wait_stats_baseline continuous aggregate,
-               which cannot carry this filter without a rebuild — see V127's rung note. */
+               the guard it always was — and ONLY for them (#3653, A10): the heuristic is gated on
+               MAX(sample_interval_seconds) IS NULL, because a collection with a measured interval that
+               survived the filter is, by the collector's verdict, a real sample whose zero is idle rather
+               than a restart (a restart's rows carry interval 0 and form no per-collection row here), and
+               the magnitude test would wrongly drop a real quiet minute after a busy one. MAX rather than
+               ANY: a collection's rows are all pre-v60 or all post-v60, so MAX IS NULL is "no row has a
+               verdict". Spelled as the aggregate itself in the QUALIFY rather than through an alias: an
+               alias that shadows the raw column's name resolves to the RAW column there, which is not in
+               the GROUP BY. Darling's twin reads the wait_stats_interval_baseline continuous aggregate,
+               which bakes this WHERE in and carries the same MAX (#3653). */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -330,7 +343,8 @@ WITH per_collection AS (
     AND   sample_interval_seconds IS DISTINCT FROM 0
     GROUP BY collection_time
     QUALIFY NOT (total_wait_ms = 0
-        AND COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) > 10000)
+        AND COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) > 10000
+        AND MAX(sample_interval_seconds) IS NULL)
 ),
 clean AS (
     SELECT collection_time, total_wait_ms AS v
@@ -423,11 +437,15 @@ WITH clean AS (
             // Wait ms per second (chart shows this, not total ms per collection)
             /* #3540: the collection's STORED interval (MAX over its rows) where it has one, the LAG only for
                pre-v60 collections; a restart collection's 0 becomes NULL and the with_rate WHERE drops it
-               exactly as it always dropped the window's first row. */
+               exactly as it always dropped the window's first row.
+               #3653 (A10): the QUALIFY restart heuristic is gated on the collection having NO stored
+               interval — the WaitStats arm's reasoning: a measured zero rate is idle, and the restart the
+               heuristic hunts for was already dropped as an interval-0 collection one CTE up. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
+           MAX(sample_interval_seconds) AS stored_interval_seconds,
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE NULLIF(MAX(sample_interval_seconds), 0)
@@ -439,11 +457,13 @@ WITH per_collection AS (
 ),
 with_rate AS (
     SELECT collection_time,
+           stored_interval_seconds,
            total_wait_ms / interval_sec AS ms_per_sec
     FROM per_collection
     WHERE interval_sec IS NOT NULL AND interval_sec > 0
     QUALIFY NOT (ms_per_sec = 0
-        AND COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) > 100)
+        AND COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) > 100
+        AND stored_interval_seconds IS NULL)
 ),
 clean AS (
     SELECT collection_time, ms_per_sec AS v

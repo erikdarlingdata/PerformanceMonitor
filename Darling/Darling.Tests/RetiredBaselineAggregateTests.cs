@@ -11,7 +11,10 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using Darling.Tests;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -161,6 +164,237 @@ WITH NO DATA", ct);
 
         /* ---- idempotent: a second pass finds nothing. */
         Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, ct));
+    }
+
+    /// <summary>
+    /// #3653 (A6 + the mechanical half of A10), proven live end to end on TimescaleDB: the legacy
+    /// <c>wait_stats_baseline</c> and its interval-honest successor built side by side over the SAME planted
+    /// history, the restart collection's fabricated zero IN the legacy sum and ABSENT from the successor, the
+    /// provider reading the legacy relation while the successor is shallower for this server and the successor
+    /// once it reaches as far, and the retirement sweep holding the legacy on day one and dropping it —
+    /// policies and all — once the clock says the successor covers the tier.
+    ///
+    /// <para><b>The planted history is chosen so the legacy read and the successor read DIFFER.</b> The
+    /// magnitude heuristic (<c>LAG &gt; 10000</c>) catches a restart zero only when the collection before it was
+    /// busy. Here the collection before the restart carries 5,000 ms — a real but quiet minute — so the
+    /// heuristic cannot see the restart, the legacy sum counts its zero as a sample (12 samples, mean 45,417),
+    /// and the successor, which dropped it on the collector's own interval-0 verdict, does not (11 samples, mean
+    /// 49,545). That difference is the A6 contamination made measurable, and it is what makes each supply choice
+    /// below observable rather than inferred. Twelve collections per hour, because the Full tier needs
+    /// <c>BaselineMath.CollapseThreshold</c> (10) samples in the bucket to be selected at all.</para>
+    ///
+    /// <para>Two hours are planted: one of measured-interval collections (a restart, a measured idle zero) and
+    /// one of pre-column NULL-interval collections (a zero after a busy minute that only the heuristic can
+    /// drop, and an idle zero after it that must survive), so all three interval states are exercised in one
+    /// pass. Skips without TimescaleDB — the plain-view half of the supersession is covered by the anomaly
+    /// tests' fallback-view runs and by <c>SupersededBaselineRelationDropsAt</c>'s pure pins.</para>
+    /// </summary>
+    [Fact]
+    public async Task Supersession_RestartZeroInLegacyNotSuccessor_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live supersession test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = 9107; // own id — this test cleans its own rows
+        const string serverName = "supersession-e2e";
+        const string waitType = "SUPERSESSION_E2E_WAIT";
+        var legacy = TimescaleSupport.LegacyWaitStatsBaselineView;
+        var successor = TimescaleSupport.WaitStatsIntervalBaselineView;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.SkipWhen(!await TimescaleSupport.DetectAsync(connection, ct),
+            "The live supersession test needs TimescaleDB: the coverage difference it proves exists only between materializations.");
+
+        /* ---- fixture. wait_stats as a hypertable (the worker's own idempotent conversion), the two names
+                cleared in whichever implementation an earlier run or a sibling test left (CREATE ... IF NOT
+                EXISTS would silently no-op against a plain fallback view), our rows gone. */
+        await ExecuteAsync(connection,
+            "SELECT create_hypertable('collect.wait_stats', by_range('collection_time', INTERVAL '1 day'), if_not_exists => true, migrate_data => true)", ct);
+        await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(legacy), ct);
+        await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(successor), ct);
+        await ExecuteAsync(connection, $"DELETE FROM collect.wait_stats WHERE server_id = {serverId}", ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            /* Monday 10:00 UTC, 8-14 days back — inside every 30-day window used below, and a different
+               (hour, dow) bucket from the anomaly tests' fixture only by server id. */
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var hour1 = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var hour2 = hour1.AddHours(1);
+
+            /* Hour 1 — MEASURED intervals (300 s at 5-minute spacing, twelve collections). c2 is a
+               quiet-but-real 5,000 ms collection, c3 is the restart as the collector writes it (delta 0 WITH
+               interval 0), c4 a measured idle zero, the rest 60,000 ms. */
+            long[] hour1Deltas = { 60000, 5000, 0, 0, 60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000 };
+            var collectionId = 900001L;
+            for (var i = 0; i < hour1Deltas.Length; i++)
+            {
+                await InsertWaitAsync(connection, collectionId++, hour1.AddMinutes(5 * i), serverId, serverName, waitType, hour1Deltas[i], i == 2 ? 0 : 300, ct);
+            }
+
+            /* Hour 2 — PRE-COLUMN rows (NULL interval) at 120,000 ms per 300 s (400 ms/s, above the rate arm's
+               100 ms/s bar): c3 is a zero after a busy collection (only the heuristic can drop it, and it
+               must), c4 a zero after a zero (kept, genuine idle). */
+            long[] hour2Deltas = { 120000, 120000, 0, 0, 120000, 120000, 120000, 120000, 120000, 120000, 120000, 120000 };
+            for (var i = 0; i < hour2Deltas.Length; i++)
+            {
+                await InsertWaitAsync(connection, collectionId++, hour2.AddMinutes(5 * i), serverId, serverName, waitType, hour2Deltas[i], null, ct);
+            }
+
+            /* Both aggregates, side by side, from the SAME registered/legacy texts the product carries; the
+               legacy gets the refresh policy every pre-#3653 store gave it, so the drop can be shown to cascade
+               it. Legacy refreshed over everything; successor over hour 2 ONLY, so for this server it is one
+               hour shallower than the legacy — the real-time union cannot fill hour 1 for it, because an
+               un-materialized region BELOW the watermark is served by neither branch. */
+            await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
+            await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
+            await ExecuteAsync(connection,
+                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+            await RefreshFromAsync(connection, legacy, hour1, ct);
+            await RefreshFromAsync(connection, successor, hour2, ct);
+
+            /* ---- A6, measured: the restart collection is a total_wait_ms = 0 row in the legacy sum and no row
+                    at all in the successor; the successor carries the measured interval for hour 1 and NULL for
+                    the pre-column hour. */
+            var restartAt = hour1.AddMinutes(10);
+            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT total_wait_ms FROM collect.{legacy} WHERE server_id = {serverId} AND collection_time = $1", restartAt, ct));
+            Assert.Equal(24L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{legacy} WHERE server_id = {serverId}", null, ct));
+
+            /* min(bucket) for this server: the legacy reaches hour 1, the successor only hour 2 — the state the
+               supply rule has to notice. */
+            Assert.Equal(hour1, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{legacy} WHERE server_id = {serverId}", null, ct));
+            Assert.Equal(hour2, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{successor} WHERE server_id = {serverId}", null, ct));
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisTime = hour1.AddDays(7);
+
+            /* ---- the provider reads the LEGACY relation while the successor is shallower: hour 1 is the
+                    contaminated statistic (12 samples, the unseen restart zero among them). Hour 2 is the same
+                    on either supply (NULL-interval rows keep the heuristic, which drops c3's zero after a
+                    120,000 collection and keeps c4's zero after a zero): 11 samples, mean 109,091. */
+            var legacyRead = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime);
+            Assert.Equal(12L, legacyRead.SampleCount);
+            Assert.Equal(545000.0 / 12.0, legacyRead.Mean, 0.01);
+            Assert.Equal(BaselineTier.Full, legacyRead.Tier);
+
+            var hour2Read = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime.AddHours(1));
+            Assert.Equal(11L, hour2Read.SampleCount);
+            Assert.Equal(1200000.0 / 11.0, hour2Read.Mean, 0.01);
+            Assert.Equal(BaselineTier.Full, hour2Read.Tier);
+
+            /* ---- day one: the sweep judges the legacy CAGG against the tier horizon and HOLDS it — policy
+                    and all (the policy's presence is asserted here so the cascade below has a before-state). */
+            var verdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, DateTime.UtcNow, ct);
+            Assert.Equal(TimescaleSupport.SupersededBaselineDecision.SuccessorShort, verdict.Decision);
+            Assert.True(verdict.LegacyIsContinuousAggregate);
+            Assert.Equal(hour2, verdict.SuccessorOldest);
+            await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
+            Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must survive a day-one sweep");
+            /* timescaledb_information.jobs names a continuous-aggregate policy's target by the VIEW's
+               schema and name (2.28.1, verified on the rig), not by its materialization hypertable. */
+            var legacyPolicySql = $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{legacy}' AND proc_name = 'policy_refresh_continuous_aggregate'";
+            Assert.Equal(1L, await ScalarAsync<long>(connection, legacyPolicySql, null, ct));
+
+            /* ---- the successor catches up (the backfill's forced refresh over the whole range): now it
+                    reaches as far as the legacy for this server and the provider switches to it — the restart
+                    zero is gone from the statistic. */
+            await RefreshFromAsync(connection, successor, hour1, ct, force: true);
+            Assert.Equal(23L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{successor} WHERE server_id = {serverId}", null, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{successor} WHERE server_id = {serverId} AND collection_time = $1", restartAt, ct));
+            Assert.Equal(300, await ScalarAsync<int>(connection, $"SELECT sample_interval_seconds FROM collect.{successor} WHERE server_id = {serverId} AND collection_time = $1", hour1, ct));
+            Assert.True(await ScalarAsync<bool>(connection, $"SELECT sample_interval_seconds IS NULL FROM collect.{successor} WHERE server_id = {serverId} AND collection_time = $1", hour2, ct));
+
+            provider.ClearCache();
+            var successorRead = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime);
+            Assert.Equal(11L, successorRead.SampleCount);
+            Assert.Equal(545000.0 / 11.0, successorRead.Mean, 0.01);
+            Assert.Equal(BaselineTier.Full, successorRead.Tier);
+
+            /* The rate arm over the same supply: hour 1 rates off the STORED 300 s (c1 200 ms/s, c2 16.67, c4 0,
+               c5..c12 200 — the window's first collection is rated, not dropped, and c4's measured zero is kept
+               whatever c2 read); hour 2 off the LAG gap (its c1's prior is hour 1's c12, 300 s back, so it
+               rates at 400; c3's zero after 400 ms/s drops on the heuristic; c4's idle zero after it survives). */
+            var rateHour1 = await provider.GetBaselineAsync(serverId, MetricNames.WaitMsPerSec, analysisTime);
+            Assert.Equal(11L, rateHour1.SampleCount);
+            Assert.Equal((200.0 * 9 + 5000.0 / 300.0 + 0) / 11.0, rateHour1.Mean, 0.01);
+            var rateHour2 = await provider.GetBaselineAsync(serverId, MetricNames.WaitMsPerSec, analysisTime.AddHours(1));
+            Assert.Equal(11L, rateHour2.SampleCount);
+            Assert.Equal((400.0 * 10 + 0) / 11.0, rateHour2.Mean, 0.01);
+
+            /* ---- day forty: the clock says the successor covers the tier; the legacy drops with its policy. */
+            var dayForty = DateTime.UtcNow.AddDays(40);
+            Assert.Equal(TimescaleSupport.SupersededBaselineDecision.Drop,
+                (await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, dayForty, ct)).Decision);
+            Assert.True(await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, dayForty, ct) >= 1);
+            Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must be gone");
+            Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(successor), null, ct), "the successor must stay");
+            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{legacy}'", null, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, legacyPolicySql, null, ct));
+            Assert.Equal(TimescaleSupport.SupersededBaselineDecision.LegacyAbsent,
+                (await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, dayForty, ct)).Decision);
+
+            /* And with the legacy gone the provider reads the successor without a coverage question. */
+            provider.ClearCache();
+            var afterRetirement = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime);
+            Assert.Equal(11L, afterRetirement.SampleCount);
+            Assert.Equal(545000.0 / 11.0, afterRetirement.Mean, 0.01);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecuteAsync(cleanup, TimescaleSupport.DropRetiredBaselineRelationSql(legacy), cleanupCt);
+                await ExecuteAsync(cleanup, TimescaleSupport.DropRetiredBaselineRelationSql(successor), cleanupCt);
+                await ExecuteAsync(cleanup, $"DELETE FROM collect.wait_stats WHERE server_id = {serverId}", cleanupCt);
+            });
+        }
+    }
+
+    private static async Task InsertWaitAsync(
+        NpgsqlConnection connection, long collectionId, DateTime at, int serverId, string serverName, string waitType, long deltaWaitMs, int? intervalSeconds, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            connection);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(waitType);
+        command.Parameters.AddWithValue(10L);
+        command.Parameters.AddWithValue(deltaWaitMs);
+        command.Parameters.AddWithValue(intervalSeconds.HasValue ? intervalSeconds.Value : DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task RefreshFromAsync(NpgsqlConnection connection, string view, DateTime from, System.Threading.CancellationToken ct, bool force = false)
+    {
+        using var command = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(view, force), connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue(from);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, DateTime? at, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        if (at is DateTime bound)
+        {
+            command.Parameters.AddWithValue(bound);
+        }
+
+        var value = await command.ExecuteScalarAsync(ct);
+        Assert.NotNull(value);
+        return (T)Convert.ChangeType(value, typeof(T), System.Globalization.CultureInfo.InvariantCulture)!;
     }
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
