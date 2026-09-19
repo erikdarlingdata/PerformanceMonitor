@@ -63,20 +63,44 @@ public partial class DuckDbFactCollector : IFactCollector
     /// <see cref="AppLogger.Debug"/> would have been the wrong home for a quieter arm regardless: it
     /// is compiled out of Release builds, and a level nobody can turn on is indistinguishable from
     /// the empty catch this replaces.</para>
+    ///
+    /// <para>#3691: the failure is also RECORDED on the context, beside the log line, so the pass and the
+    /// tool payloads learn what the log knew — a pass whose families failed used to score an empty fact
+    /// list and render as the <c>empty</c> all-clear. The outcome is <c>cancelled</c> for an
+    /// <see cref="OperationCanceledException"/> that was not the pass's own abandonment (the only kind the
+    /// <c>when</c> filter lets through), <c>error</c> for everything else — the two outcomes Lite can
+    /// actually see, per the two bullets above; a timeout arm here would record a shape that cannot
+    /// arrive. The log level is unchanged.</para>
     /// </summary>
     private static void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
+        context.RecordCollectionFailure(
+            CollectionFailure.FamilyOf(collectMethod),
+            collectMethod,
+            ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error,
+            ex.Message);
+
         AppLogger.Error("DuckDbFactCollector",
             $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
             $"contributes no facts this pass: {ex.Message}");
     }
 
+    /// <summary>
+    /// The number of family reads this collector runs, derived from the type (#3691) — the
+    /// <c>families_total</c> a collection caveat is stated against. Reflection once per process, not per pass.
+    /// </summary>
+    private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(DuckDbFactCollector));
+
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
+
+        /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
+           failed at its first read still states "1 of 32" rather than "1 of 0". */
+        context.CollectionFamilyCount = s_familyCount;
 
         /* #2412: one cancellation checkpoint per collector, not one for the phase. This is the
            longest stage of an analysis pass — thirty-one collectors, each opening the store and

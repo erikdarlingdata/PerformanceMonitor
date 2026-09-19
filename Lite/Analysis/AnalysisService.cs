@@ -80,6 +80,33 @@ public class AnalysisService
     /// </summary>
     public WindowCoverage? LastWindowCoverage { get; private set; }
 
+    /// <summary>
+    /// The fact families whose read FAILED in the last pass (#3691), carried out the way
+    /// <see cref="LastWindowCoverage"/> is and for the same reason: the findings list cannot say it. A pass
+    /// in which every family failed returns the same empty list as a quiet server, and until now the tools
+    /// rendered it as the <c>empty</c> all-clear. Empty on a clean pass and on a pass that never reached
+    /// collection; <see cref="LastCollectionFamilyCount"/> is the total the count is stated against.
+    /// </summary>
+    public IReadOnlyList<CollectionFailure> LastCollectionFailures { get; private set; } = [];
+
+    /// <summary>How many family reads the collector ran in the last pass — the caveat's denominator, stamped
+    /// by the collector from its own type (#3691). 0 when the pass never reached collection.</summary>
+    public int LastCollectionFamilyCount { get; private set; }
+
+    /// <summary>
+    /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
+    /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
+    /// reached scoring (the data-span gate, the unobserved window, a fault). They exist so an <c>empty</c>
+    /// envelope can say which kind of nothing it is: "facts were scored and none fired" (both &gt; 0),
+    /// "facts were read and none graded above zero" (count &gt; 0, scored 0), or "no fact was emitted"
+    /// (count 0) — which, beside <see cref="LastCollectionFailures"/>, is the difference between a quiet
+    /// server and a blind pass.
+    /// </summary>
+    public int? LastFactCount { get; private set; }
+
+    /// <summary>See <see cref="LastFactCount"/>: of those facts, how many scored above zero.</summary>
+    public int? LastFactsScored { get; private set; }
+
     /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
     /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
     /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
@@ -150,6 +177,10 @@ public class AnalysisService
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
         LastWindowCoverage = null;
+        LastCollectionFailures = [];
+        LastCollectionFamilyCount = 0;
+        LastFactCount = null;
+        LastFactsScored = null;
 
         try
         {
@@ -192,6 +223,18 @@ public class AnalysisService
             // 1. Collect facts from DuckDB
             var facts = await _collector.CollectFactsAsync(context);
             LastWindowCoverage = context.Coverage;
+            LastCollectionFailures = context.CollectionFailures;
+            LastCollectionFamilyCount = context.CollectionFamilyCount;
+
+            if (context.CollectionFailures.Count > 0)
+            {
+                /* #3691: the per-site log lines above say each failure as it happened; this one line says
+                   what the PASS is missing, so a scheduled pass — which has no payload to carry
+                   collection_caveats — still leaves the summary beside the findings it persists. Every
+                   envelope the tools render off this pass carries the same sentence. */
+                AppLogger.Warn("AnalysisService",
+                    $"Collection caveat for {context.ServerName}: {CollectionCaveats.Describe(context.CollectionFailures, context.CollectionFamilyCount)}");
+            }
 
             if (context.ObservedDurationMs <= 0)
             {
@@ -290,6 +333,12 @@ public class AnalysisService
 
             // 2. Score facts (base severity + amplifiers)
             _scorer.ScoreAll(facts);
+
+            /* #3691: what the scorer saw and what it graded, for the `empty` envelope's two counts. Read
+               here, after scoring and before attribution adds its own cards, so "facts_scored" means the
+               collector's and detector's facts and nothing composed later. */
+            LastFactCount = facts.Count;
+            LastFactsScored = facts.Count(f => f.Severity > 0);
 
             // 2.5. Config → outcome attribution (#3653 A10, Q2). AFTER scoring, never before: the fact
             // is appended with its Information severity preset (ConfigChangeAttribution.InformationSeverity),
@@ -441,6 +490,9 @@ public class AnalysisService
     /// window's observed coverage (#3538 A2) — returned rather than parked on a property because this
     /// path has no <see cref="IsAnalyzing"/> guard and two on-demand callers can overlap; a shared
     /// property would let one read the other's window. Coverage is null only when collection threw.
+    /// The third element (#3691) is the same context's collection failures and family total, for the
+    /// callers' <c>collection_caveats</c> — returned for the same overlap reason, and populated even when
+    /// collection threw, so a read that recorded failures before the throw still reports them.
     ///
     /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
     /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
@@ -458,7 +510,7 @@ public class AnalysisService
     /// deviation is measured against the window's own rate, and an unobserved window has none — the
     /// callers' unobserved envelope keeps describing exactly the point-in-time facts it names.</para>
     /// </summary>
-    public async Task<(List<Fact> Facts, WindowCoverage? Coverage)> CollectAndScoreFactsAsync(
+    public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
         int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
@@ -484,14 +536,14 @@ public class AnalysisService
                 var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
                 facts.AddRange(anomalies);
             }
-            if (facts.Count == 0) return (facts, context.Coverage);
+            if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
-            return (facts, context.Coverage);
+            return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
         catch (Exception ex)
         {
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
-            return ([], null);
+            return ([], null, CollectionCaveatState.From(context));
         }
     }
 

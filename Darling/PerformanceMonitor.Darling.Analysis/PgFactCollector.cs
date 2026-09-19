@@ -140,12 +140,20 @@ public sealed partial class PgFactCollector : IFactCollector
     ///
     /// <para>The site names itself via <see cref="CallerMemberNameAttribute"/> rather than a literal,
     /// so a renamed or copy-pasted collect method cannot report under the wrong name.</para>
+    ///
+    /// <para>#3691: the failure is also RECORDED on the context, beside the log line, under the same
+    /// three-way classification (<see cref="ClassifyOutcome"/>) plus <c>cancelled</c> for a stray
+    /// <see cref="OperationCanceledException"/> in the ERROR arm — so the pass and the tool payloads learn
+    /// what only the log knew: a pass whose families failed used to score an empty fact list and render as
+    /// the <c>empty</c> all-clear. The log levels are unchanged.</para>
     /// </summary>
     private void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
+        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex.Message);
+
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
             _logger?.LogWarning(
@@ -167,9 +175,35 @@ public sealed partial class PgFactCollector : IFactCollector
         }
     }
 
+    /// <summary>
+    /// The recorded outcome for a swallowed failure (#3691): the same three arms the reporter above logs by,
+    /// in the same order and through the same structural classifier — timeout via
+    /// <see cref="PgBaselineProvider.IsCommandTimeout"/> (never message text), 42P01 / 42703 as
+    /// <see cref="CollectionFailureOutcome.MissingSchema"/> — with the ERROR arm split once more so an
+    /// <see cref="OperationCanceledException"/> that was not the pass's own abandonment reads as
+    /// <c>cancelled</c> rather than as a fault. Shared with <see cref="PgTargetFactCollector"/> so the two
+    /// PostgreSQL-store collectors cannot classify the same exception two ways.
+    /// </summary>
+    internal static CollectionFailureOutcome ClassifyOutcome(Exception ex)
+    {
+        if (PgBaselineProvider.IsCommandTimeout(ex)) return CollectionFailureOutcome.Timeout;
+        if (ex is PostgresException { SqlState: "42P01" or "42703" }) return CollectionFailureOutcome.MissingSchema;
+        return ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error;
+    }
+
+    /// <summary>
+    /// The number of family reads this collector runs, derived from the type (#3691) — the
+    /// <c>families_total</c> a collection caveat is stated against. Reflection once per process, not per pass.
+    /// </summary>
+    private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(PgFactCollector));
+
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
+
+        /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
+           failed at its first read still states "1 of 32" rather than "1 of 0". */
+        context.CollectionFamilyCount = s_familyCount;
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
            it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no

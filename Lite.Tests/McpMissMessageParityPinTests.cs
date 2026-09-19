@@ -108,6 +108,14 @@ public sealed class McpMissMessageParityPinTests
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
         "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
 
+        /* The analysis family's collection caveats (#3691). The SENTENCE comes from CollectionCaveats.Describe(),
+           shared by construction; what lives twice is the label each tool body puts in front of it and the
+           description sentence that promises the field — analyze_server (three envelopes) and
+           get_analysis_facts (three envelopes), both SKUs. */
+        " COLLECTION CAVEAT: ",
+        "the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the status prose says so; the field is absent on a clean pass, and an empty result over unread families is not an all-clear. The empty envelope also states fact_count (facts the scorer saw) and facts_scored (those graded above zero), so scored-but-nothing-fired is told apart from no-fact-emitted.",
+        "the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet.",
+
         /* compare_analysis's verdict reading (#3538 A3). The band RULES live once, in the shared
            ComparisonBanding, and cannot drift; what lives twice is the sentence each tool body puts on the
            payload about what a verdict is, and the description that promises it. */

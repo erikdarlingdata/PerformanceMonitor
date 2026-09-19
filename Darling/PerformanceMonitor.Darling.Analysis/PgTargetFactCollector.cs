@@ -87,12 +87,25 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     /// </list>
     /// The site names itself via <see cref="CallerMemberNameAttribute"/> so a copied collect method cannot
     /// report under the wrong name.
+    ///
+    /// <para>#3691: the failure is also RECORDED on the context, beside the log line, classified by the
+    /// shared <see cref="PgFactCollector.ClassifyOutcome"/> (the same three arms plus <c>cancelled</c>), so
+    /// the pass and the tool payloads learn what only the log knew — a PostgreSQL target whose
+    /// <c>pg_write_stats</c> read failed used to score everything else and say nothing about writes. The
+    /// family label is the partial FILE the catch sits in (<see cref="CollectionFailure.FamilyOfFile"/>:
+    /// <c>PgTargetFactCollector.Write.cs</c> → <c>write</c>), not the reporting method, because here a family
+    /// is one file and several of them split their reads across helper methods (vacuum is three) — the method
+    /// name is kept as the entry's <c>read</c>. <see cref="CallerFilePathAttribute"/> is a compile-time constant
+    /// at each call site, so a content lane's catch names its family by being in its file.</para>
     /// </summary>
     private void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
-        [CallerMemberName] string collectMethod = "")
+        [CallerMemberName] string collectMethod = "",
+        [CallerFilePath] string collectFile = "")
     {
+        context.RecordCollectionFailure(CollectionFailure.FamilyOfFile(collectFile), collectMethod, PgFactCollector.ClassifyOutcome(ex), ex.Message);
+
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
             _logger?.LogWarning(
@@ -115,6 +128,13 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     }
 
     /// <summary>
+    /// The number of family reads this collector runs, derived from the type (#3691) — the
+    /// <c>families_total</c> a collection caveat is stated against; the census below keeps it equal to the
+    /// emission list's length. Reflection once per process, not per pass.
+    /// </summary>
+    private static readonly int s_familyCount = CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector));
+
+    /// <summary>
     /// The collect surface (v1 + the v2 families of #3691), in emission order. Every method below exists today; the ones a content lane
     /// owns return immediately until that lane lands, and the census in <c>PgTargetFactCollectorTests</c>
     /// names this exact list so that adding, removing or renaming a family is a visible decision.
@@ -123,6 +143,10 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     {
         ArgumentNullException.ThrowIfNull(context);
         var facts = new List<Fact>();
+
+        /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
+           failed at its first read still states "1 of 16" rather than "1 of 0". */
+        context.CollectionFamilyCount = s_familyCount;
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
            it. Nothing may run ahead of it — and for a PostgreSQL target the witness is pg_database_stats,

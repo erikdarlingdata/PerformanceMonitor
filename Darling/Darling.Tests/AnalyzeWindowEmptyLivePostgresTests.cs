@@ -175,7 +175,7 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
                 await PlantWaitAsync(connection, Naive(now.AddMinutes(-minutesAgo)), BenignWait, 0L, ct);
 
             /* The precondition this arm exists for: observed time, zero facts. */
-            var (facts, coverage) = await service.CollectAndScoreFactsAsync(ServerId, ServerName);
+            var (facts, coverage, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName);
             Assert.Empty(facts);
             Assert.NotNull(coverage);
             Assert.True(coverage!.IsObserved);

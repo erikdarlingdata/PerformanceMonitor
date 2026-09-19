@@ -37,7 +37,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class AnalysisFactsReadRunsDetectorParityTests
 {
-    private const string ReadEntry = "public async Task<(List<Fact> Facts, WindowCoverage? Coverage)> CollectAndScoreFactsAsync(";
+    private const string ReadEntry = "public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(";
     private const string ReadEnd = "ComparePeriodsAsync(";
     private const string Collect = ".CollectFactsAsync(context);";
     private const string Gate = "if (context.ObservedDurationMs > 0)";
