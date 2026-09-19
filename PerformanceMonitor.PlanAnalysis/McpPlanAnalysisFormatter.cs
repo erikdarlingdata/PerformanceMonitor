@@ -23,6 +23,50 @@ namespace PerformanceMonitor.PlanAnalysis;
 public static class McpPlanAnalysisFormatter
 {
     /// <summary>
+    /// How many operators <c>top_operators</c> carries per statement. A fixed cut rather than a caller knob
+    /// (the plan tools take no <c>limit</c>, and #3653 A15/A16 is about STATING the cut, not adding a knob):
+    /// ten operators is enough to hold the expensive spine of any plan an LLM can reason about in one
+    /// payload, and the rest of the plan is still reachable through the warnings (every node's warnings are
+    /// in <c>warnings</c>, uncut) and the viewer. Published on every statement as <c>operators_cap</c> beside
+    /// <c>operators_returned</c> / <c>total_operators</c> / <c>truncated</c>, so the cut is never silent.
+    /// </summary>
+    public const int TopOperatorCap = 10;
+
+    /// <summary>
+    /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
+    /// (#3653 A15/A16). A plan with runtime statistics ranks by measured elapsed time; an estimated plan has
+    /// no measurement and ranks by the optimizer's cost SHARE. The switch was silent before: the same key
+    /// carried a measurement in one payload and an estimate in the next, and only <c>has_actual_stats</c>
+    /// hinted at which — a caller comparing two payloads' top operators was comparing a stopwatch to a
+    /// guess without being told.
+    /// </summary>
+    public const string RankedByActualElapsed = "actual_elapsed_ms";
+
+    /// <inheritdoc cref="RankedByActualElapsed"/>
+    public const string RankedByEstimatedCostPercent = "cost_percent (optimizer estimate)";
+
+    /// <summary>
+    /// What <c>missing_indexes[].impact</c> IS, published as <c>impact_basis</c> beside it (#3653 A15/A16): the
+    /// showplan <c>MissingIndexGroup/@Impact</c>, the optimizer's estimate of the percent by which THIS
+    /// statement's cost would fall if the index existed. It is not a share of server load, not a share of
+    /// the batch, and not measured; two statements' impacts do not add. The payload used to carry the bare
+    /// number under <c>impact</c> as though it were self-explanatory.
+    /// </summary>
+    public const string MissingIndexImpactBasis = "estimated percent reduction of this statement's cost (showplan MissingIndexGroup/@Impact; optimizer estimate, statement-scoped, not additive)";
+
+    /// <summary>
+    /// The sentence every <c>missing_indexes[]</c> row carries in place of the CREATE INDEX DDL it used to
+    /// paste (#3653 A15/A16). The DMV's suggestion is a HINT the optimizer emits for one statement's shape:
+    /// it knows nothing of the table's existing indexes (it will suggest a near-duplicate of one), of the
+    /// other statements that touch the table, of write cost, or of key order beyond equality-before-inequality.
+    /// A paste-ready statement in an agent's payload reads as a design; the column lists are the evidence and
+    /// stay as data, and the design is the operator's. The plan viewer still renders the DMV text for a human
+    /// reading a single plan; the MCP surface is the one an agent may act on unread, so it is the one that
+    /// stops handing out DDL.
+    /// </summary>
+    public const string MissingIndexNote = "The optimizer's missing-index suggestion for this ONE statement: a hint, not a design. It ignores the table's existing indexes (it often near-duplicates one), every other statement that touches the table, and write cost. Use the column lists as evidence against the table's actual indexes and workload before creating anything.";
+
+    /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
     /// </summary>
     public static string BuildAnalysisResult(string xml, string? serverName, string source, string? identifier)
@@ -45,10 +89,13 @@ public static class McpPlanAnalysisFormatter
                 var allWarnings = stmtWarnings.Concat(nodeWarnings).ToList();
 
                 var hasActuals = allNodes.Any(n => n.HasActualStats);
+                /* #3653 A15/A16: the cut and the basis are published, not silent — see TopOperatorCap and
+                   RankedByActualElapsed. truncated is OBSERVED against the whole population (every node is in
+                   hand), never inferred from the page size. */
                 var topOps = (hasActuals
                         ? allNodes.OrderByDescending(n => n.ActualElapsedMs)
                         : allNodes.OrderByDescending(n => n.CostPercent))
-                    .Take(10)
+                    .Take(TopOperatorCap)
                     .Select(n => new
                     {
                         node_id = n.NodeId,
@@ -88,15 +135,19 @@ public static class McpPlanAnalysisFormatter
                     }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
+                    /* #3653 A15/A16: impact is labelled for what it is, and the paste-ready CREATE INDEX is
+                       gone from this surface — the column lists ARE the data; see MissingIndexImpactBasis and
+                       MissingIndexNote for why. */
                     missing_indexes = s.MissingIndexes.Select(idx => new
                     {
                         table = $"{idx.Schema}.{idx.Table}",
                         database = idx.Database,
                         impact = idx.Impact,
+                        impact_basis = MissingIndexImpactBasis,
                         equality_columns = idx.EqualityColumns,
                         inequality_columns = idx.InequalityColumns,
                         include_columns = idx.IncludeColumns,
-                        create_statement = idx.CreateStatement
+                        note = MissingIndexNote,
                     }),
                     parameters = s.Parameters.Select(p => new
                     {
@@ -116,6 +167,11 @@ public static class McpPlanAnalysisFormatter
                         grant_wait_ms = s.MemoryGrant.GrantWaitTimeMs,
                         feedback = s.MemoryGrant.IsMemoryGrantFeedbackAdjusted
                     },
+                    operators_ranked_by = hasActuals ? RankedByActualElapsed : RankedByEstimatedCostPercent,
+                    operators_cap = TopOperatorCap,
+                    operators_returned = Math.Min(allNodes.Count, TopOperatorCap),
+                    total_operators = allNodes.Count,
+                    truncated = allNodes.Count > TopOperatorCap,
                     top_operators = topOps
                 };
             })

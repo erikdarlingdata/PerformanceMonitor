@@ -45,6 +45,10 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
     private const string OtherServerHash = "an3541-lite-elsewhere";
     private const string NeverSeenHash = "an3541-lite-never-seen";
 
+    /// <summary>The <c>story_path</c> every planted finding carries — what the registry row must name once the
+    /// store resolves the path from the retained findings (#3653 A15/A16).</summary>
+    private const string PlantedStoryPath = "AN3541_LITE";
+
     /// <summary>A second server id, never registered with the ServerManager, so a hash planted under it is
     /// visible to a fleet-wide count and invisible to the resolved server's. NEGATIVE on purpose: a server_id is
     /// an FNV hash cast to int, so about half of all real ids are negative, and the count's scope test must key
@@ -104,8 +108,106 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
         Assert.Equal(PlantedHash, root.GetProperty("story_path_hash").GetString());
         Assert.Equal("TestServer", root.GetProperty("server").GetString());
         Assert.Equal("planted", root.GetProperty("reason").GetString());
+        Assert.False(root.GetProperty("already_muted").GetBoolean());
+        /* #3653 A15/A16: the row names the CHAIN, read off the retained finding that carries the hash — not
+           the hash echoed into the path column, which is what this entry point wrote before. */
+        Assert.Equal(PlantedStoryPath, root.GetProperty("story_path").GetString());
 
         Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+        Assert.Equal(PlantedStoryPath, await StoredPathAsync(PlantedHash, _serverId));
+    }
+
+    /// <summary>
+    /// #3653 A15/A16, THE idempotence case: the same hash in the same scope a second time. Before, a second
+    /// registry row landed and the envelope said <c>muted</c> twice — "registered" was true for a write that
+    /// changed nothing. Now nothing is written, the envelope says so (<c>registered: false</c>,
+    /// <c>already_muted: true</c>, <c>status: "already_muted"</c>), <c>matched_now</c> is still read against the
+    /// same moment, and the registry holds exactly one row for the pair.
+    /// </summary>
+    [Fact]
+    public async Task TheSameHashInTheSameScope_ASecondTime_WritesNothing_AndSaysAlreadyMuted()
+    {
+        await PlantFindingAsync(_serverId, DateTime.UtcNow.AddHours(-1), PlantedHash);
+
+        var first = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer", "first");
+        using (var doc = JsonDocument.Parse(first))
+        {
+            Assert.Equal("muted", doc.RootElement.GetProperty("status").GetString());
+            Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+        }
+
+        var second = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer", "second, different reason");
+        using (var doc = JsonDocument.Parse(second))
+        {
+            var root = doc.RootElement;
+            Assert.Equal("already_muted", root.GetProperty("status").GetString());
+            Assert.False(root.GetProperty("registered").GetBoolean());
+            Assert.True(root.GetProperty("already_muted").GetBoolean());
+            Assert.Equal(1, root.GetProperty("matched_now").GetInt64());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("story_path").ValueKind);
+            Assert.Contains("nothing was written", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("not recorded", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+        }
+
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+        /* The FIRST call's reason is the one on the row — the second changed nothing, as its note said. */
+        Assert.Equal("first", await StoredReasonAsync(PlantedHash, _serverId));
+    }
+
+    /// <summary>
+    /// Scope is part of the key: a server-scoped mute and an all-servers mute of the same hash are two
+    /// different registrations, and each is idempotent only against its own kind — the second global write is
+    /// the one refused, not the first. The legacy all-servers spelling (<c>server_id = 0</c>, which the pre-fix
+    /// tool wrote and every reader still honours as global) counts as the same scope as NULL, so a store that
+    /// carries an old 0 row does not grow a NULL twin beside it.
+    /// </summary>
+    [Fact]
+    public async Task Idempotence_IsPerScope_AndTheLegacyZeroRowCountsAsGlobal()
+    {
+        var store = new FindingStore(_duckDb);
+
+        Assert.Equal(MuteRegistration.Registered, (await store.MuteStoryAsync(_serverId, NeverSeenHash, null)).Registration);
+        Assert.Equal(MuteRegistration.Registered, (await store.MuteStoryAsync(0, NeverSeenHash, null)).Registration);
+        Assert.Equal(MuteRegistration.AlreadyMuted, (await store.MuteStoryAsync(0, NeverSeenHash, null)).Registration);
+        Assert.Equal(MuteRegistration.AlreadyMuted, (await store.MuteStoryAsync(_serverId, NeverSeenHash, null)).Registration);
+        Assert.Equal(MuteRegistration.Registered, (await store.MuteStoryAsync(OtherServerId, NeverSeenHash, null)).Registration);
+
+        Assert.Equal(1, await CountMuteRowsAsync(NeverSeenHash, _serverId));
+        Assert.Equal(1, await CountMuteRowsAsync(NeverSeenHash, null));
+        Assert.Equal(1, await CountMuteRowsAsync(NeverSeenHash, OtherServerId));
+
+        /* A legacy 0 row planted directly: the global write sees it as already registered. */
+        await PlantLegacyZeroMuteAsync(OtherServerHash);
+        Assert.Equal(MuteRegistration.AlreadyMuted, (await store.MuteStoryAsync(0, OtherServerHash, null)).Registration);
+        Assert.Equal(0, await CountMuteRowsAsync(OtherServerHash, null));
+    }
+
+    /// <summary>
+    /// The path rule at the store: a caller that holds the path writes it; a caller that holds only the hash
+    /// (null or empty) gets it resolved from the newest retained finding; and when no finding carries the hash
+    /// the column — NOT NULL, no rung — takes the hash as a placeholder, which the result reports as
+    /// <c>StoryPath: null</c> rather than as a path.
+    /// </summary>
+    [Fact]
+    public async Task TheStoredPath_IsTheCallers_ElseTheRetainedFindings_ElseTheHashPlaceholderReportedAsUnknown()
+    {
+        var store = new FindingStore(_duckDb);
+
+        var held = await store.MuteStoryAsync(_serverId, OtherServerHash, "HELD → BY_CALLER");
+        Assert.Equal(MuteRegistration.Registered, held.Registration);
+        Assert.Equal("HELD → BY_CALLER", held.StoryPath);
+        Assert.Equal("HELD → BY_CALLER", await StoredPathAsync(OtherServerHash, _serverId));
+
+        await PlantFindingAsync(OtherServerId, DateTime.UtcNow.AddHours(-1), PlantedHash);
+        var resolved = await store.MuteStoryAsync(_serverId, PlantedHash, string.Empty);
+        Assert.Equal(MuteRegistration.Registered, resolved.Registration);
+        Assert.Equal(PlantedStoryPath, resolved.StoryPath);
+        Assert.Equal(PlantedStoryPath, await StoredPathAsync(PlantedHash, _serverId));
+
+        var unknown = await store.MuteStoryAsync(_serverId, NeverSeenHash, null);
+        Assert.Equal(MuteRegistration.Registered, unknown.Registration);
+        Assert.Null(unknown.StoryPath);
+        Assert.Equal(NeverSeenHash, await StoredPathAsync(NeverSeenHash, _serverId));
     }
 
     /// <summary>
@@ -202,7 +304,7 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
             .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "mute_analysis_finding");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash" })
+        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash", "already_muted", "\"already_muted\"", "story_path is", "placeholder" })
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
         }
@@ -246,6 +348,39 @@ VALUES ($1, $2, $3, 'TestServer', NULL, $4, $5, 0.9, 0.8, 'waits',
         P(analysisTime);
         P(storyPathHash);
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>A pre-fix all-servers mute: <c>server_id = 0</c>, the sentinel the old MCP path persisted and
+    /// every reader still honours as global (<c>FindingStore.GetMutedHashesSql</c>).</summary>
+    private async Task PlantLegacyZeroMuteAsync(string storyPathHash)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
+VALUES ($1, 0, $2, $2, $3, 'legacy zero row')";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private Task<string?> StoredPathAsync(string storyPathHash, int serverId) =>
+        ReadMuteColumnAsync("story_path", storyPathHash, serverId);
+
+    private Task<string?> StoredReasonAsync(string storyPathHash, int serverId) =>
+        ReadMuteColumnAsync("reason", storyPathHash, serverId);
+
+    private async Task<string?> ReadMuteColumnAsync(string column, string storyPathHash, int serverId)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {column} FROM analysis_muted WHERE story_path_hash = $1 AND server_id = $2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await cmd.ExecuteScalarAsync() as string;
     }
 
     /// <summary>Registry rows for a hash under one server, or the GLOBAL rows (server_id IS NULL) when

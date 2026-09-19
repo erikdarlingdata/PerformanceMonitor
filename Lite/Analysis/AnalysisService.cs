@@ -555,12 +555,19 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// Mutes a finding pattern so it won't appear in future runs.
+    /// Mutes a finding pattern so it won't appear in future runs and returns what the write did — a new row or
+    /// an existing one (#3653 A15/A16; the store throws on failure, so <see cref="MuteRegistration.Failed"/> is
+    /// the Darling twin's arm). An empty <see cref="AnalysisFinding.StoryPath"/> means the caller knows only the
+    /// hash (the MCP entry point does) and the store resolves the path from the retained findings; see
+    /// <see cref="FindingStore.MuteStoryAsync"/> for the placeholder it writes when none carries the hash.
     /// </summary>
-    public async Task MuteFindingAsync(AnalysisFinding finding, string? reason = null)
+    public async Task<MuteWriteResult> MuteFindingAsync(AnalysisFinding finding, string? reason = null)
     {
-        await _findingStore.MuteStoryAsync(
-            finding.ServerId, finding.StoryPathHash, finding.StoryPath, reason);
+        return await _findingStore.MuteStoryAsync(
+            finding.ServerId,
+            finding.StoryPathHash,
+            string.IsNullOrEmpty(finding.StoryPath) ? null : finding.StoryPath,
+            reason);
     }
 
     /// <summary>

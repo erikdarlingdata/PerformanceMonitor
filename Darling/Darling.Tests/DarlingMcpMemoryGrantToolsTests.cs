@@ -78,6 +78,46 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
 
+    /// <summary>
+    /// #3653 A15/A16: <c>get_resource_semaphore</c> returned the same rows in a DIFFERENT order on the two SKUs —
+    /// Darling's latest-snapshot and window reads ordered <c>resource_semaphore_id, pool_id</c>, Lite's ordered
+    /// <c>pool_id, resource_semaphore_id</c>. Both take the newest snapshot in the window through the same
+    /// <c>MAX(collection_time)</c> probe (that part never drifted); the drift was the ORDER BY alone. The parity
+    /// pin reads Lite's SQL from source (this project does not reference the desktop app — the arrangement
+    /// <see cref="McpPageContractTests"/> uses) and holds both reads on both SKUs to ONE clause, pool first.
+    /// </summary>
+    [Fact]
+    public void TheSameToolName_OrdersTheSemaphoreRowsTheSameWay_OnBothSkus()
+    {
+        const string latestOrder = "ORDER BY pool_id, resource_semaphore_id";
+        const string windowOrder = "ORDER BY a.pool_id, a.resource_semaphore_id";
+
+        /* The drifted spelling, as a FINAL clause only: the peak subquery's DISTINCT ON legitimately leads with
+           `resource_semaphore_id, pool_id, waiter_count DESC, ...` on both SKUs (DISTINCT ON must sort by its own
+           keys first) and is not the row order the payload carries, so the lookahead excludes a trailing comma. */
+        var drifted = new System.Text.RegularExpressions.Regex(@"ORDER BY (?:a\.)?resource_semaphore_id, (?:a\.)?pool_id(?!,)");
+        /* The discriminator against literals written for it, so a matcher that quietly stopped matching cannot
+           report a clean bill of health. */
+        Assert.Matches(drifted, "ORDER BY resource_semaphore_id, pool_id\n");
+        Assert.Matches(drifted, "ORDER BY a.resource_semaphore_id, a.pool_id\"");
+        Assert.DoesNotMatch(drifted, "ORDER BY resource_semaphore_id, pool_id, waiter_count DESC");
+
+        var darlingLatest = DarlingMemoryGrantReader.ResourceSemaphoreLatestSql;
+        var darlingWindow = DarlingMemoryGrantReader.ResourceSemaphoreWindowSql;
+        Assert.Contains(latestOrder, darlingLatest, StringComparison.Ordinal);
+        Assert.Contains(windowOrder, darlingWindow, StringComparison.Ordinal);
+        Assert.DoesNotMatch(drifted, darlingLatest);
+        Assert.DoesNotMatch(drifted, darlingWindow);
+
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.MemoryGrants.cs");
+        /* Positive control first: the two Lite reads this pin speaks for are where it thinks they are. */
+        Assert.Contains("GetResourceSemaphoreSnapshotAsync(", lite, StringComparison.Ordinal);
+        Assert.Contains("GetResourceSemaphoreWindowAsync(", lite, StringComparison.Ordinal);
+        Assert.Contains(latestOrder, lite, StringComparison.Ordinal);
+        Assert.Contains(windowOrder, lite, StringComparison.Ordinal);
+        Assert.DoesNotMatch(drifted, lite);
+    }
+
     [Fact]
     public void ResourceSemaphoreLatestSql_LatestSnapshot_CarriesCeilingColumns()
     {
