@@ -444,6 +444,192 @@ public sealed class ComparisonBandingTests
         Assert.Equal(0.25, ComparisonBanding.MinimumLadderPosition);
     }
 
+    /* ── the PostgreSQL-target keys (#3691 W1 / W2) ── */
+
+    /// <summary>
+    /// The v1 exit check's W1 scenario. <c>PG_TPS</c> has base severity 0 by design (throughput is context), so
+    /// under the absolute rule a 10 → 60 tps move (relative_move 0.83, ladder_position 0) could only ever read
+    /// "stable" — the same window whose anomaly detector called it 25σ. Mapped to <c>pg_tps</c>, the row is
+    /// banded on this server's own same-hour dispersion: a planted bucket of median 10 and sigma 1 reads +50σ
+    /// raw, displayed at the detectors' cap, past the metric's own anomaly cutoff: worse, with
+    /// <c>band_source: baseline</c> and <c>baseline_metric: pg_tps</c>. The BEFORE picture is asserted too — no
+    /// dispersion → absolute → stable — so the defect this closes stays written down.
+    /// </summary>
+    [Fact]
+    public void APostgresTpsSurge_IsBandedByTheServersOwnSigma_NotStableByALadderThatCannotMove()
+    {
+        var (baseline, comparison) = Scored([PgTps(10)], [PgTps(60)]);
+        Assert.Equal(0.0, baseline[0].BaseSeverity);
+        Assert.Equal(0.0, comparison[0].BaseSeverity);
+
+        var before = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, before.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, before.Status);
+        Assert.Equal(0.8333, before.RelativeMove!.Value, precision: 4);
+        Assert.Equal(0.0, before.LadderPosition);
+        Assert.Equal(MetricNames.PgTps, before.BaselineMetric); // the row already says which baseline WOULD apply
+
+        var after = Compare(baseline, comparison, PgBucket(MetricNames.PgTps, median: 10, mad: 0.6745));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, after.BandSource);
+        Assert.Equal(ComparisonBanding.StatusWorse, after.Status);
+        Assert.Equal(MetricNames.PgTps, after.BaselineMetric);
+        Assert.Equal(1.0, after.BaselineSigma!.Value, precision: 4);      // MAD 0.6745 → exactly one sigma
+        Assert.Equal(10.0, after.BaselineMedian!.Value, precision: 4);
+        Assert.Equal(50.0, after.ValueDelta!.Value, precision: 6);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, after.DeltaSigma!.Value, precision: 2); // 50σ raw, capped
+        Assert.True(after.BeyondAnomalyCutoff!.Value);
+        Assert.Equal(PgTargetFactKeys.Tps, after.Family); // its own family: one cause row
+
+        /* Inside one sigma is stable; a fall reads better (the detector's one-sided limit, stated in code). */
+        var (qb, qc) = Scored([PgTps(10)], [PgTps(10.8)]);
+        Assert.Equal(ComparisonBanding.StatusStable, Compare(qb, qc, PgBucket(MetricNames.PgTps, 10, 0.6745)).Status);
+        var (fb, fc) = Scored([PgTps(10)], [PgTps(4)]);
+        Assert.Equal(ComparisonBanding.StatusBetter, Compare(fb, fc, PgBucket(MetricNames.PgTps, 10, 0.6745)).Status);
+    }
+
+    /// <summary>
+    /// <c>PG_CONNECTION_SATURATION</c>'s value is peak ÷ usable connections, a fraction; <c>pg_session_count</c> is
+    /// a COUNT. The row is banded on the fact's <c>peak_total_sessions</c> — the reading the bucket is built from —
+    /// never on the fraction in count-sigma: 20 → 60 sessions against a median of 20 with MAD 0 (sigma floors at
+    /// 1% of the median = 0.2 sessions) is +200σ raw, worse; the fraction's own delta stays in value_delta. A
+    /// saturation fact WITHOUT the metadata has no reading in the bucket's unit and takes the absolute rule, the
+    /// row still naming the bucket that would apply.
+    /// </summary>
+    [Fact]
+    public void APostgresSaturationFraction_IsBandedOnItsPeakSessionCount_NeverOnTheFractionInCountSigma()
+    {
+        var (baseline, comparison) = Scored([PgSaturation(peak: 20, usable: 100)], [PgSaturation(peak: 60, usable: 100)]);
+        Assert.Equal(20.0, ComparisonBanding.BaselinedValueFor(baseline[0]));
+        Assert.Equal(60.0, ComparisonBanding.BaselinedValueFor(comparison[0]));
+
+        var row = Compare(baseline, comparison, PgBucket(MetricNames.PgSessionCount, median: 20, mad: 0));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, row.BandSource);
+        Assert.Equal(MetricNames.PgSessionCount, row.BaselineMetric);
+        Assert.Equal(0.2, row.BaselineSigma!.Value, precision: 4);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, row.DeltaSigma!.Value, precision: 2); // 40 / 0.2 = 200σ raw
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
+        Assert.Equal(0.2, row.BaselineValue!.Value, precision: 6);   // the fraction, the fact's own unit
+        Assert.Equal(0.6, row.ComparisonValue!.Value, precision: 6);
+        Assert.Equal(0.4, row.ValueDelta!.Value, precision: 6);
+
+        /* A fraction that moved by one sigma's worth of SESSIONS is stable: 20 → 20.2 of 100. */
+        var (sb, sc) = Scored([PgSaturation(20, 100)], [PgSaturation(20.2, 100)]);
+        Assert.Equal(ComparisonBanding.StatusStable, Compare(sb, sc, PgBucket(MetricNames.PgSessionCount, 20, 0)).Status);
+
+        var bare = new Fact { Source = PgTargetSources.SessionsSource, Key = PgTargetFactKeys.ConnectionSaturation, Value = 0.6 };
+        Assert.Null(ComparisonBanding.BaselinedValueFor(bare));
+        var (bb, bc) = Scored([PgSaturation(20, 100)], [bare]);
+        var fallback = Compare(bb, bc, PgBucket(MetricNames.PgSessionCount, 20, 0));
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, fallback.BandSource);
+        Assert.Null(fallback.DeltaSigma);
+        Assert.Equal(MetricNames.PgSessionCount, fallback.BaselineMetric);
+    }
+
+    /// <summary>
+    /// <c>pg_cpu</c> is percent of the CONFIGURED capacity ceiling; a <c>PG_CPU_PERCENT</c> fact holding the raw
+    /// <c>cpu_percent</c> (<c>capacity_measured = 0</c>) is percent of the capacity currently allocated (#3281) —
+    /// another unit — and is not sigma-banded. <c>PG_DEADLOCK_RATE</c> IS in its bucket's unit (deadlocks per
+    /// hour on both sides), but a healthy server's bucket has median and MAD at 0, sigma 0, and the key takes
+    /// the absolute rule exactly as the never-blind gate requires; a non-zero bucket bands it.
+    /// </summary>
+    [Fact]
+    public void PostgresCpu_IsSigmaBandedOnlyInTheCapacityUnit_AndDeadlocks_OnlyAgainstANonZeroBucket()
+    {
+        var (mb, mc) = Scored([PgCpu(30, measured: true)], [PgCpu(90, measured: true)]);
+        var measured = Compare(mb, mc, PgBucket(MetricNames.PgCpu, median: 30, mad: 1));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, measured.BandSource);
+        Assert.Equal(MetricNames.PgCpu, measured.BaselineMetric);
+        Assert.Equal(ComparisonBanding.StatusWorse, measured.Status);
+
+        var (rb, rc) = Scored([PgCpu(30, measured: false)], [PgCpu(90, measured: false)]);
+        Assert.Null(ComparisonBanding.BaselinedValueFor(rb[0]));
+        var raw = Compare(rb, rc, PgBucket(MetricNames.PgCpu, median: 30, mad: 1));
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, raw.BandSource);
+        Assert.Equal(MetricNames.PgCpu, raw.BaselineMetric);
+
+        var (db, dc) = Scored([PgDeadlocks(0)], [PgDeadlocks(6)]);
+        var zero = PgBucket(MetricNames.PgDeadlockRate, median: 0, mad: 0);
+        Assert.Equal(0.0, zero.EffectiveRobustSigma);
+        var quiet = Compare(db, dc, zero);
+        Assert.Equal(ComparisonBanding.BandSourceAbsolute, quiet.BandSource);
+        Assert.Equal(MetricNames.PgDeadlockRate, quiet.BaselineMetric);
+
+        var (nb, nc) = Scored([PgDeadlocks(1)], [PgDeadlocks(6)]);
+        var busy = Compare(nb, nc, PgBucket(MetricNames.PgDeadlockRate, median: 1, mad: 0.6745));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, busy.BandSource);
+        Assert.Equal(5.0, busy.DeltaSigma!.Value, precision: 2);
+        Assert.Equal(ComparisonBanding.StatusWorse, busy.Status);
+
+        Assert.Equal(
+            new[] { MetricNames.PgCpu, MetricNames.PgDeadlockRate, MetricNames.PgSessionCount, MetricNames.PgTps },
+            ComparisonBanding.DispersionMetricsFor([PgTps(1), PgSaturation(1, 10)], [PgCpu(1, true), PgDeadlocks(0)]));
+    }
+
+    /// <summary>
+    /// W2: the churn note speaks the engine of the facts. A PostgreSQL fact set (any <c>pg_</c> source) gets the
+    /// statement-identity sentence; its <c>PG_BAD_ACTOR_*</c> keys take the presence path and its churn lists
+    /// are empty by construction. A SQL Server fact set's note is the sentence it always was, verbatim.
+    /// </summary>
+    [Fact]
+    public void TheChurnNote_SpeaksTheEngineOfTheFacts()
+    {
+        var (pb, pc) = Scored([PgTps(10), PgBadActor(42, 500)], [PgTps(10), PgBadActor(43, 500)]);
+        var pg = ComparisonBanding.Compare(pb, pc, NoDispersion, coverageCaveat: false);
+        Assert.True(pg.Churn.PostgresTarget);
+        Assert.Empty(pg.Churn.Appeared);
+        Assert.Empty(pg.Churn.Disappeared);
+        Assert.Equal(0, pg.Churn.PresentInBoth);
+        Assert.Contains(pg.Rows, r => r.Key == PgTargetFactKeys.BadActorKey(43) && r.BandSource == ComparisonBanding.BandSourcePresence);
+        using (var doc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(pg.Churn.ToPayload())))
+        {
+            var note = doc.RootElement.GetProperty("note").GetString()!;
+            Assert.Equal(PlanCacheChurn.PostgresNote, note);
+            Assert.Contains("pg_stat_statements", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("BAD_ACTOR_<hash> keys are plan-cache identities", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("the cache held a different plan", note, StringComparison.Ordinal);
+        }
+
+        var (sb, sc) = Scored([Cpu(50), BadActor("0xA", 500)], [Cpu(50), BadActor("0xB", 500)]);
+        var sql = ComparisonBanding.Compare(sb, sc, NoDispersion, coverageCaveat: false);
+        Assert.False(sql.Churn.PostgresTarget);
+        Assert.Equal(
+            "BAD_ACTOR_<hash> keys are plan-cache identities: a hash present in one window only means the cache held a different plan for the top-5 cut, not that a problem began or ended. Not counted in new_issues / resolved_issues.",
+            PlanCacheChurn.SqlServerNote);
+        using var sqlDoc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(sql.Churn.ToPayload()));
+        Assert.Equal(PlanCacheChurn.SqlServerNote, sqlDoc.RootElement.GetProperty("note").GetString());
+    }
+
+    /// <summary>
+    /// The routing pin: a SQL Server fact set reaches the unit-reconciliation seam and comes out untouched —
+    /// every SQL Server key's reading is its value, the four SQL Server metric mappings are what they were, no
+    /// <c>pg_</c> bucket is ever requested for a SQL Server set, and the churn note is the SQL Server one. With
+    /// the sigma and ladder arithmetic unchanged for an unchanged reading, the fifteen SQL Server scenarios above
+    /// are the before/after equality; this test pins the seam they rest on.
+    /// </summary>
+    [Fact]
+    public void ASqlServerFactSet_NeverReachesThePostgresArms()
+    {
+        var (baseline, comparison) = Scored(
+            [Cpu(50), Sessions(100), Io(5), Wait("PAGEIOLATCH_SH", 0.3), Blocking(10), BadActor("0xA", 500)],
+            [Cpu(60), Sessions(175), Io(9), Wait("PAGEIOLATCH_SH", 0.6), Blocking(40), BadActor("0xB", 500)]);
+
+        foreach (var fact in baseline.Concat(comparison))
+            Assert.Equal(fact.Value, ComparisonBanding.BaselinedValueFor(fact));
+
+        Assert.Equal(MetricNames.Cpu, ComparisonBanding.BaselinedMetricFor("CPU_SQL_PERCENT"));
+        Assert.Equal(MetricNames.Cpu, ComparisonBanding.BaselinedMetricFor("CPU_SPIKE"));
+        Assert.Equal(MetricNames.IoLatency, ComparisonBanding.BaselinedMetricFor("IO_READ_LATENCY_MS"));
+        Assert.Equal(MetricNames.SessionCount, ComparisonBanding.BaselinedMetricFor("SESSION_STATS"));
+
+        var metrics = ComparisonBanding.DispersionMetricsFor(baseline, comparison);
+        Assert.Equal(new[] { MetricNames.Cpu, MetricNames.IoLatency, MetricNames.SessionCount }, metrics);
+        Assert.DoesNotContain(metrics, m => m.StartsWith(PgTargetSources.Prefix, StringComparison.Ordinal));
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        Assert.False(result.Churn.PostgresTarget);
+        Assert.All(result.Rows, r => Assert.Equal(ComparisonBanding.BandSourceAbsolute, r.BandSource));
+    }
+
     /* ── helpers ── */
 
     private static Fact Wait(string type, double fraction) => new()
@@ -499,5 +685,37 @@ public sealed class ComparisonBandingTests
         HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
         Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
         AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.SessionCount)
+    };
+
+    /* ── PostgreSQL-target facts, keyed and sourced from the shared vocabulary (never literals) ── */
+
+    private static Fact PgTps(double tps) => new() { Source = PgTargetSources.DatabaseSource, Key = PgTargetFactKeys.Tps, Value = tps };
+
+    private static Fact PgDeadlocks(double perHour) => new() { Source = PgTargetSources.DatabaseSource, Key = PgTargetFactKeys.DeadlockRate, Value = perHour };
+
+    /// <summary>The collector's shape: value = peak ÷ usable (a fraction), the peak COUNT in <c>peak_total_sessions</c>.</summary>
+    private static Fact PgSaturation(double peak, double usable) => new()
+    {
+        Source = PgTargetSources.SessionsSource, Key = PgTargetFactKeys.ConnectionSaturation, Value = peak / usable,
+        Metadata = new Dictionary<string, double> { ["peak_total_sessions"] = peak, ["usable_connections"] = usable, ["max_connections"] = usable + 3 }
+    };
+
+    private static Fact PgCpu(double percent, bool measured) => new()
+    {
+        Source = PgTargetSources.CpuSource, Key = PgTargetFactKeys.CpuPercent, Value = percent,
+        Metadata = new Dictionary<string, double> { [PgTargetScorer.CpuCapacityMeasuredKey] = measured ? 1 : 0 }
+    };
+
+    private static Fact PgBadActor(long queryId, double totalMs) => new()
+    {
+        Source = PgTargetSources.QueriesSource, Key = PgTargetFactKeys.BadActorKey(queryId), Value = totalMs, DatabaseName = "appdb"
+    };
+
+    /// <summary>A trustworthy Full-tier PostgreSQL bucket for <paramref name="metric"/>; the PG metrics have no absolute floor, so sigma is MAD / 0.6745 floored at 1% of the median.</summary>
+    private static BaselineBucket PgBucket(string metric, double median, double mad) => new()
+    {
+        HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
+        Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
+        AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(metric)
     };
 }
