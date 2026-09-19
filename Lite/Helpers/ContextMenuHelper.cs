@@ -293,7 +293,11 @@ public static class ContextMenuHelper
                             foreach (var point in points)
                             {
                                 /* #1944's gap markers are fabricated mid-gap timestamps with NaN values -
-                                   rendering artifacts, never collected data. Exports carry only real rows. */
+                                   rendering artifacts, never collected data. Since #3653 A7 the perfmon chart
+                                   also plots an UNKNOWABLE point (a stored interval of 0 - a restart's fabricated
+                                   delta) as NaN at its real timestamp; it is a collection with no value, and
+                                   exporting it as 0 would be the lie the chart stopped telling. Exports carry
+                                   only real rows. */
                                 if (double.IsNaN(point.Y))
                                 {
                                     continue;

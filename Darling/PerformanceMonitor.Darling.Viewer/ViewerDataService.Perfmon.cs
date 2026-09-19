@@ -20,16 +20,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// delta, both summed across the counter's instances at each collection_time, plus the wall-clock
 /// seconds that delta covers — MAX, not SUM, because the interval is one measured sweep gap repeated
 /// per instance rather than a per-instance quantity (#2234; Transactions/sec carries a median of 12
-/// instance rows). The picker does not derive a rate today, so the field rides along unplotted so that
-/// whoever adds one has a real denominator instead of a fabricated cadence. Copied from Lite's
-/// <c>PerfmonTrendPoint</c> (LocalDataService.Perfmon.cs). The picker plots <see cref="DeltaValue"/>;
-/// <see cref="Value"/> rides along for parity with Lite's row shape.
+/// instance rows). The picker plots <see cref="DeltaValue"/> THROUGH the interval (#3653 A7, via the shared
+/// <see cref="PerformanceMonitor.Common.DeltaSeriesShaping"/>): a rate counter's delta divided by it, an
+/// unknowable point (interval 0) as a line break — so the field is the denominator, not a passenger. It is
+/// nullable under the three-state rule (#3540): <c>0</c> is the calculator's "no delta knowable" marker,
+/// <c>null</c> a row that never stored one, <c>n</c> the measured sweep gap; the reader used to coerce NULL
+/// to 0 and so could not tell a restart from a pre-column row. Copied from Lite's <c>PerfmonTrendPoint</c>
+/// (LocalDataService.Perfmon.cs). <see cref="Value"/> rides along for parity with Lite's row shape.
 /// </summary>
 public sealed record PerfmonTrendPoint(
     DateTime CollectionTime,
     long Value,
     long DeltaValue,
-    long SampleIntervalSeconds);
+    long? SampleIntervalSeconds);
 
 public sealed partial class ViewerDataService
 {
@@ -152,7 +155,8 @@ public sealed partial class ViewerDataService
                 reader.GetDateTime(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+                /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
+                reader.IsDBNull(4) ? null : reader.GetInt64(4)));
         }
 
         return result;

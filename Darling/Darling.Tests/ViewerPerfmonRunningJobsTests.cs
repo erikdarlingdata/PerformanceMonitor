@@ -296,6 +296,75 @@ public sealed class ViewerPerfmonPickerLogicTests
 }
 
 /// <summary>
+/// #3653 A7: both viewers' perfmon charts plot THROUGH the row's stored interval by way of the one shared
+/// <see cref="PerformanceMonitor.Common.DeltaSeriesShaping"/>, and neither still labels the Y axis "Value"
+/// over an unshaped delta. The chart bodies are WPF-bound and cannot be executed here, so this pins the
+/// two SOURCE files for the calls that make the fix real — the shaping, the rate proxy, the composed axis
+/// label, the NaN-tolerant ceiling — and for the absence of the two lines the fix replaced. A twin that
+/// keeps one of them (or drops one of the calls) fails here with the file named. The shaping itself is
+/// pinned value-by-value in <c>Lite.Tests/DeltaSeriesShapingTests</c>, which runs off Windows.
+/// </summary>
+public sealed class ViewerPerfmonShapingParityTests
+{
+    public static IEnumerable<object[]> Charts()
+    {
+        yield return new object[] { "Darling", "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Perfmon.cs" };
+        yield return new object[] { "Lite", "Lite/Controls/ServerTab.Pickers.cs" };
+    }
+
+    [Theory]
+    [MemberData(nameof(Charts))]
+    public void BothPerfmonCharts_ShapeThroughTheSharedHelper_AndLabelWhatTheyPlot(string sku, string relativePath)
+    {
+        var raw = RepoFile.ReadRepoFile(relativePath.Split('/'));
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+        /* Scope to the perfmon method's body: Lite's Pickers.cs also holds the wait-stats and memory-clerk
+           pickers, which legitimately keep values.Max() and a literal Y label of their own. Stripping preserves
+           offsets, so the same span sliced from the raw text is the body with its literals intact. */
+        /* The DECLARATION ("Task UpdatePerfmon...()"), not the first call site ("_ = UpdatePerfmon...();"),
+           which comes earlier in both files and whose next brace opens some other method. */
+        var head = stripped.IndexOf("Task UpdatePerfmonChartFromPickerAsync()", StringComparison.Ordinal);
+        Assert.True(head >= 0, $"{sku}: the UpdatePerfmonChartFromPickerAsync declaration was not found in {relativePath}");
+        var open = stripped.IndexOf('{', head);
+        var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+        var rawBody = raw.Substring(open, body.Length);
+
+        Assert.Contains("DeltaSeriesShaping.BasisFor(counterName)", body, StringComparison.Ordinal);
+        Assert.Contains("DeltaSeriesShaping.Shape(", body, StringComparison.Ordinal);
+        Assert.Contains("new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds)", body, StringComparison.Ordinal);
+        Assert.Contains("DeltaSeriesShaping.LegendLabel(counterName, basis)", body, StringComparison.Ordinal);
+        Assert.Contains("PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases))", body, StringComparison.Ordinal);
+        Assert.Contains("DeltaSeriesShaping.MaxFinite(values, 0)", body, StringComparison.Ordinal);
+
+        /* The two lines the fix replaced: the unshaped delta and the axis label that hid it. */
+        Assert.DoesNotContain("(double)t.DeltaValue", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("values.Max()", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("YLabel(\"", rawBody, StringComparison.Ordinal);
+
+        /* The series still go through #1944's gap-aware adder, so the interval rule composes with the cadence rule. */
+        Assert.Contains("PerfmonChart.Plot.Add.TimeSeries(times, values)", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The reader keeps the third state: NULL reaches the row as null, not as the 0 marker. Pinned on
+    /// the record shape (Darling) and on the property type (Lite), since a coerced 0 would compile fine.</summary>
+    [Fact]
+    public void BothPerfmonTrendRows_CarryANullableInterval()
+    {
+        Assert.Equal(typeof(long?),
+            typeof(PerfmonTrendPoint).GetProperty(nameof(PerfmonTrendPoint.SampleIntervalSeconds))!.PropertyType);
+
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
+        Assert.Contains("public long? SampleIntervalSeconds { get; set; }", lite, StringComparison.Ordinal);
+        Assert.DoesNotContain("SampleIntervalSeconds = reader.IsDBNull(3) ? 0 :", lite, StringComparison.Ordinal);
+        Assert.DoesNotContain("SampleIntervalSeconds = reader.IsDBNull(4) ? 0 :", lite, StringComparison.Ordinal);
+
+        var darling = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Perfmon.cs");
+        Assert.Contains("reader.IsDBNull(4) ? null : reader.GetInt64(4)", darling, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
 /// Gated (DARLING_TEST_PG) live round-trips for the Perfmon + Running Jobs reads. Shares the serialized
 /// "live-postgres" collection; uses negative sentinel server_ids and cleans up in finally.
 /// </summary>

@@ -3398,8 +3398,12 @@
                     <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Latch Class" Binding="{Binding LatchClass}" Width="*"/>
-                            <DataGridTextColumn Header="Δ Wait (ms)" Binding="{Binding DeltaWaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                            <DataGridTextColumn Header="Δ Waiting Reqs" Binding="{Binding DeltaWaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                            <!-- #3653 A7: the two deltas are null on a restart / first-sample row (stored interval 0 — the
+                                 calculator's "no delta knowable" marker, #3540) and render "—", never 0; the Interval (sec)
+                                 column beside them says why, or gives the seconds the deltas accrued over. -->
+                            <DataGridTextColumn Header="Δ Wait (ms)" Binding="{Binding DeltaWaitTimeMs, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                            <DataGridTextColumn Header="Δ Waiting Reqs" Binding="{Binding DeltaWaitingRequestsCount, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                            <DataGridTextColumn Header="Interval (sec)" Binding="{Binding IntervalDisplay}" Width="150"/>
                             <DataGridTextColumn Header="Wait Time (ms)" Binding="{Binding WaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                             <DataGridTextColumn Header="Waiting Reqs (total)" Binding="{Binding WaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
@@ -3413,8 +3417,10 @@
                     <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Spinlock" Binding="{Binding SpinlockName}" Width="*"/>
-                            <DataGridTextColumn Header="Δ Collisions" Binding="{Binding DeltaCollisions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                            <DataGridTextColumn Header="Δ Spins" Binding="{Binding DeltaSpins, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                            <!-- #3653 A7: null deltas on the restart marker row render "—"; see the latch grid above. -->
+                            <DataGridTextColumn Header="Δ Collisions" Binding="{Binding DeltaCollisions, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                            <DataGridTextColumn Header="Δ Spins" Binding="{Binding DeltaSpins, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                            <DataGridTextColumn Header="Interval (sec)" Binding="{Binding IntervalDisplay}" Width="150"/>
                             <DataGridTextColumn Header="Spins/Collision" Binding="{Binding SpinsPerCollision, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Collisions (total)" Binding="{Binding Collisions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                             <DataGridTextColumn Header="Spins (total)" Binding="{Binding Spins, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>

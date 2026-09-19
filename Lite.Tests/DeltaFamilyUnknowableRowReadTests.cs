@@ -239,6 +239,68 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
+    /// #3653 A7: the latch and spinlock SNAPSHOT grids, which showed the (0, 0) restart row as "Δ 0" beside
+    /// real deltas. Three contenders at one collection: the marker (interval 0) — its deltas come back null so
+    /// the grid renders "—" and the Interval cell says why; a measured row (120 s) — deltas as stored, the
+    /// interval as a number; a pre-v60 row (NULL) — deltas as stored, "not stored" in the Interval cell, never
+    /// mistaken for the marker. The marker is seeded with a non-zero <c>delta_waiting_requests_count</c> (the
+    /// helper's 1) so the pin proves the INTERVAL decides, not a zero delta. The MCP twin that shares the row
+    /// (<c>get_latch_stats</c>) is pinned in <c>McpPageContractTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task LatchAndSpinlockSnapshots_NullTheDeltasOnTheMarkerRow_KeepMeasuredAndPreV60Deltas()
+    {
+        var t = Truncate(DateTime.UtcNow.AddMinutes(-2));
+
+        await SeedLatchAsync(t, deltaWait: 0, interval: 0, latchClass: "BUFFER");
+        await SeedLatchAsync(t, deltaWait: 600, interval: 120, latchClass: "LOG_MANAGER");
+        await SeedLatchAsync(t, deltaWait: 300, interval: null, latchClass: "ACCESS_METHODS_DATASET_PARENT");
+
+        var latches = (await _dataService.GetLatchStatsSnapshotAsync(ServerId, hoursBack: 1)).ToDictionary(r => r.LatchClass);
+        Assert.Equal(3, latches.Count);
+
+        var marker = latches["BUFFER"];
+        Assert.Equal(0, marker.SampleIntervalSeconds);
+        Assert.True(marker.IsUnknowable);
+        Assert.Null(marker.DeltaWaitTimeMs);
+        Assert.Null(marker.DeltaWaitingRequestsCount);
+        Assert.Equal("restart / first sample", marker.IntervalDisplay);
+
+        var measured = latches["LOG_MANAGER"];
+        Assert.Equal(120, measured.SampleIntervalSeconds);
+        Assert.False(measured.IsUnknowable);
+        Assert.Equal(600L, measured.DeltaWaitTimeMs);
+        Assert.Equal(1L, measured.DeltaWaitingRequestsCount);
+        Assert.Equal("120", measured.IntervalDisplay);
+
+        var preV60 = latches["ACCESS_METHODS_DATASET_PARENT"];
+        Assert.Null(preV60.SampleIntervalSeconds);
+        Assert.False(preV60.IsUnknowable);
+        Assert.Equal(300L, preV60.DeltaWaitTimeMs);
+        Assert.Equal("not stored", preV60.IntervalDisplay);
+
+        await SeedSpinlockAsync(t, deltaCollisions: 0, interval: 0, spinlockName: "LOCK_HASH");
+        await SeedSpinlockAsync(t, deltaCollisions: 1200, interval: 120, spinlockName: "SOS_CACHESTORE");
+        await SeedSpinlockAsync(t, deltaCollisions: 30, interval: null, spinlockName: "XDESMGR");
+
+        var spinlocks = (await _dataService.GetSpinlockStatsSnapshotAsync(ServerId, hoursBack: 1)).ToDictionary(r => r.SpinlockName);
+        Assert.Equal(3, spinlocks.Count);
+
+        Assert.True(spinlocks["LOCK_HASH"].IsUnknowable);
+        Assert.Null(spinlocks["LOCK_HASH"].DeltaCollisions);
+        Assert.Null(spinlocks["LOCK_HASH"].DeltaSpins);
+        Assert.Equal("restart / first sample", spinlocks["LOCK_HASH"].IntervalDisplay);
+
+        Assert.Equal(1200L, spinlocks["SOS_CACHESTORE"].DeltaCollisions);
+        Assert.Equal(0L, spinlocks["SOS_CACHESTORE"].DeltaSpins);   // a measured zero stays a zero
+        Assert.Equal("120", spinlocks["SOS_CACHESTORE"].IntervalDisplay);
+
+        Assert.Equal(30L, spinlocks["XDESMGR"].DeltaCollisions);
+        Assert.Null(spinlocks["XDESMGR"].SampleIntervalSeconds);
+        Assert.Equal("not stored", spinlocks["XDESMGR"].IntervalDisplay);
+    }
+
+    /// <summary>
     /// #3540 (v61): the procedure duration trend, the read that LAG-divided procedure_stats' fabricated
     /// zero into a confident 0.00 ms/sec. Four collections five minutes apart: t1/t2 are pre-v61 collections
     /// (NULL interval) — t1 has no prior and is UNRATED (a point with null rates, #3541 A12: kept rather than
@@ -521,7 +583,7 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedLatchAsync(DateTime at, long deltaWait, int? interval)
+    private async Task SeedLatchAsync(DateTime at, long deltaWait, int? interval, string latchClass = "BUFFER")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -530,8 +592,8 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
             (collection_id, collection_time, server_id, server_name, latch_class,
              waiting_requests_count, wait_time_ms, max_wait_time_ms,
              delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
-            VALUES ($1, $2, $3, $4, 'BUFFER', 0, 0, 0, 1, $5, 0, $6)";
-        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, deltaWait, IntervalValue(interval) })
+            VALUES ($1, $2, $3, $4, $7, 0, 0, 0, 1, $5, 0, $6)";
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, deltaWait, IntervalValue(interval), latchClass })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }
@@ -539,7 +601,7 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedSpinlockAsync(DateTime at, long deltaCollisions, int? interval)
+    private async Task SeedSpinlockAsync(DateTime at, long deltaCollisions, int? interval, string spinlockName = "LOCK_HASH")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -548,8 +610,8 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
             (collection_id, collection_time, server_id, server_name, spinlock_name,
              collisions, spins, spins_per_collision, sleep_time, backoffs,
              delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
-            VALUES ($1, $2, $3, $4, 'LOCK_HASH', 0, 0, 0, 0, 0, $5, 0, 0, 0, $6)";
-        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, deltaCollisions, IntervalValue(interval) })
+            VALUES ($1, $2, $3, $4, $7, 0, 0, 0, 0, 0, $5, 0, 0, 0, $6)";
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, deltaCollisions, IntervalValue(interval), spinlockName })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }

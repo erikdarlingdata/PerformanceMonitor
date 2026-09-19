@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -74,6 +75,50 @@ public sealed class ViewerLatchSpinlockSqlTests
         Assert.Contains("collection_time = (SELECT mx FROM latest)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY delta_wait_time_ms DESC, wait_time_ms DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 20", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3653 A7: both snapshot reads carry the stored interval so the grid can tell a restart's (0, 0)
+    /// from an idle (0, n) — and select the deltas AS STORED (no CASE/NULLIF on them in SQL), because the
+    /// ORDER BY ranks the stored numbers and the nulling is the reader's, via the shared
+    /// <see cref="DeltaSeriesShaping.ReadableDelta"/>.</summary>
+    [Theory]
+    [InlineData("latch-snapshot", "delta_wait_time_ms,")]
+    [InlineData("spinlock-snapshot", "delta_spins,")]
+    public void SnapshotSql_CarriesTheStoredInterval_SelectsDeltasAsStored(string which, string lastDeltaColumn)
+    {
+        var sql = which == "latch-snapshot" ? ViewerDataService.LatchSnapshotSql : ViewerDataService.SpinlockSnapshotSql;
+
+        Assert.Contains(lastDeltaColumn, sql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CASE", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The row-level rule the grids and the live pin below rest on, stated against the record types
+    /// themselves: the marker nulls both deltas, a measured or never-stored interval leaves them as stored,
+    /// and <c>IntervalDisplay</c> spells the three states in #3540's words.</summary>
+    [Fact]
+    public void SnapshotRows_NullTheDeltasOnTheMarker_AndSpellTheInterval()
+    {
+        var marker = new LatchStatsSnapshotRow("BUFFER", 0, 0, 0,
+            DeltaSeriesShaping.ReadableDelta(0, 0), DeltaSeriesShaping.ReadableDelta(0, 0), 0);
+        Assert.True(marker.IsUnknowable);
+        Assert.Null(marker.DeltaWaitTimeMs);
+        Assert.Null(marker.DeltaWaitingRequestsCount);
+        Assert.Equal("restart / first sample", marker.IntervalDisplay);
+
+        var measured = new SpinlockStatsSnapshotRow("LOCK_HASH", 900, 0, 0, 0, 0,
+            DeltaSeriesShaping.ReadableDelta(400, 120), DeltaSeriesShaping.ReadableDelta(0, 120), 120);
+        Assert.False(measured.IsUnknowable);
+        Assert.Equal(400L, measured.DeltaCollisions);
+        Assert.Equal(0L, measured.DeltaSpins);   // a measured zero stays a zero
+        Assert.Equal("120", measured.IntervalDisplay);
+
+        var preV127 = new LatchStatsSnapshotRow("LOG_MANAGER", 0, 0, 0,
+            DeltaSeriesShaping.ReadableDelta(100, null), DeltaSeriesShaping.ReadableDelta(4000, null), null);
+        Assert.False(preV127.IsUnknowable);
+        Assert.Equal(4000L, preV127.DeltaWaitTimeMs);
+        Assert.Equal("not stored", preV127.IntervalDisplay);
     }
 
     [Fact]
@@ -252,17 +297,30 @@ public sealed class ViewerLatchSpinlockLivePostgresTests
             var t2 = t1.AddMinutes(5);
 
             /* Older collection (t1) must be ignored; the snapshot is the latest (t2). At t2, LOCK_HASH
-               has the larger delta so it sorts above SOS_CACHESTORE. */
+               has the larger delta so it sorts above SOS_CACHESTORE. LOCK_HASH stores a measured 120 s
+               interval, SOS_CACHESTORE a pre-V127 NULL, and XDESMGR is the (0, 0) restart marker (#3653 A7):
+               its deltas read null, its IntervalDisplay says why, and it still ranks last on the stored 0. */
             await InsertSpinlockAsync(connection, 1, t1, "LOCK_HASH", collisions: 10, deltaCollisions: 10);
             await InsertSpinlockAsync(connection, 2, t2, "SOS_CACHESTORE", collisions: 500, deltaCollisions: 50);
-            await InsertSpinlockAsync(connection, 2, t2, "LOCK_HASH", collisions: 900, deltaCollisions: 400);
+            await InsertSpinlockAsync(connection, 2, t2, "LOCK_HASH", collisions: 900, deltaCollisions: 400, sampleIntervalSeconds: 120);
+            await InsertSpinlockAsync(connection, 2, t2, "XDESMGR", collisions: 7, deltaCollisions: 0, sampleIntervalSeconds: 0);
 
             var snapshot = await viewer.GetSpinlockStatsSnapshotAsync(SpinlockServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
 
-            Assert.Equal(2, snapshot.Count);
+            Assert.Equal(3, snapshot.Count);
             Assert.Equal("LOCK_HASH", snapshot[0].SpinlockName);   // larger delta first
-            Assert.Equal(400, snapshot[0].DeltaCollisions);
+            Assert.Equal(400L, snapshot[0].DeltaCollisions);
+            Assert.Equal(120, snapshot[0].SampleIntervalSeconds);
+            Assert.Equal("120", snapshot[0].IntervalDisplay);
             Assert.Equal("SOS_CACHESTORE", snapshot[1].SpinlockName);
+            Assert.Equal(50L, snapshot[1].DeltaCollisions);
+            Assert.Null(snapshot[1].SampleIntervalSeconds);
+            Assert.Equal("not stored", snapshot[1].IntervalDisplay);
+            Assert.Equal("XDESMGR", snapshot[2].SpinlockName);
+            Assert.True(snapshot[2].IsUnknowable);
+            Assert.Null(snapshot[2].DeltaCollisions);
+            Assert.Null(snapshot[2].DeltaSpins);
+            Assert.Equal("restart / first sample", snapshot[2].IntervalDisplay);
 
             bodySucceeded = true;
         }
@@ -298,14 +356,15 @@ VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, 0, $8)", connection);
 
     private static async Task InsertSpinlockAsync(
         NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc,
-        string spinlockName, long collisions, long deltaCollisions)
+        string spinlockName, long collisions, long deltaCollisions, int? sampleIntervalSeconds = null)
     {
+        /* sample_interval_seconds NULL by default (a pre-V127 row), as the latch helper above. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO spinlock_stats
     (collection_id, collection_time, server_id, server_name, spinlock_name,
      collisions, spins, spins_per_collision, sleep_time, backoffs,
-     delta_collisions, delta_spins, delta_sleep_time, delta_backoffs)
-VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7, 0, 0, 0)", connection);
+     delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7, 0, 0, 0, $8)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(SpinlockServerId);
@@ -313,6 +372,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7, 0, 0, 0)", connection);
         command.Parameters.AddWithValue(spinlockName);
         command.Parameters.AddWithValue(collisions);
         command.Parameters.AddWithValue(deltaCollisions);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)sampleIntervalSeconds ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

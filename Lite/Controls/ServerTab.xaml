@@ -2336,11 +2336,17 @@
                                 <DataGridTextColumn Binding="{Binding LatchClass}" Width="*">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LatchClass" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Latch Class" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DeltaWaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                <!-- #3653 A7: the two deltas are null on a restart / first-sample row (stored interval 0 — the
+                                     calculator's "no delta knowable" marker, #3540) and render "—", never 0; the Interval (sec)
+                                     column beside them says why, or gives the seconds the deltas accrued over. -->
+                                <DataGridTextColumn Binding="{Binding DeltaWaitTimeMs, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaWaitTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Wait (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DeltaWaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn Binding="{Binding DeltaWaitingRequestsCount, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaWaitingRequestsCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Waiting Reqs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IntervalDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Interval (sec)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding WaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Time (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -2367,11 +2373,15 @@
                                 <DataGridTextColumn Binding="{Binding SpinlockName}" Width="*">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SpinlockName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Spinlock" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DeltaCollisions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                <!-- #3653 A7: null deltas on the restart marker row render "—"; see the latch grid above. -->
+                                <DataGridTextColumn Binding="{Binding DeltaCollisions, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaCollisions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Collisions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DeltaSpins, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn Binding="{Binding DeltaSpins, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaSpins" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Spins" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" Width="150">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IntervalDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Interval (sec)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding SpinsPerCollision, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SpinsPerCollision" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Spins/Collision" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
