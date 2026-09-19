@@ -52,11 +52,17 @@ public sealed class McpCpuTools
                     samples_in_bucket = g.Count()
                 });
 
+            /* #3653 A15/A16: the old note said "15-second ring buffer samples". The ring buffer
+               (RING_BUFFER_SCHEDULER_MONITOR, the source on-prem / Managed Instance / RDS) writes ONE record per
+               minute — CpuUtilizationCollector's dedup note measures "a real ~60s gap to the next" — so a 1-minute
+               bucket normally holds one sample there; the 15-second cadence belongs to sys.dm_db_resource_stats,
+               the Azure SQL DB source, which is not a ring buffer. samples_in_bucket on every bucket is the
+               measured count, so the note names both cadences and defers to it. */
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
-                note = "Values are 1-minute averages of 15-second ring buffer samples.",
+                note = "Values are 1-minute bucket averages. Source cadence: one RING_BUFFER_SCHEDULER_MONITOR record per minute on-prem, Managed Instance and RDS (so a bucket usually holds one sample); one sys.dm_db_resource_stats row per 15 seconds on Azure SQL DB. samples_in_bucket is the measured count per bucket.",
                 samples = bucketed
             }, McpHelpers.JsonOptions);
         }

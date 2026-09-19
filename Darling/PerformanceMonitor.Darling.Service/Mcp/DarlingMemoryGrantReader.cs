@@ -89,6 +89,15 @@ internal static class DarlingMemoryGrantReader
     /// over Darling's store (plus <c>max_target_memory_mb</c> from the store; plus, since V128, the
     /// Dashboard's <c>sample_interval_seconds</c>, trailing so every existing ordinal is stable). MB columns
     /// are <c>numeric(18,2)</c> → double precision. $1 server_id, $2 window start, $3 window end (naive UTC).
+    ///
+    /// <para><b>Row order is pool first, then semaphore — the same order Lite's twin read
+    /// (<c>LocalDataService.GetResourceSemaphoreSnapshotAsync</c>) and the pool-lens reads in both SKUs
+    /// already use (#3653 A15/A16).</b> This read and <see cref="ResourceSemaphoreWindowSql"/> ordered semaphore
+    /// first while Lite ordered pool first, so <c>get_resource_semaphore</c> returned the same rows in a
+    /// different order on the two SKUs — the one place the twins disagreed on this tool, and a difference an
+    /// agent reading <c>grants[0]</c> as "the default pool's regular semaphore" would never see. Pool first
+    /// groups a pool's two semaphores (0 regular, 1 small-query) together, which is how the DMV is read.
+    /// Pinned cross-SKU by <c>DarlingMcpMemoryGrantToolsTests</c>.</para>
     /// </summary>
     public const string ResourceSemaphoreLatestSql = """
         WITH latest AS
@@ -119,7 +128,7 @@ internal static class DarlingMemoryGrantReader
         FROM v_memory_grant_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
-        ORDER BY resource_semaphore_id, pool_id
+        ORDER BY pool_id, resource_semaphore_id
         """;
 
     public static async Task<List<ResourceSemaphoreRow>> GetResourceSemaphoreLatestAsync(
@@ -283,7 +292,7 @@ internal static class DarlingMemoryGrantReader
         JOIN peak AS p
           ON p.resource_semaphore_id = a.resource_semaphore_id
          AND p.pool_id = a.pool_id
-        ORDER BY a.resource_semaphore_id, a.pool_id
+        ORDER BY a.pool_id, a.resource_semaphore_id
         """;
 
     /// <summary>

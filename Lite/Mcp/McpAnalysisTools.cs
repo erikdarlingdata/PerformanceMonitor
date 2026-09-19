@@ -495,7 +495,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices, accounting for edition (Standard vs Enterprise) and server resources. Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based).")]
     public static async Task<string> AuditConfig(
         AnalysisService analysisService,
         ServerManager serverManager,

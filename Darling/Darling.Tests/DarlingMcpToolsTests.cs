@@ -93,6 +93,38 @@ public sealed class DarlingMcpToolsTests
     /// table row agrees. The live round-trip below is what proves the numbers; this is what a caller reads
     /// before deciding to trust them.
     /// </summary>
+    /// <summary>
+    /// #3653 A15/A16: <c>audit_config</c> claimed to account for edition with zero edition branches (the MAXDOP
+    /// rule is topology-based, the rest resource-based; the edition is REPORTED in the payload, never consulted),
+    /// and its description said nothing about the PostgreSQL refusal the body has carried since #3542. The
+    /// description now says both, and the instruction table stops calling it "edition-aware".
+    /// </summary>
+    [Fact]
+    public void AuditConfig_Description_DoesNotClaimEditionAwareness_AndNamesThePostgresRefusal()
+    {
+        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "audit_config");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("accounting for edition", description, StringComparison.Ordinal);
+        Assert.Contains("NO check branches on it", description, StringComparison.Ordinal);
+        Assert.Contains("not_collected", description, StringComparison.Ordinal);
+        Assert.Contains("get_pg_server_config", description, StringComparison.Ordinal);
+        Assert.Contains("get_pg_logging_audit", description, StringComparison.Ordinal);
+
+        /* And the claim is true of the body: the only edition reads are the fact lookup and the payload echo. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+        var start = source.IndexOf("Name = \"audit_config\"", StringComparison.Ordinal);
+        var body = source[start..source.IndexOf("FormatError(\"audit_config\"", StringComparison.Ordinal)];
+        Assert.Contains("edition = editionName", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (edition", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition ==", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition switch", body.Replace("var editionName = edition switch", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+
+        Assert.DoesNotContain("Edition-aware", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("edition-aware", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void MuteAnalysisFinding_Description_NamesRegistered_MatchedNow_AndTheUnmatchedStatus()
     {

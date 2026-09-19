@@ -39,7 +39,13 @@ public sealed class DarlingMcpAgTools
         "log-send and redo queue sizes in KB, send/redo rates in KB/s, estimated drain minutes, secondary lag " +
         "seconds, and whether data movement is suspended and why). Each group is one monitored server's VIEW of " +
         "an AG and names that server, so an AG with several monitored replicas appears once per replica — compare " +
-        "them to reconcile perspectives. Severities are computed server-side. Returns an empty result on a fleet " +
+        "them to reconcile perspectives. Severities are computed server-side and restate the DMVs' OWN verdicts " +
+        "(states and health strings) only: lag and queue depth are NOT banded, so a badly lagging asynchronous " +
+        "secondary whose replica health still reads HEALTHY carries a healthy severity — read secondary_lag_seconds " +
+        "and the queue sizes yourself, and read lag together with is_suspended (the DMV reports 0 lag while data " +
+        "movement is suspended). Each group carries its collection_time: the collectors write NO row for a server " +
+        "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then — " +
+        "an old collection_time on a group is that case, not a live reading. Returns an empty result on a fleet " +
         "with no Availability Groups.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,

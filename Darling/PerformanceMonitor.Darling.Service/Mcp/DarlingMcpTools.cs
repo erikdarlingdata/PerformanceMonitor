@@ -522,7 +522,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices, accounting for edition (Standard vs Enterprise) and server resources. Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). SQL Server only: for a PostgreSQL target this tool refuses with status not_collected and points at get_pg_server_config, get_pg_logging_audit and the CONFIG_PG_* facts instead of pretending the collector failed.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -558,6 +558,7 @@ public sealed class DarlingMcpTools
                             new { tool = "get_analysis_facts", reason = "CONFIG_PG_* setting facts for this target", suggested_params = new { source = "pg_config" } },
                             new { tool = "analyze_server", reason = "the advisory findings those settings root" },
                             new { tool = "get_pg_server_config", reason = "the raw pg_settings snapshot with sources and pending restarts" },
+                            new { tool = "get_pg_logging_audit", reason = "the PostgreSQL logging-configuration audit (log_min_duration_statement, log_lock_waits, log_checkpoints and their peers)" },
                         },
                     });
             }

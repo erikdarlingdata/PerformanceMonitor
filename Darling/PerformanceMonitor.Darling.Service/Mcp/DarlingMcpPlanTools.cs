@@ -45,7 +45,7 @@ public sealed class DarlingMcpPlanTools
     [McpServerTool(Name = "analyze_query_plan"), Description(
         "Analyzes a stored execution plan captured from query stats by query_hash. " +
         "Use after get_top_queries_by_cpu to understand why a query is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Returns warnings, missing indexes (column lists and the optimizer's statement-scoped impact estimate, labelled impact_basis; no CREATE INDEX text — the suggestion is a hint, not a design), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeQueryPlan(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
@@ -76,7 +76,7 @@ public sealed class DarlingMcpPlanTools
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
         "Analyzes a stored execution plan captured from procedure stats by sql_handle. " +
         "Use after get_top_procedures_by_cpu to understand why a procedure is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Returns warnings, missing indexes (column lists and the optimizer's statement-scoped impact estimate, labelled impact_basis; no CREATE INDEX text — the suggestion is a hint, not a design), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeProcedurePlan(
         NpgsqlDataSource postgres,
         [Description("The sql_handle value from get_top_procedures_by_cpu.")] string sql_handle,
@@ -106,7 +106,7 @@ public sealed class DarlingMcpPlanTools
     [McpServerTool(Name = "analyze_query_store_plan"), Description(
         "Analyzes a stored Query Store execution plan by database name and query ID. " +
         "Use after get_query_store_top to understand why a query is expensive. " +
-        "Returns warnings, missing indexes, parameters, memory grants, and top operators.")]
+        "Returns warnings, missing indexes (column lists and the optimizer's statement-scoped impact estimate, labelled impact_basis; no CREATE INDEX text — the suggestion is a hint, not a design), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -138,8 +138,8 @@ public sealed class DarlingMcpPlanTools
 
     [McpServerTool(Name = "analyze_plan_xml"), Description(
         "Analyzes raw showplan XML directly. Use when you have plan XML from any source " +
-        "(clipboard, file, another tool). Returns warnings, missing indexes, parameters, " +
-        "memory grants, and top operators.")]
+        "(clipboard, file, another tool). " +
+        "Returns warnings, missing indexes (column lists and the optimizer's statement-scoped impact estimate, labelled impact_basis; no CREATE INDEX text — the suggestion is a hint, not a design), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static string AnalyzePlanXml(
         [Description("Raw showplan XML content.")] string plan_xml)
     {
