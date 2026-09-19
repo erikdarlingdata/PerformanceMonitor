@@ -311,8 +311,10 @@ public class AnalysisService
             // (same run, same database) by rewriting its stamped incident id onto that parent's — so
             // the anomaly stops rendering as its own card / its own email. No-parent anomalies stay
             // solo; db-scoped object anomalies never cross databases. Presentation-only: nothing is
-            // dropped, only the incident tag is reconciled.
-            AnomalyIncidentReconciler.Reconcile(stories);
+            // dropped, only the incident tag is reconciled. The facts ride along (#3704) so a
+            // maintenance-family anomaly folded onto a fired RUNNING_JOBS' incident can name the job
+            // in its frozen StoryText — the name is on the fact (#3693), not on any story.
+            AnomalyIncidentReconciler.Reconcile(stories, facts);
 
             context.CancellationToken.ThrowIfCancellationRequested();
 
