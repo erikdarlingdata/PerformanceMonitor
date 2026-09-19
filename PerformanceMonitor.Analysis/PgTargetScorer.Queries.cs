@@ -6,19 +6,128 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
 /// <c>pg_queries</c> — top statements (lane 7), keyed through <see cref="PgTargetFactKeys.BadActorKey"/>.
-/// Pattern: <c>FactScorer.ScoreBadActorFact</c> tiering by execution count, with PostgreSQL-measured bars.
+/// Pattern: <c>FactScorer.ScoreBadActorFact</c> — a tier that gets the statement in the door and a grade that
+/// says how bad — with ONE decision variable in place of its two: the statement's SHARE of the window's total
+/// execution time, computed over the WINDOW (the collector's <c>SUM(…) OVER ()</c>, #3541 A7), never over the
+/// page of rows returned.
+///
+/// <para><b>Why share and not the SQL Server pair (execution-count tier × per-execution impact).</b> The SQL
+/// Server family answers "is this query consistently terrible" from <c>query_stats</c>, where every row is a
+/// plan-cache entry with CPU and reads per execution, and its tiers (1,000 / 10,000 / 100,000 executions;
+/// 50 / 2,000 ms CPU; 5,000 / 250,000 reads) are that engine's inherited constants. None of them may be
+/// reused by value here (#3538 A5), and the PostgreSQL source does not offer the same axes: <c>pg_stat_statements</c>
+/// has no CPU (that is <c>pg_stat_kcache</c>, an optional extension) and its block counts are cache-tier
+/// counters, not a logical-reads figure. What it does offer, exactly, is elapsed time per statement shape and
+/// the total across every shape — so the honest question is the one a PostgreSQL operator actually asks of
+/// this view: "how much of what the server did was this one statement". A statement holding six tenths of
+/// the window's time is the story's query-shaped leaf whatever its per-call cost; the per-call figures
+/// (<c>mean_exec_ms</c>, <c>calls_per_sec</c>) are the advice's material, not the gate's.</para>
+///
+/// <para><b>The idle-server gate.</b> Share alone would root a card on a development box where the whole
+/// window's execution time is 100 ms and one statement holds 60 of them. <c>window_busy_fraction</c> — the
+/// window's total statement time over <see cref="AnalysisContext.ObservedDurationMs"/>, summed over backends
+/// so it may exceed 1.0 — is the "was the server doing anything" gate, a fraction of OBSERVED time (#3538 A7),
+/// so the same server reads the same at every <c>hours_back</c>.</para>
+///
+/// <para><b>Lineage.</b> Both bars are UNMEASURED: there is no engine-defined line for "too large a share"
+/// and no fleet measurement of it yet. The calibrating read is the per-server distribution of the top-1
+/// statement's share of <c>SUM(delta_total_exec_time_ms)</c> per window over <c>pg_statement_stats</c>
+/// (p50 / p95 across the dogfood PostgreSQL fleet), and, for the gate, the distribution of that sum over
+/// observed seconds. Until it is read, every fact this arm grades carries <c>threshold_lineage = 0</c> so
+/// <c>get_analysis_facts</c> shows the number is a judgment.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
-    /* filled by lane 7 */
-    private static partial double ScoreQueriesFact(Fact fact) => 0.0;
+    /// <summary>
+    /// The share of the window's total execution time at which one statement is CONCERNING (severity 0.5 —
+    /// the story threshold) and at which it is CRITICAL (1.0). A quarter of everything the server executed
+    /// being one statement shape is a workload with a head; six tenths is a workload that IS one statement.
+    /// unmeasured: chosen, not measured — calibrate against pg_statement_stats before the next release (the
+    /// per-server top-1 share distribution named in the class summary); the fact carries threshold_lineage = 0.
+    /// </summary>
+    public const double BadActorShareConcerning = 0.25;
+    public const double BadActorShareCritical = 0.60;
 
-    /* filled by lane 7 */
-    private static partial List<AmplifierDefinition> QueriesAmplifiers(string key) => [];
+    /// <summary>
+    /// The floor on <c>window_busy_fraction</c> below which no statement can be a bad actor: the server
+    /// executed statements for less than this fraction of ONE backend's worth of the observed time (0.05 of
+    /// a four-hour window is twelve minutes of statement time), so a large share is a large share of nearly
+    /// nothing. unmeasured: chosen, not measured — calibrate against pg_statement_stats before the next
+    /// release (Σ delta_total_exec_time_ms over observed seconds, per server-window); the fact carries
+    /// threshold_lineage = 0.
+    /// </summary>
+    public const double BadActorBusyFloor = 0.05;
+
+    /// <summary>The boost a co-firing workload symptom adds to a bad actor — see <see cref="QueriesAmplifiers"/>.
+    /// unmeasured: chosen, not measured — calibrate against analysis_findings co-fire rates before the next
+    /// release; the fact carries threshold_lineage = 0.</summary>
+    public const double BadActorCoFireBoost = 0.25;
+
+    /// <summary>
+    /// Layer-1 base severity for a <c>PG_BAD_ACTOR_*</c> fact: the share graded through the shared formula
+    /// between the two bars above, gated on the idle-server floor. Zero for anything under the
+    /// <c>pg_queries</c> source that is not a bad-actor key, for a fact with no share, and for an idle window.
+    /// Stamps <c>threshold_lineage = 0</c> on every fact it grades (including the ones it grades to 0 through
+    /// the gate), because the number that decided is unmeasured either way.
+    /// </summary>
+    private static partial double ScoreQueriesFact(Fact fact)
+    {
+        if (!fact.Key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
+            return 0.0;
+        if (!fact.Metadata.TryGetValue("share_of_window_time", out var share) || share <= 0)
+            return 0.0;
+
+        /* unmeasured: both bars below are the constants declared above, chosen, not measured — calibrate
+           against pg_statement_stats before the next release; the fact carries threshold_lineage = 0. */
+        fact.Metadata["threshold_lineage"] = 0;
+
+        var busy = fact.Metadata.GetValueOrDefault("window_busy_fraction");
+        if (busy < BadActorBusyFloor)
+            return 0.0;
+
+        return FactScorer.ApplyThresholdFormula(share, BadActorShareConcerning, BadActorShareCritical);
+    }
+
+    /// <summary>
+    /// Layer-2 amplifiers for a bad actor: the server-level symptoms that make one statement's share URGENT
+    /// rather than merely large. Each predicate asks only whether the sibling fact FIRED (its own scorer's bar
+    /// put its base severity above zero) and, where the statement's own metadata can corroborate, whether it
+    /// does — never a bar of this arm's own.
+    /// <list type="bullet">
+    /// <item><description><see cref="PgTargetFactKeys.TempSpill"/> fired and THIS statement wrote temp blocks
+    /// in the window (<c>temp_blks_written &gt; 0</c>): the server is spilling and this is one of the
+    /// spillers — lane 6's <c>PG_TEMP_SPILL → PG_BAD_ACTOR_*</c> edge, seen from the leaf.</description></item>
+    /// <item><description><see cref="PgTargetFactKeys.CpuPercent"/> fired: instance CPU is high (Aurora /
+    /// Performance Insights only — the fact is absent on stock, so the arm is inert there) while one statement
+    /// holds the time. <c>pg_stat_statements</c> measures elapsed, not CPU, so this is corroboration, not
+    /// attribution; the advice says so.</description></item>
+    /// </list>
+    /// </summary>
+    private static partial List<AmplifierDefinition> QueriesAmplifiers(string key) =>
+    [
+        new()
+        {
+            Description = "The server is spilling to temp files and this statement wrote temp blocks in the window",
+            /* unmeasured: BadActorCoFireBoost, chosen, not measured — see its declaration. */
+            Boost = BadActorCoFireBoost,
+            Predicate = facts =>
+                facts.TryGetValue(PgTargetFactKeys.TempSpill, out var spill) && spill.BaseSeverity > 0
+                && facts.TryGetValue(key, out var self) && self.Metadata.GetValueOrDefault("temp_blks_written") > 0,
+        },
+        new()
+        {
+            Description = "Instance CPU is elevated while this statement holds the window's execution time",
+            /* unmeasured: BadActorCoFireBoost, chosen, not measured — see its declaration. */
+            Boost = BadActorCoFireBoost,
+            Predicate = facts =>
+                facts.TryGetValue(PgTargetFactKeys.CpuPercent, out var cpu) && cpu.BaseSeverity > 0,
+        },
+    ];
 }

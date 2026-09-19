@@ -301,7 +301,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
     {
         var lookup = new Dictionary<string, Fact>(StringComparer.Ordinal);
 
-        /* Stubs: null, without throwing, for every declared key and both dynamic families. */
+        /* DELEGATION, for every declared key and both dynamic families: what the shared entry points answer is
+           exactly what the PostgreSQL composer answers — null while a family is a stub, its own block once its
+           lane lands (the bad-actor family was the first) — and never a SQL Server composer's block. A block
+           that came from the SQL Server side would differ from PgTargetAdvice's answer, which is what the
+           equality catches; AdviceBlock is a record, so the comparison is by value. */
         var keys = typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
             .Where(f => f.IsLiteral && f.FieldType == typeof(string))
             .Select(f => (string)f.GetRawConstantValue()!)
@@ -311,10 +315,14 @@ public sealed class PgTargetSharedSwitchRoutingTests
             .ToList();
         foreach (var key in keys)
         {
-            Assert.Null(FactAdvice.Compose(key, lookup));
-            Assert.Null(FactAdvice.GetForFactKey(key));
-            Assert.Null(PgTargetAdvice.Static(key));
+            Assert.Equal(PgTargetAdvice.Compose(key, lookup), FactAdvice.Compose(key, lookup));
+            Assert.Equal(PgTargetAdvice.Static(key), FactAdvice.GetForFactKey(key));
+            Assert.Equal(PgTargetAdvice.Static(key), PgTargetAdvice.Compose(key, lookup));
         }
+        /* And the stub families still answer null — one representative each, so a lane that fills its family
+           moves its own line here and says so. */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "relation")));
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(7)));
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. */
