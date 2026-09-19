@@ -271,14 +271,23 @@ public sealed class PgTargetBetweenWavesTests
         Assert.Contains("get_pg_query_duration_trend", PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(42))!.Remediation, StringComparison.Ordinal);
     }
 
-    /* ───────────────────────── item 11: the parked hook names the shipped trend key ───────────────────────── */
+    /* ───────────────────────── item 11: the offered-vs-delivered hook and the trend key ───────────────────────── */
 
+    /// <summary>Item 11 renamed the parked hook's key to the shipped constant; lane 18 (#3691) then RETIRED the hook
+    /// — the 2026-09-19 calibration (§A1) showed the in-window TPS trend is noise — and replaced it with the
+    /// anomaly-pair amplifier. The pin now holds the replacement: the sessions scorer reads the two ANOMALY keys by
+    /// constant and reads the trend nowhere (no literal, no constant), while the key itself still ships on
+    /// <c>PG_TPS</c> for the reader.</summary>
     [Fact]
-    public void TheParkedOfferedVsDeliveredHook_NamesTpsTrendKey_NotALiteral()
+    public void TheOfferedVsDeliveredArm_ReadsTheAnomalyPair_AndTheRetiredTrendHookReadsNothing()
     {
         var sessions = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Sessions.cs");
-        Assert.Contains("tps.Metadata.GetValueOrDefault(TpsTrendKey) <= 0", sessions, StringComparison.Ordinal);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(sessions);
+        Assert.Contains("PgTargetFactKeys.AnomalySessionSpike", code, StringComparison.Ordinal);
+        Assert.Contains("PgTargetFactKeys.AnomalyTps", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("TpsTrendKey", code, StringComparison.Ordinal);
         Assert.DoesNotContain("GetValueOrDefault(\"trend\")", sessions, StringComparison.Ordinal);
+        Assert.DoesNotContain("tps_trend", sessions, StringComparison.Ordinal);
         Assert.Equal("tps_trend", PgTargetScorer.TpsTrendKey);
     }
 

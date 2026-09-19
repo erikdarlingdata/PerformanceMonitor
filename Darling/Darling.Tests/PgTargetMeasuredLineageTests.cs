@@ -68,7 +68,8 @@ public sealed class PgTargetMeasuredLineageTests
         ("PgTargetScorer.Waits.cs", new[] { "WaitStandoutConcerning", "WaitStandoutCritical", "WaitSampledMinimumSamples", "WaitCoFireBoost" }),
         ("PgTargetScorer.Temp.cs", new[] { "TempCauseBoost" }),
         ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost" }),
-        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost" }),
+        /* Lane 18 (#3691) added the offered-vs-delivered co-fire boost — a boost, unmeasured like its siblings. */
+        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost", "OfferedVsDeliveredBoost" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgRatioAnomalyThreshold" }),
     };
 

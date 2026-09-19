@@ -59,6 +59,16 @@ namespace Darling.Tests;
 /// naming the holder, the duration, the horizon claim, the recurrence, and each of the three chains only when its
 /// sibling fired. Gated: a third server whose one holder — 15 min, pinning, six captures — yields the fact at
 /// 1.0 × 1.2 through the real <c>analyze_server</c>, headline naming the application and the horizon.</para>
+///
+/// <para><b>Offered vs delivered (#3691 lane 18, design §3.6 / D7).</b> Pinned: saturation's THIRD amplifier reads
+/// the two hour-of-week anomalies and fires on the pair only — <c>ANOMALY_PG_SESSION_SPIKE</c> fired, <c>ANOMALY_PG_TPS</c>
+/// not (both fired is a surge; a present-but-unfired spike is not "high"; a fired TPS drop keeps the pair) — never
+/// the <c>PG_TPS</c> trend the retired hook read; it stamps <c>offered_vs_delivered</c> and both ratios either way;
+/// through the real <c>ScoreAll</c> the pair lifts 1.0 to 1.55 and both-fired leaves 1.25; a pass with no anomaly
+/// is byte-identical in severity, path, edges and advice text (the metadata gains the three stamps at 0); the
+/// advice sentence states the multiple only on the stamp. Gated: two 31-day servers climbing to 90 of 97, one
+/// with throughput held (1.55, the sentence, the stamps through <c>get_analysis_facts</c>) and one with throughput
+/// climbing too (1.25, no sentence).</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgTargetSessionsTests
@@ -69,6 +79,11 @@ public sealed class PgTargetSessionsTests
     private static readonly int BlindServerId = ServerIdHelper.GetDeterministicHashCode(BlindServerName);
     private const string ParkedServerName = "darling-pg-target-sessions-parked";
     private static readonly int ParkedServerId = ServerIdHelper.GetDeterministicHashCode(ParkedServerName);
+    /* Lane 18's pair (offered vs delivered): a pool that climbed while throughput held, and one that climbed with it. */
+    private const string QueuedServerName = "darling-pg-target-sessions-queued";
+    private static readonly int QueuedServerId = ServerIdHelper.GetDeterministicHashCode(QueuedServerName);
+    private const string SurgeServerName = "darling-pg-target-sessions-surge";
+    private static readonly int SurgeServerId = ServerIdHelper.GetDeterministicHashCode(SurgeServerName);
 
     /// <summary>A saturation fact as the collector composes it: 100 / 3 → 97 usable; the breakdown and the
     /// window shape are the e2e's planted figures unless overridden.</summary>
@@ -203,7 +218,9 @@ public sealed class PgTargetSessionsTests
         var key = PgTargetFactKeys.ConnectionSaturation;
         var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
         var definitions = ((System.Collections.IEnumerable)amplifiers.Invoke(null, [key])!).Cast<object>().ToList();
-        Assert.Equal(2, definitions.Count);
+        /* Three arms since lane 18: parked share, CPU, offered-vs-delivered (its own pin below); the first two are
+           lane 3's, unchanged. */
+        Assert.Equal(3, definitions.Count);
 
         static (double Boost, Func<Dictionary<string, Fact>, bool> Predicate) Read(object definition)
         {
@@ -242,9 +259,10 @@ public sealed class PgTargetSessionsTests
         new FactScorer().ScoreAll(facts);
         Assert.Equal(1.0, facts[0].BaseSeverity, precision: 9);
         Assert.Equal(1.25, facts[0].Severity, precision: 9);
-        Assert.Equal(2, facts[0].AmplifierResults.Count);
+        Assert.Equal(3, facts[0].AmplifierResults.Count);
         Assert.True(facts[0].AmplifierResults[0].Matched);
         Assert.False(facts[0].AmplifierResults[1].Matched);
+        Assert.False(facts[0].AmplifierResults[2].Matched);   /* no anomaly in the set: offered-vs-delivered is quiet */
 
         /* And with the capacity reading measured at 95% of the configured ceiling the CPU fact fires (1.0) and the
            arm lifts saturation to 1.0 × (1 + 0.25 + 0.25) = 1.5 — the D7 "queueing at the cliff" shape. */
@@ -629,16 +647,18 @@ public sealed class PgTargetSessionsTests
         var graph = new PgTargetRelationshipGraph();
 
         /* Saturation alone (30 of 90 parked, fired): exactly what lane 5 left — no active edge (no wait, no idle
-           fact), a one-card story at 1.25 with the two amplifier results the v1 pin recorded. */
+           fact), a one-card story at 1.25 with the amplifier results the v1 pin recorded (plus lane 18's third arm,
+           unmatched with no anomaly in the set). */
         var alone = new List<Fact> { Saturation(90, idleInTransaction: 30) };
         new FactScorer().ScoreAll(alone);
         Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.ConnectionSaturation, alone.ToFactLookup()));
         var soloStory = Assert.Single(new InferenceEngine(graph).BuildStories(alone));
         Assert.Equal(new[] { PgTargetFactKeys.ConnectionSaturation }, soloStory.Path);
         Assert.Equal(1.25, alone[0].Severity, precision: 9);
-        Assert.Equal(2, alone[0].AmplifierResults.Count);
+        Assert.Equal(3, alone[0].AmplifierResults.Count);
         Assert.True(alone[0].AmplifierResults[0].Matched);
         Assert.False(alone[0].AmplifierResults[1].Matched);
+        Assert.False(alone[0].AmplifierResults[2].Matched);
 
         /* Saturation at 1.25 + a fired idle fact, share 30/90: both directions active; saturation outranks and walks
            to the idle leaf; ONE story. The saturation fact's severity is unchanged by the idle fact's presence — the
@@ -647,7 +667,7 @@ public sealed class PgTargetSessionsTests
         new FactScorer().ScoreAll(meshed);
         var lookup = meshed.ToFactLookup();
         Assert.Equal(1.25, meshed[0].Severity, precision: 9);
-        Assert.Equal(2, meshed[0].AmplifierResults.Count);
+        Assert.Equal(3, meshed[0].AmplifierResults.Count);
         Assert.Equal(PgTargetFactKeys.IdleInTransaction, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.ConnectionSaturation, lookup)).Destination);
         Assert.Equal(PgTargetFactKeys.ConnectionSaturation, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.IdleInTransaction, lookup)).Destination);
         var story = Assert.Single(new InferenceEngine(graph).BuildStories(meshed));
@@ -682,6 +702,191 @@ public sealed class PgTargetSessionsTests
         new FactScorer().ScoreAll(quietPool);
         Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.IdleInTransaction, quietPool.ToFactLookup()));
         Assert.Equal(new[] { PgTargetFactKeys.IdleInTransaction }, Assert.Single(new InferenceEngine(graph).BuildStories(quietPool)).Path);
+    }
+
+    /* ───────────────────────── offered vs delivered (#3691 lane 18) ───────────────────────── */
+
+    /// <summary>A PostgreSQL z-score anomaly as lane 9's detector emits it: <c>Value</c> is the window's peak, the
+    /// bucket's median / mean and the deviation the shared ramp grades (10σ at a 3.5 anchor scores 1.0).</summary>
+    private static Fact Anomaly(string key, double peak, double median, double mean, double deviation = 10.0) => new()
+    {
+        Source = PgTargetAnomalyDetector.AnomalySource,
+        Key = key,
+        Value = peak,
+        ServerId = 1,
+        Metadata =
+        {
+            ["deviation_sigma"] = deviation,
+            ["fire_threshold"] = 3.5,
+            ["baseline_low_quality"] = 0,
+            ["confidence"] = 1.0,
+            ["baseline_median"] = median,
+            ["baseline_mean"] = mean,
+        },
+    };
+
+    private static Fact SessionSpike(double peak = 90, double median = 21, double mean = 21.4, double deviation = 10.0) =>
+        Anomaly(PgTargetFactKeys.AnomalySessionSpike, peak, median, mean, deviation);
+
+    private static Fact TpsSpike(double peak = 60, double median = 10, double mean = 10.2, double deviation = 10.0) =>
+        Anomaly(PgTargetFactKeys.AnomalyTps, peak, median, mean, deviation);
+
+    /// <summary>
+    /// The third saturation arm reads the two ANOMALY facts, not the <c>PG_TPS</c> trend: it fires on the PAIR —
+    /// <c>ANOMALY_PG_SESSION_SPIKE</c> fired, <c>ANOMALY_PG_TPS</c> not — and on nothing else; and it is the one
+    /// predicate that stamps, so the verdict and both ratios are on the fact whichever way it went.
+    /// </summary>
+    [Fact]
+    public void TheOfferedVsDeliveredArm_FiresOnlyOnThePair_ReadsTheAnomaliesNotTheTrend_AndStampsTheVerdictEitherWay()
+    {
+        var key = PgTargetFactKeys.ConnectionSaturation;
+        var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var definitions = ((System.Collections.IEnumerable)amplifiers.Invoke(null, [key])!).Cast<object>().ToList();
+        var arm = definitions[2];
+        Assert.Equal(PgTargetScorer.OfferedVsDeliveredBoost, (double)arm.GetType().GetProperty("Boost")!.GetValue(arm)!);
+        Assert.Equal(0.3, PgTargetScorer.OfferedVsDeliveredBoost);
+        Assert.Contains("ANOMALY_PG_SESSION_SPIKE fired while ANOMALY_PG_TPS did not", (string)arm.GetType().GetProperty("Description")!.GetValue(arm)!, StringComparison.Ordinal);
+        var predicate = (Func<Dictionary<string, Fact>, bool>)arm.GetType().GetProperty("Predicate")!.GetValue(arm)!;
+
+        /* The pair: sessions anomalous high, no TPS anomaly — fires, and stamps 1 with the session multiple (90 / 21). */
+        var pair = Saturation(90);
+        var spike = SessionSpike();
+        spike.BaseSeverity = 1.0;
+        Assert.True(predicate(Lookup(pair, spike)));
+        Assert.Equal(1, pair.Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+        Assert.Equal(90 / 21.0, pair.Metadata[PgTargetScorer.SessionSpikeRatioKey], precision: 9);
+        Assert.Equal(0, pair.Metadata[PgTargetScorer.TpsAnomalyRatioKey]);
+
+        /* Both fired: a load surge, not queueing — quiet, stamped 0, both ratios stated. */
+        var surge = Saturation(90);
+        var tps = TpsSpike();
+        tps.BaseSeverity = 1.0;
+        Assert.False(predicate(Lookup(surge, spike, tps)));
+        Assert.Equal(0, surge.Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+        Assert.Equal(90 / 21.0, surge.Metadata[PgTargetScorer.SessionSpikeRatioKey], precision: 9);
+        Assert.Equal(6.0, surge.Metadata[PgTargetScorer.TpsAnomalyRatioKey], precision: 9);
+
+        /* TPS alone, or no anomaly at all: quiet, stamped 0. */
+        var tpsOnly = Saturation(90);
+        Assert.False(predicate(Lookup(tpsOnly, tps)));
+        Assert.Equal(0, tpsOnly.Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+        Assert.Equal(0, tpsOnly.Metadata[PgTargetScorer.SessionSpikeRatioKey]);
+        var none = Saturation(90);
+        Assert.False(predicate(Lookup(none)));
+        Assert.Equal(0, none.Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+
+        /* A session anomaly PRESENT but not fired (its own scorer put it at 0) is not "sessions high". */
+        var unfired = SessionSpike();
+        unfired.BaseSeverity = 0.0;
+        Assert.False(predicate(Lookup(Saturation(90), unfired)));
+
+        /* The defensive clause: a fired TPS anomaly whose peak sits at or under its centre is NOT "throughput
+           high" (a future two-sided detector's drop) — the pair holds. A fired one with no computable centre is. */
+        var dropped = TpsSpike(peak: 8, median: 10, mean: 10.2);
+        dropped.BaseSeverity = 0.6;
+        Assert.True(predicate(Lookup(Saturation(90), spike, dropped)));
+        var uncentred = TpsSpike(peak: 60, median: 0, mean: 0);
+        uncentred.BaseSeverity = 1.0;
+        var withUncentred = Saturation(90);
+        Assert.False(predicate(Lookup(withUncentred, spike, uncentred)));
+        Assert.Equal(0, withUncentred.Metadata[PgTargetScorer.TpsAnomalyRatioKey]);
+
+        /* No saturation fact in the set: nothing to stamp, false, no throw. */
+        Assert.False(predicate(Lookup(spike)));
+
+        /* The arm never reads the PG_TPS fact or its trend: a steeply FALLING trend with no anomalies is quiet, a
+           steeply rising one with the pair still fires — the retired hook's inputs are inert either way. */
+        var falling = new Fact { Source = PgTargetSources.DatabaseSource, Key = PgTargetFactKeys.Tps, Value = 10, Metadata = { [PgTargetScorer.TpsTrendKey] = -50 } };
+        Assert.False(predicate(Lookup(Saturation(90), falling)));
+        var rising = new Fact { Source = PgTargetSources.DatabaseSource, Key = PgTargetFactKeys.Tps, Value = 10, Metadata = { [PgTargetScorer.TpsTrendKey] = 50 } };
+        Assert.True(predicate(Lookup(Saturation(90), spike, rising)));
+    }
+
+    [Fact]
+    public void AnomalyPeakOverCentre_PrefersTheMedian_FallsBackToTheMean_AndIsZeroOnAZeroCentre()
+    {
+        Assert.Equal(90 / 21.0, PgTargetScorer.AnomalyPeakOverCentre(SessionSpike(peak: 90, median: 21, mean: 30)), precision: 9);
+        Assert.Equal(90 / 30.0, PgTargetScorer.AnomalyPeakOverCentre(SessionSpike(peak: 90, median: 0, mean: 30)), precision: 9);
+        Assert.Equal(0.0, PgTargetScorer.AnomalyPeakOverCentre(SessionSpike(peak: 90, median: 0, mean: 0)));
+        var bare = new Fact { Source = PgTargetAnomalyDetector.AnomalySource, Key = PgTargetFactKeys.AnomalyTps, Value = 60 };
+        Assert.Equal(0.0, PgTargetScorer.AnomalyPeakOverCentre(bare));
+    }
+
+    /// <summary>
+    /// Through the REAL <see cref="FactScorer.ScoreAll"/>: the pair lifts a CRITICAL pool to 1.0 × (1 + 0.25 + 0.3) =
+    /// 1.55 — past the notify line on two corroborators; both anomalies fired leaves lane 3's 1.25; and a saturation
+    /// pass with NO anomaly facts is the pre-lane-18 pass in severity, path and edges, its advice byte-identical,
+    /// its metadata gaining exactly the three stamps at 0.
+    /// </summary>
+    [Fact]
+    public void ThroughScoreAll_ThePairLiftsSaturationToOnePointFiveFive_BothFiredLeavesOnePointTwoFive_AndNoAnomalyIsByteIdentical()
+    {
+        var pair = new List<Fact> { Saturation(90), SessionSpike() };
+        new FactScorer().ScoreAll(pair);
+        Assert.Equal(1.0, pair[1].BaseSeverity, precision: 9);   /* the anomaly fired through the shared deviation ramp */
+        Assert.Equal(1.0, pair[0].BaseSeverity, precision: 9);
+        Assert.Equal(1.55, pair[0].Severity, precision: 9);
+        Assert.True(pair[0].AmplifierResults[2].Matched);
+        Assert.Equal(1, pair[0].Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+        Assert.Equal(1, pair[0].Metadata["threshold_lineage"]);   /* a boost moves no lineage */
+
+        var surge = new List<Fact> { Saturation(90), SessionSpike(), TpsSpike() };
+        new FactScorer().ScoreAll(surge);
+        Assert.Equal(1.25, surge[0].Severity, precision: 9);
+        Assert.False(surge[0].AmplifierResults[2].Matched);
+        Assert.Equal(0, surge[0].Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+
+        /* Byte-identity (lane 14's pin shape): no anomaly in the set. */
+        var before = Saturation(90);
+        var beforeMetadata = new Dictionary<string, double>(before.Metadata, StringComparer.Ordinal);
+        var alone = new List<Fact> { before };
+        new FactScorer().ScoreAll(alone);
+        var graph = new PgTargetRelationshipGraph();
+        Assert.Equal(1.25, before.Severity, precision: 9);
+        Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.ConnectionSaturation, alone.ToFactLookup()));
+        Assert.Equal(new[] { PgTargetFactKeys.ConnectionSaturation }, Assert.Single(new InferenceEngine(graph).BuildStories(alone)).Path);
+        var added = before.Metadata.Keys.Except(beforeMetadata.Keys).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(
+            new[] { PgTargetScorer.OfferedVsDeliveredKey, PgTargetScorer.SessionSpikeRatioKey, "threshold_lineage", PgTargetScorer.TpsAnomalyRatioKey }.Order(StringComparer.Ordinal),
+            added);
+        Assert.Equal(0, before.Metadata[PgTargetScorer.OfferedVsDeliveredKey]);
+        Assert.Equal(0, before.Metadata[PgTargetScorer.SessionSpikeRatioKey]);
+        Assert.Equal(0, before.Metadata[PgTargetScorer.TpsAnomalyRatioKey]);
+        /* The advice does not read the 0 stamps: composed with them and composed from the un-stamped fact, one string. */
+        var stamped = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, alone.ToFactLookup())!;
+        var unstamped = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(Saturation(90)))!;
+        Assert.Equal(unstamped.Headline, stamped.Headline);
+        Assert.Equal(unstamped.Investigation, stamped.Investigation);
+        Assert.Equal(unstamped.Remediation, stamped.Remediation);
+    }
+
+    [Fact]
+    public void ComposeSessions_StatesTheSessionMultipleAndThatThroughputHeld_OnlyWhenTheArmStamped()
+    {
+        var pair = new List<Fact> { Saturation(90), SessionSpike() };
+        new FactScorer().ScoreAll(pair);
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, pair.ToFactLookup())!;
+        Assert.Contains(
+            " Connections rose to 4.3× this hour of the week's norm while throughput stayed at its norm — arrivals are queueing, not working:",
+            advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("accepting more connections than usual and completing no more transactions than usual", advice.Investigation, StringComparison.Ordinal);
+        /* The parked-share sentence still precedes it; the capture sentence still follows — the block is lane 3's plus one sentence. */
+        Assert.True(advice.Investigation.IndexOf("PARKED connections", StringComparison.Ordinal) < advice.Investigation.IndexOf("Connections rose to", StringComparison.Ordinal));
+        Assert.True(advice.Investigation.IndexOf("Connections rose to", StringComparison.Ordinal) < advice.Investigation.IndexOf("The peak was seen over", StringComparison.Ordinal));
+
+        /* Both fired (stamped 0): no sentence. A fact with no stamp at all: no sentence. The static block: never. */
+        var surge = new List<Fact> { Saturation(90), SessionSpike(), TpsSpike() };
+        new FactScorer().ScoreAll(surge);
+        Assert.DoesNotContain("arrivals are queueing", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, surge.ToFactLookup())!.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("arrivals are queueing", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(Saturation(90)))!.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("arrivals are queueing", PgTargetAdvice.Static(PgTargetFactKeys.ConnectionSaturation)!.Investigation, StringComparison.Ordinal);
+
+        /* Stamped 1 with no computable session ratio (a zero-centred bucket): the sentence still states the verdict
+           without inventing a multiple. */
+        var uncentred = Saturation(90);
+        uncentred.Metadata[PgTargetScorer.OfferedVsDeliveredKey] = 1;
+        uncentred.Metadata[PgTargetScorer.SessionSpikeRatioKey] = 0;
+        Assert.Contains("Connections rose to a level above this hour of the week's norm while throughput stayed at its norm —", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(uncentred))!.Investigation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1188,13 +1393,180 @@ VALUES ($1, $2, $3, $4, $5, $6, 'appdb', $18, $19, NULL,
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var ids = $"{BusyServerId}, {BlindServerId}, {ParkedServerId}, {QueuedServerId}, {SurgeServerId}";
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM pg_session_states WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId}); " +
-            $"DELETE FROM pg_server_config WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId}); " +
-            $"DELETE FROM pg_database_stats WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId}); " +
-            $"DELETE FROM analysis_findings WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId}); " +
-            $"DELETE FROM analysis_muted WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId}); " +
-            $"DELETE FROM servers WHERE server_id IN ({BusyServerId}, {BlindServerId}, {ParkedServerId});", connection);
+            $"DELETE FROM pg_session_states WHERE server_id IN ({ids}); " +
+            $"DELETE FROM pg_server_config WHERE server_id IN ({ids}); " +
+            $"DELETE FROM pg_database_stats WHERE server_id IN ({ids}); " +
+            $"DELETE FROM analysis_findings WHERE server_id IN ({ids}); " +
+            $"DELETE FROM analysis_muted WHERE server_id IN ({ids}); " +
+            $"DELETE FROM servers WHERE server_id IN ({ids});", connection) { CommandTimeout = 120 };
         await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Thirty-one days of one-minute <c>pg_database_stats</c> and <c>pg_session_states</c> for one server in
+    /// two bulk inserts (lane 9's e2e shape): a steady state, then the climb from <paramref name="climbFrom"/> —
+    /// sessions to 90 on both servers, throughput to 60 tps only when <paramref name="tpsClimbs"/>.</summary>
+    private static async Task PlantThirtyOneDaysAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime start, int minutes, int climbFrom, bool tpsClimbs, CancellationToken ct)
+    {
+        async Task Plant(string sql)
+        {
+            using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+            command.Parameters.AddWithValue(CollectionIdGenerator.Next() + 1_000_000L);
+            command.Parameters.AddWithValue(start);
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(serverName);
+            command.Parameters.AddWithValue(climbFrom);
+            command.Parameters.AddWithValue(minutes);
+            command.Parameters.AddWithValue(tpsClimbs ? 3600 : 600);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        /* ≈10 tps for 31 days (600 commits a minute, ±60 sin ripple); the climb is 60 tps on the surge server and the
+           same 600 on the queued one. */
+        await Plant(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, 'appdb',
+       SUM(CASE WHEN n >= $5 THEN $7 ELSE 600 + round(60 * sin(n)) END) OVER (ORDER BY n), 0, 100, 9000, 0, 0, 0, NULL
+FROM generate_series(0, $6) AS n");
+
+        /* 20–22 sessions for 31 days, one stored row a minute, none redacted; the climb is 90 — 40 active, 30 idle in
+           transaction (a third: lane 3's parked-share arm fires exactly as in the busy server's e2e), 20 other. The
+           row's own transaction is 45 s, under the idle-in-transaction floor, so no idle fact competes. */
+        await Plant(@"
+INSERT INTO pg_session_states
+    (collection_id, collection_time, server_id, server_name, backend_id, pid, database_name, username, application_name,
+     backend_type, state, command_tag, state_duration_ms, xact_duration_ms, backend_duration_ms, xmin_age, xid_age, horizon_age,
+     is_idle_in_transaction, is_horizon_holder, state_is_redacted,
+     total_sessions, active_sessions, idle_in_transaction_sessions, reportable_sessions)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, 1000, 5000, 'appdb', 'app', 'pool-worker',
+       'client backend', 'idle in transaction', 'UPDATE', 45000, 45000, 600000, -1, -1, -1,
+       TRUE, FALSE, FALSE,
+       CASE WHEN n >= $5 THEN 90 ELSE 20 + (n % 3) END,
+       CASE WHEN n >= $5 THEN 40 ELSE 4 END,
+       CASE WHEN n >= $5 THEN 30 ELSE 1 END, 1
+FROM generate_series(0, $6) AS n");
+    }
+
+    /// <summary>
+    /// Lane 18's exit criterion, live: two stock-stamped servers with 31 days of one-minute <c>pg_session_states</c>
+    /// (20–22 sessions) and <c>pg_database_stats</c> (≈10 tps, a ±1 ripple), each climbing to 90 sessions of a 97
+    /// ceiling for the last 250 minutes so the four-hour window sits wholly inside the climb. On the QUEUED server
+    /// throughput stays at its norm through the climb: <c>ANOMALY_PG_SESSION_SPIKE</c> fires, <c>ANOMALY_PG_TPS</c> does
+    /// not, and the saturation card reads 1.0 × (1 + 0.25 + 0.3) = <b>1.55</b> with the offered-vs-delivered sentence.
+    /// On the SURGE server throughput climbs with it (60 tps): both anomalies fire, the arm stays quiet, and the
+    /// card is lane 3's 1.25 without the sentence.
+    /// </summary>
+    [Fact]
+    public async Task APoolThatClimbedWhileThroughputHeld_IsAmplifiedToOnePointFiveFiveAndSaysArrivalsAreQueueing_AndOneThatClimbedWithThroughputIsNot()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the offered-vs-delivered e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, QueuedServerId, QueuedServerName, "postgres", 18, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, SurgeServerId, SurgeServerName, "postgres", 18, ct);
+
+            /* 31 days of one-minute samples ending a minute ago; the last 250 minutes are the climb, so the four-hour
+               window anchored at the end sits wholly inside it (lane 9's e2e shape). */
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+            const int minutes = 31 * 24 * 60;
+            var start = windowEnd.AddMinutes(-minutes);
+            const int climbFrom = minutes - 250;
+
+            await PlantThirtyOneDaysAsync(connection, QueuedServerId, QueuedServerName, start, minutes, climbFrom, tpsClimbs: false, ct);
+            await PlantThirtyOneDaysAsync(connection, SurgeServerId, SurgeServerName, start, minutes, climbFrom, tpsClimbs: true, ct);
+            await PlantConfigSnapshotAsync(connection, QueuedServerId, QueuedServerName, windowEnd.AddMinutes(-30), ct);
+            await PlantConfigSnapshotAsync(connection, SurgeServerId, SurgeServerName, windowEnd.AddMinutes(-30), ct);
+
+            /* ── The detector alone: the queued server has ONE anomaly (sessions), the surge server two. */
+            var baselines = new PgTargetBaselineProvider(postgres);
+            var detector = new PgTargetAnomalyDetector(postgres, baselines);
+            AnalysisContext Context(int serverId, string serverName) => new()
+            {
+                ServerId = serverId, ServerName = serverName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+            };
+            var queuedAnomalies = await detector.DetectAnomaliesAsync(Context(QueuedServerId, QueuedServerName));
+            Assert.Equal(new[] { PgTargetFactKeys.AnomalySessionSpike }, queuedAnomalies.Select(a => a.Key).Order(StringComparer.Ordinal));
+            Assert.Equal(90.0, queuedAnomalies[0].Value, precision: 6);
+            var surgeAnomalies = await detector.DetectAnomaliesAsync(Context(SurgeServerId, SurgeServerName));
+            Assert.Equal(
+                new[] { PgTargetFactKeys.AnomalySessionSpike, PgTargetFactKeys.AnomalyTps }.Order(StringComparer.Ordinal),
+                surgeAnomalies.Select(a => a.Key).Order(StringComparer.Ordinal));
+
+            /* ── THE EXIT CRITERION, through the real analyze_server anchored at the planted window's end. */
+            var service = new DarlingAnalysisService(postgres);
+            var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+            var queued = await DarlingMcpTools.AnalyzeServer(service, postgres, QueuedServerName, 4, as_of: asOf);
+            using (var doc = JsonDocument.Parse(queued))
+            {
+                var root = doc.RootElement;
+                Assert.Equal("findings", root.GetProperty("status").GetString());
+                var findings = root.GetProperty("findings").EnumerateArray().ToList();
+                var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                Assert.Equal(1.55, card.GetProperty("severity").GetDouble(), precision: 9);
+                Assert.Equal(90 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                var investigation = card.GetProperty("advice").GetProperty("investigation").GetString()!;
+                Assert.Contains("Connections rose to ", investigation, StringComparison.Ordinal);
+                Assert.Contains("this hour of the week's norm while throughput stayed at its norm — arrivals are queueing, not working", investigation, StringComparison.Ordinal);
+                Assert.Contains("PARKED connections", investigation, StringComparison.Ordinal);
+            }
+
+            var queuedFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, QueuedServerName, 4, PgTargetSources.SessionsSource, as_of: asOf);
+            using (var doc = JsonDocument.Parse(queuedFacts))
+            {
+                var fact = Assert.Single(doc.RootElement.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                var metadata = fact.GetProperty("metadata");
+                Assert.Equal(1, metadata.GetProperty(PgTargetScorer.OfferedVsDeliveredKey).GetDouble());
+                /* 90 over a median of 20–22. */
+                Assert.InRange(metadata.GetProperty(PgTargetScorer.SessionSpikeRatioKey).GetDouble(), 90 / 22.0, 90 / 20.0);
+                Assert.Equal(0, metadata.GetProperty(PgTargetScorer.TpsAnomalyRatioKey).GetDouble());
+                Assert.Equal(1, metadata.GetProperty("threshold_lineage").GetDouble());
+            }
+
+            var surge = await DarlingMcpTools.AnalyzeServer(service, postgres, SurgeServerName, 4, as_of: asOf);
+            using (var doc = JsonDocument.Parse(surge))
+            {
+                var root = doc.RootElement;
+                Assert.Equal("findings", root.GetProperty("status").GetString());
+                var findings = root.GetProperty("findings").EnumerateArray().ToList();
+                var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                Assert.Equal(1.25, card.GetProperty("severity").GetDouble(), precision: 9);
+                Assert.DoesNotContain("arrivals are queueing", card.GetProperty("advice").GetProperty("investigation").GetString()!, StringComparison.Ordinal);
+            }
+
+            var surgeFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, SurgeServerName, 4, PgTargetSources.SessionsSource, as_of: asOf);
+            using (var doc = JsonDocument.Parse(surgeFacts))
+            {
+                var fact = Assert.Single(doc.RootElement.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                var metadata = fact.GetProperty("metadata");
+                Assert.Equal(0, metadata.GetProperty(PgTargetScorer.OfferedVsDeliveredKey).GetDouble());
+                Assert.InRange(metadata.GetProperty(PgTargetScorer.SessionSpikeRatioKey).GetDouble(), 90 / 22.0, 90 / 20.0);
+                /* 60 tps over a median of ≈10 (600 ± 60 commits a minute). */
+                Assert.InRange(metadata.GetProperty(PgTargetScorer.TpsAnomalyRatioKey).GetDouble(), 5.0, 7.0);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
     }
 }

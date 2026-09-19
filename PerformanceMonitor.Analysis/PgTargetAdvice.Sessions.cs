@@ -35,6 +35,14 @@ namespace PerformanceMonitor.Analysis;
 /// the reader: the breakdown says which one the evidence points at — parked idle-in-transaction sessions are an
 /// application scoping fault a bigger pool would only defer. No DDL is written here (D8).</para>
 ///
+/// <para><b>Offered vs delivered</b> (v2 — #3691 lane 18, design §3.6 / D7): when the scorer's amplifier stamped
+/// <see cref="PgTargetScorer.OfferedVsDeliveredKey"/> — the session-count anomaly fired against this server's own
+/// hour-of-week baseline while the transaction-rate anomaly did not — the composed block adds ONE sentence stating
+/// the multiple it read (<see cref="PgTargetScorer.SessionSpikeRatioKey"/>): connections rose to N× this hour's
+/// norm while throughput stayed at its norm, so arrivals are queueing, not working. Absent the stamp the block is
+/// byte-identical to lane 3's; the sentence never reads a raw in-window TPS trend (retired on the 2026-09-19
+/// calibration's evidence, <c>PgTargetScorer.OfferedVsDeliveredBoost</c>).</para>
+///
 /// <para><b><c>PG_IDLE_IN_TRANSACTION</c></b> (v2 — #3691 lane 14, design §3.10) names the longest holder — the
 /// application, the role, the database (<see cref="Fact.ObjectName"/> / <see cref="Fact.DatabaseName"/>, the two
 /// string seams), how long, in how many captures, how many were parked at once at the peak — and says what the
@@ -162,6 +170,9 @@ public static partial class PgTargetAdvice
         var pendingRestart = fact.Metadata.GetValueOrDefault("max_connections_pending_restart") > 0;
         var hasPeakAge = fact.Metadata.TryGetValue("peak_age_s", out var peakAgeSeconds);
         var idleShare = fact.Metadata.GetValueOrDefault("peak_idle_in_transaction_share");
+        var offeredVsDelivered = fact.Metadata.GetValueOrDefault(PgTargetScorer.OfferedVsDeliveredKey) > 0;
+        var sessionSpikeRatio = fact.Metadata.GetValueOrDefault(PgTargetScorer.SessionSpikeRatioKey);
+        var tpsAnomalyRatio = fact.Metadata.GetValueOrDefault(PgTargetScorer.TpsAnomalyRatioKey);
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
@@ -172,6 +183,12 @@ public static partial class PgTargetAdvice
         if (idleShare >= PgTargetScorer.IdleInTransactionShareBar)
             inv.Append(CultureInfo.InvariantCulture,
                 $" Idle-in-transaction sessions were {idleShare * 100:0}% of the peak — the pool is being filled by PARKED connections, not work.");
+        /* Offered vs delivered (#3691 lane 18): the scorer's amplifier stamped the verdict off the two hour-of-week
+           anomalies; the sentence states the session multiple it read and, when the ratio was computable, that
+           throughput was NOT anomalous — never a raw in-window TPS trend (retired on the calibration's evidence). */
+        if (offeredVsDelivered)
+            inv.Append(CultureInfo.InvariantCulture,
+                $" Connections rose to {(sessionSpikeRatio > 0 ? $"{sessionSpikeRatio:0.0}×" : "a level above")} this hour of the week's norm while throughput stayed at its norm{(tpsAnomalyRatio > 0 ? $" ({tpsAnomalyRatio:0.0}× its own)" : string.Empty)} — arrivals are queueing, not working: the server is accepting more connections than usual and completing no more transactions than usual, which is the shape of a pool at its cliff rather than a busier application.");
         inv.Append(CultureInfo.InvariantCulture,
             $" The peak was seen over {captures:0} {(captures == 1 ? "capture" : "captures")} that stored session rows (the collector stores a capture only when some session had a transaction open past its floor, so quiet minutes are absent from this series); the newest capture in the window had {latest:0} sessions.");
         if (pendingRestart)
