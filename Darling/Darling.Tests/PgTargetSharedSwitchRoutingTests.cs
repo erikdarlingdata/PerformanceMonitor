@@ -319,9 +319,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
             Assert.Equal(PgTargetAdvice.Static(key), FactAdvice.GetForFactKey(key));
             Assert.Equal(PgTargetAdvice.Static(key), PgTargetAdvice.Compose(key, lookup));
         }
-        /* And the stub families still answer null — one representative each, so a lane that fills its family
-           moves its own line here and says so. */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "relation")));
+        /* And the filled families answer their own block — one representative each, so a lane that fills its
+           family moves its own line here and says so. Lane 5 (the wait profile) moved the wait line: a v1 wait
+           key composes; a wait key outside the v1 vocabulary still answers null. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "relation")));
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "transactionid")));
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(7)));
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
