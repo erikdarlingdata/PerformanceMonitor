@@ -29,6 +29,21 @@ name: Claude review guard
 # It polls rather than using `on: workflow_run` because workflow_run only ever fires from the copy
 # of a workflow that is on the default branch: that variant would be dormant, and untestable, until
 # a release shipped it.
+#
+# #3657's landing produced a third case the never-ran arm had no name for. That arm read "Claude
+# never ran and this PR does not touch claude-review.yml" as one thing -- an unreviewed edit to the
+# file somewhere -- and failed every PR in the repo red for it. But pull requests to main are only
+# allowed from dev (check-pr-branch.yml), so a fix to the review workflow CANNOT land on main and
+# dev together outside a release: it merges to dev through a reviewed PR, and from that moment until
+# the next dev -> main release, cause (1) skips the action on every dev PR. That window is a NORMAL
+# state of this repo's branching model, not an incident, and the arm now names it. When the base
+# branch's copy of the file was put there by a MERGED pull request into that branch -- the newest
+# commit touching the file resolves to one, that PR's diff includes the file, and the branch's blob
+# is that merge's blob -- the verdict is "review pending release": a warning, exit 0, and the PR
+# still needs a human. When no merged PR accounts for the branch's copy -- a direct push, or an
+# unreviewed edit -- the drift is hostile and the arm fails exactly as before. When the guard cannot
+# tell, because a lookup died, it fails CLOSED with its own message: an unexplained drift is the one
+# condition this check exists to make loud, and a 503 must not wave one through.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -68,6 +83,11 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # The branch this PR merges INTO -- dev for the nightly train, main only for a release PR
+          # from dev. The pending-release arm asks whose copy of $WF this branch carries, so it must
+          # read the base, not the head and not the default branch (which is the other side of the
+          # comparison).
+          BASE: ${{ github.base_ref }}
           WF: .github/workflows/claude-review.yml
           # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
           # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
@@ -96,36 +116,62 @@ jobs:
           # the rest, with nothing to show that it did. Identical for the single-argument calls.
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
 
-          # #2309: every one-shot catalog lookup below goes through this, because under `set -e` a
-          # bare $(gh api ...) assignment that fails KILLS the step with one context-free stderr
-          # line -- which is how a transient 404/503 became a deterministic-looking hard red on
-          # three PRs in one afternoon, with no annotation naming the call that died. A lookup
-          # failure is not a review verdict (the same rule the sentinel read at the bottom already
-          # encodes): name the endpoint, mark the review UNCONFIRMED, exit 0. The helper assigns to
-          # LOOKUP_OUT instead of being command-substituted because an exit inside $() only leaves
-          # the subshell -- the one shape that CANNOT work here.
-          LOOKUP_OUT=''
-          lookup() {
-            local what=$1; shift
+          # #2309: every one-shot catalog lookup below goes through one of the two wrappers here,
+          # because under `set -e` a bare $(gh api ...) assignment that fails KILLS the step with one
+          # context-free stderr line -- which is how a transient 404/503 became a
+          # deterministic-looking hard red on three PRs in one afternoon, with no annotation naming
+          # the call that died. The helpers assign to LOOKUP_OUT instead of being command-substituted
+          # because an exit inside $() only leaves the subshell -- the one shape that CANNOT work
+          # here.
+          #
+          # One capture, two wrappers, differing ONLY in what a failed call becomes. lookup() is the
+          # #2309 shape: a lookup failure is not a review verdict (the same rule the sentinel read at
+          # the bottom already encodes), so it names the endpoint, marks the review UNCONFIRMED, and
+          # exits 0. lookup_closed() serves the drift-origin read in the never-ran arm, where the
+          # question is no longer "did the review post" but "is this drift a merged change awaiting
+          # release, or an unreviewed edit" -- and there a lookup that dies must NOT pass, because
+          # passing IS the false verdict: a hostile drift waved through on a 503. It names the
+          # endpoint the same way and exits 1.
+          LOOKUP_OUT=''; LOOKUP_ERR=''
+          gh_capture() {
             # stderr goes to its OWN capture, never into LOOKUP_OUT: a SUCCESSFUL gh call that
             # prints a warning (deprecation notice, scope hint) must not pollute a value the call
             # sites compare ("$step" != "success") or feed to arithmetic -- that would be this
             # exact defect class reintroduced through the fix (review catch on #2309's own PR).
-            local errfile err
+            local errfile
             # The plumbing itself must not be able to kill the step either (review catch on the
             # #2309 fix): a failed mktemp degrades to /dev/null (stderr is then lost but the
             # verdict path survives), and the cat/rm are failure-tolerant for the same reason.
             errfile=$(mktemp 2>/dev/null || echo /dev/null)
             if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
-              err=$(cat "$errfile" 2>/dev/null || true)
+              LOOKUP_ERR=$(cat "$errfile" 2>/dev/null || true)
               [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
-              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${err:-$LOOKUP_OUT}."\
+              return 1
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          }
+          lookup() {
+            local what=$1; shift
+            if ! gh_capture "$@"; then
+              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${LOOKUP_ERR:-$LOOKUP_OUT}."\
                 "A lookup failure must not become a review verdict (#2309), so the review is"\
                 "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
               summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
               exit 0
             fi
-            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          }
+          lookup_closed() {
+            local what=$1; shift
+            if ! gh_capture "$@"; then
+              echo "::error title=Drift origin unknown::gh api (${what}) failed: ${LOOKUP_ERR:-$LOOKUP_OUT}."\
+                "Claude never ran on this PR, and this guard could not determine whether $WF's drift"\
+                "from $DEFAULT_BRANCH is a merged $BASE change awaiting release or an unreviewed edit."\
+                "An unexplained drift is the one condition this check exists to make loud, so it"\
+                "fails CLOSED rather than guess. Re-run this guard; if the failure repeats, read"\
+                "$WF's history on $BASE by hand."
+              summary "- Drift origin UNKNOWN: lookup failed at ${what}. Failing closed."
+              exit 1
+            fi
           }
 
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
@@ -215,6 +261,88 @@ jobs:
                 "is NOT Claude-reviewed and cannot be until it merges -- a human must review it."
               summary "- Expected: this PR edits \`$WF\`, so a human must review it."
               exit 0
+            fi
+
+            # THE PENDING-RELEASE ARM. Nothing in this PR explains the skip, so the copy of $WF that
+            # the action validated -- the merge of this PR into $BASE, which carries $BASE's copy --
+            # differs from the default branch's. That is one observation with two causes, and the
+            # week of #3657 showed they need different colors. PRs to main come only from dev
+            # (check-pr-branch.yml), so a REVIEWED fix to $WF necessarily merges to $BASE first and
+            # sits there, differing from $DEFAULT_BRANCH, until the next release ships it: a normal
+            # state of the branching model, during which every PR into $BASE is skipped and this
+            # arm went red on all of them for a drift a merged PR had already been read for. The
+            # other cause is the one the arm was built for: someone put a copy of $WF on $BASE that
+            # no pull request carried -- a direct push -- and NOTHING has read it.
+            #
+            # The discriminator is provenance, not content. Take the newest commit on $BASE that
+            # touched $WF (the commits list with a path filter is exact, whatever the branch's
+            # age -- a most-recently-updated PR list would have to be paged back through every PR
+            # that gained a comment since, and on a repo merging a train a night the fix falls out
+            # of any fixed window in a day), ask which pull request introduced that commit, and hold
+            # the answer to three facts: it MERGED into $BASE, its diff includes $WF, and $BASE's
+            # blob of $WF is the blob at its merge commit -- so the branch carries exactly what that
+            # merge produced and nothing after it. Blob shas compare content (git's are
+            # content-addressed), so no decode is needed. All three hold: pending release, a
+            # warning, exit 0 -- still NOT reviewed, still a human's job, the same as the arm above.
+            # Any fails, or no PR claims the commit: the hostile error below, unchanged. Every read
+            # goes through lookup_closed(): a lookup that dies here fails the check with its own
+            # message, because an unresolved drift must not pass on a 503.
+            lookup_closed "$DEFAULT_BRANCH blob of $WF" \
+              "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.sha // empty'
+            default_blob=$LOOKUP_OUT
+            lookup_closed "$BASE blob of $WF" "repos/$R/contents/$WF?ref=$BASE" --jq '.sha // empty'
+            base_blob=$LOOKUP_OUT
+            if [ -n "$default_blob" ] && [ -n "$base_blob" ] && [ "$default_blob" != "$base_blob" ]; then
+              lookup_closed "newest $BASE commit touching $WF" \
+                "repos/$R/commits?sha=$BASE&path=$WF&per_page=1" --jq '.[0].sha // empty'
+              drift_commit=$LOOKUP_OUT
+              if [ -z "$drift_commit" ]; then
+                # The branch carries a copy of the file and its history has no commit touching it:
+                # not a state git can produce, so the read is wrong, not the branch.
+                echo "::error title=Drift origin unknown::$BASE carries a copy of $WF that differs"\
+                  "from $DEFAULT_BRANCH, but the commit list for that path on $BASE came back empty,"\
+                  "so this guard cannot say what put it there. Failing closed; re-run this guard."
+                summary "- Drift origin UNKNOWN: no commit on \`$BASE\` touches \`$WF\`. Failing closed."
+                exit 1
+              fi
+              # "The merged pull request that introduced the commit" -- for a commit not yet on the
+              # default branch the endpoint returns merged AND open PRs associated with it, which is
+              # why the base and merged_at filters are here and not assumed: once a release PR from
+              # $BASE is open, this commit is associated with it too. Newest-first is the endpoint's
+              # order; one PR is expected, and one is all the verdict needs.
+              lookup_closed "pull requests introducing ${drift_commit:0:12}" \
+                "repos/$R/commits/$drift_commit/pulls" \
+                --jq '.[] | select(.merged_at != null and .base.ref == env.BASE)
+                      | "\(.number)\t\(.merge_commit_sha)\t\(.title)"'
+              origin=$(printf '%s\n' "$LOOKUP_OUT" | head -n 1)
+              if [ -n "$origin" ]; then
+                IFS=$'\t' read -r origin_pr origin_merge origin_title <<<"$origin"
+                lookup_closed "PR #$origin_pr changed files" "repos/$R/pulls/$origin_pr/files" \
+                  --paginate --jq '.[].filename'
+                origin_touched=$(printf '%s' "$LOOKUP_OUT" | { grep -Fx "$WF" || true; })
+                lookup_closed "$WF blob at PR #$origin_pr merge ${origin_merge:0:12}" \
+                  "repos/$R/contents/$WF?ref=$origin_merge" --jq '.sha // empty'
+                if [ -n "$origin_touched" ] && [ "$LOOKUP_OUT" = "$base_blob" ]; then
+                  echo "::warning title=Review pending release::Claude cannot run on any PR into"\
+                    "$BASE because $WF changed on $BASE in merged PR #$origin_pr ($origin_title)"\
+                    "and $DEFAULT_BRANCH has not synced yet. Reviews resume at the next $BASE ->"\
+                    "$DEFAULT_BRANCH release. This PR is NOT Claude-reviewed -- a human must review"\
+                    "it."
+                  summary "- Pending release: \`$WF\` on \`$BASE\` is what merged PR #$origin_pr"\
+                    "produced, and \`$DEFAULT_BRANCH\` has not synced. Reviews resume at the next"\
+                    "release; a human must review this PR."
+                  exit 0
+                fi
+                summary "- \`$WF\` on \`$BASE\` was last touched by \`${drift_commit:0:12}\` (PR"\
+                  "#$origin_pr), but that PR's diff and merge blob do not account for the branch's"\
+                  "current copy."
+              else
+                summary "- \`$WF\` on \`$BASE\` was last touched by \`${drift_commit:0:12}\`, which"\
+                  "no merged pull request into \`$BASE\` introduced."
+              fi
+            else
+              summary "- \`$WF\` on \`$BASE\` already matches \`$DEFAULT_BRANCH\`; nothing visible"\
+                "from here explains the skip."
             fi
             # Nothing in this PR explains the skip, so $WF on this branch has drifted from the
             # default branch -- which silently disables review for EVERY PR, not just this one.
