@@ -124,13 +124,31 @@ public static class BaselineMath
     /// <summary>
     /// Bounded-metric absolute dispersion floor (see BaselineBucket.AbsStdDevFloor). Server-relative
     /// metrics have no universal floor and return 0. Tunable — calibrate on the SQL2025/HammerDB box.
+    ///
+    /// <para>#3691: <see cref="MetricNames.PgCpu"/> takes the SQL Server CPU floor by UNIT PARITY, not by
+    /// reuse-by-value. The metric is <c>pg_cpu_utilization.acu_utilization_percent</c> — percent of the
+    /// configured capacity ceiling on Aurora Serverless (never a raw <c>cpu_percent</c>; the target provider's
+    /// arm says so) — and the floor's unit is percentage points of a 0–100 bounded scale, the same unit
+    /// <see cref="MetricNames.Cpu"/> carries. The 5-point floor exists because a bounded percentage that sat
+    /// still for a month has a variance the arithmetic collapses to nothing, and one ordinary point of
+    /// movement then reads as a 25σ event (the <c>SigmaDisplayCap</c> the PostgreSQL buckets leaned on before
+    /// this arm); the floor says "five points is the least a percentage can move and mean something", and
+    /// that statement is about the scale, not the engine. What the floor is NOT: a fleet measurement of
+    /// PostgreSQL CPU dispersion — none exists yet; it is the same engine-defined argument that set 5.0 for
+    /// SQL Server, applied to the same unit. <see cref="MetricNames.PgWaitMsPerSec"/> stays at 0 with the
+    /// SQL Server wait-profile metric: ms of wait per second of wall clock is server-relative (a store class
+    /// idling at 20 ms/s and one saturating at 2,000 ms/s are both healthy), so no universal floor is
+    /// honest; the detector's magnitude floors and the quality gate carry that arm, as they do for SQL Server.
+    /// The other PostgreSQL names (tps, session count, deadlock rate) are server-relative by the same
+    /// argument and fall through.</para>
     /// </summary>
     public static double AbsStdDevFloorFor(string metricName) => metricName switch
     {
         MetricNames.Cpu => 5.0,        // CPU utilization %
+        MetricNames.PgCpu => 5.0,      // percent of the capacity ceiling — same unit as Cpu, same floor (#3691, see the summary)
         MetricNames.Memory => 4.0,     // memory pressure %
         MetricNames.IoLatency => 2.5,  // I/O latency ms
-        _ => 0.0,                       // batch/query-duration/sessions/waits/blocking/deadlock — server-relative
+        _ => 0.0,                       // batch/query-duration/sessions/waits/blocking/deadlock — server-relative (PG tps/sessions/deadlock/wait too)
     };
 
     /// <summary>
