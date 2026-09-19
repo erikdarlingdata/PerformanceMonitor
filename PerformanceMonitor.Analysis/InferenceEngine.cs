@@ -69,6 +69,15 @@ public class InferenceEngine
         // scores it at >= 0.5 (MEDIUM+) behind a size guard, so this is belt-and-suspenders with the 0.5
         // incident threshold, and keeps the standing-state key in the same rooting set as the others.
         "PLAN_CACHE_BLOAT",
+        // #3653 A10 (Q2): a server configuration change observed inside the pass window, with the ±4 h
+        // before/after compare frozen on the fact. Rooted at ConfigChangeAttribution.InformationSeverity
+        // (0.25) — INFO by the readers' band table, below every standing-misconfiguration advisory — so
+        // it can NEVER reach the 0.5 incident threshold and must be listed here to become a story at all.
+        // Explicitly, not by a prefix rule: the fact is built after ScoreAll (the scorer would zero an
+        // unknown "config" key) with its severity preset, and this line is the one that says "and it
+        // roots". It has no graph edges, so it is always a one-node story and its own incident; the
+        // finding attributes, it does not accuse, and nothing folds onto it.
+        ConfigChangeAttribution.FactKey,
     };
 
     private readonly RelationshipGraph _graph;

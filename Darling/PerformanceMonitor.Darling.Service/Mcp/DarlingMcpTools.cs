@@ -1206,6 +1206,18 @@ internal static class ToolRecommendations
             new("get_running_jobs", "See currently running jobs with duration vs historical"),
             new("get_cpu_utilization", "Check if long-running jobs are consuming CPU")
         ],
+        /* #3653 A10 (Q2): the CONFIG_CHANGED attribution card. The frozen finding text already states the
+           setting, old → new and the banded compare; these are the reads that firm it up — the history tool
+           for the change row itself (the snapshot diff, with the previous capture's time), the compare tool
+           to rerun the before/after over a wider pair of windows or the same hour yesterday (one window
+           against one window is not a causal test, and a second pair is the cheapest check), and the config
+           audit for whether the NEW value is a good one regardless of what moved. */
+        [ConfigChangeAttribution.FactKey] =
+        [
+            new("get_server_config_changes", "See the change itself: setting, old and new configured/in-use values, and the snapshot it was first observed on"),
+            new("compare_analysis", "Rerun the before/after compare over a different pair of windows (wider, or the same hour yesterday) before reading the move as the change's doing"),
+            new("audit_config", "Grade the new value against guidance — a change can be an improvement and still move a metric")
+        ],
         ["ANOMALY_CPU"] =
         [
             new("get_cpu_utilization", "See CPU trend to identify when the spike occurred"),

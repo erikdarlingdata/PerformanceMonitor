@@ -206,6 +206,10 @@ public static class FactAdvice
             "DISK_SPACE" => ComposeDiskSpace(factsByKey),
             "CONFIG_IFI_DISABLED" or "CONFIG_LPIM_DISABLED" or "SERVER_MEMORY_DUMPS"
                 => ComposeServerHealth(rootFactKey, factsByKey),
+            // #3653 A10 (Q2): a server configuration change observed inside the window, with the ±4 h
+            // before/after compare frozen on the fact — states the setting, old → new, when it was first
+            // observed, and which metrics moved beyond their band (or that none did).
+            ConfigChangeAttribution.FactKey => ComposeConfigChanged(factsByKey),
             // Anomaly facts: state the observed value, how many σ above the hour-of-week baseline, and
             // the baseline itself — "X is Nσ above its M baseline for this time of week".
             "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees."),
@@ -539,6 +543,154 @@ public static class FactAdvice
         return clause.Length == 0
             ? fallback
             : fallback with { Remediation = clause + fallback.Remediation };
+    }
+
+    /// <summary>
+    /// CONFIG_CHANGED composed (#3653 A10, Q2): the setting(s), old → new, when the change was FIRST
+    /// OBSERVED, how much of the ±4 h compare exists yet, and the metrics that moved beyond their band —
+    /// or the sentence that none did, which is the finding's other value. Every number is read off the
+    /// fact <see cref="ConfigChangeAttribution"/> built; the setting names ride in ObjectName and the
+    /// values in the doubles-only metadata under the keys that class spells.
+    ///
+    /// <para><b>The words are chosen against three lies.</b> (1) "changed at" — the config snapshot runs on
+    /// connect, so the time on the fact is when the new value was first SEEN; the prose says "first
+    /// observed" and states the span since the previous snapshot, and when that span exceeds the
+    /// before-window it says the before half may already hold the new value. (2) A full four hours after
+    /// — when the change is younger than that, the after half is a partial and the prose says how much of
+    /// it exists and that later passes complete it. (3) Cause — a before/after is not a causal test; the
+    /// remediation says so in the compare tool's own terms and offers the reads that would firm it up.
+    /// A non-dynamic setting whose configured value moved while in-use did not gets its own sentence:
+    /// the engine is still running the old value, so nothing should have moved yet.</para>
+    ///
+    /// <para>Falls back to the static block when the fact is absent (a finding persisted before the
+    /// composer existed, or a story whose root the lookup cannot find).</para>
+    /// </summary>
+    private static AdviceBlock ComposeConfigChanged(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey[ConfigChangeAttribution.FactKey];
+        if (!facts.TryGetValue(ConfigChangeAttribution.FactKey, out var fact))
+            return fallback;
+
+        var settings = ConfigChangeAttribution.SettingNames(fact);
+        if (settings.Count == 0)
+            return fallback;
+
+        // ── the change itself: `name` old → new, per setting ──
+        var described = new List<string>(settings.Count);
+        var pendingRestart = new List<string>();
+        foreach (var name in settings)
+        {
+            var oldInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldInUseKey(name), out var oi) ? oi : (double?)null;
+            var newInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewInUseKey(name), out var ni) ? ni : (double?)null;
+            var oldCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldConfiguredKey(name), out var oc) ? oc : (double?)null;
+            var newCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewConfiguredKey(name), out var nc) ? nc : (double?)null;
+            var restart = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.RequiresRestartKey(name)) > 0;
+
+            if (oldInUse is not null && newInUse is not null && oldInUse != newInUse)
+                described.Add($"`{name}` {Num(oldInUse.Value)} → {Num(newInUse.Value)}");
+            else if (oldCfg is not null && newCfg is not null && oldCfg != newCfg)
+            {
+                described.Add($"`{name}` configured {Num(oldCfg.Value)} → {Num(newCfg.Value)}" + (restart ? " (in use unchanged until restart)" : " (in use unchanged)"));
+                if (restart) pendingRestart.Add(name);
+            }
+            else
+                described.Add($"`{name}` changed");
+        }
+        var changeList = string.Join(", ", described);
+
+        // ── when, and how honest "when" is ──
+        var changeUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaChangeTimeUnix);
+        var observedAt = changeUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)changeUnix).UtcDateTime : (DateTime?)null;
+        var gapHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservationGapHours);
+        var beforeHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBeforeHours);
+        if (beforeHours <= 0) beforeHours = ConfigChangeAttribution.CompareWindowHours;
+
+        var inv = new StringBuilder();
+        inv.Append(changeList);
+        inv.Append(observedAt is null
+            ? " — first observed by the configuration snapshot this window."
+            : $" — first observed by the configuration snapshot at {observedAt.Value:yyyy-MM-dd HH:mm} UTC.");
+        if (gapHours > 0)
+        {
+            inv.Append($" The snapshot runs on connect, so the change itself landed somewhere in the {gapHours:0.#} h since the previous snapshot; this finding's time is when it was seen, not when it was made.");
+            if (gapHours > beforeHours)
+                inv.Append($" That span is longer than the {beforeHours:0} h before-window, so the \"before\" half may already reflect the new value and a null result here does not mean the change had no effect.");
+        }
+
+        // ── the compare ──
+        var unavailable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaCompareUnavailable) > 0;
+        var afterHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAfterHoursObserved);
+        var afterClamped = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAfterWindowClamped) > 0;
+        var earlier = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaEarlierEventsInWindow);
+        var moved = ConfigChangeAttribution.MovedKeys(fact);
+        var stable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaStable);
+        var omitted = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaMovedKeysOmitted);
+
+        string verdict;
+        if (unavailable)
+        {
+            verdict = "The before/after compare could not run this pass (the store read failed on both sides), so this card records the change and nothing about its effect; the next pass retries while the change stays inside the window.";
+        }
+        else
+        {
+            var afterClause = afterClamped
+                ? $"the {afterHours:0.#} h after it that exist so far — the after half is still filling in, and later passes complete it"
+                : $"the {afterHours:0.#} h after it";
+            inv.Append($" The engine compared the {beforeHours:0} h before the observation with {afterClause}.");
+
+            if (pendingRestart.Count == settings.Count)
+            {
+                verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
+            }
+            else if (moved.Count == 0)
+            {
+                verdict = "No metric in the compare moved beyond its dispersion band — that is the finding: at this window's grain the change had no measurable effect.";
+            }
+            else
+            {
+                var parts = new List<string>(moved.Count);
+                foreach (var key in moved)
+                {
+                    var worse = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.StatusKey(key)) > 0;
+                    var sigma = fact.Metadata.TryGetValue(ConfigChangeAttribution.DeltaSigmaKey(key), out var ds) ? ds : (double?)null;
+                    var rel = fact.Metadata.TryGetValue(ConfigChangeAttribution.RelativeMoveKey(key), out var rm) ? rm : (double?)null;
+                    var magnitude = sigma is not null
+                        ? $"{(sigma.Value >= 0 ? "+" : string.Empty)}{sigma.Value:0.#}σ"
+                        : rel is not null && rel.Value < 1.0
+                            ? $"{(worse ? "+" : "−")}{rel.Value * 100:0}%"
+                            : worse ? "appeared" : "resolved";
+                    parts.Add($"{key} {magnitude} ({(worse ? "worse" : "better")})");
+                }
+                verdict = $"Moved beyond its band after the change: {string.Join("; ", parts)}"
+                          + (omitted > 0 ? $"; and {Plural(omitted, "more key")} (see the fact's metadata)" : string.Empty)
+                          + (stable > 0 ? $". {Plural(stable, "other compared key")} stayed inside band." : ".");
+            }
+        }
+        inv.Append(' ').Append(verdict);
+        if (earlier > 0)
+            inv.Append($" {Plural(earlier, "earlier configuration change")} also sat inside this pass's window and is not compared here — the passes that ran while it was the most recent change carried its own compare.");
+
+        // ── headline ──
+        var subject = settings.Count == 1 ? described[0] : $"{Plural(settings.Count, "server setting")} changed together";
+        var headline = unavailable
+            ? $"Server configuration changed: {subject} — effect not yet compared"
+            : pendingRestart.Count == settings.Count
+                ? $"Server configuration changed: {subject} — takes effect at the next restart"
+                : moved.Count == 0
+                    ? $"Server configuration changed: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                    : $"Server configuration changed: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+
+        // ── remediation ──
+        var rem =
+            "This is an attribution, not an accusation: one window against one window cannot show that a change CAUSED anything " +
+            "(DB time on an unchanged server routinely varies severalfold day to day), and a metric that moved may have moved for " +
+            "reasons of its own. Read it as a pointer. If something moved the wrong way and stays moved on later passes, the " +
+            "setting is the first suspect: `get_server_config_changes` lists the change with its old and new values, " +
+            "`compare_analysis` reruns the compare over any pair of windows (a wider one, or the same hour yesterday), and " +
+            "`audit_config` grades the new value against guidance. If nothing moved, there is nothing to do; the card recurs " +
+            "on each pass while the change sits inside the analysis window and stops on its own.";
+
+        return fallback with { Headline = headline, Investigation = inv.ToString(), Remediation = rem };
     }
 
     /// <summary>A fact's metadata value, or null when the fact or the metadata key is absent.</summary>
@@ -2495,6 +2647,17 @@ public static class FactAdvice
                 "Every row in `sys.dm_server_memory_dumps` is a point where SQL Server detected something abnormal — an access violation, a non-yielding scheduler, a latch time-out, a failed assertion, or a stack corruption — and wrote a dump for diagnosis. The finding's metadata carries the dump count. List them with `SELECT filename, creation_time, size_in_bytes FROM sys.dm_server_memory_dumps ORDER BY creation_time DESC;` and correlate the creation_time against the SQL Server ERRORLOG (`EXEC sys.xp_readerrorlog 0, 1, N'dump';`) — the log entry around each dump names the failure type. A single old dump from a since-patched build is usually historical; recent or repeating dumps are a live reliability signal.",
             Remediation:
                 "Dumps mean investigate, not a setting to flip — so there is nothing to Apply. First, get current on Cumulative Updates: a large share of dump-producing bugs are already fixed in later builds, and 'apply the latest CU and re-evaluate' resolves many cases outright. If dumps continue on a current build, match the ERRORLOG failure type to a known issue or open a case with Microsoft and attach the dump files — they are the artifact support needs. Watch the volume holding the dump directory: repeated large dumps can themselves fill the disk. Do not delete the dump files until you (or support) have read them.");
+
+        // #3653 A10 (Q2): the static fallback for CONFIG_CHANGED — a finding persisted before the composer
+        // existed, or a read that cannot find the fact. The composed block (ComposeConfigChanged) states the
+        // setting, the values, the observation time and the compare; this one only says what the family is.
+        t[ConfigChangeAttribution.FactKey] = new AdviceBlock(
+            Headline:
+                "A server configuration setting changed inside the analysis window",
+            Investigation:
+                "The configuration snapshot (taken on each connect) observed a sys.configurations value that differs from the previous snapshot's, and the engine compared the four hours before that observation with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. The frozen finding text states the setting, old → new, when it was first observed, and which metrics moved beyond their band — or that none did. `get_server_config_changes` lists the change; `compare_analysis` reruns the compare over any pair of windows.",
+            Remediation:
+                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the setting is the first suspect; `audit_config` grades the new value against guidance. If nothing moved, there is nothing to do.");
 
         // ─────────────────────────────────────────────────────────────────
         // Query-plan advisories (WS4) — advise-only: missing indexes, plan warnings.

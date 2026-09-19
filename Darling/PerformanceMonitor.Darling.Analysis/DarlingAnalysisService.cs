@@ -447,6 +447,15 @@ public sealed class DarlingAnalysisService
             // 2. Score facts (base severity + amplifiers)
             _scorer.ScoreAll(facts);
 
+            // 2.5. Config → outcome attribution (#3653 A10, Q2). AFTER scoring, never before: the fact
+            // is appended with its Information severity preset (ConfigChangeAttribution.InformationSeverity),
+            // because FactScorer.ScoreConfigFact returns 0 for a "config" key it does not know and ScoreAll
+            // would zero it out of the working set. SQL Server engine only — the PostgreSQL-target config
+            // family is #3691's. Its own try inside: a failed snapshot read or compare costs the pass this
+            // one card, never the pass.
+            context.CancellationToken.ThrowIfCancellationRequested();
+            await AttributeConfigChangesAsync(engine, context, facts);
+
             // 3. Build stories via graph traversal
             var stories = engine.Engine.BuildStories(facts);
 
@@ -822,6 +831,123 @@ WHERE server_id = $1";
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM pg_database_stats
 WHERE server_id = $1";
+
+    /// <summary>
+    /// The <c>server_config</c> snapshots the config-change attribution diffs (#3653 A10, Q2): every capture
+    /// inside the pass window PLUS the last capture before it — the diff baseline, without which a change
+    /// first seen on the first in-window capture is invisible (the WINDOWING rule every history reader
+    /// follows; see <c>ConfigChangeDiff</c>). Reads the collector table directly like the SQL Server fact
+    /// collector's <c>ServerConfigSql</c> does (the MCP history tool reads the <c>v_server_config</c>
+    /// passthrough; same rows). <c>$1</c> server_id, <c>$2</c> window start, <c>$3</c> window end — naive
+    /// timestamps, the column being <c>timestamp</c> without time zone. Exposed const for the dialect pins.
+    /// The subquery's COALESCE covers a server with no capture before the window: the bound then becomes the
+    /// window start and the in-window captures are read alone, which the diff answers with "no change"
+    /// (it needs two captures) rather than a fabricated one.
+    /// </summary>
+    public const string ServerConfigSnapshotsForAttributionSql = @"
+SELECT capture_time, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
+FROM server_config
+WHERE server_id = $1
+AND   capture_time <= $3
+AND   capture_time >= COALESCE(
+        (SELECT MAX(capture_time) FROM server_config WHERE server_id = $1 AND capture_time < $2),
+        $2)
+ORDER BY configuration_name, capture_time";
+
+    /// <summary>
+    /// Step 2.5 of the pass (#3653 A10, Q2): if a <c>sys.configurations</c> value was first observed changed
+    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before that
+    /// observation and the (clamped) four hours after it, band the result with
+    /// <see cref="ComparisonBanding.Compare"/> exactly as <c>compare_analysis</c> would, and append ONE
+    /// <c>CONFIG_CHANGED</c> fact carrying the verdict. <see cref="ConfigChangeAttribution"/> holds the
+    /// design — why one fact, why Information, why "first observed" and never "changed at"; this method is
+    /// the store read, the engine gate and the wiring.
+    ///
+    /// <para><b>Engine gate by identity, not by token.</b> <c>ReferenceEquals(engine, _sqlServerEngine)</c>
+    /// rather than re-reading <c>engine_kind</c>: the pass already resolved the set once, and an unstamped
+    /// row (NULL kind → SQL Server set) must attribute exactly as a stamped SQL Server row does.</para>
+    ///
+    /// <para><b>Cost.</b> A compare is two full fact collections (the collector's thirty-one reads, twice) plus
+    /// the baseline lookups, inside the pass's 120 s budget. It runs only when a change is in-window — the
+    /// snapshot read alone is the steady-state cost, one small indexed query — and at most once per pass
+    /// (the most recent event). The compare's contexts are not wired to the pass token
+    /// (<see cref="ComparePeriodsAsync"/>'s public shape is <c>compare_analysis</c>'s); each of its commands
+    /// carries the 60 s per-command deadline, and the pass's boundary checks bracket the call.</para>
+    ///
+    /// <para><b>Its own catch.</b> Like every collector read: a store fault here degrades to "no card" with
+    /// one Warning naming why, and shutdown residue propagates to the pass's single classified line (#2299).
+    /// <see cref="ComparePeriodsAsync"/> swallows its own faults and returns empties with null coverage;
+    /// that shape is passed through as <c>compare_unavailable</c> on the fact, so a change is still recorded
+    /// when its compare could not run.</para>
+    /// </summary>
+    private async Task AttributeConfigChangesAsync(AnalysisEngineSet engine, AnalysisContext context, List<Fact> facts)
+    {
+        if (!ReferenceEquals(engine, _sqlServerEngine))
+            return;
+
+        try
+        {
+            var snapshots = new List<ConfigChangeDiff.ServerConfigSnapshot>();
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            {
+                using var cmd = new NpgsqlCommand(ServerConfigSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
+                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
+
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    snapshots.Add(new ConfigChangeDiff.ServerConfigSnapshot(
+                        reader.GetDateTime(0),
+                        reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                        reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? null : reader.GetBoolean(4),
+                        reader.IsDBNull(5) ? null : reader.GetBoolean(5)));
+                }
+            }
+
+            var events = ConfigChangeAttribution.GroupIntoEvents(
+                ConfigChangeDiff.DiffServerConfigChanges(snapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                    .Select(c => (c.ChangeTime, new ConfigChangeAttribution.SettingChange(
+                        c.ConfigurationName, c.OldValueConfigured, c.NewValueConfigured, c.OldValueInUse, c.NewValueInUse, c.RequiresRestart))),
+                snapshots.Select(s => s.CaptureTime));
+            if (events.Count == 0)
+                return;
+
+            var latest = events[0];
+            var windows = ConfigChangeAttribution.WindowsFor(latest.ChangeTime, context.TimeRangeEnd);
+
+            context.CancellationToken.ThrowIfCancellationRequested();
+            var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
+                context.ServerId, context.ServerName,
+                windows.BeforeStart, windows.BeforeEnd,
+                windows.AfterStart, windows.AfterEnd);
+
+            /* Both coverages null is ComparePeriodsAsync's own catch (collection threw); an empty compare
+               over OBSERVED windows is the "nothing moved" answer and is banded like any other. */
+            var compare = beforeCoverage is null && afterCoverage is null
+                ? null
+                : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
+
+            facts.Add(ConfigChangeAttribution.BuildFact(
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage));
+
+            _logger?.LogInformation(
+                "[DarlingAnalysisService] Configuration change attributed for {Server}: {Settings} first observed at {ObservedAt:u}, compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better, {Stable} stable{Unavailable}",
+                context.ServerName, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)), latest.ChangeTime,
+                ConfigChangeAttribution.CompareWindowHours, windows.AfterHoursObserved,
+                compare?.Worse ?? 0, compare?.Better ?? 0, compare?.Stable ?? 0,
+                compare is null ? " (compare unavailable this pass)" : string.Empty);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            _logger?.LogWarning(
+                "[DarlingAnalysisService] Configuration-change attribution failed for {Server}; the pass continues without the CONFIG_CHANGED card: {Message}",
+                context.ServerName, ex.Message);
+        }
+    }
 
     /// <summary>
     /// The registry read behind <see cref="ResolveEngineAsync"/>: the server's engine KIND token, stamped on
