@@ -31,9 +31,10 @@ namespace Darling.Tests;
 /// example, is also read by the buffer family and the WAL baseline, and would plant two failures and a
 /// detector fault). The table is renamed away for the blind pass and renamed back — in the <c>finally</c>,
 /// ahead of the row cleanup — so the store the next live class inherits is whole. The vacuum family's other
-/// two reads (<c>pg_wraparound_stats</c>, <c>pg_xmin_horizon</c>) still run, which is why the entry names the
-/// READ (<c>ReadAutovacuumBacklogAsync</c>) beside the family (<c>vacuum</c>, off the partial file), and why
-/// <c>families_failed</c> is 1 of the collector's 16.</para>
+/// other reads (<c>pg_wraparound_stats</c>, <c>pg_xmin_horizon</c>) still run, which is why each entry names the
+/// READ beside the family (<c>vacuum</c>, off the partial file), and why <c>families_failed</c> is 1 of the
+/// collector's 16 however many vacuum reads the table serves — the backlog read, and since step 22 the
+/// autovacuum-disabled read too; the entries are asserted over the family, never by count.</para>
 ///
 /// <para>Both arms on the same store: the clean pass first, whose envelope carries no <c>collection_caveats</c>
 /// at all (not a null — the field is absent), then the blind one.</para>
@@ -108,14 +109,22 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 Assert.True(status is "empty" or "findings", $"the blind pass must still be a pass, got {status}: {blind}");
                 var envelope = Envelope(doc.RootElement, status!);
 
+                /* ONE family missing, however many of its reads the table serves: the backlog read (v1) and, since
+                   #3691 step 22, the autovacuum-disabled read both fail on the same 42P01, and families_failed
+                   counts DISTINCT families. The entries are asserted as a set over the family, not by count, so a
+                   further read of this table in the vacuum family joins the list without moving this pin. */
                 var caveats = envelope.GetProperty("collection_caveats");
                 Assert.Equal(1, caveats.GetProperty("families_failed").GetInt32());
                 Assert.Equal(16, caveats.GetProperty("families_total").GetInt32());
-                var entry = Assert.Single(caveats.GetProperty("entries").EnumerateArray());
-                Assert.Equal("vacuum", entry.GetProperty("family").GetString());
-                Assert.Equal("ReadAutovacuumBacklogAsync", entry.GetProperty("read").GetString());
-                Assert.Equal("missing_schema", entry.GetProperty("outcome").GetString());
-                Assert.Contains("pg_autovacuum_stats", entry.GetProperty("message").GetString(), StringComparison.Ordinal);
+                var entries = caveats.GetProperty("entries").EnumerateArray().ToList();
+                Assert.NotEmpty(entries);
+                Assert.All(entries, entry =>
+                {
+                    Assert.Equal("vacuum", entry.GetProperty("family").GetString());
+                    Assert.Equal("missing_schema", entry.GetProperty("outcome").GetString());
+                    Assert.Contains("pg_autovacuum_stats", entry.GetProperty("message").GetString(), StringComparison.Ordinal);
+                });
+                Assert.Contains(entries, entry => entry.GetProperty("read").GetString() == "ReadAutovacuumBacklogAsync");
 
                 /* Appended LAST — every property the clean payload had precedes it. */
                 Assert.Equal("collection_caveats", envelope.EnumerateObject().Last().Name);
@@ -132,9 +141,12 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                     Assert.True(envelope.GetProperty("facts_scored").ValueKind == JsonValueKind.Number);
                 }
             }
-            var failure = Assert.Single(service.LastCollectionFailures);
-            Assert.Equal("vacuum", failure.Family);
-            Assert.Equal(PerformanceMonitor.Analysis.CollectionFailureOutcome.MissingSchema, failure.Outcome);
+            Assert.NotEmpty(service.LastCollectionFailures);
+            Assert.All(service.LastCollectionFailures, failure =>
+            {
+                Assert.Equal("vacuum", failure.Family);
+                Assert.Equal(PerformanceMonitor.Analysis.CollectionFailureOutcome.MissingSchema, failure.Outcome);
+            });
 
             /* get_analysis_facts on the same blind store: the block rides on the data result too. */
             var facts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName);
@@ -143,7 +155,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 var root = doc.RootElement;
                 Assert.True(root.TryGetProperty("total_facts", out _), $"the facts read must return data over an observed window: {facts}");
                 Assert.Contains("1 of 16 fact families could not be read (vacuum (missing_schema))", root.GetProperty("caveat").GetString(), StringComparison.Ordinal);
-                Assert.Equal("vacuum", Assert.Single(root.GetProperty("collection_caveats").GetProperty("entries").EnumerateArray()).GetProperty("family").GetString());
+                Assert.All(root.GetProperty("collection_caveats").GetProperty("entries").EnumerateArray(), entry => Assert.Equal("vacuum", entry.GetProperty("family").GetString()));
                 Assert.Equal("collection_caveats", root.EnumerateObject().Last().Name);
             }
 
