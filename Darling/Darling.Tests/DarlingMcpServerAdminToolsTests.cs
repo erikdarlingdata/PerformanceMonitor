@@ -444,9 +444,44 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Contains("ONLY when exactly one", description, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved the same way the read tools resolve", description, StringComparison.Ordinal);
 
+        /* #3653 A15/A16: the description says WHICH table the name is resolved against (the definitions the DELETE
+           targets, so a never-connected server is removable), and names the two disclosures the payload gained. */
+        Assert.Contains("config_monitored_servers", description, StringComparison.Ordinal);
+        Assert.Contains("never connected", description, StringComparison.Ordinal);
+        Assert.Contains("ever_connected", description, StringComparison.Ordinal);
+        Assert.Contains("matched_in", description, StringComparison.Ordinal);
+
         var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `remove_server` |", StringComparison.Ordinal));
         Assert.Contains("status:\"ambiguous\"", row, StringComparison.Ordinal);
         Assert.Contains("deletes NOTHING", row, StringComparison.Ordinal);
+        Assert.Contains("never connected", row, StringComparison.Ordinal);
+        Assert.Contains("ever_connected", row, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 A15/A16: the definitions read behind <c>remove_server</c> is over the table the DELETE targets, carries
+    /// the full #2218 identity (engine + port, so a PostgreSQL definition on a host that also has a SQL Server one
+    /// rebuilds to its own storage name), asks the registry only whether a row EXISTS, and keeps the store dialect
+    /// every other admin-tool statement keeps (no bare now(), no N'' literals, no @named parameters).
+    /// </summary>
+    [Fact]
+    public void DefinitionsForRemovalSql_ReadsTheDeleteTargetTable_WithTheFullIdentity_AndAnExistsAgainstTheRegistry()
+    {
+        var sql = DarlingMcpServerAdminTools.DefinitionsForRemovalSql;
+
+        Assert.Contains("FROM config_monitored_servers", sql, StringComparison.Ordinal);
+        foreach (var column in new[] { "server_id", "name", "host", "database", "read_only_intent", "engine", "port" })
+        {
+            Assert.Contains(column, sql, StringComparison.Ordinal);
+        }
+        Assert.Contains("EXISTS (SELECT 1 FROM servers", sql, StringComparison.Ordinal);
+        Assert.Contains("AS ever_connected", sql, StringComparison.Ordinal);
+        /* Every definition, enabled or not: a disabled definition is still one an operator may remove. */
+        Assert.DoesNotContain("is_enabled", sql, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("now(", sql.ToLowerInvariant(), StringComparison.Ordinal);
+        Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -723,46 +758,90 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbAppId}")));
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbDecoyId}")));
 
-            /* remove_server resolves against the servers registry, so register BOTH hosts there (same server_id
-               config_monitored_servers keys on). */
+            /* #3653 A15/A16: remove_server resolves against the DEFINITIONS (config_monitored_servers), so only the
+               SQL host is registered in the connected-servers registry here — the Windows host and the AppDb
+               definition have NEVER connected, which is exactly the population the pre-#3653 tool (resolving
+               against `servers`) answered not_found for. Every assertion below on those two is the fix. */
             await DarlingMcpTestData.RegisterServerAsync(connection, sqlId, sqlHost, ct);
-            await DarlingMcpTestData.RegisterServerAsync(connection, winId, winHost, ct);
 
-            /* #3541 A14: the GUID suffix is a fragment BOTH registered names contain. The read resolver would
-               hand back whichever sorts first; the delete must refuse, name both, and remove neither. */
+            /* #3541 A14: the GUID suffix is a fragment ALL THREE defined names contain — the two that never
+               connected included, since the definitions are what is matched now. The read resolver would hand
+               back whichever sorts first; the delete must refuse, name all three with ever_connected per row,
+               and remove none. */
             using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, suffix)))
             {
                 Assert.Equal("ambiguous", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.Equal("config_monitored_servers", doc.RootElement.GetProperty("matched_in").GetString());
                 var candidates = doc.RootElement.GetProperty("candidates").EnumerateArray()
-                    .Select(c => c.GetProperty("server").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-                Assert.Equal(new[] { sqlHost, winHost }.OrderBy(n => n, StringComparer.Ordinal).ToArray(), candidates);
+                    .ToDictionary(c => c.GetProperty("server").GetString()!, c => c.GetProperty("ever_connected").GetBoolean(), StringComparer.Ordinal);
+                Assert.Equal(
+                    new[] { sqlHost, winHost, dbHost + ":AppDb" }.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+                    candidates.Keys.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+                Assert.True(candidates[sqlHost]);
+                Assert.False(candidates[winHost]);
+                Assert.False(candidates[dbHost + ":AppDb"]);
             }
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sqlId}")));
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbAppId}")));
 
-            /* A partial that only ONE registered name contains is honored, and says so. */
+            /* A partial that only ONE defined name contains is honored, and says so — on a server that never
+               connected (THE #3653 case: the old tool could not see it at all). */
             using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, "add-win-" + suffix)))
             {
                 Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal(winHost, doc.RootElement.GetProperty("server").GetString());
                 Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.Equal("config_monitored_servers", doc.RootElement.GetProperty("matched_in").GetString());
+                Assert.False(doc.RootElement.GetProperty("ever_connected").GetBoolean());
+                Assert.Contains("never connected", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
             }
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
 
-            /* The exact name removes the SQL host — the config row is deleted. */
+            /* The exact STORAGE name (host:database, as list_servers would report it once connected) removes the
+               never-connected AppDb definition — exact beats partial, and the definition's identity is rebuilt
+               through the same BuildStorageName the registry would have used. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, dbHost + ":AppDb")))
+            {
+                Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal(dbHost + ":AppDb", doc.RootElement.GetProperty("server").GetString());
+                Assert.Equal("exact", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.False(doc.RootElement.GetProperty("ever_connected").GetBoolean());
+            }
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbAppId}")));
+
+            /* The exact name removes the SQL host — the config row is deleted; it HAD connected, and the payload
+               says so (its registry row and history stay). */
             using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, sqlHost)))
             {
                 Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal("exact", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.True(doc.RootElement.GetProperty("ever_connected").GetBoolean());
+                Assert.Contains("history are kept", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
             }
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sqlId}")));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM servers WHERE server_id = {sqlId}")));
 
-            /* Remove again: the servers-registry row still resolves, but the config row is gone → not_found. */
-            Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpServerAdminTools.RemoveServer(postgres, sqlHost)));
+            /* Remove again: the servers-registry row still resolves the name, but no definition does → not_found
+               that NAMES the registry as where the match came from (the darling.json-defined shape), and nothing
+               is touched. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, sqlHost)))
+            {
+                Assert.Equal("not_found", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal("servers", doc.RootElement.GetProperty("matched_in").GetString());
+                Assert.Equal("exact", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.Equal(sqlHost, Assert.Single(doc.RootElement.GetProperty("candidates").EnumerateArray()).GetProperty("server").GetString());
+                Assert.Contains("darling.json", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM servers WHERE server_id = {sqlId}")));
 
-            /* A name that does not resolve at all → not_found. */
-            Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpServerAdminTools.RemoveServer(postgres, "no-such-server-" + suffix)));
+            /* A name that does not resolve at all → not_found, with no matched_in (nothing matched anywhere). */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, "no-such-server-" + suffix)))
+            {
+                Assert.Equal("not_found", doc.RootElement.GetProperty("status").GetString());
+                Assert.False(doc.RootElement.TryGetProperty("matched_in", out _));
+            }
 
             bodySucceeded = true;
         }

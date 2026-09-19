@@ -35,6 +35,39 @@ public sealed record MutedStory(
     string? Reason);
 
 /// <summary>
+/// What one <see cref="PgFindingStore.MuteStoryAsync"/> call did to the registry (#3653 A15/A16). Before this
+/// the method answered <c>true</c> for every INSERT that did not throw, so muting the same pattern twice wrote
+/// two rows and both calls reported the same success — the tool above it could not tell a caller "that was
+/// already muted". Three outcomes because the caller acts differently on each: a new row means the pattern
+/// was live until this call; an existing row means nothing changed; a failure means nothing is muted.
+/// The Lite twin (<c>FindingStore.MuteStoryAsync</c>) returns the same type by name and never returns
+/// <see cref="Failed"/>, because its store throws instead of swallowing.
+/// </summary>
+public enum MuteRegistration
+{
+    /// <summary>A new registry row was written: this (scope, hash) was not muted before the call.</summary>
+    Registered,
+
+    /// <summary>
+    /// No row was written because the registry already held this (scope, hash). The mute was in force before
+    /// the call and still is; a caller that wanted to change its reason has nothing to change it on.
+    /// </summary>
+    AlreadyMuted,
+
+    /// <summary>The INSERT failed (logged, as every read-back surface here logs); the registry is as it was.</summary>
+    Failed,
+}
+
+/// <summary>
+/// The result of <see cref="PgFindingStore.MuteStoryAsync"/>: what happened, and — when a row was written —
+/// the <c>story_path</c> it carries, or <c>null</c> when the store could not learn the path and stored the
+/// hash in its place (see the method note for why the column cannot be NULL without a rung). <c>StoryPath</c>
+/// is <c>null</c> for <see cref="MuteRegistration.AlreadyMuted"/> and <see cref="MuteRegistration.Failed"/>
+/// too — nothing was written, so there is nothing to report as written.
+/// </summary>
+public sealed record MuteWriteResult(MuteRegistration Registration, string? StoryPath);
+
+/// <summary>
 /// Persists analysis findings to Darling's Postgres store (the V4 <c>analysis_findings</c> /
 /// <c>analysis_muted</c> tables) and checks for muted story hashes — the write side of the
 /// analysis pipeline, ported with the DASHBOARD twin's method surface and semantics
@@ -179,9 +212,35 @@ SELECT mute_id, server_id, story_path_hash, story_path, muted_date, reason
 FROM analysis_muted
 WHERE server_id = $1 OR server_id IS NULL OR server_id = 0";
 
+    /* #3653 A15/A16: one statement does three things the old VALUES form did not, and the reasons live on
+       MuteStoryAsync. (1) story_path is the caller's when it has one ($4), else the newest retained finding's
+       path for the hash (the hash is a function of the path alone — InferenceEngine.ComputeHash — so any row
+       carrying it names the same path; ORDER BY only makes the choice stable), else the hash itself, because
+       the column is NOT NULL and the hash is the placeholder the viewer's own mute button already writes for an
+       empty path. (2) NOT EXISTS makes the write idempotent per (scope, hash): a scope is one server_id, with
+       NULL and the legacy 0 both meaning "every server" (COALESCE folds them together, the way every reader
+       here treats them). analysis_muted has no unique key over the pair and adding one is a rung, so this is
+       a guarded INSERT, not a constraint; two callers muting the same pattern in the same instant can still
+       both land, which is exactly the duplicate the readers already tolerate (hash-set semantics; the viewer
+       unmutes the smallest mute_id). (3) RETURNING tells the caller whether a row was written at all and
+       what path it carries — zero rows back is "already muted", not a failure. The hash predicate rides
+       idx_analysis_muted_hash; the path subquery rides idx_analysis_findings_hash. */
     public const string MuteStorySql = @"
 INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
-VALUES ($1, $2, $3, $4, $5, $6)";
+SELECT $1, $2, $3,
+       COALESCE(
+           $4,
+           (SELECT f.story_path FROM analysis_findings f
+            WHERE f.story_path_hash = $3
+            ORDER BY f.analysis_time DESC
+            LIMIT 1),
+           $3),
+       $5, $6
+WHERE NOT EXISTS (
+    SELECT 1 FROM analysis_muted m
+    WHERE m.story_path_hash = $3
+      AND COALESCE(m.server_id, 0) = COALESCE($2, 0))
+RETURNING story_path";
 
     public const string UnmuteStorySql = "DELETE FROM analysis_muted WHERE mute_id = $1";
 
@@ -489,20 +548,38 @@ WHERE story_path_hash = $1 AND server_id = $2";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs. Returns <c>true</c> when the registry
-    /// row was written and <c>false</c> when the INSERT failed (logged, as every read-back surface here logs).
+    /// Mutes a story pattern so it won't appear in future analysis runs, and reports what the write did:
+    /// <see cref="MuteRegistration.Registered"/> when a new row landed, <see cref="MuteRegistration.AlreadyMuted"/>
+    /// when the registry already held this (scope, hash) and nothing was written, <see cref="MuteRegistration.Failed"/>
+    /// when the INSERT failed (logged, as every read-back surface here logs).
     ///
-    /// <para>The return value is #3541 A14: this method swallowed its failure and returned <c>Task</c>, so the
-    /// MCP mute verb above it reported <c>status: "muted"</c> whether or not a row exists — a write that
-    /// reported what it intended, not what happened. The swallow stays (the viewer's mute button has no better
-    /// answer than a logged line), but the caller now learns which of the two things occurred.</para>
+    /// <para>The <c>bool</c> this replaces was #3541 A14: the method had swallowed its failure and returned
+    /// <c>Task</c>, so the MCP mute verb reported <c>status: "muted"</c> whether or not a row exists. The three-way
+    /// answer is #3653 A15/A16, which found two more lies the same verb told. First, it wrote the HASH into the
+    /// <c>story_path</c> column, because the MCP entry point knows only the hash: a registry row that claims to
+    /// name a diagnostic chain and names a checksum instead. Second, muting the same hash twice registered two
+    /// rows and reported success twice; the readers were never confused by that (they fold by hash, and the
+    /// viewer unmutes the smallest <c>mute_id</c>), but the caller was, because "registered" was true for a write
+    /// that changed nothing.</para>
+    ///
+    /// <para><paramref name="storyPath"/> is therefore nullable now: pass the path when you hold the finding (the
+    /// viewer does), pass <c>null</c> when you hold only the hash (the MCP does), and <see cref="MuteStorySql"/>
+    /// resolves it from the newest retained finding carrying the hash. When no retained finding carries it —
+    /// the pattern's history has been purged, or the hash is mistyped — the hash goes into the column as a
+    /// placeholder, the same placeholder the viewer's own mute button writes for an empty path, because the
+    /// column is NOT NULL and relaxing it is a rung. The result's <see cref="MuteWriteResult.StoryPath"/> is
+    /// <c>null</c> in that case so the caller can say so instead of echoing the checksum as a path.</para>
+    ///
+    /// <para>Idempotence is a guarded INSERT, not a constraint (see the SQL note): a duplicate can still land
+    /// when two callers mute the same pattern in the same instant, and that duplicate is harmless by the readers'
+    /// contract. Promoting it to a unique index is a rung this change deliberately does not take.</para>
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist.</para>
     /// </summary>
-    public async Task<bool> MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
+    public async Task<MuteWriteResult> MuteStoryAsync(int serverId, string storyPathHash, string? storyPath, string? reason = null)
     {
         try
         {
@@ -513,17 +590,29 @@ WHERE story_path_hash = $1 AND server_id = $2";
             // canonical global marker every reader filters on (legacy 0 rows are still honored).
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId == 0 ? (object)DBNull.Value : serverId });
             command.Parameters.AddWithValue(storyPathHash);
-            command.Parameters.AddWithValue(storyPath);
+            // An empty path is "unknown" too: AnalysisFinding.StoryPath defaults to empty, and the viewer's
+            // pre-#3653 fallback wrote the hash for exactly that case.
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = string.IsNullOrEmpty(storyPath) ? DBNull.Value : storyPath });
             command.Parameters.AddWithValue(NaiveUtcNow());
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)reason ?? DBNull.Value });
 
-            await command.ExecuteNonQueryAsync();
-            return true;
+            /* RETURNING yields one row when the guarded INSERT wrote, none when the registry already held the
+               pair — ExecuteScalar reads that as null. A written path equal to the hash is the NOT NULL
+               placeholder, reported as "no path known" rather than as a path. */
+            var written = await command.ExecuteScalarAsync();
+            if (written is not string storedPath)
+            {
+                return new MuteWriteResult(MuteRegistration.AlreadyMuted, null);
+            }
+
+            return new MuteWriteResult(
+                MuteRegistration.Registered,
+                string.Equals(storedPath, storyPathHash, StringComparison.Ordinal) ? null : storedPath);
         }
         catch (Exception ex)
         {
             _logger?.LogError("[PgFindingStore] MuteStoryAsync failed: {Message}", ex.Message);
-            return false;
+            return new MuteWriteResult(MuteRegistration.Failed, null);
         }
     }
 

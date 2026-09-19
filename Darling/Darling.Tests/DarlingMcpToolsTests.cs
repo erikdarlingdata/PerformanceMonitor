@@ -100,7 +100,9 @@ public sealed class DarlingMcpToolsTests
             .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "mute_analysis_finding");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash", "\"error\"" })
+        /* #3653 A15/A16 added the idempotence vocabulary (already_muted, both as key and status) and the
+           resolved story_path with its placeholder rule. */
+        foreach (var token in new[] { "registered", "matched_now", "\"muted_unmatched\"", "mistyped hash", "\"error\"", "already_muted", "\"already_muted\"", "story_path is", "placeholder" })
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
         }
@@ -108,6 +110,8 @@ public sealed class DarlingMcpToolsTests
         var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `mute_analysis_finding` |", StringComparison.Ordinal));
         Assert.Contains("`matched_now`", row, StringComparison.Ordinal);
         Assert.Contains("`muted_unmatched`", row, StringComparison.Ordinal);
+        Assert.Contains("`already_muted`", row, StringComparison.Ordinal);
+        Assert.Contains("`story_path`", row, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -570,7 +574,36 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(TestServerName, doc.RootElement.GetProperty("server").GetString());
                 Assert.Equal("an4 e2e mute", doc.RootElement.GetProperty("reason").GetString());
                 Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.False(doc.RootElement.GetProperty("already_muted").GetBoolean());
                 Assert.Equal(2, doc.RootElement.GetProperty("matched_now").GetInt64());
+                /* #3653 A15/A16: the registry row names the CHAIN, resolved from the retained finding that
+                   carries the hash — not the hash echoed into the path column, which is what this entry point
+                   wrote before. */
+                Assert.Equal("SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT", doc.RootElement.GetProperty("story_path").GetString());
+            }
+
+            using (var storedPath = new NpgsqlCommand(
+                "SELECT story_path FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
+            {
+                storedPath.Parameters.AddWithValue(TestServerId);
+                storedPath.Parameters.AddWithValue(TestStoryHash);
+                Assert.Equal("SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT", await storedPath.ExecuteScalarAsync(ct));
+            }
+
+            /* ---- #3653 A15/A16, THE idempotence case: the same hash in the same scope a second time. Before,
+                    a second row landed and the envelope said "muted" twice; now nothing is written, the envelope
+                    says so (registered false, already_muted true, status already_muted), matched_now is still
+                    read, and the row count below stays at one. */
+            var secondMuteJson = await DarlingMcpTools.MuteAnalysisFinding(
+                analysisService, postgres, TestStoryHash, TestServerName, "an4 e2e mute, again");
+
+            using (var doc = JsonDocument.Parse(secondMuteJson))
+            {
+                Assert.Equal("already_muted", doc.RootElement.GetProperty("status").GetString());
+                Assert.False(doc.RootElement.GetProperty("registered").GetBoolean());
+                Assert.True(doc.RootElement.GetProperty("already_muted").GetBoolean());
+                Assert.Equal(2, doc.RootElement.GetProperty("matched_now").GetInt64());
+                Assert.Contains("nothing was written", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
             }
 
             /* ---- #3541 A14, THE case: a hash no stored finding carries. Registered (pattern registry — it
@@ -585,14 +618,20 @@ public sealed class DarlingMcpToolsTests
                 Assert.True(doc.RootElement.GetProperty("registered").GetBoolean());
                 Assert.Equal(0, doc.RootElement.GetProperty("matched_now").GetInt64());
                 Assert.Contains("no stored finding", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+                /* #3653 A15/A16: no retained finding carries the hash, so the path is UNKNOWN and said so —
+                   the row below holds the hash as the NOT NULL placeholder, never reported as a path. */
+                Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("story_path").ValueKind);
             }
 
             using (var unmatchedCount = new NpgsqlCommand(
-                "SELECT COUNT(*) FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
+                "SELECT COUNT(*), MIN(story_path) FROM analysis_muted WHERE server_id = $1 AND story_path_hash = $2", connection))
             {
                 unmatchedCount.Parameters.AddWithValue(TestServerId);
                 unmatchedCount.Parameters.AddWithValue("an4-mcp-e2e-never-seen-hash");
-                Assert.Equal(1L, await unmatchedCount.ExecuteScalarAsync(ct));
+                await using var unmatchedReader = await unmatchedCount.ExecuteReaderAsync(ct);
+                Assert.True(await unmatchedReader.ReadAsync(ct));
+                Assert.Equal(1L, unmatchedReader.GetInt64(0));
+                Assert.Equal("an4-mcp-e2e-never-seen-hash", unmatchedReader.GetString(1));
             }
 
             using (var muteCount = new NpgsqlCommand(

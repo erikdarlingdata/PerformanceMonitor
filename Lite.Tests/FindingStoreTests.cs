@@ -732,10 +732,17 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);
         Assert.Contains("A READ lock", Between(source, "public async Task<List<AnalysisFinding>> InsertFindingsAsync(", "public async Task<List<AnalysisFinding>> SaveFindingsAsync("), StringComparison.Ordinal);
-        Assert.Contains("see the class note (#2455)", Between(source, "public async Task MuteStoryAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
+        /* #3653 A15/A16: the mute write is a guarded INSERT ... RETURNING now (ExecuteScalar reads the one
+           row back), so its window ends at that call rather than at ExecuteNonQuery. */
+        Assert.Contains("see the class note (#2455)", Between(source, "public async Task<MuteWriteResult> MuteStoryAsync(", "await cmd.ExecuteScalarAsync();"), StringComparison.Ordinal);
         Assert.Contains("see the class note (#2455)", Between(source, "public async Task CleanupOldFindingsAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
 
-        /* And the reason the shared lock is SUFFICIENT: no read-modify-write is left under it. */
+        /* And the reason the shared lock is SUFFICIENT: no read-modify-write is left under it in C#. The one
+           read-then-write that remains is INSIDE a single statement (#3653 A15/A16: the mute's NOT EXISTS
+           guard), and the method states why a duplicate that slips past it under the shared lock is the
+           pre-#3653 state the readers already tolerate rather than an invariant the lock must defend —
+           pinned here so the guard is never mistaken for a reason to take the write lock. */
+        Assert.Contains("not an invariant the lock has to defend", Between(source, "public async Task<MuteWriteResult> MuteStoryAsync(", "await cmd.ExecuteScalarAsync();"), StringComparison.Ordinal);
         Assert.DoesNotContain("private long _nextId", source, StringComparison.Ordinal);
         Assert.Contains("FindingId = NextId(),", source, StringComparison.Ordinal);
         Assert.Contains("Value = NextId() }", source, StringComparison.Ordinal);

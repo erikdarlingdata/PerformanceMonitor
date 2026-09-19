@@ -13,6 +13,38 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Analysis;
 
 /// <summary>
+/// What one <see cref="FindingStore.MuteStoryAsync"/> call did to the registry (#3653 A15/A16). Before this the
+/// method returned <c>Task</c>, so muting the same pattern twice wrote two rows and both calls looked the same to
+/// the tool above it — it could not tell a caller "that was already muted". Three outcomes because the caller
+/// acts differently on each: a new row means the pattern was live until this call; an existing row means nothing
+/// changed; a failure means nothing is muted. Twin-local by name with Darling's
+/// <c>PerformanceMonitor.Darling.Analysis.MuteRegistration</c>; this store never returns <see cref="Failed"/>
+/// because it throws instead of swallowing, and the member exists so both SKUs' callers switch on one shape.
+/// </summary>
+public enum MuteRegistration
+{
+    /// <summary>A new registry row was written: this (scope, hash) was not muted before the call.</summary>
+    Registered,
+
+    /// <summary>
+    /// No row was written because the registry already held this (scope, hash). The mute was in force before
+    /// the call and still is; a caller that wanted to change its reason has nothing to change it on.
+    /// </summary>
+    AlreadyMuted,
+
+    /// <summary>The INSERT failed; the registry is as it was. Darling's store returns this; Lite's throws.</summary>
+    Failed,
+}
+
+/// <summary>
+/// The result of <see cref="FindingStore.MuteStoryAsync"/>: what happened, and — when a row was written — the
+/// <c>story_path</c> it carries, or <c>null</c> when the store could not learn the path and stored the hash in
+/// its place (see the method note). <c>StoryPath</c> is <c>null</c> for <see cref="MuteRegistration.AlreadyMuted"/>
+/// too — nothing was written, so there is nothing to report as written. Matches the Darling twin.
+/// </summary>
+public sealed record MuteWriteResult(MuteRegistration Registration, string? StoryPath);
+
+/// <summary>
 /// Persists analysis findings to DuckDB and checks for muted story hashes.
 /// Handles the write side of the analysis pipeline — after the engine produces
 /// stories, FindingStore saves them and filters out muted patterns.
@@ -453,38 +485,105 @@ ORDER BY severity DESC";
         return findings;
     }
 
+    /* #3653 A15/A16: one statement does three things the old VALUES form did not; the reasons are on
+       MuteStoryAsync. (1) story_path is the caller's when it has one ($4), else the newest retained finding's
+       path for the hash (the hash is a function of the path alone — InferenceEngine.ComputeHash — so any row
+       carrying it names the same chain; ORDER BY only makes the choice stable), else the hash itself, because
+       the column is NOT NULL and the hash is the placeholder the MCP verb used to write unconditionally.
+       (2) NOT EXISTS makes the write idempotent per (scope, hash): a scope is one server_id, with NULL and the
+       legacy 0 both meaning "every server" (COALESCE folds them together, the way every reader here treats
+       them). analysis_muted has no unique key over the pair, so this is a guarded INSERT, not a constraint.
+       (3) RETURNING tells the caller whether a row was written at all and what path it carries — zero rows
+       back is "already muted", not a failure. Byte-identical to the Darling twin's PgFindingStore.MuteStorySql:
+       DuckDB and PostgreSQL both take numbered parameters reused across the statement, COALESCE over a scalar
+       subquery, and RETURNING on INSERT ... SELECT. */
+    public const string MuteStorySql = @"
+INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
+SELECT $1, $2, $3,
+       COALESCE(
+           $4,
+           (SELECT f.story_path FROM analysis_findings f
+            WHERE f.story_path_hash = $3
+            ORDER BY f.analysis_time DESC
+            LIMIT 1),
+           $3),
+       $5, $6
+WHERE NOT EXISTS (
+    SELECT 1 FROM analysis_muted m
+    WHERE m.story_path_hash = $3
+      AND COALESCE(m.server_id, 0) = COALESCE($2, 0))
+RETURNING story_path";
+
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.
+    /// Mutes a story pattern so it won't appear in future analysis runs, and reports what the write did:
+    /// <see cref="MuteRegistration.Registered"/> when a new row landed, <see cref="MuteRegistration.AlreadyMuted"/>
+    /// when the registry already held this (scope, hash) and nothing was written. Never
+    /// <see cref="MuteRegistration.Failed"/>: this store throws on a failed INSERT (the Darling twin swallows,
+    /// logs and returns it), and the caller-visible contract is the same either way.
+    ///
+    /// <para>The three-way answer is #3653 A15/A16, which found two lies the MCP mute verb told through this
+    /// method. First, it wrote the HASH into the <c>story_path</c> column, because the MCP entry point knows
+    /// only the hash: a registry row that claims to name a diagnostic chain and names a checksum instead.
+    /// Second, muting the same hash twice registered two rows and reported success twice; the readers were never
+    /// confused by that (they fold by hash), but the caller was, because "registered" was true for a write that
+    /// changed nothing.</para>
+    ///
+    /// <para><paramref name="storyPath"/> is therefore nullable now: pass the path when you hold the finding,
+    /// pass <c>null</c> (or empty — <c>AnalysisFinding.StoryPath</c> defaults to empty) when you hold only the
+    /// hash, and <see cref="MuteStorySql"/> resolves it from the newest retained finding carrying the hash. When
+    /// no retained finding carries it — the pattern's history has been purged, or the hash is mistyped — the
+    /// hash goes into the column as a placeholder, because the column is NOT NULL and relaxing it is a schema
+    /// change. The result's <see cref="MuteWriteResult.StoryPath"/> is <c>null</c> in that case so the caller
+    /// can say so instead of echoing the checksum as a path.</para>
+    ///
+    /// <para>Idempotence is a guarded INSERT under the shared read lock, not a constraint, and the class note's
+    /// "no read-modify-write is left under it" needs one sentence here: the NOT EXISTS guard IS a read-then-write
+    /// inside one statement, and two callers muting the same pattern in the same instant can both land. That
+    /// duplicate is exactly the pre-#3653 state every reader already tolerates (hash-set semantics), so the
+    /// guard is a courtesy to the caller's envelope, not an invariant the lock has to defend — the write lock
+    /// would serialize every mute against every UI read to close a race that needs two operators muting one
+    /// pattern inside a single statement's flight. Matches the Darling twin's PgFindingStore.</para>
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
-    public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
+    public async Task<MuteWriteResult> MuteStoryAsync(int serverId, string storyPathHash, string? storyPath, string? reason = null)
     {
         /* Read lock around an INSERT: deliberate, see the class note (#2455). It admits concurrent
            holders, which is exactly why the mute_id below comes from the shared generator and not
-           from per-instance state this lock could not have protected. */
+           from per-instance state this lock could not have protected. The statement's NOT EXISTS guard
+           (#3653 A15/A16) is a courtesy to the caller's envelope, not an invariant the lock has to defend —
+           the method note says why. */
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
-VALUES ($1, $2, $3, $4, $5, $6)";
+        cmd.CommandText = MuteStorySql;
 
         cmd.Parameters.Add(new DuckDBParameter { Value = NextId() });
         // serverId 0 is the MCP "mute across all servers" sentinel; persist it as NULL, the
         // canonical global marker every reader filters on (legacy 0 rows are still honored).
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId == 0 ? (object)DBNull.Value : serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
-        cmd.Parameters.Add(new DuckDBParameter { Value = storyPath });
+        cmd.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrEmpty(storyPath) ? (object)DBNull.Value : storyPath });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = reason ?? (object)DBNull.Value });
 
-        await cmd.ExecuteNonQueryAsync();
+        /* RETURNING yields one row when the guarded INSERT wrote, none when the registry already held the pair —
+           ExecuteScalar reads that as null. A written path equal to the hash is the NOT NULL placeholder,
+           reported as "no path known" rather than as a path. */
+        var written = await cmd.ExecuteScalarAsync();
+        if (written is not string storedPath)
+        {
+            return new MuteWriteResult(MuteRegistration.AlreadyMuted, null);
+        }
+
+        return new MuteWriteResult(
+            MuteRegistration.Registered,
+            string.Equals(storedPath, storyPathHash, StringComparison.Ordinal) ? null : storedPath);
     }
 
     /// <summary>

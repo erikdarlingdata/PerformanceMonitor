@@ -730,16 +730,25 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
-    /// Mutes a finding pattern so it won't appear in future runs. Returns whether the registry row was written
-    /// (<see cref="PgFindingStore.MuteStoryAsync"/> logs and returns <c>false</c> on a store failure), so the
-    /// MCP mute verb reports what happened rather than what it asked for (#3541 A14). The Lite twin returns
-    /// <c>Task</c> because its store throws instead of swallowing; the caller-visible contract is the same —
-    /// a mute that did not land is never reported as one that did.
+    /// Mutes a finding pattern so it won't appear in future runs and returns what the write did — a new row,
+    /// an existing one, or a failure (<see cref="PgFindingStore.MuteStoryAsync"/> logs and returns
+    /// <see cref="MuteRegistration.Failed"/> on a store failure) — so the MCP mute verb reports what happened
+    /// rather than what it asked for (#3541 A14, widened to the three-way answer by #3653 A15/A16). The Lite
+    /// twin returns the same type by name and never <c>Failed</c>, because its store throws instead of
+    /// swallowing; the caller-visible contract is the same — a mute that did not land is never reported as
+    /// one that did, and a mute that was already in force is never reported as newly registered.
+    ///
+    /// <para>An empty <see cref="AnalysisFinding.StoryPath"/> means the caller knows only the hash (the MCP entry
+    /// point does) and the store resolves the path from the retained findings; see the store note for the
+    /// placeholder it writes when none carries the hash.</para>
     /// </summary>
-    public async Task<bool> MuteFindingAsync(AnalysisFinding finding, string? reason = null)
+    public async Task<MuteWriteResult> MuteFindingAsync(AnalysisFinding finding, string? reason = null)
     {
         return await _findingStore.MuteStoryAsync(
-            finding.ServerId, finding.StoryPathHash, finding.StoryPath, reason);
+            finding.ServerId,
+            finding.StoryPathHash,
+            string.IsNullOrEmpty(finding.StoryPath) ? null : finding.StoryPath,
+            reason);
     }
 
     /// <summary>

@@ -55,11 +55,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>{requested, added, skipped, collided, failed, results:[...]}</c>, and the four counters SUM to
 /// <c>requested</c> — every per-row status is mapped to exactly one of them by <see cref="CounterOfStatus"/>
 /// (#3541 A14: <c>collides</c> used to land in no counter, so a batch with a collided server summarised as
-/// <c>failed: 0</c> and the server went silently unmonitored under a clean summary). <b>remove_server</b> reads the
-/// SAME <c>servers</c> registry the read tools resolve against, but with a stricter rule than theirs: an exact
-/// match, or a partial match ONLY when it is unique — an ambiguous partial is refused with the candidates named,
-/// because a first-wins partial on a DELETE removes whichever sibling sorts first. It then DELETEs the
-/// <c>config.config_monitored_servers</c> row.</para>
+/// <c>failed: 0</c> and the server went silently unmonitored under a clean summary). <b>remove_server</b> resolves
+/// the name against the <c>config.config_monitored_servers</c> DEFINITIONS — the rows it deletes from, projected
+/// onto the read tools' (id, storage name, display name) identity — rather than the <c>servers</c> registry the
+/// read tools resolve against (#3653 A15/A16: that registry is written on FIRST successful connect, so a server
+/// added with a bad password or an unreachable host could not be removed by the tool that added it), with a
+/// stricter rule than theirs: an exact match, or a partial match ONLY when it is unique — an ambiguous partial is
+/// refused with the candidates named, because a first-wins partial on a DELETE removes whichever sibling sorts
+/// first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
@@ -210,15 +213,23 @@ public sealed class DarlingMcpServerAdminTools
 
     [McpServerTool(Name = "remove_server"), Description(
         "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
-        "list_servers reports them). Matching is exact first (case-insensitive, against the storage name and the " +
-        "display name); a PARTIAL match is honored ONLY when exactly one registered server contains the text. When " +
-        "the name is ambiguous — an exact name shared by two registrations, or a fragment such as \"-01\" that " +
+        "list_servers reports them). The name is resolved against the monitored-server DEFINITIONS in the central " +
+        "store (config_monitored_servers — the table add_servers writes and this tool deletes from), NOT against the " +
+        "registry of servers that have connected, so a server that was added but has never connected can be removed " +
+        "by the tool that added it. Matching is exact first (case-insensitive, against the storage name and the " +
+        "display name); a PARTIAL match is honored ONLY when exactly one defined server contains the text. When " +
+        "the name is ambiguous — an exact name shared by two definitions, or a fragment such as \"-01\" that " +
         "several servers contain — NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
-        "display_name}], message}; re-issue with one candidate's full name. Deletes the server's definition from the " +
-        "central monitoring store; the running service drops it from its collection set within one sweep. " +
-        "Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, matched_by:\"exact\"|" +
-        "\"partial\"} on success, {status:\"ambiguous\", ...} as above, or {status:\"not_found\", ...} when no " +
-        "registered server matches the name (the message lists the servers that are registered).")]
+        "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
+        "definition from the central monitoring store; the running service drops it from its collection set within " +
+        "one sweep. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
+        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
+        "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
+        "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
+        "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
+        "not_found whose matched_in is \"servers\" means the name IS a connected server but has no definition in the " +
+        "store to delete (it is defined in darling.json, or its definition was already removed); the message otherwise " +
+        "lists the servers that are defined.")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
         [Description("The name of the monitored server to remove — its display name or storage name / address (as list_servers / get_alert_history report it). A partial name is accepted only when it matches exactly one server.")] string server_name)
@@ -230,21 +241,61 @@ public sealed class DarlingMcpServerAdminTools
                 return Outcome("invalid", "server_name is required.");
             }
 
-            /* The SAME registry rows the read tools resolve against (the id is the shared-identity server_id that
-               keys config_monitored_servers), but NOT the same rule. The read resolver's first-wins partial match
-               is the right convenience for a read — an agent that lands on the wrong sibling sees its name in the
-               payload and re-asks. On a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
-               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
-               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
-            var servers = await DarlingServerResolver.LoadEnabledAsync(postgres);
-            var target = ResolveForRemoval(servers, server_name);
+            /* The rows this DELETE targets — the definitions in config_monitored_servers — projected onto the same
+               (server_id, storage name, display name) identity the read tools resolve against, so the matching rule
+               below is the one #3541 A14 wrote and the caller's vocabulary (list_servers' names) is unchanged.
+
+               Why the definitions and not the servers registry (#3653 A15/A16): the registry is written by the
+               worker on a server's FIRST successful connection. A server that add_servers defined a minute ago with
+               a wrong password, or one whose host is unreachable from the service, has a definition and no registry
+               row — and the pre-#3653 tool, resolving against the registry, answered not_found for the very server
+               its sibling had just added; the only way to undo a bad add_servers was psql. Resolving against the
+               table the DELETE runs on closes that gap by construction: whatever the tool can name, it can remove.
+               The registry is still consulted, but only to DISCLOSE (ever_connected on every candidate) and to give
+               the darling.json-defined server — a registry row with no store definition — an answer that names
+               the real reason nothing was deleted.
+
+               NOT the read resolver's rule, then or now. Its first-wins partial match is the right convenience
+               for a read — an agent that lands on the wrong sibling sees its name in the payload and re-asks. On a
+               DELETE the payload IS the damage: "-01" against "-01"/"-02" removed whichever sorted first, and
+               said so only after the fact (#3541 A14). So the partial match survives, as documented, but only when
+               it is UNIQUE; anything else is refused with the candidates named. */
+            var definitions = await LoadDefinitionsForRemovalAsync(postgres);
+            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
+            var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
 
             if (target.Candidates.Count == 0)
             {
-                /* No exact and no partial match at all: the resolver's own miss message (the available-servers
-                   listing, plus the #2339 peer disclosure) is the right answer here too, and with zero candidates
-                   it cannot resolve to anything, so reusing it cannot pick a server this method declined to. */
-                var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                /* No definition matches. Two honest answers, and the registry tells them apart: a name the
+                   connected-servers registry DOES resolve (by the same rule, so a partial that is unique there is
+                   honored as a match) is a server defined outside the store — darling.json — or one whose
+                   definition was already deleted; naming that is the difference between "typo" and "wrong tool".
+                   Otherwise the miss lists what IS defined, through the resolver's own listing (its miss message
+                   over the definition rows; with zero candidates it cannot resolve to anything, so reusing it cannot
+                   pick a server this method declined to). */
+                var registry = await DarlingServerResolver.LoadEnabledAsync(postgres);
+                var connectedOnly = ResolveForRemoval(registry, server_name);
+                if (connectedOnly.Candidates.Count > 0)
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        status = "not_found",
+                        matched_in = "servers",
+                        matched_by = connectedOnly.MatchedBy,
+                        candidates = connectedOnly.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+                        message = $"'{server_name}' matches {connectedOnly.Candidates.Count} server(s) in the connected-servers registry but none of the " +
+                                  "monitored-server definitions in the central store, so there is nothing for this tool to delete: the server is " +
+                                  "defined in darling.json (remove it there and restart the service), or its store definition was already removed. " +
+                                  "Nothing was changed.",
+                    }, McpHelpers.JsonOptions);
+                }
+
+                if (definitions.Count == 0)
+                {
+                    return Outcome("not_found", $"Could not resolve server '{server_name}': no monitored-server definitions exist in the central store (servers defined in darling.json are not removable through this tool).");
+                }
+
+                var (_, missMessage) = DarlingServerResolver.ResolveOrError(definitions.Select(d => d.Server).ToList(), server_name);
                 return Outcome("not_found", missMessage ?? $"Could not resolve server '{server_name}'.");
             }
 
@@ -253,15 +304,17 @@ public sealed class DarlingMcpServerAdminTools
                 return JsonSerializer.Serialize(new
                 {
                     status = "ambiguous",
-                    message = $"'{server_name}' matches {target.Candidates.Count} registered servers " +
-                              $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                    message = $"'{server_name}' matches {target.Candidates.Count} defined servers " +
+                              $"({(target.MatchedBy == "exact" ? "the same name on more than one definition" : "as a partial name")}); " +
                               "nothing was removed. Re-issue remove_server with ONE candidate's full name.",
                     matched_by = target.MatchedBy,
-                    candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+                    matched_in = "config_monitored_servers",
+                    candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName, ever_connected = everConnected[c.ServerId] }),
                 }, McpHelpers.JsonOptions);
             }
 
             var resolved = target.Candidates[0];
+            var connected = everConnected[resolved.ServerId];
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -269,9 +322,20 @@ public sealed class DarlingMcpServerAdminTools
             var affected = await command.ExecuteNonQueryAsync();
 
             return affected > 0
-                ? JsonSerializer.Serialize(new { status = "removed", server = resolved.ServerName, matched_by = target.MatchedBy }, McpHelpers.JsonOptions)
+                ? JsonSerializer.Serialize(new
+                {
+                    status = "removed",
+                    server = resolved.ServerName,
+                    display_name = resolved.DisplayName,
+                    matched_by = target.MatchedBy,
+                    matched_in = "config_monitored_servers",
+                    ever_connected = connected,
+                    note = connected
+                        ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept."
+                        : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+                }, McpHelpers.JsonOptions)
                 : Outcome("not_found",
-                    $"'{resolved.ServerName}' is registered but has no monitored-server definition to remove (it may have been added only via darling.json, or already removed).");
+                    $"'{resolved.ServerName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
         catch (Exception ex)
         {
@@ -346,10 +410,57 @@ public sealed class DarlingMcpServerAdminTools
     };
 
     /// <summary>
-    /// The outcome of matching a <c>remove_server</c> name against the registry: the rows it matched and HOW.
+    /// The outcome of matching a <c>remove_server</c> name against the definitions: the rows it matched and HOW.
     /// Zero candidates is a miss, one is the row to delete, more than one is a refusal.
     /// </summary>
     internal sealed record RemovalTarget(IReadOnlyList<DarlingServerResolver.RegisteredServer> Candidates, string MatchedBy);
+
+    /// <summary>
+    /// One <c>config_monitored_servers</c> row as <c>remove_server</c> resolves it (#3653 A15/A16): projected onto
+    /// the read tools' <see cref="DarlingServerResolver.RegisteredServer"/> identity — the storage name rebuilt
+    /// from the definition's identity columns through the SAME <see cref="ServerIdHelper.BuildStorageName"/> the
+    /// worker uses when it registers the server on first connect, so a definition and its registry row carry one
+    /// name and one id — plus whether that registry row exists at all.
+    /// </summary>
+    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected);
+
+    /// <summary>
+    /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
+    /// identity columns (the same five <see cref="ExistingServersSql"/> reads for the dedupe gate, #2218's engine
+    /// and port included) and the display name, plus an EXISTS against the connected-servers registry so the tool
+    /// can say whether the server it is about to remove ever connected. No <c>is_enabled</c> filter: a disabled
+    /// definition is still a definition, and removing one is what an operator who disabled it first would expect.
+    /// Exposed const so Darling.Tests can pin the dialect ungated ($-free, no bare now(), no N'' literals).
+    /// </summary>
+    public const string DefinitionsForRemovalSql = @"
+SELECT d.server_id, d.name, d.host, d.database, d.read_only_intent, d.engine, d.port,
+       EXISTS (SELECT 1 FROM servers s WHERE s.server_id = d.server_id) AS ever_connected
+FROM config_monitored_servers d
+ORDER BY d.host, d.database";
+
+    private static async Task<List<ServerDefinition>> LoadDefinitionsForRemovalAsync(NpgsqlDataSource postgres)
+    {
+        var definitions = new List<ServerDefinition>();
+        await using var command = postgres.CreateCommand(DefinitionsForRemovalSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var serverId = reader.GetInt32(0);
+            var displayName = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var host = reader.GetString(2);
+            var database = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var readOnlyIntent = !reader.IsDBNull(4) && reader.GetBoolean(4);
+            var engine = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var port = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
+            var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
+            definitions.Add(new ServerDefinition(
+                new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
+                reader.GetBoolean(7)));
+        }
+
+        return definitions;
+    }
 
     /// <summary>
     /// The matching rule for a DELETE, over the same registry rows the read resolver uses: every exact match

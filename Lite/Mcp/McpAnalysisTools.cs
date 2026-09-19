@@ -865,7 +865,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether the mute row was stored, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is registered AND matched_now is at least 1; \"muted_unmatched\" when it is registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it).")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -888,35 +888,46 @@ public sealed class McpAnalysisTools
                 serverId = resolved.ServerId;
             }
 
+            /* StoryPath is left EMPTY on purpose (#3653 A15/A16): this entry point holds only the hash, and the
+               pre-#3653 code wrote that hash into the registry's story_path column — a row claiming to name a
+               diagnostic chain that named a checksum. An empty path tells the store "resolve it" and it reads
+               the path off the newest retained finding carrying the hash (the hash is a function of the path, so
+               any such finding names the same chain); when none does, the store writes the hash as the NOT NULL
+               placeholder and reports the path as unknown, which is what story_path: null below means. */
             var finding = new AnalysisFinding
             {
                 ServerId = serverId ?? 0,
                 StoryPathHash = story_path_hash,
-                StoryPath = story_path_hash
             };
 
             /* #3541 A14: report what happened, not what was asked. Before this the verb returned "muted" for any
                hash — a mistyped one, one copied from another store — and the agent walked away believing a
                pattern was silenced. The store's INSERT throws on failure here (the Darling twin's swallows and
-               returns false; both surface as not-muted), and matched_now is counted AFTER the write so the two
-               are read against the same moment. The registry is a pattern registry (no row references a
-               finding), so an unmatched hash is still stored — legitimately, when a pattern's history has been
-               purged — and the status names that case instead of folding it into success. See
-               FindingStore.CountStoredFindingsAsync. */
-            await analysisService.MuteFindingAsync(finding, reason);
+               returns Failed; both surface as not-muted), it says whether a NEW row landed or the (scope, hash)
+               was already registered (#3653 A15/A16: the old write registered a second row and called it
+               success), and matched_now is counted AFTER the write so the two are read against the same moment.
+               The registry is a pattern registry (no row references a finding), so an unmatched hash is still
+               stored — legitimately, when a pattern's history has been purged — and the status names that case
+               instead of folding it into success. See FindingStore.CountStoredFindingsAsync. */
+            var write = await analysisService.MuteFindingAsync(finding, reason);
             var matchedNow = await analysisService.CountStoredFindingsAsync(serverId, story_path_hash);
+            var registered = write.Registration == MuteRegistration.Registered;
 
             return JsonSerializer.Serialize(new
             {
-                status = matchedNow > 0 ? "muted" : "muted_unmatched",
+                status = !registered ? "already_muted" : matchedNow > 0 ? "muted" : "muted_unmatched",
                 story_path_hash,
+                story_path = write.StoryPath,
                 server = server_name ?? "(all servers)",
                 reason,
-                registered = true,
+                registered,
+                already_muted = !registered,
                 matched_now = matchedNow,
-                note = matchedNow > 0
-                    ? $"The mute is registered; {matchedNow} stored finding(s) in this scope carry the hash and the pattern will be dropped from future analysis runs."
-                    : "The mute is registered, but no stored finding in this scope carries this story_path_hash. If you copied it from analyze_server or get_analysis_findings it is still valid (the pattern will be dropped if it recurs); a hash from anywhere else may be mistyped and would mute nothing.",
+                note = !registered
+                    ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({matchedNow} stored finding(s) in this scope carry the hash). A reason passed on this call is not recorded."
+                    : matchedNow > 0
+                        ? $"The mute is registered; {matchedNow} stored finding(s) in this scope carry the hash and the pattern will be dropped from future analysis runs."
+                        : "The mute is registered, but no stored finding in this scope carries this story_path_hash. If you copied it from analyze_server or get_analysis_findings it is still valid (the pattern will be dropped if it recurs); a hash from anywhere else may be mistyped and would mute nothing.",
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
