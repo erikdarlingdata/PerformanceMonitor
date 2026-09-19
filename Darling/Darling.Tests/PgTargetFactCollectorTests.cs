@@ -150,7 +150,11 @@ public sealed class PgTargetFactCollectorTests
             Assert.DoesNotMatch(new Regex(@"new\s+(?:Npgsql\.)?NpgsqlCommand\s*\(\s*(?:\$?@?""|sql\b|query\b)"), code);
         }
 
-        Assert.Equal(2, sites);
+        /* A floor, not an equality: the two sites are the plumbing's (coverage witness, registry metadata), and
+           the count exists so a scan that read the wrong directory cannot report clean on nothing. Every
+           content lane adds a site, and a pin that broke on each one would be a tax on writing a family — the
+           per-site assertion above is the closure; this is the proof the scan saw the files. */
+        Assert.True(sites >= 2, $"expected at least the plumbing's two command construction sites; found {sites}");
     }
 
     [Fact]
