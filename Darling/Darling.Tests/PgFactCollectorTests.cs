@@ -583,6 +583,169 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
         }
     }
 
+    /* ---------------- #3653: RUNNING_JOBS names the job ---------------- */
+
+    /// <summary>
+    /// #3653 (A9): the RUNNING_JOBS aggregate names ONE job — the one furthest past its own history among
+    /// the rows that were RUNNING LONG — and the emission carries it on <c>Fact.ObjectName</c>, never in the
+    /// doubles-only metadata. Pinned on the text because each clause is a behaviour a simplification would
+    /// remove: drop the FILTER and the longest merely-running job is named; put duration before percent and
+    /// a slow-but-normal job outranks a fast one at 4× its average; drop the job_name tail and two equal rows
+    /// pick nondeterministically, rewriting the frozen finding text between passes over the same window.
+    /// Both SKUs: Lite's inline query carries the clause verbatim and maps the same ordinal to the same
+    /// slot, so a change to one side fails here before the parity review has to find it.
+    /// </summary>
+    [Fact]
+    public void RunningJobsSql_NamesTheJobFurthestPastItsOwnHistory_AmongLongRowsOnly_OnObjectName_BothSkus()
+    {
+        var sql = PgFactCollector.RunningJobsSql;
+
+        const string clause =
+            "(ARRAY_AGG(job_name ORDER BY percent_of_average DESC NULLS LAST, current_duration_seconds DESC, job_name)";
+        Assert.Contains(clause, sql, StringComparison.Ordinal);
+        Assert.Contains("FILTER (WHERE is_running_long))[1] AS worst_long_job_name", sql, StringComparison.Ordinal);
+
+        /* The four pre-existing columns keep their positions (the C# reads ordinals 0–3 as before) and the
+           name is the FIFTH — the C# reads ordinal 4. */
+        var columns = Regex.Matches(sql, @"\bAS\s+(\w+)", RegexOptions.IgnoreCase).Select(m => m.Groups[1].Value).ToArray();
+        Assert.Equal(
+            new[] { "running_count", "running_long_count", "max_percent_of_avg", "max_duration_seconds", "worst_long_job_name" },
+            columns);
+
+        /* Any_value would be the wrong tool here twice over: it is unordered, and the dialect pin above
+           confines it to the plan-regression query. */
+        Assert.DoesNotContain("any_value", sql, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var relativePath in new[]
+        {
+            "Darling/PerformanceMonitor.Darling.Analysis/PgFactCollector.Activity.cs",
+            "Lite/Analysis/DuckDbFactCollector.Activity.cs"
+        })
+        {
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+            Assert.Contains(clause, source, StringComparison.Ordinal);
+            Assert.Contains("FILTER (WHERE is_running_long))[1] AS worst_long_job_name", source, StringComparison.Ordinal);
+
+            /* The ordinal-4 read keeps NULL as null (not ""), and the value lands on ObjectName. */
+            Assert.Contains("var worstLongJobName = reader.IsDBNull(4) ? null : reader.GetString(4);", source, StringComparison.Ordinal);
+            Assert.Contains("ObjectName = worstLongJobName,", source, StringComparison.Ordinal);
+
+            /* Never into Metadata: the dictionary is Dictionary<string, double>, so a string there would not
+               compile — this guards the next-cheapest drift, a numeric "has_name" stand-in that a reader would
+               then have to reverse-map. The RUNNING_JOBS metadata block stays the four figures. */
+            var emission = source.IndexOf("Key = \"RUNNING_JOBS\",", StringComparison.Ordinal);
+            Assert.True(emission >= 0, $"{relativePath}: RUNNING_JOBS emission not found");
+            var block = source[emission..source.IndexOf("});", emission, StringComparison.Ordinal)];
+            var metadataKeys = Regex.Matches(block, @"\[""(\w+)""\]\s*=").Select(m => m.Groups[1].Value).ToArray();
+            Assert.Equal(new[] { "running_count", "running_long_count", "max_percent_of_average", "max_duration_seconds" }, metadataKeys);
+        }
+    }
+
+    /// <summary>
+    /// #3653 live fixture: three running_jobs rows at one tick — two running long (400% at 7,200 s and 250%
+    /// at 9,000 s) and one not (the longest runtime and the highest percent of the three, so a dropped
+    /// FILTER would name it) — must emit RUNNING_JOBS with the 400% job on ObjectName, the running-long
+    /// count as the value, and the pre-#3653 per-row counts and window maxima untouched beside it. A second
+    /// tick where nothing runs long must emit the fact with a NULL name, not an empty string and not the
+    /// longest job present.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_RunningJobs_NamesTheWorstLongJob_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live running-jobs fact test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int jobsServerId = TestServerId - 3; // own id — this test cleans its own rows
+        const int quietServerId = TestServerId - 4;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM running_jobs WHERE server_id IN ({jobsServerId}, {quietServerId});", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var collector = new PgFactCollector(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowStart = windowEnd.AddHours(-1);
+            var tick = windowStart.AddMinutes(30);
+
+            async Task PlantAsync(int serverId, string jobName, long currentSeconds, bool isLong, decimal? percentOfAverage)
+            {
+                /* avg/p95 derived so is_running_long agrees with the collector's own definition (current > p95
+                   when long); percent_of_average is stored verbatim because the ORDER BY reads the column. */
+                using var plant = new NpgsqlCommand(@"
+INSERT INTO running_jobs
+    (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time,
+     current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count,
+     is_running_long, percent_of_average)
+VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)", connection);
+                plant.Parameters.AddWithValue(tick);
+                plant.Parameters.AddWithValue(serverId);
+                plant.Parameters.AddWithValue("running-jobs-name-e2e");
+                plant.Parameters.AddWithValue(jobName);
+                plant.Parameters.AddWithValue(Guid.NewGuid().ToString());
+                plant.Parameters.AddWithValue(tick.AddSeconds(-currentSeconds));
+                plant.Parameters.AddWithValue(currentSeconds);
+                plant.Parameters.AddWithValue(isLong ? currentSeconds / 3 : currentSeconds);
+                plant.Parameters.AddWithValue(isLong ? currentSeconds / 2 : currentSeconds * 2);
+                plant.Parameters.AddWithValue(isLong);
+                plant.Parameters.AddWithValue((object?)percentOfAverage ?? DBNull.Value);
+                await plant.ExecuteNonQueryAsync(ct);
+            }
+
+            await PlantAsync(jobsServerId, "Weekly CHECKDB", 9_000, isLong: true, percentOfAverage: 250.0m);
+            await PlantAsync(jobsServerId, "Nightly Index Maintenance", 7_200, isLong: true, percentOfAverage: 400.0m);
+            await PlantAsync(jobsServerId, "Long Steady ETL", 99_999, isLong: false, percentOfAverage: 900.0m);
+
+            await PlantAsync(quietServerId, "Log Backup", 300, isLong: false, percentOfAverage: 100.0m);
+            await PlantAsync(quietServerId, "Long Steady ETL", 99_999, isLong: false, percentOfAverage: null);
+
+            AnalysisContext Context(int serverId) => new()
+            {
+                ServerId = serverId,
+                ServerName = "running-jobs-name-e2e",
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var jobs = Assert.Single(await collector.CollectFactsAsync(Context(jobsServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+            Assert.Equal(2, jobs.Value);
+            Assert.Equal(3, jobs.Metadata["running_count"]);
+            Assert.Equal(2, jobs.Metadata["running_long_count"]);
+            Assert.Equal(900, jobs.Metadata["max_percent_of_average"]);
+            Assert.Equal(99_999, jobs.Metadata["max_duration_seconds"]);
+
+            var quiet = Assert.Single(await collector.CollectFactsAsync(Context(quietServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Null(quiet.ObjectName);
+            Assert.Equal(0, quiet.Value);
+            Assert.Equal(2, quiet.Metadata["running_count"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand(
+                    $"DELETE FROM running_jobs WHERE server_id IN ({jobsServerId}, {quietServerId});", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 

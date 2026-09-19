@@ -1642,9 +1642,11 @@ public static class FactAdvice
     /// <see cref="RelationshipGraph"/> use, so the prose and the incident clustering agree on when the
     /// link exists). States the job facts the engine collected (count, worst overrun, longest runtime)
     /// rather than re-describing the symptom. Empty when the fact is absent or no job is running long,
-    /// so a caller can append it unconditionally. Leading space included. The RUNNING_JOBS fact carries
-    /// no job NAME (its metadata is counts and durations), so the sentence points at the Running Jobs
-    /// view for the name instead of pretending to know it.
+    /// so a caller can append it unconditionally. Leading space included. The RUNNING_JOBS fact's
+    /// metadata is counts and durations; since #3653 the collectors also put the worst job's NAME on the
+    /// fact's ObjectName, and the job card (<see cref="ComposeRunningJobs"/>) states it. This clause is
+    /// the symptom cards' text (SCH_M, IO_WRITE_LATENCY_MS, WRITELOG) and still points at the Running Jobs
+    /// view for the name; carrying the name into it is those cards' change, not the job card's.
     /// </summary>
     private static string LinkedJobClause(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1695,7 +1697,21 @@ public static class FactAdvice
         };
     }
 
-    /// <summary>RUNNING_JOBS composed: states how many jobs overran and by how much.</summary>
+    /// <summary>
+    /// RUNNING_JOBS composed: states how many jobs overran and by how much, and (#3653) WHICH one.
+    /// <para>The collectors put the name of the job furthest past its own history on the fact's
+    /// ObjectName (both SKUs, one name, running-long rows only — the SQL comment there states the choice).
+    /// When it is present the headline, the first sentence and the remediation name the job; when it is
+    /// absent — a finding persisted before the collectors carried it, or a window where jobs ran but none
+    /// ran long — every sentence is the pre-#3653 one, so the frozen text of old findings and the
+    /// nothing-long case read exactly as before. The name is guarded on the count as well as the slot:
+    /// a name with a zero count cannot come from the collectors (the FILTER yields NULL) and naming a job
+    /// that did not run long would be the lie this arm exists to stop. The overrun figures stay attributed
+    /// to "the worst", not to the named job, because <c>max_percent_of_average</c> and
+    /// <c>max_duration_seconds</c> are window maxima over EVERY running row, long or not, while the name
+    /// is chosen among the long rows only; the two coincide in the ordinary case and the wording does not
+    /// depend on it.</para>
+    /// </summary>
     private static AdviceBlock ComposeRunningJobs(IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["RUNNING_JOBS"];
@@ -1705,7 +1721,15 @@ public static class FactAdvice
 
         var pct = FactMeta(facts, "RUNNING_JOBS", "max_percent_of_average");
         var dur = FactMeta(facts, "RUNNING_JOBS", "max_duration_seconds");
-        var inv = new StringBuilder($"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window");
+        var name = longCount.Value > 0 && facts.TryGetValue("RUNNING_JOBS", out var jobFact) && !string.IsNullOrEmpty(jobFact.ObjectName)
+            ? jobFact.ObjectName
+            : null;
+        var others = longCount.Value - 1;
+        var inv = new StringBuilder(name is null
+            ? $"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window"
+            : others > 0
+                ? $"{Plural(longCount.Value, "Agent job")} ran well past normal duration this window, `{name}` the furthest past its own history (the Running Jobs view lists the {Plural(others, "other")})"
+                : $"Agent job `{name}` ran well past normal duration this window");
         if (pct is > 0)
             inv.Append($", the worst at {pct.Value:N0}% of its historical average");
         if (dur is > 0)
@@ -1723,14 +1747,20 @@ public static class FactAdvice
             inv.Append($" Also elevated this window and linked to this job by the engine: {string.Join("; ", symptoms)}. Where one of them rooted its own finding, it and this card are ONE incident, not two.");
 
         var rem =
-            "Check the long-running jobs in Agent history: one at several times its normal runtime is typically " +
+            (name is null
+                ? "Check the long-running jobs in Agent history: one at several times its normal runtime is typically "
+                : $"Check `{name}` in Agent history first{(others > 0 ? ", then the others" : string.Empty)}: a job at several times its normal runtime is typically ") +
             "blocked (look for it in the blocking findings) or waiting on a resource. Decide whether to let it finish " +
             "or stop it, and address the cause — a job that regularly overruns its window usually needs its schedule " +
             "or its workload rethought.";
 
         return fallback with
         {
-            Headline = $"{Plural(longCount.Value, "Agent job")} running well past normal — likely stuck, not busy",
+            Headline = name is null
+                ? $"{Plural(longCount.Value, "Agent job")} running well past normal — likely stuck, not busy"
+                : others > 0
+                    ? $"Agent job `{name}` and {Plural(others, "other")} running well past normal — likely stuck, not busy"
+                    : $"Agent job `{name}` running well past normal — likely stuck, not busy",
             Investigation = inv.ToString(),
             Remediation = rem
         };

@@ -1913,6 +1913,48 @@ VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
     }
 
     /// <summary>
+    /// #3653: seeds running_jobs with NAMED rows whose overrun figures differ per job, for the pin that the
+    /// RUNNING_JOBS fact names the right one. One row per tuple at the same collection tick; avg and p95
+    /// are derived so <c>is_running_long</c> is consistent with the collector's own definition
+    /// (current &gt; p95 when long, current &lt; p95 when not) and <c>percent_of_average</c> is the caller's
+    /// figure verbatim — the choice under test orders on the stored column, not on a recomputation.
+    /// </summary>
+    internal async Task SeedRunningJobRowsAsync(
+        params (string jobName, long currentDurationSeconds, bool isRunningLong, double? percentOfAverage)[] jobs)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var t = TestPeriodEnd.AddMinutes(-10);
+        foreach (var (jobName, currentDurationSeconds, isRunningLong, percentOfAverage) in jobs)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO running_jobs
+    (collection_time, server_id, server_name, job_name, job_id,
+     job_enabled, start_time, current_duration_seconds,
+     avg_duration_seconds, p95_duration_seconds, successful_run_count,
+     is_running_long, percent_of_average)
+VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = jobName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = Guid.NewGuid().ToString() });
+            cmd.Parameters.Add(new DuckDBParameter { Value = t.AddSeconds(-currentDurationSeconds) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = currentDurationSeconds });
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong ? currentDurationSeconds / 3 : currentDurationSeconds }); // avg
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong ? currentDurationSeconds / 2 : currentDurationSeconds * 2 }); // p95
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)percentOfAverage ?? DBNull.Value });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
     /// Seeds session_stats with per-application connection data.
     /// </summary>
     internal async Task SeedSessionStatsAsync(
