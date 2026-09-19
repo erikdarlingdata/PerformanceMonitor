@@ -44,8 +44,8 @@ public static partial class PgTargetAdvice
             "itself enforces: max_connections minus superuser_reserved_connections, the slots an ordinary role can " +
             "take. Past that line a new connection is refused outright (FATAL: too many clients already / remaining " +
             "connection slots are reserved) — there is no queue, so for the application that asked this is an " +
-            "outage, not a slowdown. The ceiling is the engine's own; the 80% / 90% bands on the ratio are an " +
-            "unmeasured judgment (threshold_lineage = 0) until the fleet distribution is read. The count includes " +
+            "outage, not a slowdown. The ceiling is the engine's own; the 80% / 90% bands on the ratio sit far above " +
+            "anything the measured fleet reached (fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1). The count includes " +
             "PostgreSQL's own background processes, which hold no connection slot, so the ratio reads a few points " +
             "high — the safe direction for a cliff. The session collector stores a capture only when some session " +
             "had a transaction open past its floor, so the peak is over the captures that had something to report.",
@@ -134,7 +134,7 @@ public static partial class PgTargetAdvice
             $" The peak was seen over {captures:0} {(captures == 1 ? "capture" : "captures")} that stored session rows (the collector stores a capture only when some session had a transaction open past its floor, so quiet minutes are absent from this series); the newest capture in the window had {latest:0} sessions.");
         if (pendingRestart)
             inv.Append(" A max_connections change is already pending a restart on this server — the ceiling stated here is the RUNNING value, not the pending one.");
-        inv.Append(" The ceiling is the engine's own line; the 80% / 90% bands on the ratio are an unmeasured judgment (threshold_lineage = 0) until the fleet distribution is read.");
+        inv.Append(" The ceiling is the engine's own line; the 80% / 90% bands on the ratio sit far above anything the measured fleet reached (fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1).");
 
         var rem = new StringBuilder();
         if (idleShare >= PgTargetScorer.IdleInTransactionShareBar)

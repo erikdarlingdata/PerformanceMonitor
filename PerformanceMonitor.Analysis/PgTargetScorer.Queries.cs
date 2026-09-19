@@ -36,12 +36,17 @@ namespace PerformanceMonitor.Analysis;
 /// so it may exceed 1.0 — is the "was the server doing anything" gate, a fraction of OBSERVED time (#3538 A7),
 /// so the same server reads the same at every <c>hours_back</c>.</para>
 ///
-/// <para><b>Lineage.</b> Both bars are UNMEASURED: there is no engine-defined line for "too large a share"
-/// and no fleet measurement of it yet. The calibrating read is the per-server distribution of the top-1
-/// statement's share of <c>SUM(delta_total_exec_time_ms)</c> per window over <c>pg_statement_stats</c>
-/// (p50 / p95 across the dogfood PostgreSQL fleet), and, for the gate, the distribution of that sum over
-/// observed seconds. Until it is read, every fact this arm grades carries <c>threshold_lineage = 0</c> so
-/// <c>get_analysis_facts</c> shows the number is a judgment.</para>
+/// <para><b>Lineage.</b> There is no engine-defined line for "too large a share"; the #3691 fleet calibration
+/// (2026-09-19, 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, hourly <c>pg_statement_stats</c>)
+/// read both quantities. The result is the reason the gate exists: the top-1 share is ROUTINE unconditionally
+/// (63 % of server-hours on the median cluster have a statement at or above 0.25), while the busy fraction is
+/// tiny almost everywhere (the median cluster is below the 0.05 floor in 100 % of its hours; fleet p25 73 %,
+/// minimum 12 %). So the floor is the discriminator and is <b>measured</b> at ≈ the fleet p97 of hourly busy
+/// fractions, and the share bars are <b>measured-conditional</b> — their placement on the per-server share
+/// distribution is known, and they mean something only given busy ≥ the floor. Every fact this arm grades
+/// carries <c>threshold_lineage = 1</c>: no bar here is a bare choice any more. The quantities are
+/// engine-neutral; the stock-PostgreSQL population is not yet measured. A second read conditioned on the floor
+/// is the follow-up if the fired rate on the fleet reads wrong.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
@@ -49,8 +54,12 @@ public static partial class PgTargetScorer
     /// The share of the window's total execution time at which one statement is CONCERNING (severity 0.5 —
     /// the story threshold) and at which it is CRITICAL (1.0). A quarter of everything the server executed
     /// being one statement shape is a workload with a head; six tenths is a workload that IS one statement.
-    /// unmeasured: chosen, not measured — calibrate against pg_statement_stats before the next release (the
-    /// per-server top-1 share distribution named in the class summary); the fact carries threshold_lineage = 0.
+    /// measured-conditional (given busy ≥ <see cref="BadActorBusyFloor"/>): per-server top-1 share of hourly
+    /// execution time over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 — p50 median
+    /// 0.32 (range 0.14 – 0.67), p90 median 0.42, p99 median 0.71, maximum 0.95. Unconditionally 0.25 is BELOW
+    /// the median cluster's median hour (63 % of hours at or above it) and 0.60 is ≈ its p96 (4 % of hours at
+    /// or above; on the fleet-p90 cluster 29 %) — routine shapes, which is why the floor below decides and these grade. The
+    /// fact carries threshold_lineage = 1; a share read conditioned on the floor is the stated follow-up.
     /// </summary>
     public const double BadActorShareConcerning = 0.25;
     public const double BadActorShareCritical = 0.60;
@@ -59,9 +68,11 @@ public static partial class PgTargetScorer
     /// The floor on <c>window_busy_fraction</c> below which no statement can be a bad actor: the server
     /// executed statements for less than this fraction of ONE backend's worth of the observed time (0.05 of
     /// a four-hour window is twelve minutes of statement time), so a large share is a large share of nearly
-    /// nothing. unmeasured: chosen, not measured — calibrate against pg_statement_stats before the next
-    /// release (Σ delta_total_exec_time_ms over observed seconds, per server-window); the fact carries
-    /// threshold_lineage = 0.
+    /// nothing. measured: ≈ p97 of hourly busy fractions (Σ delta_total_exec_time_ms over observed time) over
+    /// 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 — per-server p50 median 0.7 %,
+    /// p90 median 3.3 %, maximum 69 %; hours below the floor: median 100 % of a cluster's hours, fleet p25 73 %,
+    /// minimum 12 %. Measured on Aurora; the stock-PostgreSQL population is not yet measured. The fact carries
+    /// threshold_lineage = 1.
     /// </summary>
     public const double BadActorBusyFloor = 0.05;
 
@@ -74,8 +85,9 @@ public static partial class PgTargetScorer
     /// Layer-1 base severity for a <c>PG_BAD_ACTOR_*</c> fact: the share graded through the shared formula
     /// between the two bars above, gated on the idle-server floor. Zero for anything under the
     /// <c>pg_queries</c> source that is not a bad-actor key, for a fact with no share, and for an idle window.
-    /// Stamps <c>threshold_lineage = 0</c> on every fact it grades (including the ones it grades to 0 through
-    /// the gate), because the number that decided is unmeasured either way.
+    /// Stamps <c>threshold_lineage = 1</c> on every fact it grades (including the ones it grades to 0 through
+    /// the gate), because the number that decided — the floor or the share bars — is fleet-measured either way
+    /// (2026-09-19; the share bars conditionally, see their declaration).
     /// </summary>
     private static partial double ScoreQueriesFact(Fact fact)
     {
@@ -84,9 +96,9 @@ public static partial class PgTargetScorer
         if (!fact.Metadata.TryGetValue("share_of_window_time", out var share) || share <= 0)
             return 0.0;
 
-        /* unmeasured: both bars below are the constants declared above, chosen, not measured — calibrate
-           against pg_statement_stats before the next release; the fact carries threshold_lineage = 0. */
-        fact.Metadata["threshold_lineage"] = 0;
+        /* measured: the floor and both share bars below are the constants declared above with their 2026-09-19
+           lineage (the floor ≈ fleet p97 of hourly busy fractions; the shares measured-conditional on it). */
+        fact.Metadata["threshold_lineage"] = 1;
 
         var busy = fact.Metadata.GetValueOrDefault("window_busy_fraction");
         if (busy < BadActorBusyFloor)

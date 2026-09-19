@@ -28,10 +28,14 @@ namespace PerformanceMonitor.Analysis;
 /// <para><b>Lineage.</b> The CEILING is engine-defined: <c>max_connections</c> is the line PostgreSQL refuses at,
 /// and <c>superuser_reserved_connections</c> is the engine's own carve-out of slots an ordinary role can never
 /// take — there is no judgment in the denominator. The two BANDS on the ratio (0.8 → 0.5, 0.9 → 1.0) are
-/// UNMEASURED: no fleet distribution of peak-sessions-over-ceiling has been read yet, so every saturation fact
-/// carries <c>threshold_lineage = 0</c>. The calibrating read is the per-server distribution of
-/// <c>max(total_sessions)</c> per window over <c>pg_session_states</c> against that server's usable ceiling
-/// (p50 / p95 across the dogfood PostgreSQL fleet).</para>
+/// fractions of that engine-defined line, and the #3691 fleet calibration (2026-09-19) read where they sit: over
+/// 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet (usable ceilings 1,240 – 5,000, a
+/// <c>max_connections</c> snapshot on all 50), sessions-over-ceiling per capture had a per-server p99 median of
+/// 0.021 and a fleet MAXIMUM of 0.103 — both bands sit deep in the measured empty interval, which is where a
+/// hard-FATAL cliff's bars belong. So every saturation fact carries <c>threshold_lineage = 1</c>: the ceiling is
+/// the engine's, the bands are measured against it. Caveat the constants repeat: the numerator read was
+/// <c>pg_session_states</c>' <c>total_sessions</c> (the exception-capture peak, the same figure this fact is
+/// composed from); <c>numbackends</c> (V133) is the honest population numerator and a re-measurement follows it.</para>
 ///
 /// <para><b>Self-gating below the warning line, THREADPOOL's shape.</b> <see cref="FactScorer.ApplyThresholdFormula"/>
 /// grades ANY positive value below the concerning bar as a fraction of it, so a pool at 40% of its ceiling would
@@ -52,9 +56,12 @@ public static partial class PgTargetScorer
     /// The saturation ratio (peak sessions over usable connections) at which the pool is CONCERNING (0.5 — the
     /// story threshold) and at which it is CRITICAL (1.0). Eight tenths of the usable slots taken at the window's
     /// peak leaves one burst of headroom; nine tenths leaves none a deploy or a retry storm would not consume.
-    /// unmeasured: chosen, not measured — calibrate against pg_session_states before the next release (the
-    /// per-server peak-sessions / ceiling distribution named in the class summary); the fact carries
-    /// threshold_lineage = 0.
+    /// engine-defined denominator (max_connections − superuser_reserved_connections); the bands on it are
+    /// measured: above the fleet maximum sessions-over-ceiling of 0.103 (per-server p99 median 0.021) over 7 days
+    /// × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 (pg_session_states total_sessions per
+    /// capture against each server's usable ceiling) — the measured empty interval. Engine-neutral quantity,
+    /// Aurora population; the stock-PostgreSQL population is not yet measured, and the numbackends (V133)
+    /// re-measurement follows. The fact carries threshold_lineage = 1.
     /// </summary>
     public const double ConnectionSaturationWarning = 0.8;
     public const double ConnectionSaturationCritical = 0.9;
@@ -89,18 +96,21 @@ public static partial class PgTargetScorer
     /// The share of the PEAK capture's sessions that were <c>idle in transaction</c> at or above which the pool is
     /// being filled by PARKED connections rather than work — design §3.6's named amplifier ("parked connections
     /// consuming slots"), read off the fact's own state breakdown because the <c>PG_IDLE_IN_TRANSACTION</c> fact
-    /// that would co-fire is v2. unmeasured: chosen, not measured — calibrate against pg_session_states before
-    /// the next release (the per-capture idle_in_transaction_sessions / total_sessions distribution); the fact
-    /// carries threshold_lineage = 0.
+    /// that would co-fire is v2. measured: above the fleet maximum idle-in-transaction share of 0.167 (per-server
+    /// maximum median 0.063) over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19
+    /// (pg_session_states, idle_in_transaction_sessions / total_sessions per capture) — a quarter was never
+    /// reached, so the amplifier's gate sits in the measured empty interval. Measured on Aurora; the
+    /// stock-PostgreSQL population is not yet measured. The boost it applies is a separate, unmeasured constant.
     /// </summary>
     public const double IdleInTransactionShareBar = 0.25;
 
     /// <summary>
     /// Layer-1 base severity for the <c>pg_sessions</c> source: the saturation ratio graded between the two bands
     /// above and ZERO below the warning line; the permissions advisory at its fixed base. Anything else under the
-    /// source (a future session fact without an arm) scores 0. Stamps <c>threshold_lineage = 0</c> on every
-    /// saturation fact it sees, including the ones it grades to 0 — the number that decided is unmeasured either
-    /// way — and never on the permissions fact, whose only line is definitional.
+    /// source (a future session fact without an arm) scores 0. Stamps <c>threshold_lineage = 1</c> on every
+    /// saturation fact it sees, including the ones it grades to 0 — the number that decided is the engine's
+    /// ceiling and bands measured against it (2026-09-19) either way — and never on the permissions fact, whose
+    /// only line is definitional.
     /// </summary>
     private static partial double ScoreSessionsFact(Fact fact)
     {
@@ -111,11 +121,10 @@ public static partial class PgTargetScorer
                 if (!fact.Metadata.TryGetValue("saturation_ratio", out var ratio) || ratio <= 0)
                     return 0.0;
 
-                /* unmeasured: both bands are the constants declared above, chosen, not measured — calibrate
-                   against pg_session_states before the next release; the fact carries threshold_lineage = 0.
-                   Below the warning band the fact is context (0), never a fraction of the bar — see the class
-                   summary on self-gating. */
-                fact.Metadata["threshold_lineage"] = 0;
+                /* engine-defined ceiling, measured bands: both are the constants declared above with their
+                   2026-09-19 lineage; the fact carries threshold_lineage = 1. Below the warning band the fact is
+                   context (0), never a fraction of the bar — see the class summary on self-gating. */
+                fact.Metadata["threshold_lineage"] = 1;
                 if (ratio < ConnectionSaturationWarning)
                     return 0.0;
 

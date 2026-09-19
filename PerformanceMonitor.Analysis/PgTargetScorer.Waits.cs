@@ -19,13 +19,19 @@ namespace PerformanceMonitor.Analysis;
 /// observed time (<see cref="WaitSourceObservedMsKey"/>): time summed over tasks per second of wall clock, the
 /// axis the SQL Server wait facts grade on, so a 1.0 here means what a 1.0 there means (D5).
 ///
-/// <para><b>Lineage: every bar in this file is UNMEASURED.</b> There is no fleet measurement of PostgreSQL
-/// wait fractions tonight and PostgreSQL draws no line of its own for "how much waiting is too much" — a
-/// wait event is a label, not a limit — so no bar here can be measured or engine-defined. Each carries the
-/// unmeasured marker with the reasoning that chose it, every graded fact carries <c>threshold_lineage = 0</c>,
-/// and the calibrating read is named once: the per-server per-type fraction distribution over
-/// <c>pg_wait_stats</c> (the 4-hour-bucket pass #3616 ran over SQL Server <c>wait_stats</c>), before the next
-/// release. No bar is a SQL Server wait constant reused by value — the SQL Server table's pairs are
+/// <para><b>Lineage: the four TYPE-ROLLUP bars are measured on Aurora; the standout bars and the sampling floor
+/// are not.</b> PostgreSQL draws no line of its own for "how much waiting is too much" — a wait event is a
+/// label, not a limit — so no bar here can be engine-defined. The #3691 fleet calibration (2026-09-19) read
+/// the per-type fraction distribution over <c>pg_wait_stats</c> (5-minute buckets, 7 days × 50 Aurora
+/// PostgreSQL clusters of the dogfood fleet — the engine's own measured wait deltas, the source the Aurora
+/// wait collector stores) and the rollup bars stand where they were chosen: each constant below names its percentile. The
+/// population is Aurora-specific — a stock server's <c>pg_wait_sampling</c> ESTIMATE grades on the same bars
+/// by design but is another instrument on another population, so a sampled fact keeps
+/// <c>threshold_lineage = 0</c>; an Aurora rollup graded on its fraction carries <c>threshold_lineage = 1</c>.
+/// The per-EVENT standout bars were not read (the calibration aggregated by type), so every standout fact,
+/// and a rollup that yields to a standout (the yield is decided on the standout bar), stays at 0 with the
+/// unmeasured marker and the reasoning that chose the bar. No bar is a SQL Server wait constant reused by
+/// value — the SQL Server table's pairs are
 /// (0.01, 0.05, 0.10, 0.25, 0.30, 0.50, 0.75) and none appears here; that is checked by eye, not by accident:
 /// the numbers below were chosen on the PostgreSQL side's own argument (a backend-equivalent of continuous
 /// waiting) and then confirmed distinct.</para>
@@ -121,9 +127,14 @@ public static partial class PgTargetScorer
     /// </summary>
     public const int WaitSampledMinimumSamples = 3;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_wait_stats (the per-server per-type fraction
-       distribution, 4-hour buckets) before the next release. The argument for the shape, stated once for all
-       eight: the fraction is backend-seconds waiting per wall second, so 1.0 is ONE backend waiting on this
+    /* measured: 0.20 ≈ p97 and 1.0 ≈ p99.7 of 5-minute buckets of total non-CPU waiting (ms waited per second
+       observed) over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 (pg_wait_stats,
+       the engine's measured wait deltas). Per-server p50 median 0.012, p99 median 0.062, fleet p90 of p99 0.82,
+       maximum 10.7; buckets at or above 0.20: median cluster 0, fleet p75 2.8 %, worst 41 % (a chronically
+       waiting cluster); at or above 1.0: fleet p90 0.5 %, worst 15.7 %. Per type, ipc p99 0.35 (max 7.8), lock
+       p99 0.034 (max 2.0), lwlock negligible. Aurora population; a stock pg_wait_sampling estimate is unmeasured.
+       The argument for the shape, stated once for all eight: the fraction is backend-seconds waiting per wall
+       second, so 1.0 is ONE backend waiting on this
        thing continuously for the whole window — the natural critical line for a rollup and for the standouts
        that are its dominant members. Concerning is a fifth of a backend (0.20) for the rollups: PostgreSQL
        grants heavyweight locks FIFO with no timeout by default, so a fifth of a backend permanently queued on
@@ -134,14 +145,18 @@ public static partial class PgTargetScorer
     public const double WaitRollupConcerning = 0.20;
     public const double WaitRollupCritical = 1.0;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_wait_stats before the next release. IO is the
-       one type a healthy server legitimately spends time in (reading is what a database does), so its
+    /* measured: 0.40 ≈ p99 and 2.0 ≈ p99.9 of 5-minute buckets of IO-type waiting (ms waited per second observed)
+       over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 — io p50 0.012, p90 0.077,
+       p99 0.46, maximum 3.9; buckets at or above 0.40: fleet p90 2.4 %, worst 24 %. Aurora population (Aurora
+       storage; a stock local-disk server is a different population and its sampled estimate is unmeasured). IO is
+       the one type a healthy server legitimately spends time in (reading is what a database does), so its
        concerning bar sits at twice the others (0.40) and its critical at two full backends (2.0): a server
        that keeps two backends' worth of time in I/O waits continuously is I/O-bound by any definition. */
     public const double WaitIoConcerning = 0.40;
     public const double WaitIoCritical = 2.0;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_wait_stats before the next release. The four
+    /* unmeasured: chosen, not measured — calibrate against pg_wait_stats before the next release; the 2026-09-19
+       calibration aggregated by TYPE and did not read per-event fractions, so these two stay a judgment. The four
        standouts are each ONE event, and a single event holding 0.15 of a backend continuously is already a
        named cause (Lock:relation — a table or index another session holds; LWLock:WALWrite — every commit
        queued behind the WAL writer; IO:WALSync — fsync on the WAL segment, the durability cost paid per
@@ -159,11 +174,11 @@ public static partial class PgTargetScorer
     /// </summary>
     private static readonly Dictionary<string, (double Concerning, double Critical)> s_waitBars = new(StringComparer.Ordinal)
     {
-        /* unmeasured: WaitRollupConcerning / WaitRollupCritical (see the constants). */
+        /* measured (Aurora, 2026-09-19): WaitRollupConcerning / WaitRollupCritical (see the constants). */
         [PgTargetFactKeys.WaitKey("Lock", null)] = (WaitRollupConcerning, WaitRollupCritical),
         [PgTargetFactKeys.WaitKey("LWLock", null)] = (WaitRollupConcerning, WaitRollupCritical),
         [PgTargetFactKeys.WaitKey("IPC", null)] = (WaitRollupConcerning, WaitRollupCritical),
-        /* unmeasured: WaitIoConcerning / WaitIoCritical (see the constants). */
+        /* measured (Aurora, 2026-09-19): WaitIoConcerning / WaitIoCritical (see the constants). */
         [PgTargetFactKeys.WaitKey("IO", null)] = (WaitIoConcerning, WaitIoCritical),
         /* unmeasured: WaitStandoutConcerning / WaitStandoutCritical (see the constants). */
         [PgTargetFactKeys.WaitKey("Lock", "relation")] = (WaitStandoutConcerning, WaitStandoutCritical),
@@ -181,8 +196,9 @@ public static partial class PgTargetScorer
     /// The fraction graded through the shared formula: 0 for a key outside the vocabulary, 0 when the wait
     /// source observed no time, 0 for a sampled fact under <see cref="WaitSampledMinimumSamples"/>, 0 for a
     /// rollup whose named standout fired (the class remarks), 0 below the concerning bar (not fired), 0.5 at
-    /// it, 1.0 at critical. Every graded fact is stamped <c>threshold_lineage = 0</c> — every bar here is
-    /// unmeasured.
+    /// it, 1.0 at critical. Every graded fact is stamped: <c>threshold_lineage = 1</c> for an Aurora rollup graded
+    /// on its measured fraction bars; 0 for a standout (per-event bars unmeasured), for a rollup that yielded on
+    /// the standout bar, and for any sampled fact (the stock estimate is another population, class remarks).
     /// </summary>
     private static partial double ScoreWaitFact(Fact fact)
     {
@@ -197,7 +213,8 @@ public static partial class PgTargetScorer
             return 0.0;
 
         /* unmeasured: the standout bar, WaitStandoutConcerning (see the constant) — a rollup whose named standout
-           is itself a finding yields the story to it (class remarks: one wait is graded once). */
+           is itself a finding yields the story to it (class remarks: one wait is graded once). The number that
+           decided here is the unmeasured standout bar, so the yielded rollup says 0. */
         if (fact.Metadata.GetValueOrDefault(WaitIsStandoutKey) <= 0
             && fact.Metadata.GetValueOrDefault(WaitMaxStandoutFractionKey) >= WaitStandoutConcerning)
         {
@@ -205,10 +222,13 @@ public static partial class PgTargetScorer
             return 0.0;
         }
 
-        /* unmeasured: the fraction ramp (see the constants behind s_waitBars); the fact says so for
-           get_analysis_facts. Below concerning the fact scores 0, not the shared formula's fraction — see the
-           class remarks on what "fired" means for a PostgreSQL wait. */
-        fact.Metadata["threshold_lineage"] = 0;
+        /* The fraction ramp (see the constants behind s_waitBars): the rollup bars are measured on the Aurora
+           population (2026-09-19), the standout bars unmeasured; a sampled fact is the stock estimate the
+           calibration did not read. The fact says which for get_analysis_facts. Below concerning the fact scores
+           0, not the shared formula's fraction — see the class remarks on what "fired" means for a PostgreSQL wait. */
+        var isMeasuredRollup = fact.Metadata.GetValueOrDefault(WaitIsStandoutKey) <= 0
+            && fact.Metadata.GetValueOrDefault(WaitIsSampledKey) <= 0;
+        fact.Metadata["threshold_lineage"] = isMeasuredRollup ? 1 : 0;
         if (fact.Value < bars.Value.Concerning) return 0.0;
         return FactScorer.ApplyThresholdFormula(fact.Value, bars.Value.Concerning, bars.Value.Critical);
     }

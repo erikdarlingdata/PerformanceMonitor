@@ -16,9 +16,12 @@ namespace PerformanceMonitor.Analysis;
 /// §3.3, doctrine [D3]: workload-triggered maintenance is the named failure class). The wraparound and xmin
 /// bars are the SAME symbols the Tier-0 alert evaluator grades on (D9) — <see cref="PostgresOutagePredictorThresholds"/>,
 /// engine-defined lineage, referenced, never retyped; a source pin holds that neither file carries the
-/// other's literal. Everything ELSE numeric in this file is either the engine's own per-table trigger line
-/// (engine-defined) or marked unmeasured, and a fact graded on an unmeasured bar carries
-/// <c>threshold_lineage = 0</c> so <c>get_analysis_facts</c> shows it.
+/// other's literal. Everything ELSE numeric in this file is the engine's own per-table trigger line
+/// (engine-defined), a backlog bar the #3691 fleet calibration measured on 2026-09-19 (14 days × 50 Aurora
+/// PostgreSQL clusters of the dogfood fleet, hourly <c>pg_autovacuum_stats</c> — the constants carry their
+/// percentiles; the quantity is engine-neutral, the stock-PostgreSQL population is not yet measured), or a
+/// co-fire boost still marked unmeasured. The backlog fact carries <c>threshold_lineage = 1</c> so
+/// <c>get_analysis_facts</c> shows that every bar it was graded on is measured or engine-defined.
 ///
 /// <para><b>Metadata contract with the collector</b> (<c>PgTargetFactCollector.Vacuum.cs</c>): the keys below
 /// are the whole interface between the read and the grade, and the advice partial reads the same names. A
@@ -37,8 +40,11 @@ public static partial class PgTargetScorer
     /// runs it at hours), so a table still past its line after three hourly captures has been offered to
     /// the launcher a hundred-odd times and not been cleared — either a vacuum on it takes longer than an
     /// hour, or the workers never reached it, or what it vacuumed could not be removed. All three are
-    /// findings. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate against
-    /// <c>pg_autovacuum_stats</c> before the next release. Consequence a caller should know: an
+    /// findings. Lineage: <b>measured</b> — ≈ the fleet p90 of each server's longest consecutive run of hourly
+    /// samples past the line, over 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19
+    /// (median longest run 1 h, fleet p90 3 h, max 8 h; hours with any table past its line: median 2.1 %, max
+    /// 21.5 %). Three sits at the top of routine — the WARNING shape. Measured on Aurora; the stock-PostgreSQL
+    /// population is not yet measured. Consequence a caller should know: an
     /// <c>hours_back</c> below this cannot produce the fact at all — the metadata's
     /// <c>samples_in_window</c> says how many the window held.
     /// </summary>
@@ -49,8 +55,11 @@ public static partial class PgTargetScorer
     /// The CONCERNING bar is engine-defined (ratio 1.0 = <c>n_dead_tup</c> equals the table's
     /// <c>autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × n_live_tup</c>, reloptions honoured
     /// — past it and not clearing is definitionally starvation, not opinion); this critical multiple is
-    /// <b>unmeasured</b> — chosen, not measured; calibrate against <c>pg_autovacuum_stats</c> before the next
-    /// release. A fact graded through it carries <c>threshold_lineage = 0</c>.
+    /// <b>measured</b> — ≈ p99.4 of per-server hourly maximum backlog ratios over 14 days × 50 Aurora PostgreSQL
+    /// clusters of the dogfood fleet, 2026-09-19 (hours at or above 10×: at most 0.6 % on any cluster; per-server
+    /// p50 of the hourly max 0.92 — tables live just under their own line, which is the engine working — p99
+    /// median 1.0, fleet p90 of p99 2.2, one table at 350×). Measured on Aurora; the stock-PostgreSQL
+    /// population is not yet measured. A fact graded through it carries <c>threshold_lineage = 1</c>.
     /// </summary>
     public const double BacklogCriticalRatio = 10.0;
 
@@ -91,8 +100,10 @@ public static partial class PgTargetScorer
     /// <summary>
     /// How many tables persistently past their line reads as the WORKERS being the bottleneck rather than one
     /// table's shape — the amplifier that redirects the advice from per-table reloptions to
-    /// <c>autovacuum_max_workers</c>. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate against
-    /// <c>pg_autovacuum_stats</c> before the next release. The stock worker count is three, so five tables
+    /// <c>autovacuum_max_workers</c>. Lineage: <b>measured</b> — above the fleet maximum of tables past their
+    /// line at once (3) over 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19; five was
+    /// never reached, so the amplifier sits in the measured empty interval. Measured on Aurora; the
+    /// stock-PostgreSQL population is not yet measured. The stock worker count is three, so five tables
     /// each holding a worker for over an hour is past what the default pool can rotate through.
     /// </summary>
     public const int BacklogManyTables = 5;
@@ -178,9 +189,10 @@ public static partial class PgTargetScorer
             return 0.0;
 
         /* Concerning = 1.0 is engine-defined: the table's own autovacuum trigger line (threshold +
-           scale_factor × live tuples, reloptions honoured by the collector). Critical is the unmeasured
-           multiple above — so the fact carries the lineage flag. */
-        fact.Metadata["threshold_lineage"] = 0;
+           scale_factor × live tuples, reloptions honoured by the collector). Critical is the measured multiple
+           above (2026-09-19), as is the persistence gate — so the fact carries threshold_lineage = 1: every bar
+           it was graded on is engine-defined or measured. */
+        fact.Metadata["threshold_lineage"] = 1;
         return FactScorer.ApplyThresholdFormula(ratio, 1.0, BacklogCriticalRatio);
     }
 
@@ -349,7 +361,8 @@ public static partial class PgTargetScorer
         new()
         {
             Description = "Many tables are persistently past their line — the worker pool, not this table's shape, is the bottleneck",
-            /* unmeasured: BacklogManyTables above — chosen, not measured. */
+            /* The gate is BacklogManyTables above (measured, 2026-09-19); the boost itself is unmeasured: chosen,
+               not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var f)
                 && f.Metadata.GetValueOrDefault(BacklogTablesKey) >= BacklogManyTables,

@@ -132,6 +132,9 @@ public sealed class RepoFileAdoptionTests
         "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
         "PgLoggingCollectorOffTests.cs",
+        /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
+           is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
+        "PgTargetMeasuredLineageTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",

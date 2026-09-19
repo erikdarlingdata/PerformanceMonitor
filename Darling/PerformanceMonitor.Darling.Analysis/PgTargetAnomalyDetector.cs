@@ -42,8 +42,13 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// the ramp and the extremity escape #3584 built without knowing the engine — the membership that routes them
 /// there is <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c>. The ratio families carry <c>ratio</c>, <c>is_new</c>
 /// and <c>fallback_exceedance</c> and are graded by <c>PgTargetScorer.ScoreRatioAnomaly</c>. Every fact also carries
-/// <c>threshold_lineage = 0</c>: the PostgreSQL floors and bars in <c>AnomalyThresholds</c> are unmeasured tonight
-/// (each names its calibrating read), and <c>get_analysis_facts</c> should say so.</para>
+/// <c>threshold_lineage</c>, the verdict on the PostgreSQL floors and bars in <c>AnomalyThresholds</c> the fact was
+/// gated on: 1 when every one of them is fleet-measured (the #3691 calibration of 2026-09-19 — TPS floor and
+/// fallback, CPU floor and fallback), 0 when at least one is still a chosen number (the session COUNT floors, which
+/// are unmeasured in count terms; the ratio families' firing multiple <c>PgRatioAnomalyThreshold</c> and the
+/// wait profile's borrowed heavy-tail cutoff, so the deadlock-rate and wait-profile anomalies stay at 0 even though
+/// their own floors are now measured). Each constant names its lineage, and <c>get_analysis_facts</c> shows the
+/// flag.</para>
 ///
 /// <para><b>A known, deferred residue, copied rather than fixed (#3538 A8).</b> Like every SQL Server z-detector,
 /// the window statistic is the PEAK per-collection value and the baseline bucket is a distribution of PER-SAMPLE
@@ -306,7 +311,8 @@ LIMIT 6";
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgTps), PgTpsFloor, PgTpsFallback, SigmaDisplayCap);
             if (!decision.Fire) return;
 
-            var metadata = ZScoreMetadata(baseline, decision, tpsSamples);
+            /* measured: PgTpsFloor / PgTpsFallback carry the 2026-09-19 fleet lineage (AnomalyThresholds). */
+            var metadata = ZScoreMetadata(baseline, decision, tpsSamples, barsMeasured: true);
             metadata["peak_tps"] = peakTps;
             metadata["avg_tps"] = avgTps;
 
@@ -329,7 +335,9 @@ LIMIT 6";
     /// <see cref="PgTargetFactKeys.AnomalySessionSpike"/>: the window's peak capture session count against the
     /// <c>pg_session_count</c> bucket. The floors are COUNTS with unmeasured lineage (a fraction of
     /// <c>max_connections</c> is meaningless as a constant, and this detector cannot see the config fact — it has
-    /// the context, not the fact set); the ceiling-aware arm is the regular <c>PG_CONNECTION_SATURATION</c> fact,
+    /// the context, not the fact set), and they stay unmeasured after the 2026-09-19 calibration, which read
+    /// sessions as a fraction of each server's ceiling and not as counts — so <c>threshold_lineage</c> stays 0 here;
+    /// the ceiling-aware arm is the regular <c>PG_CONNECTION_SATURATION</c> fact,
     /// which the reconciler folds this anomaly into and which is the never-blind arm on a young store, so the
     /// fallback bar here is deliberately high enough not to be that finding twice.
     /// </summary>
@@ -407,7 +415,8 @@ LIMIT 6";
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpu), PgCpuFloorPct, PgCpuFallbackPct, SigmaDisplayCap);
             if (!decision.Fire) return;
 
-            var metadata = ZScoreMetadata(baseline, decision, windowSamples);
+            /* measured: PgCpuFloorPct / PgCpuFallbackPct carry the 2026-09-19 fleet lineage (AnomalyThresholds). */
+            var metadata = ZScoreMetadata(baseline, decision, windowSamples, barsMeasured: true);
             metadata["peak_capacity_pct"] = peakCapacity;
             metadata["avg_capacity_pct"] = avgCapacity;
             metadata["peak_time_ticks"] = peakTime?.Ticks ?? 0;
@@ -494,6 +503,8 @@ LIMIT 6";
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = PgRatioAnomalyThreshold,
                 ["top_database_count"] = topCount,
+                /* 0, not 1: the floor (1/h) and the fallback (the measured alert tier) are measured, but the firing
+                   multiple PgRatioAnomalyThreshold is still a chosen number — one unmeasured bar keeps the flag at 0. */
                 ["threshold_lineage"] = 0,
             };
             AddBaselineContext(metadata, baseline);
@@ -520,7 +531,8 @@ LIMIT 6";
     /// wait-profile detector with the table swapped. Robust bucket: modified z at the heavy-tail cutoff
     /// (<see cref="AnomalyThresholds.HeavyTailModifiedZThreshold"/> — the SQL Server fleet's calibrated 5.0, used
     /// by reference as the shared robust-statistic cutoff; the PostgreSQL distribution has not been read, so the
-    /// fact still carries <c>threshold_lineage = 0</c>) AND the magnitude bar; classical bucket: the ratio at
+    /// fact still carries <c>threshold_lineage = 0</c> although the magnitude bar itself was placed against the
+    /// 2026-09-19 fleet read — see <see cref="AnomalyThresholds.PgWaitProfileFallbackMsPerSec"/>) AND the magnitude bar; classical bucket: the ratio at
     /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>; untrustworthy: the bar alone, <c>is_new</c>, no
     /// sentinel. Top contributors ride as <c>contrib_Type:event</c>. The stock sampled estimate is never read here
     /// (class summary) and the fact therefore never carries <c>is_sampled</c>; a sampled arm, when it comes, is
@@ -589,6 +601,8 @@ LIMIT 6";
                 ["is_new"] = isNew ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = isNew ? 0 : (baseline.EffectiveRobustSigma > 0 ? HeavyTailModifiedZThreshold : PgRatioAnomalyThreshold),
+                /* 0, not 1: the magnitude bar is measured (2026-09-19) but the heavy-tail cutoff is the SQL Server
+                   fleet's and the ratio multiple is chosen — one unmeasured bar keeps the flag at 0. */
                 ["threshold_lineage"] = 0,
             };
             AddBaselineContext(metadata, baseline);
@@ -657,8 +671,11 @@ LIMIT 6";
     }
 
     /// <summary>The z-family metadata the shared scorer grades from (<c>FactScorer.ScoreAnomalyFact</c> /
-    /// <c>IsExtremeAnomaly</c>), key for key what <see cref="PgAnomalyDetector"/> writes, plus the lineage stamp.</summary>
-    private static Dictionary<string, double> ZScoreMetadata(BaselineBucket baseline, AnomalyGate.ZDecision decision, long windowSamples)
+    /// <c>IsExtremeAnomaly</c>), key for key what <see cref="PgAnomalyDetector"/> writes, plus the lineage stamp:
+    /// <paramref name="barsMeasured"/> is the caller's verdict on ITS floor and fallback pair in
+    /// <c>AnomalyThresholds</c> (TPS and CPU measured 2026-09-19; the session counts not), stated at the call so the
+    /// stamp sits beside the constants it describes.</summary>
+    private static Dictionary<string, double> ZScoreMetadata(BaselineBucket baseline, AnomalyGate.ZDecision decision, long windowSamples, bool barsMeasured = false)
     {
         var metadata = new Dictionary<string, double>
         {
@@ -670,7 +687,7 @@ LIMIT 6";
             ["fallback_exceedance"] = decision.FallbackExceedance,
             ["baseline_samples"] = baseline.SampleCount,
             ["window_samples"] = windowSamples,
-            ["threshold_lineage"] = 0,
+            ["threshold_lineage"] = barsMeasured ? 1 : 0,
         };
         AddBaselineContext(metadata, baseline);
         return metadata;

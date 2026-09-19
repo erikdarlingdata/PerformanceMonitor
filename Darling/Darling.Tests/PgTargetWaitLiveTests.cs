@@ -252,7 +252,11 @@ public sealed class PgTargetWaitLiveTests
                 foreach (var fact in shown)
                 {
                     var metadata = fact.GetProperty("metadata");
-                    Assert.Equal(0, metadata.GetProperty("threshold_lineage").GetDouble());
+                    /* #3691 lineage: only the LWLock rollup was graded on its own (fleet-measured) type bars — the
+                       Lock and IO rollups yielded to a standout past 0.15 (decided on the unmeasured standout bar)
+                       and the four standouts grade on the unmeasured per-event bars, so they say 0. */
+                    var expectedLineage = fact.GetProperty("key").GetString() == PgTargetFactKeys.WaitKey("LWLock", null) ? 1 : 0;
+                    Assert.Equal(expectedLineage, metadata.GetProperty("threshold_lineage").GetDouble());
                     Assert.False(metadata.TryGetProperty(PgTargetScorer.WaitIsSampledKey, out _), fact.GetProperty("key").GetString());
                 }
             }
@@ -265,6 +269,8 @@ public sealed class PgTargetWaitLiveTests
                 {
                     var metadata = fact.GetProperty("metadata");
                     Assert.Equal(1, metadata.GetProperty(PgTargetScorer.WaitIsSampledKey).GetDouble());
+                    /* A stock sampled estimate is another instrument than the Aurora population measured 2026-09-19. */
+                    Assert.Equal(0, metadata.GetProperty("threshold_lineage").GetDouble());
                     Assert.Equal(10, metadata.GetProperty(PgTargetScorer.WaitEstimateResolutionMsKey).GetDouble());
                 }
             }

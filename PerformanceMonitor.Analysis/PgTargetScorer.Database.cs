@@ -28,7 +28,11 @@ namespace PerformanceMonitor.Analysis;
 /// <c>PostgresOutagePredictorThresholds</c> for why); <c>PgTargetTempTests</c> pins the two pairs equal, the
 /// way <c>FactScorerTests</c> pins the SQL Server <c>DEADLOCKS</c> arm to the same constants. This is not a
 /// SQL Server constant reused by value: it is the alerting layer's measured tier, which PostgreSQL targets
-/// are already banded on.</para>
+/// are already banded on. The #3691 fleet calibration (2026-09-19) then read the PostgreSQL side directly —
+/// 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet: 40 of 50 had zero deadlocks in 14 days, the
+/// other 10 had 1 – 4 in total with at most 2 in any hour, so both tiers sit in that population's measured
+/// empty interval and the first-occurrence anomaly (<c>ANOMALY_PG_DEADLOCK_RATE</c>, floor 1/h) is the
+/// detector that fires there. Measured on Aurora; the stock-PostgreSQL population is not yet measured.</para>
 ///
 /// <para><b>What the alert's <c>pg_count_threshold</c> is NOT.</b> The PostgreSQL deadlock ALERT counts
 /// <c>pg_deadlocks</c> rows with a threshold of 1 — a different instrument on a different source (the log
@@ -63,23 +67,30 @@ public static partial class PgTargetScorer
 
     /* measured: p99.94 of deadlocks per server-hour over 14 days × 43 servers of the dogfood fleet (#3368; 2,722
        deadlocks over 14,448 server-hours) — ServerHealthThresholds.DeadlockWarnPerHourDefault, repeated here because
-       this assembly references nothing; PgTargetTempTests pins the pair equal. */
+       this assembly references nothing; PgTargetTempTests pins the pair equal. Re-read on the PostgreSQL side over
+       14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19: above the fleet maximum of 2
+       deadlocks in any hour (40 clusters had none; 10 had 1 – 4 in 14 days) — the measured empty interval. */
     public const double DeadlockWarnPerHour = 5.0;
 
     /* measured: the same 14-day distribution — bimodal, the routine mode topping out at 15 and the next observation
        at 90 — with the critical line placed inside the empty interval [16, 89]; ServerHealthThresholds.
-       DeadlockCriticalPerHourDefault, repeated and pinned equal for the same reason. */
+       DeadlockCriticalPerHourDefault, repeated and pinned equal for the same reason. On the 50 Aurora PostgreSQL
+       clusters read 2026-09-19 the line was never approached (fleet maximum 2 in any hour). */
     public const double DeadlockCriticalPerHour = 20.0;
 
     /// <summary>
     /// <c>PG_DEADLOCK_RATE</c> through the shared formula on the alert band's two tiers; <c>PG_TPS</c> and any
-    /// other <c>pg_database</c> key are context (0). No <c>threshold_lineage</c> stamp: the bars are measured,
-    /// and the stamp marks an unmeasured one.
+    /// other <c>pg_database</c> key are context (0). Stamps <c>threshold_lineage = 1</c>: both bars are measured
+    /// (the alert band's #3368 read and the 2026-09-19 PostgreSQL-side re-read). Since #3691 the stamp is a verdict
+    /// wherever a family states lineage — 0 means at least one chosen bar decided, 1 means every bar that decided is
+    /// measured or engine-defined — so a reader of <c>get_analysis_facts</c> sees the verdict on this fact instead of
+    /// inferring it from an absent key. Context facts (<c>PG_TPS</c>) are not graded and carry no stamp.
     /// </summary>
     private static partial double ScoreDatabaseFact(Fact fact)
     {
         if (fact.Key != PgTargetFactKeys.DeadlockRate) return 0.0;
 
+        fact.Metadata["threshold_lineage"] = 1;
         /* measured: DeadlockWarnPerHour / DeadlockCriticalPerHour (see the constants). Value is per observed hour. */
         return FactScorer.ApplyThresholdFormula(fact.Value, DeadlockWarnPerHour, DeadlockCriticalPerHour);
     }

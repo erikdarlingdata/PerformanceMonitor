@@ -33,10 +33,15 @@ namespace PerformanceMonitor.Analysis;
 /// <para><b>Lineage.</b> The two bars are the fleet card's own CPU ladder on the same quantity
 /// (<c>ServerHealthThresholds.CpuWarningPercent</c> / <c>CpuCriticalPercent</c> — repeated here because this
 /// assembly references nothing; <c>PgTargetAnomalyTests</c> pins each pair equal), so the card, the High CPU alert
-/// and this pass cannot disagree about the colour of one minute. They are UNMEASURED all the same: that ladder is
-/// stated against a quantity, not read off a fleet distribution, and every graded fact carries
-/// <c>threshold_lineage = 0</c>; the calibrating read is the per-server p95 of <c>acu_utilization_percent</c> over
-/// <c>pg_cpu_utilization</c>.</para>
+/// and this pass cannot disagree about the colour of one minute. They are also MEASURED, since the #3691 fleet
+/// calibration of 2026-09-19 read <c>acu_utilization_percent</c> over <c>pg_cpu_utilization</c> for 14 days × 50
+/// Aurora PostgreSQL clusters of the dogfood fleet (5-minute rates): 80 % sits at ≈ p99.8 and 95 % at ≈ p99.9 of
+/// the fleet's samples (per-server p50 median 6.3 %; p99 median 49 %, fleet p90 of p99 88 %; the ceiling itself is
+/// touched briefly on at least three quarters of the clusters — Serverless v2 scaling to its cap). The same read confirmed
+/// the rule above: the raw <c>cpu_percent</c> p99 was 100 on at least a tenth of the clusters while the capacity in use
+/// idled at 0.5 – 4.5 of 8 – 128 configured ACUs. The population is Aurora Serverless v2 — the only engine that
+/// emits this fact — so the measurement covers the fact's whole population, and every graded fact carries
+/// <c>threshold_lineage = 1</c>.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
@@ -59,9 +64,11 @@ public static partial class PgTargetScorer
     /// <summary>
     /// Percent of the configured capacity ceiling at which the instance is CONCERNING (0.5) and CRITICAL (1.0), and
     /// — the warning bar — the line the load-family anomaly confirmer reads (<c>PgTargetScorer.Anomaly.cs</c>).
-    /// unmeasured: the fleet card's CPU ladder repeated on the same quantity (see the class summary), chosen, not
-    /// measured — calibrate against pg_cpu_utilization before the next release; the fact carries
-    /// threshold_lineage = 0.
+    /// measured: 80 ≈ p99.8 and 95 ≈ p99.9 of 5-minute acu_utilization_percent samples over 14 days × 50 Aurora
+    /// PostgreSQL clusters of the dogfood fleet, 2026-09-19 (pg_cpu_utilization; samples at or above 80: median
+    /// cluster 0.2 %, worst 3.6 %; at or above 95: median 0.1 %, worst 1.2 %). The bars are also the fleet card's
+    /// CPU ladder repeated on the same quantity (see the class summary). Aurora Serverless v2 population, which is
+    /// the fact's whole population; the fact carries threshold_lineage = 1.
     /// </summary>
     public const double CpuCapacityWarningPercent = 80.0;
     public const double CpuCapacityCriticalPercent = 95.0;
@@ -69,18 +76,19 @@ public static partial class PgTargetScorer
     /// <summary>
     /// Layer-1 base severity for the <c>pg_cpu</c> source: the capacity percent graded between the two bars above
     /// and ZERO below the warning bar; a fact without a capacity reading is context (0) whatever its raw percent
-    /// says. Stamps <c>threshold_lineage = 0</c> on every fact it sees, graded or not — the bar that decided is
-    /// unmeasured either way.
+    /// says. Stamps <c>threshold_lineage = 1</c> on every fact it sees, graded or not — the bar that decided is
+    /// fleet-measured either way (2026-09-19), and the stamp is on every fact so a reader never infers it from
+    /// absence.
     /// </summary>
     private static partial double ScoreCpuFact(Fact fact)
     {
         if (fact.Key != PgTargetFactKeys.CpuPercent) return 0.0;
 
-        fact.Metadata["threshold_lineage"] = 0;
+        fact.Metadata["threshold_lineage"] = 1;
         if (fact.Metadata.GetValueOrDefault(CpuCapacityMeasuredKey) < 1 || fact.Value <= 0)
             return 0.0;
 
-        /* unmeasured: CpuCapacityWarningPercent / CpuCapacityCriticalPercent (see the constants); below the warning
+        /* measured: CpuCapacityWarningPercent / CpuCapacityCriticalPercent (see the constants, 2026-09-19); below the warning
            bar the fact is context, never a fraction of the bar — see the class summary on self-gating. */
         if (fact.Value < CpuCapacityWarningPercent)
             return 0.0;

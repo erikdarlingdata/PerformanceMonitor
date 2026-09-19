@@ -30,8 +30,8 @@ namespace Darling.Tests;
 /// in its place when the monitoring login could not see session state.
 ///
 /// <para><b>What is pinned.</b> The scorer's bands — 0.79 scores ZERO (not a fraction of the bar: a fired saturation
-/// fact must mean the pool is near its cliff), 0.8 scores 0.5, 0.9 scores 1.0 — with <c>threshold_lineage = 0</c>
-/// on every graded fact; the permissions advisory at the story line, only past the majority; the two amplifiers
+/// fact must mean the pool is near its cliff), 0.8 scores 0.5, 0.9 scores 1.0 — with <c>threshold_lineage = 1</c>
+/// on every graded fact (engine-defined ceiling, bands measured against it in the #3691 calibration); the permissions advisory at the story line, only past the majority; the two amplifiers
 /// (the fact's own parked-connections share; a fired <c>PG_CPU_PERCENT</c>) and their inertness through the real
 /// <see cref="FactScorer.ScoreAll"/> while the CPU family is a stub; the advice stating the division with all
 /// three numbers (<c>90 / (100 − 3) = 93%</c>), the state breakdown of the peak capture, both levers with their
@@ -118,7 +118,7 @@ public sealed class PgTargetSessionsTests
     [InlineData(0.85, 0.75)]    // between: 0.5 + 0.5 × (0.85 − 0.8) / (0.9 − 0.8)
     [InlineData(0.90, 1.0)]     // critical
     [InlineData(0.97, 1.0)]     // past it: pinned at 1.0, the amplifiers do the rest
-    public void ScoreSessionsFact_IsZeroBelowTheWarningBand_HalfAtIt_FullAtCritical_AndStampsTheUnmeasuredLineage(double ratio, double expected)
+    public void ScoreSessionsFact_IsZeroBelowTheWarningBand_HalfAtIt_FullAtCritical_AndStampsTheLineage(double ratio, double expected)
     {
         /* The ratio is planted EXACTLY (not derived from a peak, so 0.8 is 0.8 and not 77.6 / 97's last bit):
            the band edges are the thing under test. */
@@ -127,8 +127,9 @@ public sealed class PgTargetSessionsTests
         fact.Metadata["saturation_ratio"] = ratio;
 
         Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 9);
-        /* The number that decided is unmeasured whichever side of it the fact fell — the stamp lands on the 0.79 too. */
-        Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+        /* The number that decided — the engine's ceiling, bands measured against it (2026-09-19) — is stated
+           whichever side of it the fact fell: the stamp lands on the 0.79 too. */
+        Assert.Equal(1, fact.Metadata["threshold_lineage"]);
 
         Assert.Equal(0.8, PgTargetScorer.ConnectionSaturationWarning);
         Assert.Equal(0.9, PgTargetScorer.ConnectionSaturationCritical);
@@ -278,7 +279,7 @@ public sealed class PgTargetSessionsTests
         Assert.Contains("ratio reads a few points high, the safe direction for a cliff", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("seen over 48 captures that stored session rows", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("the newest capture in the window had 60 sessions", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("pending a restart on this server", block.Investigation, StringComparison.Ordinal);
 
         /* Both levers, each with its counter-objective, and the parked-connections lever first because the
@@ -349,7 +350,7 @@ public sealed class PgTargetSessionsTests
            read. The only digits are the two bands it names as a judgment. */
         Assert.StartsWith("Connections peaked near the usable ceiling", saturation!.Headline, StringComparison.Ordinal);
         Assert.Contains("max_connections minus superuser_reserved_connections", saturation.Investigation, StringComparison.Ordinal);
-        Assert.Contains("80% / 90% bands on the ratio are an unmeasured judgment", saturation.Investigation, StringComparison.Ordinal);
+        Assert.Contains("80% / 90% bands on the ratio sit far above anything the measured fleet reached", saturation.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain(" of ", saturation.Headline, StringComparison.Ordinal);
         Assert.Contains("pgbouncer", saturation.Remediation, StringComparison.Ordinal);
         Assert.Contains("takes a restart", saturation.Remediation, StringComparison.Ordinal);
@@ -533,7 +534,7 @@ public sealed class PgTargetSessionsTests
             new FactScorer().ScoreAll(busyFacts);
             Assert.Equal(1.0, saturation.BaseSeverity, precision: 9);
             Assert.Equal(1.25, saturation.Severity, precision: 9);
-            Assert.Equal(0, saturation.Metadata["threshold_lineage"]);
+            Assert.Equal(1, saturation.Metadata["threshold_lineage"]);
 
             /* ── the blind server: the advisory, and NO saturation fact. */
             var blindContext = new AnalysisContext
@@ -613,7 +614,7 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(1, root.GetProperty("shown").GetInt32());
                 var fact = Assert.Single(root.GetProperty("facts").EnumerateArray());
                 Assert.Equal(PgTargetFactKeys.ConnectionSaturation, fact.GetProperty("key").GetString());
-                Assert.Equal(0, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
                 Assert.Equal(97, fact.GetProperty("metadata").GetProperty("usable_connections").GetDouble());
             }
 
