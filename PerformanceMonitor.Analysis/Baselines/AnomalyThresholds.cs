@@ -213,4 +213,26 @@ public static class AnomalyThresholds
     /// apart, so calibrate this one against the per-server ratio distribution over pg_database_stats and
     /// pg_wait_stats before the next release.</summary>
     public const double PgRatioAnomalyThreshold = 3.0;
+
+    /* ── lane 11 (#3691): the I/O read-latency z-detector (PgTargetAnomalyDetector.Io.cs). ──
+       Unlike the lane-9 block above these two are MEASURED — the #3691 calibration pass (measurements-3691.md §B1)
+       read hourly ms per data-file read over 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet,
+       2026-09-19 — and the detector stamps threshold_lineage = 1 on the facts it fires, with the population named
+       in PgTargetScorer.Io.cs: these are Aurora-storage shapes, and stock local-disk PostgreSQL is a different
+       population. */
+
+    /// <summary>Magnitude floor for the read-latency z-detector, milliseconds per read: under two milliseconds a
+    /// deviation is fast storage's jitter however many sigmas it reads. measured: the fleet's per-server p50 of
+    /// hourly ms per read is 1.0–10 ms with a median of 1.29 ms over 14 days × 50 Aurora PostgreSQL clusters of the
+    /// dogfood fleet, 2026-09-19 — two milliseconds sits above the median server's routine and below every
+    /// server's p99 (§B1).</summary>
+    public const double PgIoLatencyFloorMs = 2.0;              // ms per data-file read
+
+    /// <summary>Absolute-fallback bar for read latency on an untrustworthy baseline: twenty milliseconds, the
+    /// midpoint between the regular fact's measured WARNING (10 ms ≈ fleet p90 of per-server p99) and CRITICAL
+    /// (30 ms ≈ fleet max) bars in <c>PgTargetScorer.Io.cs</c> — so a young store's latency anomaly fires only on
+    /// a window the regular fact already grades as a finding, and folds into it, without being that finding
+    /// twice at the warning line. measured: derived from the two §B1 bars named, 14 days × 50 Aurora PostgreSQL
+    /// clusters of the dogfood fleet, 2026-09-19; <c>PgTargetIoTests</c> pins it strictly between them.</summary>
+    public const double PgIoLatencyFallbackMs = 20.0;          // ms per data-file read
 }

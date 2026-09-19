@@ -105,7 +105,10 @@ public static partial class PgTargetAdvice
             "leading wait will fire and the standard advice applies.");
 
     /// <summary>The composed block for an <c>ANOMALY_PG_*</c> root, or the family's static block when the fact
-    /// set does not carry the key (the <see cref="Static"/> path). Null for a key outside the five.</summary>
+    /// set does not carry the key (the <see cref="Static"/> path). Null for a key outside the six — the five v1
+    /// anomalies here and, since #3691 lane 11, <c>ANOMALY_PG_IO_LATENCY</c>, whose composer lives beside its
+    /// family in <c>PgTargetAdvice.Io.cs</c> (one delegating arm; the shared prefix routing sends every
+    /// <c>ANOMALY_PG_</c> key here, so the arm is the only way a v2 anomaly reaches its own prose).</summary>
     private static partial AdviceBlock? ComposeAnomaly(string key, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         switch (key)
@@ -134,6 +137,10 @@ public static partial class PgTargetAdvice
                 return factsByKey.TryGetValue(key, out var profile)
                     ? ComposeWaitProfileRatio(profile)
                     : s_waitProfileStatic;
+
+            /* v2 (#3691) lane 11: the I/O family's anomaly composes in its family file. */
+            case PgTargetFactKeys.AnomalyIoLatency:
+                return ComposeIoLatencyAnomaly(factsByKey);
 
             default:
                 return null;

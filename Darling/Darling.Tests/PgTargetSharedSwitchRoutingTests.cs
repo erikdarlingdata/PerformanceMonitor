@@ -370,8 +370,16 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.WaitKey("Lock", "transactionid")));
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(7)));
         /* v2 (#3691) stubs: null IS the delegation — the shared entry points answer exactly what the stub does (the
-           equality above), and no SQL Server composer claims the key. Each lane moves its own line to NotNull. */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.IoReadLatencyMs));        /* lane 11 */
+           equality above), and no SQL Server composer claims the key. Each lane moves its own line to NotNull.
+           Lane 11 (I/O latency) filled: both measured keys AND the family's anomaly compose — the anomaly through
+           the ANOMALY_PG_ prefix arm's one delegating case into PgTargetAdvice.Io.cs, never the SQL Server
+           "Anomalous spike" composer. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.IoReadLatencyMs));     /* lane 11 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.IoWriteLatencyMs));    /* lane 11 */
+        var pgIoAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyIoLatency);
+        Assert.NotNull(pgIoAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyIoLatency), pgIoAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgIoAnomaly!.Headline, StringComparison.Ordinal);
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ReplicationLag));         /* lane 12 */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));             /* lane 13 */
 

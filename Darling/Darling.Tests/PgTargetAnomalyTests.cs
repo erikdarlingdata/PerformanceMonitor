@@ -60,6 +60,8 @@ public sealed class PgTargetAnomalyTests
     private static readonly string[] s_pgMetricNames =
     [
         MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu,
+        /* v2 (#3691) lane 11: the I/O read-latency arm, filled. */
+        MetricNames.PgIoReadLatency,
     ];
 
     private static readonly (string Metric, string Table)[] s_metricTables =
@@ -69,14 +71,15 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgSessionCount, "pg_session_states"),
         (MetricNames.PgWaitMsPerSec, "pg_wait_stats"),
         (MetricNames.PgCpu, "pg_cpu_utilization"),
+        (MetricNames.PgIoReadLatency, "pg_io_stats"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
 
     [Fact]
-    public void TheFivePgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
+    public void TheSixPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
     {
-        Assert.Equal(5, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(6, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
         foreach (var metric in s_pgMetricNames)
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
@@ -103,16 +106,18 @@ public sealed class PgTargetAnomalyTests
     }
 
     /// <summary>
-    /// #3691 v2 plumbing: the three v2 baselines and detectors exist as REACHABLE, INERT stubs — the metric names
-    /// are declared and pg_-prefixed, the SQL Server provider has no arm for them, the PostgreSQL provider's arm
-    /// answers null until its lane lands (the same answer as "no arm", so the shared reader reports no baseline
-    /// rather than a bucket built from nothing), the root detector awaits each stub after the five v1 detectors,
-    /// and every stub file carries the exact marker the content briefs quote. The wave-2 name has no arm at all.
+    /// #3691 v2 plumbing: the v2 baselines and detectors exist as REACHABLE stubs until their lane lands — the metric
+    /// names are declared and pg_-prefixed, the SQL Server provider has no arm for them, an unfilled PostgreSQL arm
+    /// answers null (the same answer as "no arm", so the shared reader reports no baseline rather than a bucket built
+    /// from nothing), the root detector awaits each stub after the five v1 detectors, and every stub file carries
+    /// the exact marker the content briefs quote (a filled family keeps it, as v1's did). The wave-2 name has no arm
+    /// at all. Lane 11 (I/O read latency) has landed: its metric moved to <see cref="s_pgMetricNames"/> and out of
+    /// the inert loop; <c>PgTargetIoTests</c> pins the filled arm's shape.
     /// </summary>
     [Fact]
     public void TheV2BaselinesAndDetectors_AreReachableInertStubs_EachNamingItsLane()
     {
-        foreach (var metric in new[] { MetricNames.PgIoReadLatency, MetricNames.PgReplayLagBytes, MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
+        foreach (var metric in new[] { MetricNames.PgReplayLagBytes, MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
@@ -235,6 +240,8 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.CpuWindowSql,
         PgTargetAnomalyDetector.WaitRateWindowSql,
         PgTargetAnomalyDetector.WaitContribWindowSql,
+        /* v2 (#3691) lane 11 */
+        PgTargetAnomalyDetector.IoLatencyWindowSql,
     ];
 
     [Fact]
@@ -266,6 +273,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("FROM pg_cpu_utilization", PgTargetAnomalyDetector.CpuWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitContribWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_io_stats", PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
 
         /* The window reads share the fact reads' shapes. */
         Assert.Contains("stats_reset", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgTps)!, StringComparison.Ordinal);
@@ -568,7 +576,7 @@ public sealed class PgTargetAnomalyTests
             .Select(f => f.Name)
             .ToList();
         Assert.Equal(
-            new[] { "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgRatioAnomalyThreshold", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec" },
+            new[] { "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec" },
             pgConstants.Order(StringComparer.Ordinal).ToArray());
 
         var lines = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
@@ -592,6 +600,7 @@ public sealed class PgTargetAnomalyTests
         Assert.True(AnomalyThresholds.PgTpsFallback > AnomalyThresholds.PgTpsFloor);
         Assert.True(AnomalyThresholds.PgSessionCountFallback > AnomalyThresholds.PgSessionCountFloor);
         Assert.True(AnomalyThresholds.PgDeadlockRateFallbackPerHour > AnomalyThresholds.PgDeadlockRateFloorPerHour);
+        Assert.True(AnomalyThresholds.PgIoLatencyFallbackMs > AnomalyThresholds.PgIoLatencyFloorMs);
     }
 
     /* ───────────────────────── the advice ───────────────────────── */
