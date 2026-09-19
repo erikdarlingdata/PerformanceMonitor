@@ -204,6 +204,13 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// is built over the raw values. NULL on every pre-v61 row: "never recorded", which the seed reads as
     /// "no key can be rebuilt from this row". <see cref="DuckDbInitializer"/>'s v61 migration adds all four
     /// to existing databases.</para>
+    ///
+    /// <para>#3653 A7 / schema v62: <c>perfmon_stats.cntr_type</c> — the Windows performance-counter type id
+    /// the DMV reports for every row, so the store can say which perfmon rows are counts and which are levels
+    /// and the collector stops differencing gauges (a falling level read as a counter reset). INTEGER (the
+    /// DMV's type), nullable, trailing; NULL on every pre-v62 row is "type never recorded", which the readers
+    /// classify by the #3702 name proxy as they did before the rung. <see cref="DuckDbInitializer"/>'s v62
+    /// migration adds it to existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
@@ -218,6 +225,8 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "memory_grant_stats.sample_interval_seconds",
         "query_stats.statement_start_offset",
         "query_stats.statement_end_offset",
+        /* v62 (#3653 A7): the counter's DMV type, so gauges stop being differenced. Appended, nullable INTEGER. */
+        "perfmon_stats.cntr_type",
     };
 
     [Fact]

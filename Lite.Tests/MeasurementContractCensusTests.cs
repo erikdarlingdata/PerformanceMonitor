@@ -108,12 +108,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Left alone here.</description></item>
 /// <item><description><b>Gauges are never delta'd.</b> A perfmon counter whose <c>cntr_type</c> is a gauge
 /// (Total Server Memory (KB), Memory Grants Pending, Processes blocked…) is a level, and differencing it turns a
-/// falling level into a fake counter reset. <b>NOT CENSUS-ABLE</b>: the collector differences every counter
-/// it reads and the store does not hold <c>cntr_type</c>, so nothing in the tree can say which rows are
-/// gauges (#3653 A7's rung, the one un-landed-rung slot). <see cref="TheGaugeRule_WaitsOnTheCounterTypeRung"/>
-/// pins the fact the wait rests on — no <c>cntr_type</c> in the perfmon payload — so the day the rung lands
-/// this row goes red and demands the census rather than letting the rule stay a sentence. The
-/// <c>/sec</c>-suffix proxy the viewer item names is not pinned: that lane has not landed.</description></item>
+/// falling level into a fake counter reset. <b>PINNED here</b> since Darling V132 / Lite v62 stored the type
+/// (<see cref="TheGaugeRule_TheCollectorWritesNoDeltaForAGaugeType_AndEveryReaderClassifiesByTheStoredType"/>):
+/// the collector's payload carries <c>cntr_type</c>, its write branches on the one gauge set the read-side
+/// vocabulary declares (pinned equal across the assembly boundary in <c>PerfmonCounterTypeTests</c>), the
+/// delta call sits inside the non-gauge branch only, and every perfmon read that sums or projects a delta
+/// also selects the type. Until the rung this row pinned the ABSENCE of the column so the rung would red it
+/// and owe the census; the census is what replaced it. The <c>/sec</c>-suffix proxy is now the NULL-type
+/// fallback only, pinned as such in <c>DeltaSeriesShapingTests</c>.</description></item>
 /// <item><description><i>Not recoverable from the record.</i> The review numbered ten; the body names eight.
 /// Whoever holds the review's enumeration writes this slot; nothing is invented for it.</description></item>
 /// <item><description><i>Not recoverable from the record</i> — as above.</description></item>
@@ -720,35 +722,58 @@ public sealed class MeasurementContractCensusTests
             "the /sec-named counters are the population rule 6 speaks about; fewer than twenty means the list moved");
     }
 
-    /* ---------------- rule 8: gauges never delta'd (waits on the rung) ---------------- */
+    /* ---------------- rule 8: gauges never delta'd (the census, since the rung) ---------------- */
 
     /// <summary>
-    /// Rule 8 rests on a store fact and this pins the fact: the perfmon payload has NO <c>cntr_type</c>, so no
-    /// reader can tell a gauge from a counter and the rule cannot be censused. The collector differences
-    /// every counter it reads, gauge or not, and the default list carries both kinds by name — so the day a
-    /// rung adds <c>cntr_type</c>, this goes red and the census is owed, the exemption-rests-on-a-store-fact
-    /// idiom <see cref="DeltaFamilySeedingCensusTests"/> used for the query_stats offsets.
+    /// Rule 8, censused (V132 / v62, #3653 A7). Three facts, each of which the rule rests on: the perfmon payload
+    /// carries <c>cntr_type</c> as its LAST column (positional writers; an ALTER lands at the end); the collector's
+    /// one delta call sits inside the branch guarded by <c>IsGauge</c> and nowhere else, so a gauge row can
+    /// never reach the calculator (the value-level proof — a gauge row writes NULL/NULL and records no delta
+    /// call — is <c>PerfmonStatsCollectorDefinitionTests</c>); and every product SQL that sums or projects
+    /// <c>delta_cntr_value</c> off the perfmon family also selects <c>cntr_type</c>, so no reader is left
+    /// differencing a level it cannot recognise. The default list still carries both kinds by name — that is
+    /// why the type, not the name, is the classifier. Population floors keep a dead filter from passing.
     /// </summary>
     [Fact]
-    public void TheGaugeRule_WaitsOnTheCounterTypeRung()
+    public void TheGaugeRule_TheCollectorWritesNoDeltaForAGaugeType_AndEveryReaderClassifiesByTheStoredType()
     {
         var perfmon = CollectorCatalog.Find("perfmon_stats")!;
-        Assert.DoesNotContain(perfmon.PayloadColumns, c => c.Name.Contains("cntr_type", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("cntr_type", perfmon.PayloadColumns[^1].Name);
+        Assert.Equal(CollectorColumnType.Integer, perfmon.PayloadColumns[^1].Type);
 
-        /* Both kinds are collected under one delta call — rates by name, and levels the name does not mark. */
+        /* Both kinds are still collected under one counter list — rates by name, and levels the name does not
+           mark — which is exactly why a name cannot be the classifier. */
         var counters = PerfmonStatsCollector.DefaultCounters;
         Assert.True(counters.Count(c => c.EndsWith("/sec", StringComparison.Ordinal)) >= 20);
         Assert.True(counters.Count(c => !c.EndsWith("/sec", StringComparison.Ordinal)) >= 10);
-        /* One level and one rate, by name: Total Server Memory is a gauge (a level in KB) and Batch Requests/sec
-           is a bulk counter; the collector differences both with the same call. */
         Assert.Contains("Total Server Memory (KB)", counters);
         Assert.Contains("Memory Grants Pending", counters);
         Assert.Contains("Batch Requests/sec", counters);
 
+        /* The write: one delta call, inside the non-gauge branch. The branch is read structurally off the
+           stripped source — the `if (!IsGauge(` guard opens before the call and its block closes after it. */
         var writer = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile("PerformanceMonitor.Collectors/PerfmonStatsCollector.cs"));
         var payload = writer[writer.IndexOf("public override void WritePayload(", StringComparison.Ordinal)..];
         Assert.Single(Regex.Matches(payload, @"CalculateDeltaWithInterval\("));
-        Assert.DoesNotContain("cntr_type", writer, StringComparison.OrdinalIgnoreCase);
+        var guard = payload.IndexOf("if (!IsGauge(row.CntrType))", StringComparison.Ordinal);
+        var call = payload.IndexOf("CalculateDeltaWithInterval(", StringComparison.Ordinal);
+        Assert.True(guard >= 0, "the collector's WritePayload has no IsGauge guard — gauges are being differenced");
+        var guardBlock = CSharpSourceWalker.BraceBalanced(payload, payload.IndexOf('{', guard));
+        Assert.True(guard < call && call < guard + guardBlock.Length, "the delta call sits outside the IsGauge guard");
+        Assert.NotEmpty(PerfmonStatsCollector.GaugeCounterTypes);
+
+        /* The reads: every product SQL literal that aggregates or projects the perfmon delta selects the type
+           beside it. Population floor: the two trend reads per SKU plus the two latest-snapshot reads. */
+        var perfmonReads = SqlBodies()
+            .Where(b => b.Sql.Contains("perfmon_stats", StringComparison.Ordinal)
+                        && Regex.IsMatch(b.Sql, @"\bdelta_cntr_value\b")
+                        && Regex.IsMatch(b.Sql, @"^\s*SELECT", RegexOptions.Multiline)
+                        && !b.Sql.Contains("Batch Requests/sec", StringComparison.Ordinal)
+                        && !b.Sql.Contains("SQL Compilations/sec", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(perfmonReads.Count >= 5, "fewer than five perfmon delta reads swept: " + perfmonReads.Count);
+        var blind = perfmonReads.Where(b => !b.Sql.Contains("cntr_type", StringComparison.Ordinal)).Select(b => $"{b.File}:{b.Line}").ToList();
+        Assert.True(blind.Count == 0, "perfmon delta read(s) that do not select cntr_type:\n  " + string.Join("\n  ", blind));
     }
 
     /* ---------------- rules 4 and 7: the numbers on the record ---------------- */

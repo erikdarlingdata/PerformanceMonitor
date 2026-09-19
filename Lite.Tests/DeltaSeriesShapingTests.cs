@@ -19,8 +19,9 @@ namespace PerformanceMonitorLite.Tests;
 /// under "Value" with the fetched interval unused, drew a restart's fabricated (0, 0) as a real trough, and the
 /// snapshot grids rendered that same (0, 0) as "Δ 0". These pins are the three-state interval rule
 /// (#2234 / #3540: 0 = unknowable, NULL = never stored, n = measured) applied to a plotted point and to a
-/// grid cell, and the name-suffix rate proxy that stands in for the unstored <c>cntr_type</c> until its rung
-/// lands.
+/// grid cell, the stored-type classification that arrived with Darling V132 / Lite v62 (a gauge plots as its
+/// level; a rate per second; everything else per interval), and the name-suffix rate proxy that is now the
+/// NULL-type fallback only.
 ///
 /// <para>The helper lives in <c>PerformanceMonitor.Common</c> (no WPF, no ScottPlot) precisely so this file
 /// runs outside Windows: it was executed on the Mac through the net10.0 mactest harness against the built
@@ -35,7 +36,44 @@ public sealed class DeltaSeriesShapingTests
     private static DeltaSample At(int minutes, long delta, long? interval) =>
         new(T0.AddMinutes(minutes), delta, interval);
 
-    /* ---- the rate proxy ---------------------------------------------------------------------------------- */
+    /* ---- the stored type decides (V132 / v62) ------------------------------------------------------------- */
+
+    /// <summary>A stored type wins over the name, whatever the name says: a gauge id makes a <c>/sec</c>-named
+    /// counter a level, a rate id makes a name without the suffix per second, and the average/fraction/base
+    /// family is per interval however it is named. The proxy's stated mis-classes are corrected by exactly
+    /// this arm — <c>Temp Tables Creation Rate</c> and <c>Lock Wait Time (ms)</c> are bulk counts, and their
+    /// stored type says so.</summary>
+    [Theory]
+    [InlineData("Total Server Memory (KB)", PerfmonCounterTypes.PerfCounterLargeRawCount, DeltaBasis.Level)]
+    [InlineData("Memory Grants Pending", PerfmonCounterTypes.PerfCounterRawCount, DeltaBasis.Level)]
+    [InlineData("Batch Requests/sec", PerfmonCounterTypes.PerfCounterLargeRawCount, DeltaBasis.Level)]   // the type, not the name
+    [InlineData("Batch Requests/sec", PerfmonCounterTypes.PerfCounterBulkCount, DeltaBasis.PerSecond)]
+    [InlineData("Temp Tables Creation Rate", PerfmonCounterTypes.PerfCounterBulkCount, DeltaBasis.PerSecond)]
+    [InlineData("Lock Wait Time (ms)", PerfmonCounterTypes.PerfCounterCounter, DeltaBasis.PerSecond)]
+    [InlineData("Lock waits", PerfmonCounterTypes.PerfAverageBulk, DeltaBasis.PerInterval)]
+    [InlineData("Buffer cache hit ratio", PerfmonCounterTypes.PerfLargeRawFraction, DeltaBasis.PerInterval)]
+    [InlineData("Buffer cache hit ratio base", PerfmonCounterTypes.PerfLargeRawBase, DeltaBasis.PerInterval)]
+    [InlineData("Something/sec", 424242, DeltaBasis.PerInterval)]   // an id the vocabulary has never seen is Other, never a rate
+    public void BasisFor_AStoredType_DecidesOverTheName(string counterName, int cntrType, DeltaBasis expected)
+    {
+        Assert.Equal(expected, DeltaSeriesShaping.BasisFor(counterName, cntrType));
+    }
+
+    /// <summary>A NULL type is the proxy, byte for byte: the one-argument overload's verdict, which never says
+    /// Level — so a pre-rung gauge row plots its stored delta per interval, as it did before the rung.</summary>
+    [Theory]
+    [InlineData("Batch Requests/sec", DeltaBasis.PerSecond)]
+    [InlineData("Version Cleanup rate (KB/s)", DeltaBasis.PerSecond)]
+    [InlineData("Total Server Memory (KB)", DeltaBasis.PerInterval)]
+    [InlineData("Temp Tables Creation Rate", DeltaBasis.PerInterval)]
+    [InlineData(null, DeltaBasis.PerInterval)]
+    public void BasisFor_ANullType_IsTheNameProxy(string? counterName, DeltaBasis expected)
+    {
+        Assert.Equal(expected, DeltaSeriesShaping.BasisFor(counterName, null));
+        Assert.Equal(DeltaSeriesShaping.BasisFor(counterName), DeltaSeriesShaping.BasisFor(counterName, null));
+    }
+
+    /* ---- the rate proxy (the NULL-type fallback) ---------------------------------------------------------- */
 
     [Theory]
     [InlineData("Batch Requests/sec")]
@@ -52,8 +90,10 @@ public sealed class DeltaSeriesShapingTests
 
     /// <summary>The proxy's stated limits, pinned as limits: these are per-interval under the proxy even where
     /// the engine's cntr_type would say otherwise (Temp Tables Creation Rate and Lock Wait Time (ms) are bulk
-    /// counts without the suffix). The rung, not a longer suffix list, is the fix — so a "helpful" widening
-    /// that starts classifying by anything other than the suffix fails here and has to say why.</summary>
+    /// counts without the suffix). The stored type, not a longer suffix list, is the fix — it applies the
+    /// moment a row carries one (<see cref="BasisFor_AStoredType_DecidesOverTheName"/>) — so a "helpful"
+    /// widening that starts classifying the FALLBACK by anything other than the suffix fails here and has to
+    /// say why.</summary>
     [Theory]
     [InlineData("Page life expectancy")]
     [InlineData("Memory Grants Pending")]
@@ -155,23 +195,70 @@ public sealed class DeltaSeriesShapingTests
         Assert.Equal(3, DeltaSeriesShaping.Shape(new[] { At(0, 1, 1), At(1, 1, 1), At(2, 1, 1) }, DeltaBasis.PerInterval).Length);
     }
 
+    /// <summary>A row with no delta — a gauge row that reached a delta series, which the readers' type rule should
+    /// not allow — plots NaN on both delta bases rather than a manufactured 0 (#3642's class).</summary>
+    [Fact]
+    public void DeltaBases_NullDelta_IsNaN_NotZero()
+    {
+        var samples = new[] { new DeltaSample(T0, null, null, 100), new DeltaSample(T0.AddMinutes(5), null, 300, 100) };
+
+        Assert.All(DeltaSeriesShaping.Shape(samples, DeltaBasis.PerSecond), y => Assert.True(double.IsNaN(y)));
+        Assert.All(DeltaSeriesShaping.Shape(samples, DeltaBasis.PerInterval), y => Assert.True(double.IsNaN(y)));
+    }
+
+    /* ---- shaping a gauge series (V132 / v62) -------------------------------------------------------------- */
+
+    /// <summary>A gauge plots its stored value as the level it is and reads NEITHER the delta nor the interval:
+    /// the post-rung row (NULL delta, NULL interval) and the pre-rung row (a meaningless delta, a measured
+    /// interval) plot the same way, and a pre-rung (0, 0) marker — the calculator's verdict on a delta nobody
+    /// should have taken, in practice a FALLING level read as a reset — does not break the line. That is the
+    /// correction: the store held the level all along. A null value plots NaN rather than inventing one.</summary>
+    [Fact]
+    public void Level_PlotsTheStoredValue_AndIgnoresDeltaAndInterval()
+    {
+        var samples = new[]
+        {
+            new DeltaSample(T0, null, null, 8_388_608),                 // post-rung gauge row
+            new DeltaSample(T0.AddMinutes(5), 12_345, 300, 8_400_953),   // pre-rung row: a delta nobody should read
+            new DeltaSample(T0.AddMinutes(10), 0, 0, 8_000_000),         // pre-rung marker: the level FELL, and that is the reading
+            new DeltaSample(T0.AddMinutes(15), null, null, null),        // no value at all
+        };
+
+        var ys = DeltaSeriesShaping.Shape(samples, DeltaBasis.Level);
+
+        Assert.Equal(8_388_608.0, ys[0]);
+        Assert.Equal(8_400_953.0, ys[1]);
+        Assert.Equal(8_000_000.0, ys[2]);
+        Assert.True(double.IsNaN(ys[3]));
+    }
+
     /* ---- labels ------------------------------------------------------------------------------------------- */
 
     [Fact]
-    public void LegendLabel_RateKeepsItsName_DeltaSaysSo()
+    public void LegendLabel_RateAndGaugeKeepTheirNames_DeltaSaysSo()
     {
         Assert.Equal("Batch Requests/sec", DeltaSeriesShaping.LegendLabel("Batch Requests/sec", DeltaBasis.PerSecond));
         Assert.Equal("Lock waits (Δ/interval)", DeltaSeriesShaping.LegendLabel("Lock waits", DeltaBasis.PerInterval));
+        Assert.Equal("Total Server Memory (KB)", DeltaSeriesShaping.LegendLabel("Total Server Memory (KB)", DeltaBasis.Level));   // its name is its unit
     }
 
+    /// <summary>One basis → its own label; more than one → the parts present, in the fixed order rate · delta ·
+    /// gauge, each with its qualifier — so a mixed axis names every kind of number on it and only those.</summary>
     [Fact]
     public void YAxisLabel_NamesWhatIsPlotted()
     {
         Assert.Equal("per second", DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerSecond, DeltaBasis.PerSecond }));
         Assert.Equal("Δ per interval", DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerInterval }));
-        Assert.Equal(DeltaSeriesShaping.MixedAxisLabel, DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerInterval, DeltaBasis.PerSecond }));
-        Assert.Contains("per second", DeltaSeriesShaping.MixedAxisLabel, StringComparison.Ordinal);
-        Assert.Contains("Δ per interval", DeltaSeriesShaping.MixedAxisLabel, StringComparison.Ordinal);
+        Assert.Equal("value (gauge)", DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.Level }));
+
+        Assert.Equal("per second (rates) · Δ per interval (others)",
+            DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerInterval, DeltaBasis.PerSecond }));
+        Assert.Equal("per second (rates) · value (gauges)",
+            DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerSecond }));
+        Assert.Equal("Δ per interval (others) · value (gauges)",
+            DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerInterval }));
+        Assert.Equal("per second (rates) · Δ per interval (others) · value (gauges)",
+            DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerInterval, DeltaBasis.PerSecond, DeltaBasis.Level }));
     }
 
     /// <summary>Nothing plotted → the label the chart carried before #3653, so an empty chart is unchanged.</summary>

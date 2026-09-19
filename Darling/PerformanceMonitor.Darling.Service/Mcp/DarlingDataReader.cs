@@ -187,8 +187,10 @@ internal static class DarlingDataReader
         double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb,
         long TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb);
 
-    /// <summary>One perfmon counter at the latest snapshot.</summary>
-    public sealed record PerfmonRow(string CounterName, string InstanceName, long Value, long DeltaValue);
+    /// <summary>One perfmon counter at the latest snapshot. <c>DeltaValue</c> is null on a gauge row, which
+    /// stores no delta (V132, #3653 A7); <c>CntrType</c> is the DMV's type id as stored, null on a row written
+    /// before the rung.</summary>
+    public sealed record PerfmonRow(string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -715,7 +717,8 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest perfmon counters — Lite's <c>GetLatestPerfmonStatsAsync</c>: counter_name /
     /// instance_name / cntr_value / delta_cntr_value at the newest collection, with that collection's
-    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>). $1 server_id.
+    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>) and the row's
+    /// stored <c>cntr_type</c> after it (V132). $1 server_id.
     /// </summary>
     public const string LatestPerfmonStatsSql = """
         SELECT
@@ -723,7 +726,8 @@ internal static class DarlingDataReader
             instance_name,
             cntr_value,
             delta_cntr_value,
-            collection_time
+            collection_time,
+            cntr_type
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -745,7 +749,9 @@ internal static class DarlingDataReader
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+                /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(5) ? null : reader.GetInt32(5)));
             capturedAt ??= reader.GetDateTime(4);
         }
 

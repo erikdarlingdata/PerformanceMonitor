@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpPerfmonTools
 {
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time.")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count and delta_value is its change over the last collection interval (get_perfmon_trend carries the sample_interval_seconds to divide it by for a per-second figure), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate).")]
     public static async Task<string> GetPerfmonStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -35,12 +35,17 @@ public sealed class McpPerfmonTools
             if (!string.IsNullOrEmpty(instance_name))
                 filtered = filtered.Where(r => r.InstanceName != null && r.InstanceName.Contains(instance_name, StringComparison.OrdinalIgnoreCase));
 
+            /* counter_kind is the stored type's three-way reading (v62, #3653 A7) through the one shared
+               vocabulary; delta_value is null on a gauge because the collector writes none — the reading is
+               value — and null on nothing else. Twin of Darling's DarlingMcpDataTools. */
             var result = filtered.Select(r => new
             {
                 counter_name = r.CounterName,
                 instance_name = r.InstanceName,
                 value = r.Value,
-                delta_value = r.DeltaValue
+                delta_value = r.DeltaValue,
+                cntr_type = r.CntrType,
+                counter_kind = PerfmonCounterTypes.Word(r.CntrType)
             });
 
             return JsonSerializer.Serialize(new
@@ -57,7 +62,7 @@ public sealed class McpPerfmonTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names.")]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored.")]
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -116,6 +121,12 @@ public sealed class McpPerfmonTools
                     new { collected_counters = collected });
             }
 
+            /* counter_kind is the series' stored type read three ways (v62, #3653 A7): the type of any point
+               that has one, because a counter's type does not change and the read reports a type only where
+               the point's instance rows agree; null when no point has one. A gauge's points publish null
+               delta_value and null sample_interval_seconds — the collector writes neither for a level — and
+               value is the reading. Twin of Darling's DarlingMcpTrendTools. */
+            var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
@@ -131,6 +142,8 @@ public sealed class McpPerfmonTools
             {
                 server = resolved.ServerName,
                 counter_name,
+                cntr_type = seriesType,
+                counter_kind = PerfmonCounterTypes.Word(seriesType),
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
