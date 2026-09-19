@@ -45,6 +45,24 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </para>
 ///
 /// <para>
+/// <b>The bucket key is the TARGET's local hour-of-week, not UTC (#3653 item 12, Q6).</b> <c>collection_time</c>
+/// is the service host's <c>DateTime.UtcNow</c>, and keying <c>EXTRACT(HOUR/DOW FROM collection_time)</c> on it
+/// pooled two local hours into one bucket across a DST change — the "Tue 22:00" a finding named was 17:00 on the
+/// server in winter and 18:00 in summer. Three more parameters follow the window bounds: <c>$4</c> the offset
+/// transition inside the window (naive UTC; the window end when there is none), <c>$5</c>/<c>$6</c> the offset
+/// minutes before/after it, resolved ONCE per compute by <see cref="BaselineLocalClock"/> from the newest
+/// <c>server_properties</c> row's <c>time_zone_id</c> (preferred — it knows WHEN the offset changed) or
+/// <c>utc_offset_minutes</c> (a fixed shift), and 0/0 — today's UTC keying — when the server has no row (a
+/// PostgreSQL target). <see cref="RobustTierScaffold"/> and the two event-family arms extract from
+/// <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, and <see cref="GetBaselineAsync"/> looks the analysis
+/// time up through the SAME three numbers (<see cref="LocalClockWindow.LocalKey"/>), cached beside the buckets.
+/// Nothing keyed is stored, so the re-bucketing the ruling asks for is the next compute after the cache
+/// expires. Neither PostgreSQL nor Npgsql rejects a statement that ignores <c>$4..$6</c> (measured), so an arm
+/// that bypassed the scaffold would key on UTC silently — <c>LocalClockBucketKeyTests</c>' local-clock census
+/// is what forbids it.
+/// </para>
+///
+/// <para>
 /// The arc's only genuine dialect work lives in <see cref="GetBaselineQuery"/>:
 /// DuckDB's QUALIFY clause (used at four sites for restart-poisoning / rate
 /// exclusion when this port was made; three since #3653 retired Lite's
@@ -90,6 +108,7 @@ public class PgBaselineProvider
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
+    private readonly BaselineLocalClock _localClock;
 
     /// <summary>Cache TTL — baselines are recomputed after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
@@ -100,6 +119,9 @@ public class PgBaselineProvider
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        /* Information, not Warning: "this host cannot resolve that zone id" is a statement about the host's
+           configuration, made once per zone per process by the resolver itself — see BaselineLocalClock. */
+        _localClock = new BaselineLocalClock(message => _logger?.LogInformation("{Message}", message));
     }
 
     /// <summary>
@@ -109,12 +131,15 @@ public class PgBaselineProvider
     public async Task<BaselineBucket> GetBaselineAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
-        var hourOfDay = analysisTime.Hour;
-        var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0 — matches EXTRACT(DOW) in both engines
-
-        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var cached = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var baselines = cached.Buckets;
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
+
+        /* #3653 Q6: the lookup key is the analysis time on the TARGET's clock, through the same three numbers
+           the SQL keyed the buckets with (cached beside them, so a cache hit and its lookup agree even if the
+           server's stored clock changed since) — Sunday=0 matches EXTRACT(DOW) in both engines. */
+        var (hourOfDay, dayOfWeek) = cached.Clock.LocalKey(analysisTime);
 
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
@@ -130,7 +155,7 @@ public class PgBaselineProvider
     /// <summary>Forces full cache clear — used during testing.</summary>
     public void ClearCache() => _cache.Clear();
 
-    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> GetOrComputeBaselinesAsync(
+    private async Task<CachedBaseline> GetOrComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
@@ -140,28 +165,62 @@ public class PgBaselineProvider
             cached.ComputedAt == roundedHour &&
             (DateTime.UtcNow - cached.RealTime) < CacheTtl)
         {
-            return cached.Buckets;
+            return cached;
         }
 
-        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
-        _cache[cacheKey] = new CachedBaseline
+        var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
-            Buckets = buckets
+            Buckets = buckets,
+            Clock = clock
         };
+        _cache[cacheKey] = entry;
 
-        return buckets;
+        return entry;
     }
 
-    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
+    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var query = ResolveBaselineQuery(metricName);
-        if (query == null) return null;
+        if (query == null) return (null, LocalClockWindow.Utc(analysisTime));
 
         return await ComputeBucketsAsync(serverId, metricName, analysisTime, query, cancellationToken);
+    }
+
+    /// <summary>
+    /// The newest <c>server_properties</c> row that carries an offset, for the clock the buckets key on (#3653 Q6).
+    /// The same read <c>PgFindingStore.GetPriorOccurrencesSql</c> and Lite's <c>LocalDataService.ServerInfo</c> make,
+    /// with <c>time_zone_id</c> (V134) riding along: skipping NULL offsets rather than taking the newest row blindly,
+    /// because the column is nullable and a store migrated from before it holds snapshots that predate it. One row,
+    /// on the compute's own connection, once per metric per cache period — an indexed <c>LIMIT 1</c> beside a
+    /// 30-day aggregate scan. A PostgreSQL target has no <c>server_properties</c> row and reads (NULL, NULL), which
+    /// <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what every bucket was before Q6.
+    /// </summary>
+    internal const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        using var cmd = new NpgsqlCommand(ServerClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(serverId);
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null);
+        }
+
+        return (reader.IsDBNull(0) ? null : Convert.ToInt32(reader.GetValue(0)),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
     /// <summary>
@@ -309,11 +368,12 @@ public class PgBaselineProvider
         return await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
     }
 
-    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBucketsAsync(
+    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBucketsAsync(
         int serverId, string metricName, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
+        var clock = LocalClockWindow.Utc(analysisTime);
 
         /* Timed so the failure path can say how long it got, not just that it failed — see the catch. */
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -324,12 +384,25 @@ public class PgBaselineProvider
 
             query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
 
+            /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
+               purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
+               aggregate scan either, and one classified catch (AnalysisShutdownResidueTests pins exactly one) is
+               the right number of places for "this metric has no baseline this pass" to be said. */
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, cancellationToken);
+            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, AsNaive(windowStart), AsNaive(analysisTime));
+
             using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             /* Window bounds arrive as bound naive-UTC parameters (Kind-Unspecified so Npgsql
                maps them to `timestamp`, matching the naive-UTC columns) — never bare now(). */
             cmd.Parameters.AddWithValue(AsNaive(windowStart));
             cmd.Parameters.AddWithValue(AsNaive(analysisTime));
+            /* $4..$6: the clock BaselineLocalClock.LocalCollectionTimeSql keys on — the transition instant (naive
+               UTC, same `timestamp` mapping as the bounds) and the offset minutes before/after it. Every statement
+               this method runs must reference all three; the engine will not say so if one does not. */
+            cmd.Parameters.AddWithValue(AsNaive(clock.TransitionAtUtc));
+            cmd.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
+            cmd.Parameters.AddWithValue(clock.OffsetAfterMinutes);
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
@@ -371,7 +444,7 @@ public class PgBaselineProvider
                 };
             }
 
-            return buckets;
+            return (buckets, clock);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
@@ -400,7 +473,7 @@ public class PgBaselineProvider
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
 
-            return null;
+            return (null, clock);
         }
     }
 
@@ -431,13 +504,21 @@ public class PgBaselineProvider
        Expanding rows before an equi-join is deliberately the cheaper side of the trade: the fanout
        is identical either way (each row belongs to exactly three tiers), so this buys the hash join
        without adding a single row to the percentile sorts.
+
+       #3653 Q6: hh, dw and d are extracted from LocalCollectionTime — collection_time shifted onto the
+       target's clock by the $4..$6 step function — not from bare collection_time. That ONE substitution is
+       what re-keys every arm ending in clean(collection_time, v): the SQL Server arms here, the legacy arms,
+       and every PgTargetBaselineProvider arm, the quarter-hour I/O grain included (every real offset is a
+       multiple of 15 minutes, so a date_bin'd sample and its rows shift into the same local hour). d is the
+       LOCAL date, so distinct_days counts the server's days, and a Wednesday-03:00Z row at UTC−5 is a
+       Tuesday-22h sample with a Tuesday date.
     */
     internal const string RobustTierScaffold = @"
 keyed AS (
     SELECT v,
-           EXTRACT(HOUR FROM collection_time)::INT AS hh,
-           EXTRACT(DOW FROM collection_time)::INT AS dw,
-           collection_time::DATE AS d
+           EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hh,
+           EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS dw,
+           " + LocalCollectionTime + @"::DATE AS d
     FROM clean
 ),
 tier_stats AS (
@@ -682,25 +763,29 @@ WITH clean AS (
 
             // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
             // No restart exclusion needed (event counts, not cumulative).
+            /* #3653 Q6: the two event arms bypass the scaffold (six-column shape, no tiers), so they are the
+               two places that must extract from LocalCollectionTime by hand — hour, dow AND the distinct
+               DATE the per-day mean divides by. A bare collection_time here would run without complaint and
+               key on UTC; the local-clock census in LocalClockBucketKeyTests is what forbids it. */
             MetricNames.Blocking => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
+       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
+       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT collection_time::DATE) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
 FROM blocked_process_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
+       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
+       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT collection_time::DATE) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
 FROM deadlock_baseline
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
@@ -911,6 +996,13 @@ clean AS (
         };
     }
 
+    /// <summary>
+    /// The bucket key's time source (#3653 Q6): <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, the shared
+    /// assembly's ONE spelling, aliased here so the arms read as SQL and so a derived provider's own-EXTRACT arm has
+    /// a name to reach for. Never spell the shift by hand in an arm.
+    /// </summary>
+    internal const string LocalCollectionTime = BaselineLocalClock.LocalCollectionTimeSql;
+
     /// <summary>Kind-Unspecified for reads/writes — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
@@ -920,5 +1012,8 @@ clean AS (
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }
         public Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets { get; init; }
+
+        /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
+        public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);
     }
 }

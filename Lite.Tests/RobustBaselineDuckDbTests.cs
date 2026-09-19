@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Analysis;
 using Xunit;
 
 namespace Lite.Tests;
@@ -72,26 +73,19 @@ INSERT INTO clean_fixture VALUES
         }
 
         using var cmd = connection.CreateCommand();
-        /* The Lite scaffold verbatim (BaselineProvider.RobustTierScaffold), over the fixture. */
-        cmd.CommandText = @"
-WITH clean AS (SELECT collection_time, v FROM clean_fixture),
-keyed AS (
-    SELECT v,
-           EXTRACT(HOUR FROM collection_time)::INT AS hh,
-           EXTRACT(DOW FROM collection_time)::INT AS dw,
-           collection_time::DATE AS d
-    FROM clean
-)
-SELECT COALESCE(hh, -1) AS hour_of_day,
-       COALESCE(dw, -1) AS day_of_week,
-       AVG(v) AS mean_val,
-       STDDEV_SAMP(v) AS stddev_val,
-       COUNT(*) AS sample_count,
-       COUNT(DISTINCT d) AS distinct_days,
-       median(v) AS median_val,
-       mad(v) AS mad_val
-FROM keyed
-GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
+        /* The Lite scaffold ITSELF (BaselineProvider.RobustTierScaffold, internal since #3653 Q6), over the
+           fixture — this test carried a hand copy before, which is how a scaffold edit could pass here and fail
+           in the product. The scaffold keys on the target's clock through $4..$6 (#3653 Q6); binding the
+           transition at the window end with 0/0 offsets is UTC keying, which is what this fixture's expected
+           rows were computed on. The clean CTE takes the provider's $1..$3 window shape so the numbering is the
+           product's (DuckDB binds positionally and cannot reach $4 in a statement with no $1). */
+        cmd.CommandText = "WITH clean AS (SELECT collection_time, v FROM clean_fixture WHERE $1 = 0 AND collection_time >= $2 AND collection_time < $3)," + BaselineProvider.RobustTierScaffold;
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = new DateTime(2026, 7, 1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = new DateTime(2026, 7, 8) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = new DateTime(2026, 7, 8) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
 
         var rows = new Dictionary<(int Hour, int Dow), (double Median, double Mad, long Samples, long Days)>();
         using (var reader = cmd.ExecuteReader())
