@@ -57,7 +57,8 @@ public sealed class PgTargetMeasuredLineageTests
         ("PgTargetScorer.Queries.cs", new[] { "BadActorShareConcerning", "BadActorShareCritical", "BadActorBusyFloor" }),
         ("PgTargetScorer.Waits.cs", new[] { "WaitRollupConcerning", "WaitRollupCritical", "WaitIoConcerning", "WaitIoCritical" }),
         ("PgTargetScorer.Cpu.cs", new[] { "CpuCapacityWarningPercent", "CpuCapacityCriticalPercent" }),
-        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationWarning", "ConnectionSaturationCritical", "IdleInTransactionShareBar" }),
+        /* Lane 14 (#3691) added the idle-in-transaction duration bars, measured as the §B4 empty interval. */
+        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationWarning", "ConnectionSaturationCritical", "IdleInTransactionShareBar", "IdleInTransactionWarningMs", "IdleInTransactionCriticalMs" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgTpsFloor", "PgTpsFallback", "PgCpuFloorPct", "PgCpuFallbackPct", "PgWaitProfileFallbackMsPerSec", "PgDeadlockRateFloorPerHour" }),
     };
 
@@ -67,7 +68,7 @@ public sealed class PgTargetMeasuredLineageTests
         ("PgTargetScorer.Waits.cs", new[] { "WaitStandoutConcerning", "WaitStandoutCritical", "WaitSampledMinimumSamples", "WaitCoFireBoost" }),
         ("PgTargetScorer.Temp.cs", new[] { "TempCauseBoost" }),
         ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost" }),
-        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost" }),
+        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgRatioAnomalyThreshold" }),
     };
 

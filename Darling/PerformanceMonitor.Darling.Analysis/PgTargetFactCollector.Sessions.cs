@@ -110,10 +110,124 @@ CROSS JOIN peak AS p
 CROSS JOIN latest AS l";
 
     /// <summary>
+    /// The window's idle-in-transaction HOLDERS from <c>pg_session_states</c> (v2 — #3691 lane 14, design §3.10):
+    /// every stored row that was <c>is_idle_in_transaction</c> with <c>xact_duration_ms</c> at or over the floor
+    /// <c>$4</c> (the scorer's WARNING bar, passed rather than repeated so the SQL and the constant cannot drift),
+    /// grouped by HOLDER IDENTITY — <c>application_name</c> + <c>username</c> + <c>database_name</c> — with how many
+    /// captures each identity was seen over the floor in, its longest transaction, the largest <c>horizon_age</c> it
+    /// carried and when it was last seen; the window's shape (captures with a holder, holder rows, the most holders
+    /// in one capture) and the peak capture ride every row. Longest holder first; at most 25 identities. <c>$1</c>
+    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    ///
+    /// <para><b>Identity, not pid.</b> The V86 table stores no query text by design, and a pid is one backend's
+    /// lifetime — the chronic shape this fact exists for is a CODE PATH that parks a transaction every time it
+    /// runs, from the same application, as the same role, in the same database, on a fresh connection each time.
+    /// Grouping by the three names is what makes "seen in 6 of 48 captures" mean recurrence rather than one
+    /// session's six sightings; <c>COUNT(DISTINCT collection_time)</c> is the recurrence, so three parked sessions
+    /// in one capture count once. Each name is <c>coalesce</c>d to the empty string so a NULL <c>application_name</c>
+    /// (a client that set none) groups as one identity rather than never grouping at all.</para>
+    ///
+    /// <para><b>Redacted rows are excluded by the flag, not by accident.</b> Under redaction <c>state</c> is NULL and
+    /// <c>is_idle_in_transaction</c> is not set, so such rows could not cross the floor anyway; the explicit
+    /// <c>NOT coalesce(state_is_redacted, false)</c> says so, and the caller does not run this read at all when the
+    /// window's rows are majority-redacted — that window stamps the permissions advisory instead of reading zero
+    /// holders off blank rows.</para>
+    ///
+    /// <para><b><c>horizon_age</c> keeps the collector's <c>-1</c> sentinel</b> (pins nothing — a READ COMMITTED
+    /// reader, an UPDATE that matched no rows, V86) through <c>coalesce(…, -1)</c> and <c>MAX()</c>: an identity
+    /// whose every sighting pinned nothing reads <c>-1</c>, one that ever pinned reads the largest age it pinned.
+    /// The scorer escalates on <c>&gt; 0</c> only.</para>
+    ///
+    /// <para>Every <c>FROM</c> / <c>JOIN</c> names the collector table or a CTE.</para>
+    /// </summary>
+    public const string PgTargetIdleInTransactionSql = @"
+WITH holders AS (
+    SELECT
+        collection_time,
+        coalesce(application_name, '')     AS application_name,
+        coalesce(username, '')             AS username,
+        coalesce(database_name, '')        AS database_name,
+        xact_duration_ms,
+        coalesce(horizon_age, -1)          AS horizon_age,
+        coalesce(is_horizon_holder, false) AS is_horizon_holder
+    FROM pg_session_states
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   coalesce(is_idle_in_transaction, false)
+    AND   NOT coalesce(state_is_redacted, false)
+    AND   xact_duration_ms >= $4
+),
+per_capture AS (
+    SELECT
+        collection_time,
+        COUNT(*)              AS holders_in_capture,
+        MAX(xact_duration_ms) AS max_xact_duration_ms
+    FROM holders
+    GROUP BY collection_time
+),
+window_shape AS (
+    SELECT
+        COUNT(*)                                              AS captures_with_holders,
+        CAST(coalesce(SUM(holders_in_capture), 0) AS bigint)  AS holder_rows,
+        coalesce(MAX(holders_in_capture), 0)                  AS peak_concurrent_holders
+    FROM per_capture
+),
+peak_capture AS (
+    SELECT collection_time, holders_in_capture
+    FROM per_capture
+    ORDER BY holders_in_capture DESC, max_xact_duration_ms DESC, collection_time DESC
+    LIMIT 1
+),
+identities AS (
+    SELECT
+        application_name,
+        username,
+        database_name,
+        COUNT(DISTINCT collection_time) AS captures_seen,
+        MAX(xact_duration_ms)           AS max_xact_duration_ms,
+        MAX(horizon_age)                AS max_horizon_age,
+        bool_or(is_horizon_holder)      AS is_horizon_holder,
+        MAX(collection_time)            AS last_seen_at
+    FROM holders
+    GROUP BY application_name, username, database_name
+)
+SELECT
+    i.application_name,
+    i.username,
+    i.database_name,
+    i.captures_seen,
+    i.max_xact_duration_ms,
+    i.max_horizon_age,
+    i.is_horizon_holder,
+    i.last_seen_at,
+    w.captures_with_holders,
+    w.holder_rows,
+    w.peak_concurrent_holders,
+    p.collection_time      AS peak_at,
+    p.holders_in_capture   AS peak_holders
+FROM identities AS i
+CROSS JOIN window_shape AS w
+CROSS JOIN peak_capture AS p
+ORDER BY i.max_xact_duration_ms DESC, i.captures_seen DESC, i.application_name, i.username, i.database_name
+LIMIT 25";
+
+    /// <summary>
     /// <c>PG_CONNECTION_SATURATION</c> from <c>pg_session_states</c>' denormalised totals over the ceiling lane 2's
     /// config family emitted a moment ago, or <c>PG_MONITORING_PERMISSIONS</c> when the <c>state_is_redacted</c>
     /// share says the monitoring login could not see session state (filled by lane 3 — #3542 step 3, design
-    /// §3.6). One read (<see cref="PgTargetSessionPeakSql"/>), at most one fact.
+    /// §3.6); and, since lane 14 of #3691, <c>PG_IDLE_IN_TRANSACTION</c> from the same captures' rows over the
+    /// duration floor (<see cref="PgTargetIdleInTransactionSql"/>, design §3.10). Two reads on one connection
+    /// (<see cref="PgTargetSessionPeakSql"/> first — it decides whether the second may be trusted), at most two
+    /// facts: the idle fact and EITHER the saturation ratio or the permissions advisory, never both of those.
+    ///
+    /// <para><b>The idle-in-transaction fact does not need the ceiling.</b> A duration is graded on its own bar, so
+    /// the second read runs after the redaction gate and BEFORE the ceiling lookup, and a window with no config
+    /// snapshot (no saturation fact) still states its parked transactions. Under a redacted majority the read is
+    /// skipped — <c>state</c> and the duration columns are NULL for every backend the login does not own, so
+    /// "no row over the floor" would be blindness read as an all-clear — and the permissions advisory carries
+    /// <see cref="PgTargetScorer.IdleInTransactionUnobservableKey"/> <c>= 1</c> so a reader of
+    /// <c>get_analysis_facts</c> sees WHY this family said nothing about parked transactions.</para>
     ///
     /// <para><b>The ceiling is composed here, at collect time, from the in-memory fact list</b> —
     /// <c>facts.Find(CONFIG_PG_MAX_CONNECTIONS)</c> and <c>facts.Find(CONFIG_PG_SUPERUSER_RESERVED)</c>, the two
@@ -164,23 +278,28 @@ CROSS JOIN latest AS l";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            /* The CROSS JOIN against the two LIMIT 1 CTEs yields no row at all when the window stored no capture —
-               the exception table's honest empty, and this family's. */
-            if (!await reader.ReadAsync(context.CancellationToken))
-                return;
+            long peakTotal, peakActive, peakIdleInTransaction, latestTotal, latestActive, latestIdleInTransaction, capturesWithRows, rowsStored, rowsRedacted;
+            DateTime? peakAt, latestAt;
+            /* The reader is closed before the second read runs — Npgsql allows one open reader per connection. */
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                /* The CROSS JOIN against the two LIMIT 1 CTEs yields no row at all when the window stored no capture —
+                   the exception table's honest empty, and this family's. */
+                if (!await reader.ReadAsync(context.CancellationToken))
+                    return;
 
-            var peakTotal = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-            var peakActive = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-            var peakIdleInTransaction = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
-            var peakAt = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var latestTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-            var latestActive = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
-            var latestIdleInTransaction = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
-            var latestAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
-            var capturesWithRows = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
-            var rowsStored = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
-            var rowsRedacted = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                peakTotal = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+                peakActive = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                peakIdleInTransaction = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                peakAt = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+                latestTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+                latestActive = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                latestIdleInTransaction = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                latestAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
+                capturesWithRows = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+                rowsStored = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
+                rowsRedacted = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+            }
 
             if (rowsStored <= 0 || peakTotal <= 0)
                 return;
@@ -205,6 +324,9 @@ CROSS JOIN latest AS l";
                         ["captures_with_rows"] = capturesWithRows,
                         /* A count, not a share of anything: count(*) is not a privileged read. */
                         ["peak_total_sessions"] = peakTotal,
+                        /* The idle-in-transaction read is NOT run on blank rows: the family's silence on parked
+                           transactions this pass is the login's, and the stamp says so instead of a false zero. */
+                        [PgTargetScorer.IdleInTransactionUnobservableKey] = 1,
                     },
                 };
                 if (peakAt is { } redactedPeakAt)
@@ -212,6 +334,10 @@ CROSS JOIN latest AS l";
                 facts.Add(advisory);
                 return;
             }
+
+            /* ── The parked transactions, on the same connection: graded on duration alone, so they need no ceiling
+               and are stated before the ceiling lookup can return early. ── */
+            await ReadIdleInTransactionAsync(connection, context, facts, capturesWithRows, redactedShare, windowEnd);
 
             /* ── The ceiling, off lane 2's context facts (emission order: Config before Sessions). The third is
                PostgreSQL 16+'s reserved_connections (pg_use_reserved_connections); absent on a pre-16 snapshot and
@@ -277,5 +403,107 @@ CROSS JOIN latest AS l";
                other facts, and WHY is reported, not assumed (#2826). An abandonment is NOT swallowed (#2443). */
             ReportCollectionFailure(ex, context);
         }
+    }
+
+    /// <summary>
+    /// <c>PG_IDLE_IN_TRANSACTION</c> from <see cref="PgTargetIdleInTransactionSql"/>: no rows over the floor, no fact
+    /// (the exception table's honest empty — and, under the floor the scorer's WARNING bar sets, an absence that
+    /// means "nothing parked past a minute", stated by the saturation card's state breakdown rather than by a
+    /// zero-valued fact here). Otherwise ONE fact for the window, named for the LONGEST holder identity
+    /// (<see cref="Fact.ObjectName"/> <c>application as role</c>, <see cref="Fact.DatabaseName"/> its database —
+    /// the two string seams the doubles-only metadata cannot carry), with <see cref="Fact.Value"/> that holder's
+    /// longest transaction in SECONDS and the rest as metadata: the milliseconds the scorer grades, the holder's
+    /// horizon claim and recurrence, the most captures ANY identity recurred in (the amplifier's witness — the
+    /// chronic path may not be the longest one), how many distinct identities were over the floor, the window's
+    /// shape, and the peak capture (how many sessions were parked at once, and when).
+    ///
+    /// <para><b>Why one fact and not one per identity.</b> A finding row is keyed by fact key; the story that
+    /// roots here is "parked transactions on this server", and the advice names the longest holder and says how
+    /// many others there were. Per-identity facts would be N cards saying the same thing with a different
+    /// application_name, muted one at a time. The 25-identity cap bounds the read; <c>holder_identities</c>
+    /// states the count the read saw so a truncated list is visible as one.</para>
+    ///
+    /// <para>Runs inside the caller's <c>try</c>: the shared three-outcome degrade covers it, and an abandonment
+    /// propagates. Ages are measured from the window's end the caller asked for — no clock of its own.</para>
+    /// </summary>
+    private async Task ReadIdleInTransactionAsync(
+        NpgsqlConnection connection, AnalysisContext context, List<Fact> facts,
+        long capturesWithRows, double redactedShare, DateTime windowEnd)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetIdleInTransactionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* The scorer's WARNING bar IS the read floor (measured, 2026-09-19 — see the constant): a row under it is
+           not a holder this fact speaks of, and the constant is passed so the SQL cannot carry a second copy. */
+        cmd.Parameters.AddWithValue((long)PgTargetScorer.IdleInTransactionWarningMs);
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken))
+            return;
+
+        /* Row 1 is the longest holder (ORDER BY max_xact_duration_ms DESC); the window shape and the peak
+           capture repeat on every row, so they are read once, here. */
+        var applicationName = reader.GetString(0);
+        var username = reader.GetString(1);
+        var databaseName = reader.GetString(2);
+        var holderCapturesSeen = ToInt64(reader.GetValue(3));
+        var holderMaxMs = ToInt64(reader.GetValue(4));
+        var holderHorizonAge = reader.IsDBNull(5) ? -1L : ToInt64(reader.GetValue(5));
+        var holderIsHorizonHolder = !reader.IsDBNull(6) && reader.GetBoolean(6);
+        var holderLastSeenAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
+        var capturesWithHolders = ToInt64(reader.GetValue(8));
+        var holderRows = ToInt64(reader.GetValue(9));
+        var peakConcurrentHolders = ToInt64(reader.GetValue(10));
+        var peakAt = reader.IsDBNull(11) ? (DateTime?)null : reader.GetDateTime(11);
+
+        if (holderMaxMs <= 0)
+            return;
+
+        /* Every identity: the recurrence witness is the MOST captures any one of them was seen in, and how many
+           pinned the horizon at some sighting — the chronic path need not be the longest holder. */
+        var identities = 1L;
+        var recurringCaptures = holderCapturesSeen;
+        var identitiesPinningHorizon = holderHorizonAge > 0 ? 1L : 0L;
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            identities++;
+            recurringCaptures = Math.Max(recurringCaptures, ToInt64(reader.GetValue(3)));
+            if (!reader.IsDBNull(5) && ToInt64(reader.GetValue(5)) > 0)
+                identitiesPinningHorizon++;
+        }
+
+        var fact = new Fact
+        {
+            Source = PgTargetSources.SessionsSource,
+            Key = PgTargetFactKeys.IdleInTransaction,
+            Value = holderMaxMs / 1_000.0,
+            ServerId = context.ServerId,
+            DatabaseName = string.IsNullOrEmpty(databaseName) ? null : databaseName,
+            /* The identity the advice names; application_name is what the client set and is operator-facing. */
+            ObjectName = $"{(string.IsNullOrEmpty(applicationName) ? "(no application_name)" : applicationName)} as {(string.IsNullOrEmpty(username) ? "(unknown role)" : username)}",
+            Metadata =
+            {
+                [PgTargetScorer.IdleInTransactionDurationMsKey] = holderMaxMs,
+                [PgTargetScorer.IdleInTransactionHolderHorizonAgeKey] = holderHorizonAge,
+                ["holder_is_horizon_holder"] = holderIsHorizonHolder ? 1 : 0,
+                ["holder_captures_seen"] = holderCapturesSeen,
+                [PgTargetScorer.IdleInTransactionRecurringCapturesKey] = recurringCaptures,
+                ["holder_identities"] = identities,
+                ["holder_identities_pinning_horizon"] = identitiesPinningHorizon,
+                ["captures_with_holders"] = capturesWithHolders,
+                ["captures_with_rows"] = capturesWithRows,
+                ["holder_rows"] = holderRows,
+                ["peak_concurrent_holders"] = peakConcurrentHolders,
+                ["floor_ms"] = PgTargetScorer.IdleInTransactionWarningMs,
+                ["rows_redacted_share"] = redactedShare,
+            },
+        };
+        if (holderLastSeenAt is { } lastSeen)
+            fact.Metadata["holder_last_seen_age_s"] = Math.Max(0, (windowEnd - AsNaive(lastSeen)).TotalSeconds);
+        if (peakAt is { } at)
+            fact.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(at)).TotalSeconds);
+
+        facts.Add(fact);
     }
 }
