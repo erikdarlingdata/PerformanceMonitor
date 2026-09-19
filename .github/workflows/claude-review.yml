@@ -11,6 +11,33 @@ name: Claude Auto Review
 # its log and the transcript attached -- a green here means a verdict exists, and the guard is the
 # second line. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork
 # PRs (which do not receive secrets), so neither case shows a failed check.
+#
+# #3710: across several hundred PRs the verdict was LGTM on very nearly all of them, and every
+# defect it missed that later surfaced (#3487, #3612, #3613, #3636, #3648, the Full-edition
+# integer division) was found by behaviour, never by the review. The shape was structural, not
+# lazy: the reviewer started every run with no memory of this repository's recurring defect
+# shapes, read the diff beside the author's essay (so it checked consistency, not correctness),
+# and could stop at "LGTM" with nothing to show for what it had checked. Four changes here, all
+# in the prompt and the verdict check, none in the tool allowlist:
+#   - .github/REVIEW-TRAPS.md -- one line per recurring shape with the PR that bit; the review
+#     must say, for each trap the diff is near, whether it applies and why.
+#   - A BLIND READ first: the prompt withholds the PR body (it interpolates only the repo, the PR
+#     number and the tier; it never did carry the body) and forbids `gh pr view` until the
+#     reviewer has read the diff, the changed files and their callers and written its own
+#     account. Phase 2 reads the body and reports DIVERGENCE between the two accounts.
+#   - The CALLERS RULE: every changed public signature or behaviour has its callers enumerated
+#     with Grep, each judged still-holds or not.
+#   - A STRUCTURED VERDICT: claims graded VERIFIED / UNVERIFIED / REFUTED, the riskiest lines and
+#     the test that pins each, the traps considered, the divergence, a reviewer checklist, and a
+#     one-line machine-readable ledger so a later pass can compute the miss rate against
+#     post-merge defects. A bare "LGTM" is no longer a valid verdict: the verdict check below
+#     fails the job when the newest verdict lacks the header or the ledger.
+# Plus a model and a TIER: a paths-filter step routes changes to the shared libraries, the
+# Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
+# .sql file to a FULL pass (Opus, 1M context, 60 turns) and everything else (tests, docs, viewer
+# XAML, wwwroot) to a LIGHT pass (Sonnet, 30 turns). Same prompt, same verdict contract, one
+# review step -- the guard counts that step's conclusion and the bot's reviews, and neither
+# accounting knows or cares which tier ran.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -48,50 +75,220 @@ jobs:
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: echo "start=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
 
+      # #3710: which tier reviews this PR. The FULL set is where the traps file's defects live --
+      # the shared libraries every product compiles against, the Darling store/analysis/service
+      # trees (Compose and Mcp are under Service), Lite's service, MCP and database layers, the
+      # install scripts, and every .sql file wherever it sits (upgrades/, tools/, fixtures) -- and
+      # a change there gets Opus with the 1M context window, which the callers rule needs on a
+      # large Storage diff. Everything else is the LIGHT tier. Same version-tag pinning as the
+      # rest of this repo's actions (build.yml uses dorny/paths-filter@v4; nothing here is
+      # SHA-pinned, so neither is this).
+      #
+      # Every pattern is `dir/**/!(*.md)`, the shape build.yml and darling-paths-filter.yml
+      # already use and explain: dorny v4 evaluates each pattern as an INDEPENDENT predicate under
+      # the default predicate-quantifier 'some', so a bare `!**/*.md` exclude would be its own rule
+      # meaning "any non-markdown file anywhere" (PR #1714, run 30219202642: every area filter true
+      # on a .gitignore edit). The markdown carve-out stays INSIDE the include, where quantifier
+      # semantics cannot detach it. A README under Analysis/ is a light-tier change on purpose.
+      #
+      # continue-on-error, and the decision step below reads the OUTCOME: a filter that dies (an
+      # API 503 listing the PR's files) must not silently become the light tier -- that is the
+      # direction that under-reviews a Storage change. It degrades to FULL, with a warning naming
+      # why. `all` is the counter the decision notice reports against; it can only ever be true.
+      - name: Classify the changed paths
+        id: paths
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        continue-on-error: true
+        uses: dorny/paths-filter@v4
+        with:
+          list-files: json
+          filters: |
+            full:
+              - 'PerformanceMonitor.Analysis/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Analysis/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+              - 'Lite/Services/**/!(*.md)'
+              - 'Lite/Mcp/**/!(*.md)'
+              - 'Lite/Database/**/!(*.md)'
+              - 'install/**/!(*.md)'
+              - '**/*.sql'
+            all:
+              - '**'
+
+      # The ONE place the tier decision is made. The review step reads model, max_turns and tier
+      # from here rather than repeating the expression three times, so the ledger line the prompt
+      # asks for names the model that actually ran. Lists reach the notice through env:, never
+      # through a ${{ }} interpolation into script text -- a PR author controls file names, and an
+      # interpolated name is the pull_request script-injection footgun build.yml describes.
+      #
+      # The model ids are Claude Code's own catalog ids: `claude-opus-5[1m]` (the [1m] selector
+      # opts into the 1M context window; claude-code-action's docs name Opus 5 and Sonnet 5 as
+      # the models that carry it) and `claude-sonnet-5`, the Sonnet family's current id, spelled
+      # out rather than left to the default so the ledger names it. No effort flag exists in
+      # claude_args (#3710's ruling); the turn ceiling is the cost lever.
+      - name: Decide the review tier
+        id: tier
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        env:
+          PATHS_OUTCOME: ${{ steps.paths.outcome }}
+          FULL: ${{ steps.paths.outputs.full }}
+          FULL_COUNT: ${{ steps.paths.outputs.full_count }}
+          FULL_FILES: ${{ steps.paths.outputs.full_files }}
+          ALL_COUNT: ${{ steps.paths.outputs.all_count }}
+        run: |
+          set -euo pipefail
+          if [ "$PATHS_OUTCOME" != "success" ]; then
+            echo "::warning title=Path classification failed - reviewing at the full tier::The paths-filter"\
+              "step ended '$PATHS_OUTCOME', so this PR's files could not be classified. The review runs"\
+              "at the FULL tier rather than guess light: under-reviewing a Storage change is the"\
+              "expensive direction to be wrong in."
+            tier=full
+          elif [ "${FULL:-}" = "true" ]; then
+            echo "::notice title=Full-tier review::${FULL_COUNT:-0} of ${ALL_COUNT:-0} changed files are in the full-tier set."
+            echo "Changed files in the full-tier set: ${FULL_FILES:-[]}"
+            tier=full
+          else
+            echo "::notice title=Light-tier review::None of the ${ALL_COUNT:-0} changed files are in the full-tier set (shared libraries, Darling Storage/Analysis/Service, Lite Services/Mcp/Database, install/, *.sql)."
+            tier=light
+          fi
+          if [ "$tier" = full ]; then
+            model='claude-opus-5[1m]'; max_turns=60
+          else
+            model='claude-sonnet-5'; max_turns=30
+          fi
+          echo "tier=$tier -- model=$model -- max_turns=$max_turns"
+          {
+            echo "tier=$tier"
+            echo "model=$model"
+            echo "max_turns=$max_turns"
+          } >> "$GITHUB_OUTPUT"
+
       # The step NAME is read by claude-review-guard.yml (REVIEW_STEP) to tell a clean no-op from a
       # run that said nothing; renaming it blinds the guard. The id is for the steps below.
+      #
+      # The `|| 'full'` / `|| 'claude-opus-5[1m]'` / `|| '60'` fallbacks: if the tier step somehow
+      # left an output empty, the review still runs, at the full tier -- the same fail-toward-
+      # thorough direction the tier step takes -- instead of handing Claude Code `--model ""`.
       - name: Claude review
         id: review
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The prompt interpolates the repo, the PR number, the tier and the model -- and NOT the
+          # PR body or title. That is what makes the blind read blind: the body arrives only when
+          # the reviewer runs `gh pr view` in Phase 2. Do not add the body here (#3710).
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
+            REVIEW TIER: ${{ steps.tier.outputs.tier || 'full' }}
+            MODEL: ${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}
 
-            Review this pull request. Follow the conventions in CONTRIBUTING.md — including
-            its T-SQL style section (AS on table aliases, column_name = expression aliasing,
-            OPTION(RECOMPILE) on collector queries). This repository ships two apps that must stay in parity — Lite
-            and Darling — so flag any change made to one but not its counterpart. Focus on:
-            - Correctness: bugs, edge cases, null/error handling at system boundaries
-            - Lite/Darling parity drift
-            - Security: input handling, SQL injection, secrets, file/network/process use
-            - Performance regressions
-            Do NOT suggest SQL Server missing-index DMV recommendations — they are folklore in
-            this codebase and explicitly unwanted.
+            You are reviewing a pull request in a repository whose defects recur in known shapes and
+            whose PR bodies are persuasive by design. The review runs in two phases, in this order,
+            and the order is the point: you form your own account of the change BEFORE you read the
+            author's, and the finding is where the two diverge.
 
-            The PR branch is already checked out in the working directory.
-            Use `gh pr comment` for top-level feedback, and
+            PHASE 1 — BLIND READ. Do NOT run `gh pr view`, `git log` or `git show <commit>` in this
+            phase: the PR body and the commit messages are the author's account, and you must form
+            your own first. Allowed here: `gh pr diff ${{ github.event.pull_request.number }}` (and
+            `--name-only`), Read, Grep, Glob, `git diff`. The PR branch is already checked out.
+              1. Read the diff, then open every changed file and read each changed region in its
+                 surrounding context — the whole method, class member or SQL statement, not the
+                 hunk.
+              2. CALLERS RULE. For every changed public signature, constant, SQL statement or
+                 behaviour, Grep the repository for its callers and readers — both SKUs (Lite and
+                 Darling) and both test projects — and, for each caller, decide whether it still
+                 holds under the change. A caller you did not re-read is UNPINNED and is reported
+                 as such.
+              3. Read `.github/REVIEW-TRAPS.md`. For every trap whose layer or shape this diff is
+                 near, decide whether it applies HERE and why. A trap that does not apply is stated
+                 as not applying, with the file:line that proves it; a trap that applies is a
+                 finding. Quote the trap in its own words.
+              4. Write down, for yourself, before Phase 2: what the change does, what it could
+                 break, the three riskiest changed lines, and which test (by name, found with Grep)
+                 pins each of them — or that none does.
+            Conventions to hold the code to: CONTRIBUTING.md, including its T-SQL style section (AS
+            on table aliases, column_name = expression aliasing, OPTION(RECOMPILE) on collector
+            queries); Lite/Darling parity — this repository ships two apps that must stay in
+            parity, so a change to one without its counterpart is a finding; correctness at system
+            boundaries (bugs, edge cases, null/error handling); security (input handling, SQL
+            injection, secrets, file/network/process use); performance regressions. Do NOT suggest
+            SQL Server missing-index DMV recommendations — they are folklore in this codebase and
+            explicitly unwanted.
+
+            PHASE 2 — THE AUTHOR'S ACCOUNT. Now run `gh pr view ${{ github.event.pull_request.number }}`
+            for the title and body (and `git log` for the commit messages if you want them).
+            Extract every factual claim the body makes about the code — what changed, what did not,
+            what was measured, what was tested, which test pins what — and grade each against what
+            you found in Phase 1:
+              - VERIFIED — you confirmed it from the tree; say how (file:line, test name, or the
+                hunk).
+              - UNVERIFIED — it could not be checked from a read-only tree (a live measurement, a
+                rig result, a build); say what would have been needed.
+              - REFUTED — the tree contradicts it; give the evidence.
+            Then report DIVERGENCE: where the author's account and your blind read disagree, in
+            either direction — a mechanism the body names that the diff does not implement, a
+            change the diff makes that the body does not mention, a test the body cites that does
+            not assert what the body says it does. Divergence is the finding; agreement between the
+            body and the diff is not evidence of correctness.
+
+            POSTING. Use `gh pr comment` for top-level notes and
             `mcp__github_inline_comment__create_inline_comment` (with confirmed: true) for
-            specific line-level issues. Only post GitHub comments and reviews — do not emit
-            review text as plain messages.
+            line-level findings. Only post GitHub comments and reviews — do not emit review text
+            as plain messages.
 
-            VERDICT PROTOCOL — ALWAYS POST a verdict. After every comment is posted, end the
-            review by submitting exactly ONE formal GitHub review:
-            - Any substantive finding — a correctness bug, a security hole, a data-integrity
-              risk, or a violation of a contract the code is supposed to keep — means:
-                gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<verdict>"
-              where <verdict> is a numbered summary of the substantive findings.
+            VERDICT PROTOCOL — ALWAYS POST a verdict, in the STRUCTURED SHAPE below. After every
+            comment is posted, end the review by submitting exactly ONE formal GitHub review whose
+            body is the block below, filled in. A bare "LGTM" is not a verdict: the job checks the
+            newest review for the `## Verdict:` header and the ledger line and fails without them.
+            - Any substantive finding — a correctness bug, a security hole, a data-integrity risk,
+              a REFUTED claim, a trap that applies, or a violation of a contract the code is
+              supposed to keep — means:
+                gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file - <<'EOF'
+                ...the block, with `## Verdict: CHANGES REQUESTED` and `verdict=CHANGES_REQUESTED`...
+                EOF
             - Otherwise:
-                gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — <one line on what was checked>"
+                gh pr review ${{ github.event.pull_request.number }} --comment --body-file - <<'EOF'
+                ...the block, with `## Verdict: LGTM` and `verdict=LGTM`...
+                EOF
             Substantive explicitly does NOT include style nits, observations you yourself label
-            non-blocking, or tradeoffs the code or the PR description already documents as
-            deliberate: those stay comments, and the verdict is the clean one.
-            Never use --approve — this token cannot approve without an org setting this repo
-            does not enable, and no gate needs it. The guard's rule is newest-verdict-wins: on
-            a re-review after new commits, review the NEW diff and submit a fresh verdict, and
-            a clean fresh verdict clears an earlier changes-requested by itself.
+            non-blocking, or tradeoffs the code or the PR body already documents as deliberate:
+            those stay comments, and the verdict is the clean one. Never use --approve — this token
+            cannot approve without an org setting this repo does not enable, and no gate needs it.
+            The guard's rule is newest-verdict-wins: on a re-review after new commits, review the
+            NEW diff and submit a fresh verdict, and a clean fresh verdict clears an earlier
+            changes-requested by itself.
+
+            THE REVIEW BODY, exactly this shape. The `## Verdict:` line is the first line; the
+            `### ` headings are read by a machine and appear in this order; the ledger is the LAST
+            line and is ONE line. Replace every <...>; keep every heading even when its section is
+            empty, and say so under it.
+
+            ## Verdict: LGTM
+            ### Claims
+            - VERIFIED — <claim from the PR body> — <how: file:line, test name, or the hunk>
+            - UNVERIFIED — <claim> — <why it could not be checked from a read-only tree>
+            - REFUTED — <claim> — <evidence>
+            ### Riskiest lines
+            1. <file:line> — <why this line> — pinned by <test name> | UNPINNED
+            2. <file:line> — <why> — pinned by <test name> | UNPINNED
+            3. <file:line> — <why> — pinned by <test name> | UNPINNED
+            ### Traps near this diff
+            - <the trap, quoted from .github/REVIEW-TRAPS.md> — applies | does not apply — <why, with file:line>
+            ### Divergence (blind read vs PR body)
+            <where the two accounts disagree, or: None — the body's account matches the diff on every claim graded above.>
+            ### Reviewer checklist
+            - [ ] <what a human should check by hand that a read-only tree could not: a live read, a build, a rig, a production page>
+            <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }} -->
+
+            Ledger arithmetic: verified / unverified / refuted are the bullet counts under Claims
+            in each state; traps is the bullet count under Traps near this diff; verdict matches
+            the header (`LGTM`, or `CHANGES_REQUESTED` for a changes-requested review); tier and
+            model are the REVIEW TIER and MODEL lines at the top of this prompt, verbatim.
           # #3650: the prompt above says the branch is checked out and asks for a correctness,
           # parity and security review -- an invitation to read code -- while the allowlist used to
           # permit only the four gh verbs and the inline-comment tool. Every Read, Grep, Glob and
@@ -103,11 +300,21 @@ jobs:
           # the files the diff touches, find a symbol's other callers and read a parity twin, and
           # nothing about reviewing needs a write. Nothing here can edit, commit, push or post
           # outside the gh verbs already listed; the git verbs are the read-only three.
+          #
+          # #3710 adds no tool. The callers rule is Grep; the traps file is Read; the blind read is
+          # an ORDERING of the gh verbs already here, enforced by instruction and by the prompt
+          # withholding the body. The structured verdict is posted through `gh pr review
+          # --body-file -` with a quoted heredoc -- the same `gh pr review` prefix the allowlist
+          # already matches, and no Write tool is needed to stage a body file. --model and
+          # --max-turns are the tier's; both are plain claude_args per claude-code-action's
+          # docs/configuration.md ("Custom Model", "Limiting Conversation Turns").
           claude_args: |
+            --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
+            --max-turns ${{ steps.tier.outputs.max_turns || '60' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
-      # review per run -- changes-requested on a substantive finding, a "LGTM" comment review
+      # review per run -- changes-requested on a substantive finding, a clean comment review
       # otherwise -- so on this repo a run that submitted no verdict has broken its contract every
       # time; a clean review is never silent, and a zero here is never legitimate. This step turns
       # that into the job's own colour, with the diagnosis in the log, so the guard (#2229/#3492,
@@ -128,6 +335,24 @@ jobs:
       # A gh lookup failure is NOT a verdict on the review (#2309): it warns and stands down rather
       # than forcing a paid re-run of the whole job to clear a transient API error -- the guard's
       # own tally, a separate and free-to-rerun workflow, stays the enforcement.
+      #
+      # #3710: a verdict that EXISTS is no longer enough; it has to have the structured shape. The
+      # bare "LGTM — <one line>" this prompt used to ask for was the whole problem the issue names:
+      # a verdict with no record of what was checked, indistinguishable from one that checked
+      # nothing, and useless to a later pass computing the miss rate. So the newest verdict in the
+      # window (last line of the stream -- the API returns oldest-first and --paginate runs --jq per
+      # page, so the newest is the last LINE, as the guard's scan already relies on) is fetched by
+      # id and its body must carry (a) the `## Verdict: LGTM | CHANGES REQUESTED` header, (b) the
+      # `<!-- review-ledger: ... -->` line, and (c) a ledger verdict that AGREES with the review's
+      # API state -- `verdict=CHANGES_REQUESTED` on a CHANGES_REQUESTED review, `verdict=LGTM` on a
+      # COMMENTED one. (c) is the one that protects the gate: the guard reads the STATE, so a body
+      # that says "CHANGES REQUESTED" inside a review submitted with --comment is a substantive
+      # finding the guard would wave through. A review lacking any of the three fails this job
+      # with the missing piece named; the guard's own verdict arm is untouched and still keys on
+      # the state, so the two checks stay compatible by construction -- this one is stricter about
+      # the body, the guard is authoritative about the state. The section headings are listed in
+      # the log for the record and not graded: a mark that fails on a heading's wording is one
+      # people learn to ignore, and the ledger is what the later pass computes from.
       - name: Verify the review posted a verdict
         if: ${{ always() && env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         env:
@@ -140,6 +365,9 @@ jobs:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
           # Author of every artifact the review leaves behind (the action's bot_name default).
           REVIEW_BOT: claude[bot]
+          # What the tier step decided, to cross-check the ledger's own tier claim (a warning,
+          # not a failure: a mislabelled tier does not compromise the verdict, only the ledger).
+          TIER: ${{ steps.tier.outputs.tier }}
         run: |
           set -euo pipefail
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
@@ -158,7 +386,7 @@ jobs:
                               and .submitted_at != null
                               and .submitted_at >= env.SINCE
                               and ((.body // \"\") | length) > 0)
-                     | \"\\(.state)\\t\\(.submitted_at)\\t\\(.html_url)\"" 2>"$errfile"); then
+                     | \"\\(.state)\\t\\(.submitted_at)\\t\\(.id)\\t\\(.html_url)\"" 2>"$errfile"); then
             err=$(cat "$errfile" 2>/dev/null || true)
             [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
             echo "::warning title=Verdict check could not read the PR's reviews::gh api"\
@@ -176,7 +404,71 @@ jobs:
 
           if [ "$count" -gt 0 ]; then
             summary "### Claude review posted $count verdict review(s) since $SINCE"
-            exit 0
+
+            # #3710: THE SHAPE CHECK, on the newest verdict in the window. A single-review fetch
+            # rather than carrying bodies through the TSV above: bodies hold tabs and newlines. A
+            # failure of THIS lookup is the #2309 shape too -- warn and stand down, the verdict
+            # exists and the guard has the state.
+            newest=$(printf '%s\n' "$matched" | tail -n 1)
+            IFS=$'\t' read -r verdict_state _ verdict_id verdict_url <<<"$newest"
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
+            if ! body=$(gh api "repos/$R/pulls/$PR/reviews/$verdict_id" --jq '.body // ""' 2>"$errfile"); then
+              err=$(cat "$errfile" 2>/dev/null || true)
+              [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+              echo "::warning title=Verdict shape check could not read the verdict::gh api"\
+                "repos/$R/pulls/$PR/reviews/$verdict_id failed: ${err:-no stderr}. The verdict"\
+                "exists ($verdict_url) and the guard reads its state; its SHAPE is UNCONFIRMED here (#2309)."
+              summary "- Verdict shape: lookup failed; UNCONFIRMED (#2309). $verdict_url"
+              exit 0
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+
+            # CRs stripped: a body typed through a Windows client can carry them, and the anchors
+            # below are line-anchored.
+            body=$(printf '%s' "$body" | tr -d '\r')
+            header=$(printf '%s\n' "$body" | grep -E -m1 '^## Verdict: (LGTM|CHANGES REQUESTED)[[:space:]]*$' || true)
+            ledger=$(printf '%s\n' "$body" | grep -E -m1 '^<!-- review-ledger: verdict=(LGTM|CHANGES_REQUESTED) verified=[0-9]+ unverified=[0-9]+ refuted=[0-9]+ traps=[0-9]+ tier=(full|light) model=[^[:space:]]+ -->[[:space:]]*$' || true)
+            sections=$(printf '%s\n' "$body" | grep -E '^### ' | tr '\n' ';' || true)
+            echo "newest verdict: $verdict_state $verdict_url"
+            echo "  header: ${header:-<missing>}"
+            echo "  ledger: ${ledger:-<missing>}"
+            echo "  sections: ${sections:-<none>}"
+
+            missing=''
+            [ -z "$header" ] && missing="$missing the '## Verdict: LGTM | CHANGES REQUESTED' header;"
+            [ -z "$ledger" ] && missing="$missing the '<!-- review-ledger: ... -->' line;"
+            if [ -n "$header" ] && [ -n "$ledger" ]; then
+              ledger_verdict=$(printf '%s' "$ledger" | sed -E 's/.*verdict=([A-Z_]+).*/\1/')
+              case "$verdict_state:$ledger_verdict" in
+                CHANGES_REQUESTED:CHANGES_REQUESTED|COMMENTED:LGTM) ;;
+                *) missing="$missing a ledger verdict ($ledger_verdict) that agrees with the review's state ($verdict_state);" ;;
+              esac
+              ledger_tier=$(printf '%s' "$ledger" | sed -E 's/.*tier=([a-z]+).*/\1/')
+              if [ -n "$TIER" ] && [ "$ledger_tier" != "$TIER" ]; then
+                echo "::warning title=Ledger tier disagrees with the tier step::The ledger says"\
+                  "tier=$ledger_tier; this run decided tier=$TIER. The verdict stands; the ledger's"\
+                  "tier is wrong for the later pass that reads it."
+              fi
+            fi
+
+            if [ -z "$missing" ]; then
+              echo "::notice title=Structured verdict present::$verdict_state -- $verdict_url"
+              summary "- newest verdict: $verdict_state, structured (header + ledger agree with the state) -- $verdict_url"
+              exit 0
+            fi
+
+            echo "::error title=Review posted an unstructured verdict::The newest verdict by"\
+              "$REVIEW_BOT on PR #$PR ($verdict_url) lacks:$missing The prompt promises a"\
+              "structured verdict every run -- claims graded VERIFIED/UNVERIFIED/REFUTED, the"\
+              "riskiest lines and their pins, the traps considered, the divergence from the PR body,"\
+              "and a one-line ledger -- because a bare LGTM is what this review posted on several"\
+              "hundred PRs while every defect it missed was found by behaviour (#3710). An"\
+              "unstructured verdict is a contract breach, not a clean review: it records nothing"\
+              "about what was checked and cannot be told from a review that checked nothing. Do"\
+              "NOT read this PR as reviewed; re-run the review workflow. The guard reads the"\
+              "verdict's STATE and is not affected by this failure."
+            summary "- newest verdict is UNSTRUCTURED: missing$missing Not reviewed (#3710). $verdict_url"
+            exit 1
           fi
 
           summary '### Claude review posted NO verdict'
