@@ -711,13 +711,19 @@ public sealed class AlertReadFailureCounter
     /// swallowed failure is the gate falling back to process memory — which re-announces the document once
     /// per restart until the store answers, the very behaviour #3580 retired. A nonzero count naming it
     /// says the store could not be asked "was one delivered today", not that a document was lost.</para>
+    ///
+    /// <para>#3712 added the analysis singles digest read — the third daily document's span read over the
+    /// digest-routed alert-history rows, Darling-only like the other two documents. Counted on the rollup's
+    /// reasoning: its swallowed failure skips the day's tick without consuming the interval, and a fault
+    /// folded into "no singles today" would make an unreadable store read as a quiet one.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
         + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
         + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
-        + "(#3466), the daily documents' delivery-stamp read that gates the digest and the rollup on "
-        + "delivered-today (#3580), and the store background-job "
+        + "(#3466), the analysis singles digest read behind the daily copy of the findings the corroboration "
+        + "gate kept off the paging channels (#3712), the daily documents' delivery-stamp read that gates the "
+        + "digest, the rollup and the singles digest on delivered-today (#3580), and the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>

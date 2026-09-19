@@ -946,6 +946,10 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogCritical("Peer disclosure refused (nothing published): {Problem}", problem);
         }
 
+        /* #3712: the file-level analysis routing knob, published the same way so get_alert_settings can report
+           the value this process applies rather than a constant (the MCP host publishes it too). */
+        DarlingFileLevelAlertSettings.Publish(config.Analysis);
+
         /* Network-endpoint caller warnings (darling-network-endpoints, D-BYO / D7) — emitted AFTER
            Validate() passes and NEVER inside it (Validate is all-fatal; an optional-endpoint note must not
            abort startup). Covers BYO-mode network.* being ignored and the network.role=admin pivot risk. */
@@ -2323,6 +2327,19 @@ public sealed class DarlingWorker : BackgroundService
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
+                    }
+
+                    /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
+                       of the findings the corroboration gate routed away from the paging channels. Same hourly
+                       tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
+                       same failure isolation as the two siblings above. */
+                    try
+                    {
+                        await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "analysis singles digest evaluation failed");
                     }
                 }
             }

@@ -222,11 +222,20 @@
   // its findings; notifications are delivered independently when a finding's severity meets the floor.
   // Defaults: enabled, every 30 minutes (clamped 5-360), notifications on, severity floor 1.5 (0-2) with
   // a fixed 6-hour per-finding re-notify cooldown. Omit the section (or any key) for the defaults.
+  //
+  // "uncorroboratedRoute" (#3712, FILE-LEVEL like web.publicBaseUrl -- not a store column, so a store
+  // reload does not change it and the Viewer does not edit it): where a notify-worthy finding goes when it
+  // is a LONE FACT -- one fact in its chain and no matched co-fire check. "digest" (the default) keeps it off
+  // email / Teams / Slack / PagerDuty / the generic webhook; it is still persisted, visible on the web and
+  // MCP surfaces the instant it fires, recorded in the alert history with notification_type 'digest' and the
+  // reason, and counted in the daily Analysis Singles Digest. "page" restores the pre-#3712 behaviour where
+  // every finding at or above notifySeverity pages. A CORROBORATED finding pages under either value.
   "analysis": {
     "enabled": true,
     "intervalMinutes": 30,
     "notificationsEnabled": true,
-    "notifySeverity": 1.5
+    "notifySeverity": 1.5,
+    "uncorroboratedRoute": "digest"
   },
 
   // Auto force-plan bot (#2138 phase 1, optional section). "enabled": false (the default) means the

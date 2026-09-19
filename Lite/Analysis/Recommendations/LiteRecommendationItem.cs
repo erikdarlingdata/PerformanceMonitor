@@ -97,4 +97,14 @@ public sealed class LiteRecommendationItem
 
     /// <summary>UTC end of the finding time window (the analysis <c>TimeRangeEnd</c>). Null when absent.</summary>
     public DateTime? WindowEndUtc { get; set; }
+
+    /// <summary>
+    /// #3712: why this finding was NOT delivered to email, the webhooks or the tray — the corroboration
+    /// gate's reason (a lone fact, no matched co-fire check) — or null when it was delivered, or was never a
+    /// delivery candidate (below the notify floor), or the reader was given no
+    /// <see cref="PerformanceMonitor.Notifications.FindingRoutingLens"/> to judge by. The card renders it as a
+    /// muted "Not paged" line so a finding that is on this grid but was never in anyone's inbox says so
+    /// where it is read, rather than leaving the operator to infer the gate from the absence of an e-mail.
+    /// </summary>
+    public string? NotPagedReason { get; set; }
 }

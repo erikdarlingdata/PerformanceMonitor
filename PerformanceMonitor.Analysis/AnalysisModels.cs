@@ -85,6 +85,28 @@ public class AnalysisStory
     public bool IsAbsolution { get; set; }
 
     /// <summary>
+    /// How many of the root fact's amplifier checks MATCHED — the corroboration count
+    /// <see cref="StoryConfidence.Compute(int, int, int)"/> folds into <see cref="Confidence"/> as the
+    /// amplifier-share term (#3538 A6). Carried as its own number since #3712 because the notification
+    /// layer routes on the corroboration COMPONENTS rather than on the confidence scalar: a page is earned by
+    /// a second fact in the chain or by a matched co-fire check, and reading either off the scalar would move
+    /// the paging bar the day the formula's weights change. Every amplifier the scorer defines is a predicate
+    /// over ANOTHER fact (a sibling anomaly fired, an absolute fact at its bar, a wait significant), so a
+    /// match here IS a co-fire. Zero for a root with no catalogue and for the two by-construction 1.0
+    /// stories (absolution, the same-statement pileup), which <c>FindingRouting</c> names by root key instead.
+    /// Ephemeral — copied onto the finding for the notification layer, not persisted.
+    /// </summary>
+    public int MatchedAmplifiers { get; set; }
+
+    /// <summary>
+    /// How many amplifier checks the scorer DEFINED for the root fact — the denominator of the amplifier
+    /// share. Zero means the root has no catalogue (the uncatalogued confidence arm), which is the absence of
+    /// evidence rather than evidence against; carried so a routing reason can say "0 of 3 checks matched"
+    /// versus "no checks defined". Ephemeral, like <see cref="MatchedAmplifiers"/>.
+    /// </summary>
+    public int DefinedAmplifiers { get; set; }
+
+    /// <summary>
     /// Stable id for the incident this story belongs to (correlate-and-focus slice 2). All findings
     /// from one analysis run share it, and it is a fingerprint of the run's PRIMARY (highest-severity)
     /// finding + database, so the same recurring incident keeps one id across runs (trackable). Set by
@@ -136,6 +158,19 @@ public class AnalysisFinding
     /// <summary>The leaf fact's RAW collected value (see <see cref="RootFactValue"/>), not severity.</summary>
     public double? LeafFactValue { get; set; }
     public int FactCount { get; set; }
+
+    /// <summary>
+    /// The root fact's matched amplifier count, carried in from <see cref="AnalysisStory.MatchedAmplifiers"/>
+    /// (#3712). Ephemeral like <see cref="DrillDown"/>: populated on the WRITE path for the notification
+    /// layer's routing gate and NOT persisted — a finding read back from <c>analysis_findings</c> carries 0
+    /// here, and a read-side surface that wants the route re-derives it through
+    /// <c>FindingRouting.ClassifyPersisted</c>, which says how.
+    /// </summary>
+    public int MatchedAmplifiers { get; set; }
+
+    /// <summary>The root fact's defined amplifier count, carried in from
+    /// <see cref="AnalysisStory.DefinedAmplifiers"/> (#3712). Ephemeral, not persisted.</summary>
+    public int DefinedAmplifiers { get; set; }
 
     /// <summary>
     /// Drill-down data collected after graph traversal. Ephemeral — not persisted.

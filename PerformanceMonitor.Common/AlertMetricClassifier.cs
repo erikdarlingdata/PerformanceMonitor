@@ -125,7 +125,7 @@ namespace PerformanceMonitor.Common
         /// cannot close (#3476 review).</para>
         /// </summary>
         public static bool IsInformational(string? metricName) =>
-            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup";
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest";
 
         /// <summary>
         /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor
@@ -192,10 +192,11 @@ namespace PerformanceMonitor.Common
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
                STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
                count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
-               stated reason. */
+               stated reason. "Analysis Singles Digest" (#3712) is the third document of that shape: its value
+               is the count of distinct uncorroborated findings the digest named. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
                 or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
-                or "Collector Cost Digest" or "Fleet Sweep Rollup" => $"{value:F0}",
+                or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the

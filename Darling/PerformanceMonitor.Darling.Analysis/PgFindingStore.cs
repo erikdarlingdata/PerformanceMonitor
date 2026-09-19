@@ -390,6 +390,10 @@ ORDER BY local_bucket, story_path_hash";
                     LeafFactKey = story.LeafFactKey,
                     LeafFactValue = story.LeafFactValue,
                     FactCount = story.FactCount,
+                    /* #3712: the corroboration components the notification layer routes on — in memory
+                       only, like the root metadata below. */
+                    MatchedAmplifiers = story.MatchedAmplifiers,
+                    DefinedAmplifiers = story.DefinedAmplifiers,
                     /* Carried in-memory only; no analysis_findings column for it. */
                     RootFactMetadata = story.RootFactMetadata
                 });

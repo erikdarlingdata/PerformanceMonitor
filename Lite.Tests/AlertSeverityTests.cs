@@ -104,6 +104,7 @@ public class AlertSeverityTests
     [Theory]
     [InlineData("Collector Cost Digest")]
     [InlineData("Fleet Sweep Rollup")]
+    [InlineData("Analysis Singles Digest")]
     public void DeliberateInfoMetrics_AreNotWarnings_InTheHistoryGridClassifier(string metric)
     {
         var (_, badge, _) = AlertSeverity.ForMetric(metric);

@@ -420,6 +420,9 @@ async function classifyResponse(resp) {
  * "tray" is a state here rather than a channel because this surface is HEADLESS - no system tray, no toast
  * code - so a stored tray row records nothing that happened. #2781/#2814 established that and chose
  * "Logged"; #3169 stopped the service writing it at all, so only rows recorded before then reach it.
+ *
+ * "digest" (#3712) is an analysis finding the corroboration gate routed to the daily digest and this surface
+ * instead of a paging channel - reported, not paged; the row's routing_reason says why.
  */
 export const ALERT_STATE_LABELS = {
   none: "No channel",
@@ -430,6 +433,7 @@ export const ALERT_STATE_LABELS = {
   throttled: "Throttled",
   folded: "Reported elsewhere",
   failed: "Failed",
+  digest: "Digest",
 };
 
 /**

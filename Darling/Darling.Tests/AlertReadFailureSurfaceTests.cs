@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 9, 12),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 10, 12),
     };
 
     /// <summary>
@@ -950,9 +950,13 @@ public sealed class AlertReadFailureSurfaceTests
     /// and the rollup (so one literal name; the warning beside it names the document) — counted because a
     /// swallowed stamp read is the gate falling back to process memory, which is the pre-#3580
     /// re-announce-per-restart posture returning for that tick, and a population of those under store
-    /// contention is exactly what this census exists to make visible. Its sibling WRITE is exempt.</para>
+    /// contention is exactly what this census exists to make visible. Its sibling WRITE is exempt. And a
+    /// TENTH since #3712: the analysis singles digest read — the third daily document's span read over the
+    /// digest-routed ledger rows — counted on the rollup's exact reasoning: its swallowed failure skips the
+    /// day's tick without consuming the interval, and a fault folded into "no singles today" would convert an
+    /// unreadable store into a permanently quiet document.</para>
     /// </summary>
-    private const int CountedSites = 33;
+    private const int CountedSites = 34;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

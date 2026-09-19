@@ -78,33 +78,49 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
 
         try
         {
-            /* Findings are never muted here — the pipeline's mute filter dropped muted
-               stories before they became findings (Lite passes muted: false identically).
-               DeliveredProse, not DetailText: an analysis finding's prose restates the structured
-               context the channels already render, so delivering both prints the Diagnosis facts
-               twice. The persisted value below is unaffected. */
-            var result = await _core.TrySendAsync(
-                alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
-                alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse);
+            var context = alert.Context;
+            AlertDelivery delivery;
 
-            /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
-            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
+            if (alert.Route == FindingRoute.Digest)
+            {
+                /* #3712: the corroboration gate routed this finding to the daily digest. NO channel is
+                   consulted — not the send core, not the webhook fan-out — so neither cooldown is spent and
+                   the row states the route as its disposition. The context already carries the routing
+                   record (AlertContext.Routing) with the reason; the row below persists it with the full
+                   detail text and the drill-down, so the web surface, the MCP history read and the digest
+                   reader see everything a page would have carried. */
+                delivery = AlertDelivery.RoutedToDigest();
+            }
+            else
+            {
+                /* Findings are never muted here — the pipeline's mute filter dropped muted
+                   stories before they became findings (Lite passes muted: false identically).
+                   DeliveredProse, not DetailText: an analysis finding's prose restates the structured
+                   context the channels already render, so delivering both prints the Diagnosis facts
+                   twice. The persisted value below is unaffected. */
+                var result = await _core.TrySendAsync(
+                    alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
+                    alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse);
+
+                /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
+                delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
+
+                /* #3598: where the posts went, on the finding's context exactly as DarlingAlertDeliverer records it
+                   for engine alerts — an "Analysis: …" finding is a performance-family alert and routes like one,
+                   so its history row must say so too. A finding always carries a context, so nothing is created
+                   here; null when no channel reached resolution. */
+                if (result.Route is { } route)
+                {
+                    context ??= new AlertContext();
+                    context.Route = route.ToDto();
+                }
+            }
 
             /* Always log the alert, regardless of channel status — the structured context
                persists as JSON alongside the flat detail_text, the numeric severity/threshold
                in the double columns (Lite's shape). DetailText in full here whatever the channels
                were handed: this column is what the MCP reader, the triage endpoint and the Viewer's
                detail pane render, and what the mute pre-fill parses. */
-            /* #3598: where the posts went, on the finding's context exactly as DarlingAlertDeliverer records it
-               for engine alerts — an "Analysis: …" finding is a performance-family alert and routes like one,
-               so its history row must say so too. A finding always carries a context, so nothing is created
-               here; null when no channel reached resolution. */
-            var context = alert.Context;
-            if (result.Route is { } route)
-            {
-                context ??= new AlertContext();
-                context.Route = route.ToDto();
-            }
 
             string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(

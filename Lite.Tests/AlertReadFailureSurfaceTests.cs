@@ -246,8 +246,9 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* Seventh since #3466: the fleet-sweep rollup read, Darling-only like the store self-alerts. Eighth
            since #3580: the daily documents' delivery-stamp read — ONE site gating both the digest and the
-           rollup on delivered-today, so one name — Darling-only for the same reason. */
-        Assert.Equal(8, nullKeyReads.Count);
+           rollup on delivered-today, so one name — Darling-only for the same reason. Ninth since #3712: the
+           analysis singles digest read, the third daily document's span read, Darling-only like the others. */
+        Assert.Equal(9, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -264,6 +265,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("fleet-sweep rollup", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("delivery-stamp", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("analysis singles digest", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
@@ -280,6 +282,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);
         Assert.Contains("fleet-sweep rollup", inventory, StringComparison.Ordinal);
         Assert.Contains("delivery-stamp", inventory, StringComparison.Ordinal);
+        Assert.Contains("analysis singles digest", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

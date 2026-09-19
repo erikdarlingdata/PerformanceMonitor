@@ -452,6 +452,25 @@ public sealed class DarlingAnalysisPipelineTests
             Assert.Equal(anomaly.Severity, sentAnomaly.Severity);
             Assert.Equal(0.3, sentAnomaly.NotifyThreshold);
 
+            /* #3712: the corroboration components rode from BuildStory through PgFindingStore onto the
+               finding — ANOMALY_WAIT_PROFILE's catalogue defines five co-fire checks, and with only wait rows
+               planted none can match — and the gate's decision rides the alert: a lone fact with no matched
+               check takes the digest road, with the reason on the context the row persists. The sender still
+               receives it (the count assertion above holds), so nothing the digest road does hides the finding. */
+            if (anomaly.StoryPath.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.Ordinal))
+            {
+                Assert.Equal(5, anomaly.DefinedAmplifiers);
+            }
+            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest);
+            Assert.Equal(expectedDecision.Route, sentAnomaly.Route);
+            Assert.NotNull(sentAnomaly.Context.Routing);
+            Assert.Equal(expectedDecision.RouteText, sentAnomaly.Context.Routing!.Route);
+            Assert.Equal(expectedDecision.Reason, sentAnomaly.Context.Routing.Reason);
+            if (anomaly.FactCount == 1 && anomaly.MatchedAmplifiers == 0)
+            {
+                Assert.Equal(FindingRoute.Digest, sentAnomaly.Route);
+            }
+
             /* Inside the cooldown, an identical batch does not re-notify. */
             await notifier.NotifyAsync(findings);
             Assert.Equal(expectedNotified.Count, sender.Sent.Count);

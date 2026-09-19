@@ -194,6 +194,10 @@ public class FindingStore
                 LeafFactKey = story.LeafFactKey,
                 LeafFactValue = story.LeafFactValue,
                 FactCount = story.FactCount,
+                /* #3712: the corroboration components ride to the notification layer in memory, like the
+                   root metadata below — no analysis_findings column for them. */
+                MatchedAmplifiers = story.MatchedAmplifiers,
+                DefinedAmplifiers = story.DefinedAmplifiers,
                 RootFactMetadata = story.RootFactMetadata
             });
         }

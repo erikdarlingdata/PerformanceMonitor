@@ -235,6 +235,8 @@ public sealed class AlertHistoryRowSeverityTests
         Assert.False(AlertHistoryRowSeverity.IsWarning("Collector Cost Digest", null));
         Assert.Equal(("info", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("Collector Cost Digest", null));
         Assert.Equal(("info", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("Fleet Sweep Rollup", null));
+        /* #3712: the third daily document, same INFO reading by name. */
+        Assert.Equal(("info", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("Analysis Singles Digest", null));
     }
 
     /* ─────────────────────────── the Viewer's row ─────────────────────────── */

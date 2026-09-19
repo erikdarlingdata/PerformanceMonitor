@@ -210,6 +210,12 @@
   "analysis_interval_minutes": 30,        // clamped 5-360
   "analysis_notify_severity": 1.5,        // minimum severity to notify on; clamped 0.0-2.0
   "analysis_notify_cooldown_minutes": 360, // clamped 30-10080
+  // #3712: where a notify-worthy but UNCORROBORATED finding goes -- a lone fact, no second fact in its
+  // chain and no matched co-fire check. "digest" (default) records it (Alerts tab status Digest, with the
+  // reason) and marks it Not paged in Recommendations but delivers it to no channel and no toast; "page"
+  // restores delivery of every finding at or above analysis_notify_severity. A corroborated finding is
+  // delivered under either. Settings -> Alerts -> "Only notify on corroborated findings".
+  "analysis_uncorroborated_route": "digest",
   // NO UI. The per-server budget for one analysis pass. Raise it on a server whose analysis
   // keeps timing out; the pass is bounded so one slow server cannot stall the rest.
   "analysis_timeout_seconds": 120,        // clamped 30-600

@@ -112,6 +112,10 @@ internal static class AlertSeverity
                INFO arm, for the digest's exact reason — it is a report to read, not a condition to act
                on, and the declaration is what keeps the next fall-through sweep from promoting it. */
             "Fleet Sweep Rollup" => ("#2eaef1", "INFO", "\U0001F535"),
+            /* #3712: the analysis singles digest is the third deliberate INFO arm, on the same reasoning — the
+               once-a-day copy of findings that were kept OFF the paging channels must not itself render as a
+               page; the declaration keeps the next fall-through sweep from promoting it. */
+            "Analysis Singles Digest" => ("#2eaef1", "INFO", "\U0001F535"),
             "Version Store (PVS)" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Failover" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Replica Disconnected" => ("#DC2626", "CRITICAL", "\U0001F534"),

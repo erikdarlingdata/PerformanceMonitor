@@ -122,9 +122,11 @@ public static class AlertFamily
         ["Web TLS Certificate Expiring"] = SelfMonitor,
         ["Collector Cost Regression"] = SelfMonitor,
 
-        /* ---- reports: the two daily documents ---- */
+        /* ---- reports: the three daily documents ---- */
         ["Collector Cost Digest"] = Reports,
         ["Fleet Sweep Rollup"] = Reports,
+        /* #3712: the once-a-day copy of the analysis findings the corroboration gate routed away from a page. */
+        ["Analysis Singles Digest"] = Reports,
     };
 
     /// <summary>

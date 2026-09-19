@@ -506,6 +506,7 @@ public sealed class NotificationRoutingTests
             AgAlertPolicy.FailoverMetric, AgAlertPolicy.ReplicaDisconnectedMetric, AgAlertPolicy.ReplicaReconnectedMetric,
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
+            DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,

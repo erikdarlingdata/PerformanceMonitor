@@ -215,6 +215,15 @@ public partial class App : Application
     public static int AnalysisNotifyCooldownMinutes { get; set; } = 360;    // Re-notify gap per finding (keyed by StoryPathHash)
     public static int AnalysisTimeoutSeconds { get; set; } = 120;           // Per-server analysis timeout
 
+    /* #3712: where a notify-worthy but UNCORROBORATED finding goes — a lone fact, no second fact in its chain and
+       no matched co-fire check. Digest (shipped) keeps it off email, the webhooks and the tray: it is persisted,
+       shown in Recommendations with a not-paged marker, and recorded in the alert log as notification_type
+       'digest' with the reason. Page restores the pre-#3712 behaviour where every finding at or above
+       AnalysisNotifySeverity is delivered. A corroborated finding is delivered under either value. Stored in
+       the settings file as analysis_uncorroborated_route ('digest' / 'page') — the same spelling Darling's
+       darling.json analysis.uncorroboratedRoute and both MCP surfaces use. */
+    public static FindingRoute AnalysisUncorroboratedRoute { get; set; } = FindingRoute.Digest;
+
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
 
@@ -1304,6 +1313,10 @@ public partial class App : Application
             if (read.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = v.Number(AnalysisNotifySeverity, 0.0, 2.0);
             if (read.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = v.WholeNumber(AnalysisNotifyCooldownMinutes, 30, 10080);
             if (read.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = v.WholeNumber(AnalysisTimeoutSeconds, 30, 600);
+            /* #3712: a value that is neither 'digest' nor 'page' keeps the current setting rather than becoming
+               either — the same keep-the-default posture every reader above takes on a malformed value. */
+            if (read.TryGetProperty("analysis_uncorroborated_route", out v))
+                AnalysisUncorroboratedRoute = FindingRouting.TryParseRoute(v.Text(FindingRouting.RouteText(AnalysisUncorroboratedRoute))) ?? AnalysisUncorroboratedRoute;
 
             /* #2444: reported AFTER every read, which is the point — the whole set, named, and every key that
                was fine applied. Empty on a healthy file, so this costs nothing on the normal path. */
