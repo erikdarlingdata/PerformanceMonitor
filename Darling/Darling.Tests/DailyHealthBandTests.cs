@@ -407,6 +407,40 @@ public class DailyHealthBandTests
         Assert.Contains("3 alerts", described);
     }
 
+    /// <summary>
+    /// #3653: the state-aware overload the two calendars' tooltips call. A grey cell used to say only "No data
+    /// collected.", which for a purged day is false — the day WAS collected; retention took it — so each state
+    /// gets one sentence saying what the zeros are, with the horizon named; inside retention the signal lines
+    /// stand and a missing run record is a trailing disclosure, never a replacement.
+    /// </summary>
+    [Fact]
+    public void Describe_WithRetentionState_SaysWhatTheZerosAre()
+    {
+        var horizon = new DateTime(2026, 7, 20, 0, 0, 0, DateTimeKind.Utc);
+
+        var purged = DailyHealthBandCalculator.Describe(Signals(hasData: false), DailySummaryDataState.Purged, horizon);
+        Assert.StartsWith("No verdict: this day is before the store's retention horizon (2026-07-20)", purged, StringComparison.Ordinal);
+        Assert.Contains("purged", purged, StringComparison.Ordinal);
+        Assert.DoesNotContain("No data collected.", purged, StringComparison.Ordinal);
+
+        var pastHorizon = DailyHealthBandCalculator.Describe(Signals(hasData: false), DailySummaryDataState.PastHorizon, horizon, signalSourcesPresent: 3);
+        Assert.Contains("(2026-07-20)", pastHorizon, StringComparison.Ordinal);
+        Assert.Contains("3 of 7 signal sources still hold rows", pastHorizon, StringComparison.Ordinal);
+
+        /* No horizon handed in: the sentence stands without the parenthetical, never a placeholder date. */
+        Assert.StartsWith("No verdict: this day is before the store's retention horizon and", DailyHealthBandCalculator.Describe(Signals(hasData: false), DailySummaryDataState.Purged, null), StringComparison.Ordinal);
+
+        var noRunRecord = DailyHealthBandCalculator.Describe(Signals(deadlocks: 2), DailySummaryDataState.NoRunRecord, horizon);
+        Assert.StartsWith("2 deadlocks", noRunRecord, StringComparison.Ordinal);
+        Assert.EndsWith("nothing records that the day was fully collected.", noRunRecord, StringComparison.Ordinal);
+
+        /* Collected is the plain overload, verbatim. */
+        Assert.Equal(DailyHealthBandCalculator.Describe(Signals()), DailyHealthBandCalculator.Describe(Signals(), DailySummaryDataState.Collected, horizon));
+        Assert.Equal(DailyHealthBandCalculator.Describe(Signals(deadlocks: 2, alerts: 3)), DailyHealthBandCalculator.Describe(Signals(deadlocks: 2, alerts: 3), DailySummaryDataState.Collected, horizon));
+        /* A no-data row inside retention (the absent day) keeps the old sentence: nothing was collected. */
+        Assert.Equal("No data collected.", DailyHealthBandCalculator.Describe(Signals(hasData: false), DailySummaryDataState.NoRunRecord, horizon));
+    }
+
     [Fact]
     public void Describe_MemoryPressure_DoesNotDoubleCountSevere()
     {

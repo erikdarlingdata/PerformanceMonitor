@@ -330,8 +330,10 @@ public class DailySummaryRow
         ? $"{TotalWaitTimeSec:N1} s"
         : $"{TotalWaitTimeSec / 60:N1} min";
 
-    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip.</summary>
-    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals());
+    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip — with the
+    /// retention state spoken (#3653, twinned with the Darling viewer): a purged cell says retention took the
+    /// day, not "No data collected."</summary>
+    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals(), DataState, RetentionHorizon, SignalSourcesPresent);
 
     /// <summary>Projects this row's counts into the shared banding input.</summary>
     public DailyHealthSignals ToSignals() => new()

@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -48,9 +49,25 @@ public sealed partial class ViewerDataService
     /// than ~4 days once retention began dropping chunks. #1664: gated on the rollups actually existing — a
     /// plain-PostgreSQL store has none (and never drops raw, so raw is complete there); routing by age alone
     /// threw 42P01 at the user.</para>
+    ///
+    /// <para>#3653 (the viewer port of #3641): every returned day is judged against the store's retention
+    /// horizon — <see cref="DailySummaryRetention.StateFor"/>, the ONE decision the MCP tool makes off the same
+    /// SQL — and a purged or past-horizon day bands <see cref="DailyHealthBand.NoData"/> (grey) rather than
+    /// Healthy. The spine names a day for as long as its longest-lived source (the collection log at 60 days,
+    /// the alert log at 90) still holds it, while every signal the band reads is purged at 30; before this the
+    /// calendar painted that second month green, with a tooltip saying "No issues detected." The horizon is
+    /// computed by <see cref="DailySummaryHorizon"/> from the fleet retention overrides and the same constants
+    /// the purge runs on, off the viewer's WALL CLOCK (a purge is a wall-clock event; the calendar's reads are
+    /// always live, so there is no anchor to be tempted by).</para>
     /// </summary>
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(
         int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
+        => (await ReadDailySummaryRangeAsync(serverId, fromDate, toDate, cancellationToken)).Rows;
+
+    /// <summary>The range read plus the horizon its rows were judged against, so the single-day path can
+    /// judge an ABSENT day without reading the horizon a second time (review note on #3661).</summary>
+    private async Task<(List<DailySummaryRow> Rows, DateTime RetentionHorizon)> ReadDailySummaryRangeAsync(
+        int serverId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var tier = RetentionTierRouter.Resolve(
@@ -66,6 +83,12 @@ public sealed partial class ViewerDataService
             DeadlockRates = await GetDeadlockRateThresholdsAsync(cancellationToken),
         };
 
+        /* #3653: the horizon, read once per range like the banding tiers above — a schedule save mid-read must
+           not judge some days against one horizon and the rest against another. BaselineMath.BaselineWindowDays
+           is the floor the purge applies to the baseline-serving raw collectors; it is passed because the
+           Analysis assembly that owns it is one Storage does not reference. */
+        var horizon = await ReadRetentionHorizonAsync(cancellationToken);
+
         await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -76,10 +99,10 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            results.Add(ReadDailySummaryRow(reader, banding));
+            results.Add(ReadDailySummaryRow(reader, banding, horizon));
         }
 
-        return results;
+        return (results, horizon);
     }
 
     /// <summary>
@@ -90,13 +113,41 @@ public sealed partial class ViewerDataService
     public async Task<DailySummaryRow?> GetDailySummaryAsync(int serverId, DateTime? summaryDate = null, CancellationToken cancellationToken = default)
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
-        var rows = await GetDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1), cancellationToken);
-        return rows.Count > 0
-            ? rows[0]
-            : new DailySummaryRow { SummaryDate = targetDate, HasData = false, HealthBand = DailyHealthBand.NoData };
+        var (rows, horizon) = await ReadDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1), cancellationToken);
+        if (rows.Count > 0)
+        {
+            return rows[0];
+        }
+
+        /* #3653: a day the spine does not hold is not "collected" either — before the horizon it is purged
+           (nothing names it any more), inside it there is simply no run record — so the absent row is judged
+           too, the way the MCP single-day tool judges its absent day, against the horizon the range read
+           already computed. */
+        return new DailySummaryRow
+        {
+            SummaryDate = targetDate,
+            HasData = false,
+            HealthBand = DailyHealthBand.NoData,
+            DataState = DailySummaryRetention.StateFor(targetDate, 0, 0, horizon),
+            RetentionHorizon = horizon,
+        };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(DbDataReader reader, DailyHealthThresholds banding)
+    /// <summary>
+    /// The store's daily-summary retention horizon as of NOW (#3653): the oldest UTC day every signal source
+    /// still holds, from the shortest effective fleet retention among the aggregate's sources —
+    /// <see cref="DailySummaryHorizon"/>, the computation the MCP health reader runs, over
+    /// <see cref="DailySummaryRetention.HorizonFor"/>'s date arithmetic.
+    /// </summary>
+    internal async Task<DateTime> ReadRetentionHorizonAsync(CancellationToken cancellationToken)
+    {
+        var fleetOverrideDays = await DailySummaryHorizon.ReadFleetRetentionOverrideDaysAsync(
+            _dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        var shortestRetentionDays = DailySummaryHorizon.ShortestSignalRetentionDays(fleetOverrideDays, BaselineMath.BaselineWindowDays);
+        return DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
+    }
+
+    private static DailySummaryRow ReadDailySummaryRow(DbDataReader reader, DailyHealthThresholds banding, DateTime retentionHorizon)
     {
         var row = new DailySummaryRow
         {
@@ -114,8 +165,16 @@ public sealed partial class ViewerDataService
             MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
             /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
             CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            /* #3541 A9 / #3653: the aggregate's LAST column, how many of the seven signal sources hold a row for
+               the day — the fact that tells a purged shell from a day the purge has not reached. */
+            SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
             HasData = true,
+            RetentionHorizon = retentionHorizon,
         };
+        /* Judged AFTER the counts are read, from the same three facts the MCP reader judges on: the day, its run
+           count, its signal presence — against the horizon. ToSignals folds the state into HasData, so Classify
+           bands a purged day NoData without knowing why. */
+        row.DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, retentionHorizon);
         row.HealthBand = DailyHealthBandCalculator.Classify(row.ToSignals(), banding);
         return row;
     }
@@ -152,8 +211,22 @@ public class DailySummaryRow
     /// (#3539 A2).</summary>
     public long MaxBlockDurationMs { get; set; }
 
-    /// <summary>True when the day had any collection. False renders the calendar cell as No-Data (grey).</summary>
+    /// <summary>True when the spine holds the day at all. Together with <see cref="DataState"/> this decides
+    /// the band's HasData: a held day that is purged or past the horizon renders the calendar cell No-Data (grey)
+    /// exactly as an absent day does (#3541 A9, #3653) — Lite's <c>DailySummaryRow</c> shape.</summary>
     public bool HasData { get; set; }
+
+    /// <summary>Whether this row's counts are a measurement or the shape retention left behind (#3541 A9) —
+    /// see <see cref="DailySummaryDataState"/>. Defaults to Collected so a row built without the reader (a
+    /// hand-built test row) bands as it always did.</summary>
+    public DailySummaryDataState DataState { get; set; } = DailySummaryDataState.Collected;
+
+    /// <summary>The horizon <see cref="DataState"/> was judged against; null on a row nobody judged.</summary>
+    public DateTime? RetentionHorizon { get; set; }
+
+    /// <summary>How many of the seven per-signal sources hold at least one row for the day (#3541 A9) — the
+    /// aggregate's trailing <c>signal_sources_present</c> column.</summary>
+    public int SignalSourcesPresent { get; set; }
 
     /// <summary>The composite health band that colors this day's calendar cell.</summary>
     public DailyHealthBand HealthBand { get; set; } = DailyHealthBand.NoData;
@@ -166,13 +239,18 @@ public class DailySummaryRow
         ? $"{TotalWaitTimeSec:N1} s"
         : $"{TotalWaitTimeSec / 60:N1} min";
 
-    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip.</summary>
-    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals());
+    /// <summary>Multi-line hover text summarizing the day's signals, for the calendar cell tooltip — with the
+    /// retention state spoken (#3653): a purged cell says retention took the day, not "No data collected."</summary>
+    public string SignalsTooltip => DailyHealthBandCalculator.Describe(ToSignals(), DataState, RetentionHorizon, SignalSourcesPresent);
 
     /// <summary>Projects this row's counts into the shared banding input.</summary>
     public DailyHealthSignals ToSignals() => new()
     {
-        HasData = HasData,
+        /* #3541 A9 / #3653: a purged or past-horizon day is a NoData day to the band, whatever the spine still
+           holds for it — its COALESCEd zeros may be absences, and measured-zero-Healthy was the lie. Inside
+           retention (Collected, NoRunRecord) a zero IS a measurement and the band stands. The same fold Lite's
+           row and the MCP reader's row make. */
+        HasData = HasData && DataState is not (DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
         Deadlocks = DeadlockCount,
         CollectionErrors = CollectionErrors,
         CollectionRuns = CollectionRuns,
