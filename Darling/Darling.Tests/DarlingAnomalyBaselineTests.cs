@@ -562,6 +562,15 @@ public sealed class DarlingAnomalyBaselineTests
            carries over verbatim — it never had a QUALIFY. */
         /* #3653: the same orderings hold for the successor text (stored interval first, LAG only where it is
            NULL, heuristic gated on NULL) and for the legacy text it falls back to. */
+        /* #3653 (#3540 rule 1, readers NULL-not-0 on unknowable) - the rate arm and its WHERE, both texts, both
+           halves. The arm ends at END: an interval_sec of 0 (two collections that date_trunc to the same
+           second, on the LAG fallback) has no rate, and ELSE 0 rated it 0 ms/sec INTO the sample set - not
+           dead text, as the census roster had it: on a PG18 rig three planted collections averaged 66.7 where
+           the two rated ones say 100. And with_rate's WHERE carries interval_sec > 0 beside IS NOT NULL
+           (Lite's text), because END alone hands clean a NULL ms_per_sec that NOT (NULL = 0 AND ...) lets
+           through whenever another conjunct is FALSE, and COUNT(*) AS sample_count counts it (same rig: count
+           3, mean 100). The WHERE sits in with_rate, BEFORE the restart LAG, so the LAG window is exactly the
+           rated rows - the ordering (b) above already requires. */
         foreach (var sql in new[]
         {
             PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!,
@@ -573,14 +582,20 @@ public sealed class DarlingAnomalyBaselineTests
             /* The Lite-verbatim interval spine survives. */
             Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
 
-            var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL", StringComparison.Ordinal);
+            var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL AND interval_sec > 0", StringComparison.Ordinal);
             var lagAt = sql.IndexOf("COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec", StringComparison.Ordinal);
             var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
             var exclusionAt = sql.IndexOf("WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100", StringComparison.Ordinal);
 
-            Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
+            Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL AND > 0 filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
             Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
             Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+
+            /* The rate arm yields NULL, never 0, for a non-positive interval; the ELSE that rated it 0 is gone
+               from both texts. */
+            Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+            Assert.True(rateFilterAt > sql.IndexOf("END AS ms_per_sec", StringComparison.Ordinal), "the > 0 filter is with_rate's own WHERE, under the arm it guards");
         }
     }
 

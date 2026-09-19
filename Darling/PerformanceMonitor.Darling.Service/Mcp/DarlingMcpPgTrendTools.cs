@@ -109,7 +109,10 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     collection_time = p.CollectionTimeUtc,
                     sample_count = p.SampleCount,
-                    estimated_wait_ms_per_second = Math.Round(p.EstimatedWaitMsPerSecond, 3),
+                    /* Null, never 0, when the reader had no positive interval to rate over (#3653): the
+                       statement's own guard keeps that unreachable today, and the key is nullable so the
+                       day it is not, the point says unknowable rather than idle. */
+                    estimated_wait_ms_per_second = p.EstimatedWaitMsPerSecond is { } wait ? Math.Round(wait, 3) : (double?)null,
                     backend_count = p.BackendCount,
                     counter_reset = p.CounterReset,
                 }),
@@ -353,7 +356,9 @@ public sealed class DarlingMcpPgTrendTools
                 total_write_bytes = (bytesMeasured || bytesEstimated) && writesTracked
                     ? points.Sum(p => p.WriteBytes)
                     : (decimal?)null,
-                peak_reads_per_second = Math.Round(points.Max(p => p.ReadsPerSecond), 3),
+                /* Max over the RATED points; null only if no point could be rated, which the reader's guard
+                   makes unreachable today (#3653). */
+                peak_reads_per_second = points.Max(p => p.ReadsPerSecond) is { } peakReads ? Math.Round(peakReads, 3) : (double?)null,
                 /* Named at the top rather than only per point: a caller has to know which of these are
                    measured before it draws any conclusion from a number below. */
                 write_counters_tracked = writesTracked,
@@ -405,19 +410,31 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     collection_time = p.CollectionTimeUtc,
                     interval_seconds = Math.Round(p.IntervalSeconds, 1),
-                    reads_per_second = Math.Round(p.ReadsPerSecond, 3),
-                    writes_per_second = p.WriteCountersTracked ? Math.Round(p.WritesPerSecond, 3) : (double?)null,
-                    extends_per_second = Math.Round(p.ExtendsPerSecond, 3),
+                    /* Each rate is null when the reader could not rate the interval (#3653; the reader's SQL
+                       says why that is unreachable today), and the write-side ones are null too when the
+                       server tracks no writes - two different absences, both spelled null, neither 0. */
+                    reads_per_second = p.ReadsPerSecond is { } reads ? Math.Round(reads, 3) : (double?)null,
+                    writes_per_second = p.WriteCountersTracked && p.WritesPerSecond is { } writes ? Math.Round(writes, 3) : (double?)null,
+                    extends_per_second = p.ExtendsPerSecond is { } extends ? Math.Round(extends, 3) : (double?)null,
                     /* The rate beside the ratio, because they answer different questions: cache_hit_pct
                        says what share the pool absorbed, hits_per_second says how much work there was to
                        absorb. A pair can hold 100% while doing almost nothing. */
-                    hits_per_second = Math.Round(p.HitsPerSecond, 3),
+                    hits_per_second = p.HitsPerSecond is { } hits ? Math.Round(hits, 3) : (double?)null,
                     /* Ring-buffer REUSE is a different thing and is not folded in here: a bulk operation
                        recycling its own buffers is not pressure on the pool, and conflating the two is the
-                       standard misreading of pg_stat_io. */
+                       standard misreading of pg_stat_io.
+
+                       Null, not 0, when there is no interval to rate over (#3653; #3540 rule 1, readers
+                       NULL-not-0 on unknowable) - the C# twin of the reader's SQL rate arms, which end at
+                       END for the same reason, and spelled the way the sibling per-second keys in this
+                       payload spell an unmeasured value (writes_per_second, write_bytes_per_second: a
+                       flag-gated nullable). The null arm is unreachable today - the reader derives
+                       IntervalSeconds from the DISTINCT collection times of the series and drops the
+                       window's first snapshot, so every point's interval is positive - and a 0 here would
+                       have been a measured idle second the day that changed, not an absent one. */
                     evictions_per_second = p.IntervalSeconds > 0
                         ? Math.Round(p.Evictions / p.IntervalSeconds, 3)
-                        : 0,
+                        : (double?)null,
                     cache_hit_pct = p.CacheHitPct is { } hit ? Math.Round(hit, 2) : (double?)null,
                     /* Nulled when the server does not time I/O, rather than passing the 0.000 the
                        arithmetic produces: that value is a statement about the configuration, not about
@@ -426,11 +443,11 @@ public sealed class DarlingMcpPgTrendTools
                     avg_write_ms = timingTracked && p.WriteCountersTracked && p.AvgWriteMs is { } write
                         ? Math.Round(write, 3)
                         : (double?)null,
-                    read_bytes_per_second = bytesMeasured || bytesEstimated
-                        ? Math.Round(p.ReadBytesPerSecond, 1)
+                    read_bytes_per_second = (bytesMeasured || bytesEstimated) && p.ReadBytesPerSecond is { } readBytes
+                        ? Math.Round(readBytes, 1)
                         : (double?)null,
-                    write_bytes_per_second = (bytesMeasured || bytesEstimated) && p.WriteCountersTracked
-                        ? Math.Round(p.WriteBytesPerSecond, 1)
+                    write_bytes_per_second = (bytesMeasured || bytesEstimated) && p.WriteCountersTracked && p.WriteBytesPerSecond is { } writeBytes
+                        ? Math.Round(writeBytes, 1)
                         : (double?)null,
                     counter_reset = p.CounterReset,
                 }),
@@ -575,7 +592,8 @@ public sealed class DarlingMcpPgTrendTools
                 worst_interval_at = rated.Count > 0
                     ? rated.OrderBy(p => p.CacheHitPct!.Value).First().CollectionTimeUtc
                     : (DateTime?)null,
-                peak_temp_bytes_per_second = Math.Round(points.Max(p => p.TempBytesPerSecond), 1),
+                /* Max over the RATED points; null only if no point could be rated (#3653, unreachable today). */
+                peak_temp_bytes_per_second = points.Max(p => p.TempBytesPerSecond) is { } peakTemp ? Math.Round(peakTemp, 1) : (double?)null,
                 /* The same prose the single-window read serves, from the same method: the scale of a spill
                    decides whether work_mem is the answer or a plan is, and two copies of that judgement is
                    how it stops being one judgement. */
@@ -598,12 +616,14 @@ public sealed class DarlingMcpPgTrendTools
                 points = points.Select(p => new
                 {
                     collection_time = p.CollectionTimeUtc,
-                    transactions_per_second = Math.Round(p.TransactionsPerSecond, 3),
+                    /* Null when the reader had no positive interval to rate over (#3653), as the ratios
+                       beside it have always been null over nothing. */
+                    transactions_per_second = p.TransactionsPerSecond is { } tps ? Math.Round(tps, 3) : (double?)null,
                     rollback_pct = p.RollbackPct is { } rb ? Math.Round(rb, 2) : (double?)null,
                     cache_hit_pct = p.CacheHitPct is { } hit ? Math.Round(hit, 2) : (double?)null,
                     temp_files = p.TempFiles,
                     temp_bytes = p.TempBytes,
-                    temp_bytes_per_second = Math.Round(p.TempBytesPerSecond, 1),
+                    temp_bytes_per_second = p.TempBytesPerSecond is { } tempBytes ? Math.Round(tempBytes, 1) : (double?)null,
                     deadlocks = p.Deadlocks,
                     counter_reset = p.CounterReset,
                 }),

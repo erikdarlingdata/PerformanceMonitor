@@ -51,8 +51,9 @@ namespace PerformanceMonitorLite.Tests;
 /// (<c>Darling.Tests/MeasurementContractCensusTests</c>) sweeps <c>Darling.Storage</c> and <c>Darling.Analysis</c>
 /// with the same regexes and holds the one allowance roster (two baseline arms whose source aggregate has
 /// already excluded the interval-0 collection). Rate arms whose CASE falls back to <c>ELSE 0</c> are
-/// rostered shrink-only in <see cref="RateArmsThatFallBackToZero"/>: each is dead text under its statement's
-/// own <c>WHERE … &gt; 0</c>, and a new one has to name itself.</description></item>
+/// rostered shrink-only in <see cref="RateArmsThatFallBackToZero"/>, EMPTY and asserted empty since the
+/// #3653 rate-arm PR retired the fifteen it named (four here, eleven in the Darling twin) to <c>END</c>;
+/// a new one has to name itself.</description></item>
 /// <item><description><b>Rates divide by measured elapsed.</b> No reader turns a delta into a rate over an
 /// ASSUMED cadence — no <c>delta_x / 60</c>, <c>/ 300</c>, <c>/ 3600</c> in SQL, no <c>Delta… / 60.0</c> in
 /// C# — because the fleet's measured gap runs p50 299 s, p99 830 s (<see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>'s
@@ -215,22 +216,19 @@ public sealed class MeasurementContractCensusTests
 
     /// <summary>
     /// Rate arms whose CASE falls back to <c>ELSE 0</c> rather than to NULL, named as <c>file: alias</c> so the
-    /// list can only shrink deliberately. Every entry is DEAD TEXT today: the statement's own <c>WHERE</c> keeps
-    /// <c>interval_seconds &gt; 0</c> (the file-I/O trends on both SKUs: <c>WHERE interval_seconds IS NOT NULL AND
-    /// interval_seconds &gt; 0</c> one CTE down), so the ELSE cannot run and no 0.00 is rendered. It is
-    /// rostered because it is the shape rule 1 forbids — a reader that would answer 0 for "unknowable" the
-    /// moment the WHERE moved — and because a census that only counts live defects lets the next one arrive
-    /// as dead text and go live in a refactor. The honest end state is <c>END</c> (NULL) and the roster
-    /// emptying; that is a product edit and not this lane's. The Darling twin's list carries the
-    /// <c>Darling.Storage</c> / <c>Darling.Analysis</c> members.
+    /// list can only shrink deliberately. EMPTY since the #3653 rate-arm PR; until then it named four, the
+    /// file-I/O throughput trends' <c>read_mb_per_sec</c> / <c>write_mb_per_sec</c> on both SKUs
+    /// (<c>Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.FileIo.cs</c>,
+    /// <c>Lite/Services/LocalDataService.FileIo.cs</c>). Each was dead text — the statement's own
+    /// <c>WHERE interval_seconds IS NOT NULL AND interval_seconds &gt; 0</c> one CTE down kept the ELSE from
+    /// running — and was rostered because it is the shape rule 1 forbids: a reader that would answer 0 for
+    /// "unknowable" the moment the WHERE moved. Each now ends at <c>END</c>. Kept declared, in
+    /// <see cref="DeltaFamilyIntervalColumnTests"/>' still-naked idiom, and asserted empty below, so a rate
+    /// arm that ships with <c>ELSE 0</c> again has to name itself here to pass and the diff says so. The
+    /// Darling twin's list (the <c>Darling.Storage</c> / <c>Darling.Analysis</c> members) emptied in the
+    /// same PR.
     /// </summary>
-    private static readonly string[] RateArmsThatFallBackToZero =
-    {
-        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.FileIo.cs: read_mb_per_sec",
-        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.FileIo.cs: write_mb_per_sec",
-        "Lite/Services/LocalDataService.FileIo.cs: read_mb_per_sec",
-        "Lite/Services/LocalDataService.FileIo.cs: write_mb_per_sec",
-    };
+    private static readonly string[] RateArmsThatFallBackToZero = Array.Empty<string>();
 
     /// <summary>
     /// Rule 1, the direct arm: no product SQL on the swept trees divides by the stored interval except through
@@ -371,13 +369,17 @@ public sealed class MeasurementContractCensusTests
         Assert.True(divisions >= 25, $"only {divisions} divisions by a derived interval alias found — the sweep is not reading the readers");
         Assert.Empty(unguarded);
 
-        /* Both directions: a new ELSE 0 arm must name itself here, and a retired one must leave. */
+        /* Rule 1's quotient arm is complete on these trees: nothing falls back to 0. A rate arm added to the
+           roster has to be a deliberate diff. Both directions: a new ELSE 0 arm must name itself here, and a
+           retired one must leave. */
+        Assert.Empty(RateArmsThatFallBackToZero);
         Assert.Equal(
             RateArmsThatFallBackToZero.OrderBy(s => s, StringComparer.Ordinal),
             zeroFallbacks.OrderBy(s => s, StringComparer.Ordinal));
 
-        /* Positive control for the roster scan, on the exact shape the file-I/O trends use, and on a nested
-           CASE inside the THEN (the shape the PostgreSQL I/O trend uses, in the Darling twin's trees). */
+        /* Positive control for the roster scan, on the exact shape the file-I/O trends USED before #3653
+           retired it, and on a nested CASE inside the THEN (the shape the PostgreSQL wait trend used, in the
+           Darling twin's trees). With the roster empty this control is what proves the scan is alive. */
         Assert.Equal(new[] { "read_mb_per_sec", "estimated_wait_ms_per_second" }, ZeroFallbackRateArms(
             "SELECT collection_time,\n"
             + "    CASE WHEN interval_seconds > 0\n     THEN CAST(delta_read_bytes AS DOUBLE PRECISION) / interval_seconds / 1048576.0\n     ELSE 0 END AS read_mb_per_sec,\n"

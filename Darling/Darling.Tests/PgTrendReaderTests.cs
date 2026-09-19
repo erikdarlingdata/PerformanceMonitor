@@ -2,6 +2,7 @@
 // Licensed under the terms in the LICENSE file in the repository root.
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -239,6 +240,80 @@ public sealed class PgTrendReaderTests
 
         Assert.Contains("/ interval_seconds", Code(DarlingPgTrendReader.DatabaseTrendSql), StringComparison.Ordinal);
         Assert.Contains("transactions_per_second", Code(DarlingPgTrendReader.DatabaseTrendSql), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 (#3540 rule 1, readers NULL-not-0 on unknowable): every per-second rate arm in the three
+    /// LAG-differenced trends ends at <c>END</c> — NULL for an interval that is not positive — rather than
+    /// <c>ELSE 0</c>, and the reader carries that NULL into a nullable field rather than reading it back as
+    /// 0. The statements' own guards keep the NULL arm unreachable today (the wait and I/O intervals are
+    /// LAGs over distinct collection times, the database trend's over one series), so nothing a point reports
+    /// changes; the pin is on the spelling, because the census that rostered these nine as dead text is what
+    /// found the two <c>PgBaselineProvider</c> siblings were not. Proven on a PG18 rig: a planted duplicate
+    /// collection time on <c>pg_database_stats</c> (the one way a 0 can be derived) came through
+    /// <c>GetDatabaseTrendAsync</c> as <c>TransactionsPerSecond = null</c> where the old text said 0.
+    /// </summary>
+    [Fact]
+    public void TheNineRateArms_YieldNullNotZero_AndTheReadersCarryIt()
+    {
+        var wait = Code(DarlingPgTrendReader.WaitTrendSql);
+        var io = Code(DarlingPgTrendReader.IoTrendSql);
+        var db = Code(DarlingPgTrendReader.DatabaseTrendSql);
+
+        foreach (var sql in new[] { wait, io, db })
+        {
+            Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        }
+
+        /* Every rate alias is the tail of a guarded CASE that has no ELSE: `... / interval_seconds` then
+           optional whitespace then END then AS <alias>. Nine aliases, both directions. */
+        var rateArm = new Regex(@"/\s*interval_seconds\s+END\s+AS\s+(\w+_per_second)\b", RegexOptions.IgnoreCase);
+        var aliases = new[] { wait, io, db }.SelectMany(sql => rateArm.Matches(sql).Select(m => m.Groups[1].Value)).OrderBy(a => a, StringComparer.Ordinal).ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "estimated_wait_ms_per_second", "extends_per_second", "hits_per_second", "read_bytes_per_second",
+                "reads_per_second", "temp_bytes_per_second", "transactions_per_second", "write_bytes_per_second",
+                "writes_per_second",
+            },
+            aliases);
+
+        /* The reader side: each of the nine is a nullable double on its point record, and the readers read
+           DBNull as null on those ordinals rather than as 0. */
+        foreach (var (type, field) in new (Type Type, string Field)[]
+        {
+            (typeof(DarlingPgTrendReader.PgWaitTrendPoint), "EstimatedWaitMsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ReadsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "WritesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ExtendsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "HitsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "ReadBytesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgIoTrendPoint), "WriteBytesPerSecond"),
+            (typeof(DarlingPgTrendReader.PgDatabaseTrendPoint), "TransactionsPerSecond"),
+            (typeof(DarlingPgTrendReader.PgDatabaseTrendPoint), "TempBytesPerSecond"),
+        })
+        {
+            var property = type.GetProperty(field);
+            Assert.True(property is not null, $"{type.Name}.{field} is not a property");
+            Assert.Equal(typeof(double?), property!.PropertyType);
+        }
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgTrendReader.cs");
+        foreach (var (method, ordinals) in new (string Method, int[] Ordinals)[]
+        {
+            ("GetWaitTrendAsync(", new[] { 2 }),
+            ("GetIoTrendAsync(", new[] { 11, 12, 13, 14, 15, 16 }),
+            ("GetDatabaseTrendAsync(", new[] { 4, 10 }),
+        })
+        {
+            var body = source[source.IndexOf(method, StringComparison.Ordinal)..];
+            body = body[..body.IndexOf("return points;", StringComparison.Ordinal)];
+            foreach (var ordinal in ordinals)
+            {
+                Assert.Contains($"reader.IsDBNull({ordinal}) ? (double?)null : reader.GetDouble({ordinal})", body, StringComparison.Ordinal);
+                Assert.DoesNotContain($"reader.IsDBNull({ordinal}) ? 0 : reader.GetDouble({ordinal})", body, StringComparison.Ordinal);
+            }
+        }
     }
 
     /// <summary>
