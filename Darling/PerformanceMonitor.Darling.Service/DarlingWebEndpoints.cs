@@ -64,7 +64,9 @@ public static class DarlingWebEndpoints
     /// the four mute-rule write verbs (<c>create_mute_rule</c> / <c>update_mute_rule</c> / <c>delete_mute_rule</c> /
     /// <c>set_mute_rule_enabled</c>) are the Custom Views disposition since #3450 — served by their OWN dedicated
     /// endpoints (<c>/api/mute-rules</c>, see <see cref="MapMuteRules"/>), never a query-string mirror of a write;
-    /// <c>update_alert_settings</c> WRITEs the alert config with no web surface at all, and the server-onboarding tools
+    /// <c>update_alert_settings</c> WRITEs the alert config with no web surface at all, as do the two notification-route
+    /// writes (<c>set_notification_route_enabled</c> / <c>delete_notification_route</c>, #3598 — routes are authored in
+    /// the Viewer's Settings window, and the web host's <c>viewer</c> role holds no write on the routes table), and the server-onboarding tools
     /// (<c>add_servers</c> / <c>remove_server</c>) WRITE the
     /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint. The
     /// custom-alert-rule tools (#3285) are the same disposition as the Custom Views tools: <c>create</c> /
@@ -88,6 +90,8 @@ public static class DarlingWebEndpoints
         "delete_custom_view",
         "run_custom_view_panel",
         "update_alert_settings",
+        "set_notification_route_enabled",
+        "delete_notification_route",
         "create_mute_rule",
         "update_mute_rule",
         "delete_mute_rule",
@@ -1872,6 +1876,10 @@ public static class DarlingWebEndpoints
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),
+            /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
+               (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
+               enabled), never a destination URL. */
+            ["get_notification_routes"] = R(CatAlerts, "The alert-family taxonomy (self-monitor / reports / agent-jobs / performance, with every metric each owns) and the notification routes layered over the parent channels — which channels each route sets, never the destination values."),
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
             ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PAsOf()),
@@ -2556,6 +2564,7 @@ public static class DarlingWebEndpoints
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false)),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true)),
+            ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg),
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
