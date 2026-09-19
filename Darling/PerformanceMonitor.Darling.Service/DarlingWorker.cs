@@ -5211,6 +5211,18 @@ public sealed class DarlingWorker : BackgroundService
     /// TimeZone (measured: a 1-hour window becomes 4 hours on an <c>America/New_York</c> store, and would
     /// invert east of UTC). An ORDER BY carries no clock frame at all. Internal so the shape and the
     /// same-row-across-offsets behaviour are both pinned by test.</para>
+    ///
+    /// <para><b>Not <c>sample_time_utc</c>, deliberately (V134, #3653 item 13).</b> Since that rung every
+    /// row carries the same instant in UTC beside the local stamp, and the windowed CPU reads prefer it. This
+    /// read does not, because the value it projects is not display data and not a window bound: it is the
+    /// CPU alert gate's OBSERVATION IDENTITY (#3282), compared only against the value this same read stored
+    /// last sweep, by <c>&gt;</c>. A frame is irrelevant to that comparison as long as it never changes — and
+    /// switching the projection to the UTC column would change it exactly once, at the upgrade, so that on
+    /// every server EAST of UTC the first post-rung sample (UTC) reads OLDER than the last pre-rung one (local)
+    /// and the gate sees no fresh sample for one offset's worth of hours: CPU alerting frozen, silently, on
+    /// the half of the world where it is morning. West of UTC the same switch would count one stale sample as
+    /// fresh. The tiebreak in the ORDER BY carries no frame either way, and the local column is what every
+    /// row has. Pinned by <c>TimeHonestyRungTests</c>.</para>
     /// </summary>
     internal const string LatestCpuSql = @"
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
@@ -5242,9 +5254,11 @@ LIMIT 1";
             sqlCpu = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0), CultureInfo.InvariantCulture);
             otherCpu = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
             /* #3282: the sample's own instant, which is the persistence gate's observation identity. Left
-               Kind=Unspecified as it comes off the naive-UTC `timestamp` column — it is only ever compared
-               against the value this same read stored last sweep, so coercing it to Kind=Utc would shift
-               one side of that comparison by the host's offset and, east of UTC, freeze the gate. */
+               Kind=Unspecified as it comes off the `timestamp` column (server-LOCAL on the ring-buffer arm,
+               UTC on Azure's — a frame this compare never needs; V134's UTC twin is deliberately not read
+               here, see LatestCpuSql) — it is only ever compared against the value this same read stored
+               last sweep, so coercing it to Kind=Utc would shift one side of that comparison by the host's
+               offset and, east of UTC, freeze the gate. */
             sampleTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
         }
 

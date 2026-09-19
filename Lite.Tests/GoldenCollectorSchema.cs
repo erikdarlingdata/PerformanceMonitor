@@ -15,7 +15,9 @@
 // store is actually built with, while every pre-existing column stays frozen. Precedent: ag_replica_role
 // (v36), replica_role (v47), runtime_stats_interval_id + interval_start_time_utc (v49, #1841 tier 2). A
 // NOT NULL relaxation is NOT an append — that goes in IntentionalStorageDivergences instead. Also
-// max_size_mb on tempdb_stats (v56, #2515).
+// max_size_mb on tempdb_stats (v56, #2515), cntr_type on perfmon_stats (v62, #3653 A7), and the v63
+// time-honesty pair (#3653 item 13): sample_time_utc on cpu_utilization_stats and time_zone_id on
+// server_properties.
 // </auto-generated>
 
 using System.Collections.Generic;
@@ -163,7 +165,8 @@ internal static class GoldenCollectorSchema
     server_name VARCHAR NOT NULL,
     sample_time TIMESTAMP NOT NULL,
     sqlserver_cpu_utilization INTEGER,
-    other_process_cpu_utilization INTEGER
+    other_process_cpu_utilization INTEGER,
+    sample_time_utc TIMESTAMP
 )",
         ["memory_stats"] = @"CREATE TABLE IF NOT EXISTS memory_stats (
     collection_id BIGINT PRIMARY KEY,
@@ -254,7 +257,8 @@ internal static class GoldenCollectorSchema
     sqlserver_start_time TIMESTAMP,
     host_os_version VARCHAR,
     ag_replica_role VARCHAR,
-    utc_offset_minutes INTEGER
+    utc_offset_minutes INTEGER,
+    time_zone_id VARCHAR
 )",
         ["server_config"] = @"CREATE TABLE IF NOT EXISTS server_config (
     config_id BIGINT PRIMARY KEY,

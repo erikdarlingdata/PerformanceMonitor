@@ -1309,7 +1309,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, and clustering. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is.")]
+    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, clustering, and the server's clock: utc_offset_minutes is the UTC offset in force when the snapshot was collected, and time_zone_id is the engine's own time-zone name (CURRENT_TIMEZONE_ID(), SQL Server 2022+ and Azure SQL only) - a null time_zone_id means a pre-2022 engine, where only the offset is known and any instant on the far side of a DST transition from the snapshot is placed an hour off by that offset. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is.")]
     public static async Task<string> GetServerProperties(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -1346,7 +1346,18 @@ public sealed class DarlingMcpDataTools
                 is_hadr_enabled = row.IsHadrEnabled,
                 is_clustered = row.IsClustered,
                 enterprise_features = string.IsNullOrEmpty(row.EnterpriseFeatures) ? null : row.EnterpriseFeatures,
-                service_objective = string.IsNullOrEmpty(row.ServiceObjective) ? null : row.ServiceObjective
+                service_objective = string.IsNullOrEmpty(row.ServiceObjective) ? null : row.ServiceObjective,
+                /* V134 (#3653 item 13, Q8): the clock pair. The offset is the one IN FORCE at captured_at,
+                   which is exact for an instant on the same side of a DST transition and an hour wrong for
+                   one on the other (#3231); the zone is what can tell the two apart. NULL is a real answer
+                   for the zone - CURRENT_TIMEZONE_ID() is SQL Server 2022+ / Azure SQL only - and the note
+                   says what it means rather than leaving a caller to read it as "not collected". Byte-for-byte
+                   the keys Lite's tool emits. */
+                utc_offset_minutes = row.UtcOffsetMinutes,
+                time_zone_id = string.IsNullOrEmpty(row.TimeZoneId) ? null : row.TimeZoneId,
+                time_zone_note = string.IsNullOrEmpty(row.TimeZoneId)
+                    ? "time_zone_id is null: a pre-2022 engine (CURRENT_TIMEZONE_ID() is SQL Server 2022+ / Azure SQL only), so only the offset in force at captured_at is known."
+                    : "time_zone_id is the engine's own zone (CURRENT_TIMEZONE_ID()); utc_offset_minutes is the offset that zone had at captured_at."
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

@@ -17,7 +17,25 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets CPU utilization data for charting.
-    /// Note: sample_time is stored in server local time (from SYSDATETIME()), not UTC.
+    /// Note: sample_time is stored in server local time (from SYSDATETIME()), not UTC, and the projected
+    /// <c>SampleTime</c> stays that way — the chart plots the server's own frame, and the local stamp IS that
+    /// frame with no offset applied.
+    ///
+    /// <para><b>The WINDOW prefers the stored UTC instant (v63, #3653 item 13, Q7).</b> Since that rung the
+    /// collector writes <c>sample_time_utc</c> — the same instant in UTC — beside the local stamp. This read's
+    /// window is a UTC question (<paramref name="hoursBack"/> back from <paramref name="asOfUtc"/>, or a
+    /// picker range the caller expressed in server time) that used to be answered ONLY by shifting the bounds
+    /// into the server's frame by the one <paramref name="utcOffsetMinutes"/> the store holds now
+    /// (<c>GetTimeRangeServerLocal</c>) and comparing them against the local stamp. That is exact while every
+    /// sample and the collected offset sit on the same side of a DST transition and an hour wrong for every
+    /// sample on the far side — silently, in the plausible direction. The predicate is now
+    /// <c>COALESCE(sample_time_utc, sample_time - offset) BETWEEN utcStart AND utcEnd</c>: a post-rung row is
+    /// selected by its measured UTC instant with no offset involved, and a pre-rung row (NULL twin) by
+    /// <c>sample_time - offset &gt;= utcStart</c>, which is algebraically the old <c>sample_time &gt;= utcStart +
+    /// offset</c> — the same rows, the same edge cases, byte-for-byte the old behaviour for the old
+    /// population. Nothing is backfilled, because the offset a server had at a past sample's instant is
+    /// exactly what the store never recorded. The MCP <c>get_cpu_utilization</c> and the WPF chart both come
+    /// through here, so both windows are honest for post-rung rows and neither's display frame changes.</para>
     /// </summary>
     /// <param name="utcOffsetMinutes">
     /// <paramref name="serverId"/>'s OWN UTC offset, which is what the server-local window has to be
@@ -32,9 +50,18 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* sample_time is in server local time, not UTC */
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes);
+        /* sample_time is in server local time, not UTC. The server-local bounds are what this read always
+           computed; the UTC bounds are the same instants un-shifted (the picker branch converts the
+           server-time range back to UTC exactly as GetTimeRange does), and the offset rides along as $4 so
+           the pre-rung fallback arm can re-derive the local comparison inside the predicate. */
+        var offset = utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes;
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, offset);
+        var startUtc = startTime.AddMinutes(-offset);
+        var endUtc = endTime.AddMinutes(-offset);
 
+        /* v63 (#3653 item 13): prefer the stored UTC instant for the window; a pre-rung row (NULL twin) falls
+           back to sample_time - offset, which against UTC bounds is exactly the old sample_time-against-local
+           bounds. The PROJECTION stays sample_time: the chart plots the server's own frame. */
         command.CommandText = @"
 SELECT
     sample_time,
@@ -42,13 +69,14 @@ SELECT
     other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   sample_time >= $2
-AND   sample_time <= $3
+AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
+AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
 ORDER BY sample_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = (long)offset });
 
         var items = new List<CpuUtilizationRow>();
         using var reader = await command.ExecuteReaderAsync();

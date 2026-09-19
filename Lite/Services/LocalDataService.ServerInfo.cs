@@ -26,7 +26,8 @@ public partial class LocalDataService
 SELECT edition, product_version, product_level, product_update_level,
        engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, is_clustered,
-       enterprise_features, service_objective, collection_time
+       enterprise_features, service_objective, collection_time,
+       utc_offset_minutes, time_zone_id
 FROM v_server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -53,7 +54,11 @@ LIMIT 1";
             IsClustered = !reader.IsDBNull(11) && reader.GetBoolean(11),
             EnterpriseFeatures = reader.IsDBNull(12) ? "" : reader.GetString(12),
             ServiceObjective = reader.IsDBNull(13) ? "" : reader.GetString(13),
-            CollectionTime = reader.GetDateTime(14)
+            CollectionTime = reader.GetDateTime(14),
+            /* v42 / v63 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
+               would claim UTC of a row that never recorded one, and "" would claim a zone name. */
+            UtcOffsetMinutes = reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16)
         };
     }
 
@@ -193,6 +198,13 @@ public class ServerPropertiesRow
     public string EnterpriseFeatures { get; set; } = "";
     public string ServiceObjective { get; set; } = "";
     public DateTime CollectionTime { get; set; }
+
+    /// <summary>The UTC offset IN FORCE at <see cref="CollectionTime"/> (v42); null on a pre-v42 snapshot.</summary>
+    public int? UtcOffsetMinutes { get; set; }
+
+    /// <summary>The engine's own time-zone name from <c>CURRENT_TIMEZONE_ID()</c> (v63, #3653 item 13, Q8); null
+    /// where the engine cannot say — every SQL Server before 2022 — which is a real value, not a miss.</summary>
+    public string? TimeZoneId { get; set; }
 }
 
 public class DatabaseSizeStatsRow

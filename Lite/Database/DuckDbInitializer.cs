@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 62;
+    internal const int CurrentSchemaVersion = 63;
 
     private readonly string _archivePath;
 
@@ -1751,6 +1751,75 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v62 on perfmon_stats.cntr_type encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 63)
+        {
+            /* v63 (#3653 item 13, rulings Q7 + Q8 — the "time honesty" rung, twinning Darling's V134): two
+               nullable columns that let the store say WHICH clock two of its values are in.
+
+               cpu_utilization_stats gains sample_time_utc. sample_time is, and stays, the MONITORED SERVER'S
+               LOCAL wall clock (SYSDATETIME() minus each ring-buffer entry's age) — the one column in this
+               store that is not naive UTC, by a documented convention: the CPU chart plots it in the
+               server's own frame, and it is the collector's watermark. Every read that windows it against a
+               UTC instant therefore had to DERIVE the UTC value, and this side derived it by shifting the
+               whole window by the single utc_offset_minutes the store holds NOW (GetTimeRangeServerLocal):
+               exact while every sample and the collected offset sit on the same side of a DST transition,
+               an hour wrong for every sample on the far side, silently and in the plausible direction. The
+               collector now writes sample_time_utc beside it — the SAME instant, the same DATEADD arithmetic
+               anchored on SYSUTCDATETIME() (on Azure SQL DB it is end_time, which is UTC and which
+               sample_time already reads, because Azure's clock IS UTC) — and GetCpuUtilizationAsync windows
+               on COALESCE(sample_time_utc, sample_time - the offset) against UTC bounds, so a post-rung row
+               is selected by a stored UTC instant and a pre-rung row exactly as before. The projected value
+               stays sample_time: the chart wants the server's frame, and the local stamp IS that frame with
+               no offset applied at all.
+
+               server_properties gains time_zone_id beside utc_offset_minutes (v42). The offset is
+               DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) — the one IN FORCE at collection — and #3231
+               documented that subtracting it from a stored instant that can outlive a DST transition
+               (get_index_usage's last_user_access, the PVS cleaner stamps) is exact on one side and an hour
+               wrong on the other, with nothing in the store able to say which. A ZONE can, because AT TIME
+               ZONE applies the rule in force at the instant. CURRENT_TIMEZONE_ID() exists on SQL Server
+               2022+ and Azure SQL only, and on an older engine it is a missing BUILT-IN rather than a missing
+               object — the batch fails to compile — so the collector reads it in its own gated sp_executesql
+               batch inside TRY/CATCH and writes NULL where the engine cannot say. NULL is a real and common
+               value: "pre-2022 engine, only the offset is known", and get_server_properties says so. The
+               offset stays alongside rather than being replaced, because every de-skew in the tree still
+               runs on it and the zone is NULL on most of today's fleet.
+
+               Both appended at the end of their PayloadColumns lists, so the positional appender and old
+               parquet are unaffected (v_ views UNION ALL BY NAME the parquet with union_by_name, so an
+               archived file without the column reads NULL through the view). Nothing to backfill and nothing
+               that COULD be: a pre-rung sample_time could be converted only by the offset its server had AT
+               THAT INSTANT, which is exactly what the store never recorded — the collected offset and the
+               derivation are the DST-blind instruments this column replaces, so a backfilled value would be
+               the old lie written into the new column where a reader could no longer tell it from a
+               measurement; and no zone can be recovered from an offset, since several zones share every one.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first CPU batch and the first
+               server_properties batch — the whole batch, not the column. Fresh installs get both from
+               DuckDbSchemaGenerator; these ALTERs are for an existing database and are idempotent. The v_
+               passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59–v62. */
+            _logger?.LogInformation("Running migration to v63: cpu_utilization_stats stores each sample's UTC instant beside the server-local one, and server_properties stores the engine's time-zone id beside its offset");
+
+            foreach (var (table, column, type) in new[]
+            {
+                ("cpu_utilization_stats", "sample_time_utc", "TIMESTAMP"),
+                ("server_properties", "time_zone_id", "VARCHAR"),
+            })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v63 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
+                }
             }
         }
     }

@@ -19,9 +19,12 @@ namespace Lite.Tests;
 /// <summary>
 /// Pins the parity contract of the extracted server_properties definition: the vCore parse rules,
 /// the Azure-only vCore application, the supplemental WS5 health probe (skipped on Azure,
-/// merge-by-replacement, failure leaves NULLs), and the 22-column payload incl. the
-/// enterprise_features placeholder Lite never collects and the utc_offset_minutes the viewer's
-/// Server-time display mode reads.
+/// merge-by-replacement, failure leaves NULLs), and the 23-column payload incl. the
+/// enterprise_features placeholder Lite never collects, the utc_offset_minutes the viewer's
+/// Server-time display mode reads, and — since Darling V134 / Lite v63 (#3653 item 13, Q8) — the
+/// time_zone_id beside it: CURRENT_TIMEZONE_ID() read in its own version/edition-gated sp_executesql batch
+/// inside TRY/CATCH, because on a pre-2022 engine the function is a missing BUILT-IN and a batch that names
+/// it fails to compile as a whole; NULL where the engine cannot say.
 /// </summary>
 public sealed class ServerPropertiesCollectorDefinitionTests
 {
@@ -66,8 +69,48 @@ public sealed class ServerPropertiesCollectorDefinitionTests
                 "enterprise_features", "service_objective", "vcore_count",
                 "lock_pages_in_memory", "instant_file_initialization_enabled", "memory_dump_count",
                 "sqlserver_start_time", "host_os_version", "ag_replica_role", "utc_offset_minutes",
+                "time_zone_id",
             },
             ServerPropertiesCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
+        Assert.Equal(CollectorColumnType.Varchar, ServerPropertiesCollector.Instance.PayloadColumns[^1].Type);
+    }
+
+    /* ── #3653 item 13 (Q8): the zone id beside the offset ── */
+
+    /// <summary>
+    /// <c>CURRENT_TIMEZONE_ID()</c> appears ONLY inside a dynamic-SQL string handed to <c>sp_executesql</c> —
+    /// never in the batch's own text — because on SQL Server 2019 and earlier it is not a missing object but a
+    /// missing built-in, and a batch that names it fails to COMPILE before any <c>IF</c> or <c>CASE</c> can
+    /// skip it (the <c>OBJECT_ID</c> guard the other two edition-specific columns use has nothing to test).
+    /// The dynamic batch is behind a version/edition gate (2022+ is ProductMajorVersion 16; Azure SQL DB = 5
+    /// and Managed Instance = 8 report a low major yet ship the function) AND inside TRY/CATCH, so an engine
+    /// the gate admits that still refuses the call leaves NULL rather than losing the row — the #1591
+    /// isolation, applied to a built-in. The projection binds the local, so the main SELECT still reads no
+    /// table and no function that could fail to compile.
+    /// </summary>
+    [Fact]
+    public void MainQuery_ReadsTheTimeZoneId_OnlyThroughAGatedDynamicBatch_AndBindsItLast()
+    {
+        var text = ServerPropertiesCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text.Replace("\r\n", "\n");
+
+        /* Exactly one mention of the function in the CODE (the T-SQL's own block-comment reasoning names it too,
+           so comments are stripped first), and it is inside an N'...' literal handed to sp_executesql. */
+        var code = System.Text.RegularExpressions.Regex.Replace(text, @"/\*.*?\*/", " ", System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(code, @"CURRENT_TIMEZONE_ID\s*\(\s*\)"));
+        Assert.Contains("EXEC sys.sp_executesql\n            N'SELECT @tz = CURRENT_TIMEZONE_ID();',\n            N'@tz nvarchar(128) OUTPUT', @tz = @time_zone_id OUTPUT;", text, StringComparison.Ordinal);
+
+        /* The gate (both arms), then TRY, then the EXEC, then the CATCH that leaves NULL — in that order. */
+        var gate = code.IndexOf("IF CONVERT(integer, SERVERPROPERTY(N'ProductMajorVersion')) >= 16\nOR CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) IN (5, 8)\nBEGIN", StringComparison.Ordinal);
+        Assert.True(gate >= 0, "the version/edition gate is missing or reshaped");
+        var tryOpen = code.IndexOf("BEGIN TRY", gate, StringComparison.Ordinal);
+        var exec = code.IndexOf("CURRENT_TIMEZONE_ID", StringComparison.Ordinal);
+        var catchLeavesNull = code.IndexOf("SET @time_zone_id = NULL;", StringComparison.Ordinal);
+        Assert.True(gate < tryOpen && tryOpen < exec && exec < catchLeavesNull, "the dynamic batch must sit inside the gate AND inside TRY/CATCH that leaves NULL");
+
+        /* Declared NULL, bound last in the projection right after the offset it disambiguates. */
+        Assert.Contains("DECLARE @time_zone_id nvarchar(128) = NULL;", text, StringComparison.Ordinal);
+        Assert.Contains("DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),", text, StringComparison.Ordinal);
+        Assert.Contains("    time_zone_id =\n        @time_zone_id\nOPTION(RECOMPILE);", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -117,7 +160,7 @@ public sealed class ServerPropertiesCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task WritePayload_Emits22Columns_WithNullEnterpriseFeatures()
+    public async Task WritePayload_Emits23Columns_WithNullEnterpriseFeatures()
     {
         using var reader = new FakeCollectorDataReader(AzureRow("HS_Gen5_14"));
         var rows = await ServerPropertiesCollector.Instance.ReadAsync(
@@ -126,7 +169,8 @@ public sealed class ServerPropertiesCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         ServerPropertiesCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(s_deltas));
 
-        Assert.Equal(22, writer.Values.Count);
+        Assert.Equal(23, writer.Values.Count);
+        Assert.Equal(ServerPropertiesCollector.Instance.PayloadColumns.Count, writer.Values.Count);
         Assert.Equal("Azure SQL Database (General Purpose)", writer.Values[0]);
         Assert.Null(writer.Values[12]);           /* enterprise_features — never collected in Lite */
         Assert.Equal("HS_Gen5_14", writer.Values[13]);
@@ -136,17 +180,39 @@ public sealed class ServerPropertiesCollectorDefinitionTests
         Assert.Equal("Windows Server 2022", writer.Values[19]);
         Assert.Null(writer.Values[20]);           /* ag_replica_role — standalone in the fixture */
         Assert.Equal(-300, writer.Values[21]);    /* utc_offset_minutes — the viewer's Server-time offset */
+        Assert.Equal("Eastern Standard Time", writer.Values[22]);   /* time_zone_id — v63 / V134 (#3653 item 13), last */
     }
 
-    /// <summary>18-column main-query row; index 0 (server_name) is read past by the definition.</summary>
+    /// <summary>The pre-2022 shape: the gated batch never ran, the local stayed NULL, and the writer emits NULL
+    /// in the last slot — "only the offset is known" — never a guessed zone and never a fabricated string.</summary>
+    [Fact]
+    public async Task WritePayload_NullTimeZoneId_StaysNull_Pre2022Engine()
+    {
+        var row = AzureRow("GP_Gen5_6");
+        row[18] = DBNull.Value;
+        using var reader = new FakeCollectorDataReader(row);
+        var rows = await ServerPropertiesCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
+
+        Assert.Null(rows[0].TimeZoneId);
+        Assert.Equal(-300, rows[0].UtcOffsetMinutes);   /* the offset is still known where the zone is not */
+
+        var writer = new RecordingCollectorRowWriter();
+        ServerPropertiesCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(s_deltas));
+        Assert.Equal(23, writer.Values.Count);
+        Assert.Null(writer.Values[22]);
+        Assert.Equal(-300, writer.Values[21]);
+    }
+
+    /// <summary>19-column main-query row; index 0 (server_name) is read past by the definition.</summary>
     private static object[] AzureRow(string? serviceObjective) => new object[]
     {
         "myserver", "Azure SQL Database (General Purpose)", "12.0.2000.8", "RTM", DBNull.Value,
         5, 80, 8, 415800L, DBNull.Value, DBNull.Value, false, false,
         serviceObjective is null ? DBNull.Value : serviceObjective,
         /* v36 inventory columns (#1372): sqlserver_start_time(14), host_os_version(15), ag_replica_role(16).
-           v42 (#1409): utc_offset_minutes(17). */
-        new DateTime(2026, 6, 1), "Windows Server 2022", DBNull.Value, -300,
+           v42 (#1409): utc_offset_minutes(17). v63 (#3653 item 13): time_zone_id(18). */
+        new DateTime(2026, 6, 1), "Windows Server 2022", DBNull.Value, -300, "Eastern Standard Time",
     };
 
     /* ── #1591: the hardware read must stay isolated from the permission-free columns ── */

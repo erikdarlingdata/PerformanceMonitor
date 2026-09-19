@@ -26,7 +26,10 @@ public sealed class McpCpuTools
             if (hoursError != null) return hoursError;
 
             /* sample_time is THIS server's local wall clock (#1262), so the window needs THIS server's
-               offset — not the desktop tab's. See McpServerLocalWindow. */
+               offset — not the desktop tab's. See McpServerLocalWindow. Since v63 (#3653 item 13) the offset
+               drives only the pre-rung fallback arm of the window: a row carrying sample_time_utc is selected
+               by that stored UTC instant, offset-free. The emitted sample_time stays the server-local stamp
+               (bucketed to the minute below), the frame this tool has always published. */
             var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetCpuUtilizationAsync(
