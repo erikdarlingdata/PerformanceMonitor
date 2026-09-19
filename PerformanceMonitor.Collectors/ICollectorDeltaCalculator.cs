@@ -60,4 +60,46 @@ public interface ICollectorDeltaCalculator
         int? seriesAgeSeconds, out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
         => CalculateDeltaWithInterval(serverId, collectorName, key, currentValue, out intervalSeconds,
             collectionTime, maxGapSeconds);
+
+    /// <summary>
+    /// Forgets every baseline and every pass window cached for <paramref name="serverId"/>, because the
+    /// counters behind that id are no longer the counters the baselines were read from (#3653 A5, the
+    /// identity-epoch item of #3540).
+    ///
+    /// <para><b>Why this is on the DEFINITION's contract and not only on the host's calculator.</b> The
+    /// hosts already forget a server they stop monitoring (Lite's tab close, Darling's reconcile-remove
+    /// branch, #3540 A4) and they hold the concrete calculator to do it. But the discontinuities that
+    /// happen WHILE a server stays monitored — the instance restarted, the listener or the DNS endpoint
+    /// now lands on a different replica, <c>pg_stat_statements_reset()</c> was called — are visible only
+    /// to a definition, in the row it is reading, and only that definition can act BEFORE its own
+    /// subtraction: a host that learns of the epoch after the run has already stored one interval of
+    /// <c>new instance's counter minus old instance's baseline</c>. So the definition that observes the
+    /// epoch (see <see cref="ServerEpoch"/>) forgets through the same handle it subtracts through.</para>
+    ///
+    /// <para><paramref name="discontinuity"/> is the one-line human account of what changed (old and new
+    /// value, named), which the implementation may keep for the host to log — the definition has no
+    /// logger, the host has no view of the row. Null when the caller has nothing to say (the host's own
+    /// remove path).</para>
+    ///
+    /// <para>Default-implemented as a no-op, like <see cref="CalculateDeltaWithSeriesAge"/>, so an
+    /// implementer that caches nothing per server — every test double in this repo — keeps compiling with
+    /// nothing to forget. The shared <see cref="CollectorDeltaCalculator"/> both SKUs run overrides both
+    /// members; an implementation that caches baselines and inherits these no-ops has the continuity bug
+    /// this paragraph is the only warning of.</para>
+    /// </summary>
+    void ClearServer(int serverId, string? discontinuity = null)
+    {
+    }
+
+    /// <summary>
+    /// As <see cref="ClearServer"/>, but for the named delta GROUPS only — the <c>collectorName</c> values
+    /// the family's <c>CalculateDelta*</c> calls pass — leaving every other family's baselines intact.
+    /// For an epoch that belongs to one family alone: <c>pg_stat_statements_info.stats_reset</c> moves when
+    /// the statements counters are reset or are a different instance's, and says nothing about any other
+    /// counter on the server, so forgetting the whole server for it would throw away knowable intervals
+    /// elsewhere. Same default, for the same reason.
+    /// </summary>
+    void ClearGroups(int serverId, string? discontinuity, params string[] groups)
+    {
+    }
 }

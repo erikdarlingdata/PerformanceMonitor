@@ -533,6 +533,13 @@ public class CollectorMeasurementSeamTests
                 BlockedProcessReportCollector.EmptyReportMeasurement,
                 BlockedProcessReportCollector.UnparsedReportMeasurement,
                 BlockedProcessReportCollector.EventsStoredMeasurement,
+                /* #3653 A5: the identity-epoch markers. Measured by ServerEpoch on behalf of the carrier
+                   collectors (cpu_utilization, pg_statement_stats), which is why the consts live in
+                   ServerEpoch.cs beside the two .Measure( calls - the resolver reads consts from the calling
+                   file. A count of 1 on the run that saw the epoch; the rendered `identity_epoch_changes=1`
+                   on that run's collection_log row is the discontinuity marker in the store. */
+                ServerEpoch.IdentityChangesMeasurement,
+                ServerEpoch.StatementsChangesMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

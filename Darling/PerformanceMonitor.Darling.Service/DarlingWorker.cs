@@ -3308,10 +3308,30 @@ public sealed class DarlingWorker : BackgroundService
             if (connectionChanged)
             {
                 _logger.LogInformation(
-                    "[{Server}] Definition changed — reconnecting with the new configuration", desiredServer.DisplayName);
+                    "[{Server}] Definition changed — reconnecting with the new configuration; delta baselines forgotten, "
+                    + "the first pass on the new connection re-baselines (#3653 A5)", desiredServer.DisplayName);
                 state.Runtime = null;
                 state.NextConnectAttempt = DateTime.MinValue;
                 state.NextDue.Clear();
+                /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
+                   fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
+                   connection reaches (host, database, auth, intent, subnet failover) or WHAT it collects
+                   (excluded databases) — so a change here means the counters the next pass reads may be a
+                   different instance's while the server_id, and every baseline cached under it, stays the
+                   same. Left cached, the first pass after the reconnect would store one interval of
+                   `new instance's total minus old instance's baseline` per key — the positive storm when the
+                   new host is the busier one, and the reset branch's (0, 0) only when it is quieter. The
+                   remove branch above already forgets for a remove+re-add; this is the same forget for the
+                   edit that never removes. The cost is one re-baseline pass on every family after an operator
+                   edits a connection field, which is the honest price of not knowing whether the host behind
+                   the id changed. The persisted identity pair (collector_state, cpu_utilization) is left for
+                   the carrier to compare on its next run: if the new connection reaches the same instance the
+                   pair matches and nothing more happens; if it reaches a different one the carrier logs the
+                   old/new pair and forgets again — and because the carrier runs after five delta families in
+                   the schedule order, that second forget costs those five one more re-baseline pass. Paid once,
+                   when an operator points a registration at a different instance, and named here rather than
+                   avoided: avoiding it means a store write on this reload path to erase the persisted pair. */
+                _deltas?.ClearServer(id);
             }
 
             desiredById.Remove(id);
@@ -7821,6 +7841,28 @@ LIMIT 1";
                (Darling/README.md, "Logs"). */
             _logger.LogDebug("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                 server.Config.DisplayName, collectorName, result.Rows, result.SqlMs, result.StorageMs);
+
+            /* #3653 A5: the identity-epoch account, if this run's definition saw one. The definition has the
+               row (old and new start time, old and new name) and no logger; this loop has the logger and
+               no row; the calculator both hold is where the sentence waits (CollectorDeltaCalculator
+               .DrainDiscontinuities). Information, not Debug: a forgotten baseline set is a measurement
+               discontinuity an operator reading a flat minute on the charts needs to be able to find, and
+               it happens on the order of once per restart or failover, never per cycle. Drained on every
+               run — a dictionary probe — so the line lands beside the run that observed it and is never
+               re-logged by the next. The same run's collection_log row carries the count
+               (identity_epoch_changes=1 / statements_epoch_changes=1) as the marker in the store; Lite's
+               twin is the same drain in RemoteCollectorService.RunCollectorAsync. Worded as "drained after"
+               rather than "observed by": a carrier run that observed the epoch and then failed at its store
+               write leaves the sentence queued for the next successful run on the server, whichever
+               collector that is. */
+            if (_deltas is not null)
+            {
+                foreach (var discontinuity in _deltas.DrainDiscontinuities(runtime.ServerId))
+                {
+                    _logger.LogInformation("  [{Server}] {Discontinuity} (#3653 A5; drained after {Collector})",
+                        server.Config.DisplayName, discontinuity, collectorName);
+                }
+            }
 
             /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch
                sub-splits do — the line above is parsed by tooling outside this repo, and "don't break the

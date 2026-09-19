@@ -168,4 +168,25 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
         return CalculateDeltaWithInterval(serverId, collectorName, key, currentValue, out intervalSeconds,
             collectionTime, maxGapSeconds);
     }
+
+    /// <summary>
+    /// Every forget a definition asked for (#3653 A5), in call order, each with the number of delta calls
+    /// that had ALREADY been recorded when it arrived. Overridden rather than left to the interface's no-op
+    /// default for the reason <see cref="SeriesAges"/> gives: the default would keep a carrier that forgot
+    /// AFTER its own subtraction — or stopped forgetting — green on every existing pin, and the property
+    /// worth pinning is precisely that the forget lands before the first delta call of the pass.
+    /// </summary>
+    public List<(string Kind, string? Discontinuity, string[] Groups, int DeltaCallsBefore)> Clears { get; } = new();
+
+    public void ClearServer(int serverId, string? discontinuity = null)
+    {
+        LastServerId = serverId;
+        Clears.Add(("server", discontinuity, Array.Empty<string>(), Calls.Count));
+    }
+
+    public void ClearGroups(int serverId, string? discontinuity, params string[] groups)
+    {
+        LastServerId = serverId;
+        Clears.Add(("groups", discontinuity, groups, Calls.Count));
+    }
 }

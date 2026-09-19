@@ -99,6 +99,18 @@ public sealed class AgAlertEvaluator
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
                 _replicaRole[key] = replica.RoleDesc!;
 
+                /* #3653 A5 asked whether this edge should also forget the server's delta baselines, and the
+                   answer is no, deliberately — the same answer as Darling's twin. A role change is a fact about
+                   the REPLICA the row names, judged from whichever monitored connection can see the
+                   AG; it is not a fact about which instance THIS server_id's connection reaches. A registration
+                   pointed at a node directly keeps reading that node's cumulative DMVs through a failover —
+                   the counters are continuous and a forget would throw one honest interval away on every
+                   replica that can see the role change. A registration pointed at the LISTENER does land on a
+                   different instance after a failover, and that instance reports a different @@SERVERNAME
+                   and sqlserver_start_time, which is exactly the pair the identity-epoch carrier
+                   (CpuUtilizationCollector -> ServerEpoch) compares every minute: the forget happens there,
+                   named for the mechanism that actually moved the counters, and this edge stays what it is
+                   — an alert about a role. */
                 if (failover)
                 {
                     alerts.Add(new AgAlert(

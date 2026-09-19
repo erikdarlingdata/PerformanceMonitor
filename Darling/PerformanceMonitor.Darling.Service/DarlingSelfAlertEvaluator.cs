@@ -2626,6 +2626,19 @@ internal sealed class DarlingSelfAlertEvaluator
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
                 _agReplicaRole[key] = replica.RoleDesc;
 
+                /* #3653 A5 asked whether this edge should also forget the server's delta baselines
+                   (_deltas.ClearServer), and the answer is no, deliberately. Two reasons, both about WHICH
+                   server. First, this edge fires from the AUTHORITATIVE vantage for the AG (#1696 de-dup above),
+                   which is a monitored connection that can SEE the role change — not necessarily the one whose
+                   counters moved; `serverId` here names the observer. Second, a role change is a fact about a
+                   replica, not about which instance a connection reaches: a registration pointed at a node
+                   directly keeps reading that node's cumulative DMVs through the failover, the counters are
+                   continuous, and forgetting them would throw one honest interval away on every replica of the
+                   AG at the moment the charts matter most. The registration that DOES change instance — one
+                   pointed at the listener — reports a different @@SERVERNAME and sqlserver_start_time after the
+                   failover, and that pair is what the identity-epoch carrier (CpuUtilizationCollector ->
+                   ServerEpoch) compares every minute against the persisted one; the forget happens there, on
+                   the server whose counters actually moved, and this edge stays an alert about a role. */
                 if (failover)
                 {
                     await FireAsync(

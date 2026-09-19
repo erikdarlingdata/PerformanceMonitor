@@ -53,7 +53,9 @@ public class PgStatementStatsDeltaSkipTests
     /// <summary>
     /// One row's worth of reader values in ordinal order. Only the fields a scenario cares about are
     /// parameterized; everything else reads exactly as an idle statement's row would (zero counters, NULL
-    /// on the Aurora-only six).
+    /// on the Aurora-only six, and — since #3653 A5 — a NULL <c>statements_stats_reset</c> at ordinal 27,
+    /// which the epoch check reads as "unknown" and so never as a change; these tests are about the skip,
+    /// not the epoch, and a NULL keeps the epoch inert. <c>ServerEpochTests</c> drives the epoch itself.)
     /// </summary>
     private static object[] Row(long queryId, long calls, double totalExecTimeMs, long rowsReturned = 0, long databaseId = 1, long userId = 1) => new object[]
     {
@@ -64,6 +66,7 @@ public class PgStatementStatsDeltaSkipTests
         DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
         0L, 0L, 0L,
         DBNull.Value, DBNull.Value,
+        DBNull.Value,
     };
 
     private static async Task<List<PgStatementStatsCollector.Row>> ReadAsync(

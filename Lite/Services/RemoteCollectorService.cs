@@ -664,6 +664,18 @@ public partial class RemoteCollectorService
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
 
+            /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
+               in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old
+               and new start time, old and new @@SERVERNAME, what was forgotten) and has no logger; this is
+               the host loop that does. Info, once, beside the run that observed it; the run's collection_log
+               row carries identity_epoch_changes=1 as the marker in the store. Drained on every run so a
+               carrier that observed and then failed at its write still gets its sentence logged by the next
+               successful run on the server. */
+            foreach (var discontinuity in _deltaCalculator.DrainDiscontinuities(GetServerId(server)))
+            {
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] {discontinuity} (#3653 A5; drained after {collectorName})");
+            }
+
             /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
                catches below assign it — so this carries the runner's note (an enumeration that listed
                zero databases, items whose enumeration probe failed) onto the collection_log row without
