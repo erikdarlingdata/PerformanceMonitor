@@ -776,7 +776,24 @@ WITH clean AS (
                    after zeros survive. Row selection is exactly the original's for NULL-interval
                    collections; for measured ones the > 100 heuristic is gated off (the WaitStats
                    arm's reasoning) and the window's first collection is rated off its stored
-                   interval rather than dropped for lacking a prior. */
+                   interval rather than dropped for lacking a prior.
+
+               #3653 (#3540 rule 1, readers NULL-not-0 on unknowable): the ms_per_sec arm ends at END,
+               not ELSE 0, and with_rate's WHERE carries interval_sec > 0 beside IS NOT NULL — Lite's
+               current text, verbatim (Lite/Analysis/BaselineProvider.cs, WaitMsPerSec). Both halves
+               are needed together. The stored interval this arm reads is positive by the aggregate's
+               own predicate, but the LAG fallback for a pre-column collection is NOT: two collections
+               that date_trunc to the same second derive interval_sec = 0, and under IS NOT NULL alone
+               that row reached with_rate, where ELSE 0 rated it 0 ms/sec — a fabricated idle sample in
+               the baseline's mean and stddev, which the > 100 heuristic only caught after a busy one.
+               With END alone the row would instead carry a NULL ms_per_sec into clean (NOT (NULL = 0
+               AND …) is TRUE whenever either other conjunct is FALSE, which is the common case) and be
+               COUNT(*)ed as a sample of nothing; interval_sec > 0 in with_rate drops it BEFORE the
+               restart LAG, so the sample set holds only rated collections and the LAG window is exactly
+               the rated rows, as (b) requires. Proven on a PG18 rig with three planted pre-column
+               collections, one pair in the same second: old text count 3 / mean 66.7, END alone count 3 /
+               mean 100, this text count 2 / mean 100. The same-second row is unknowable, not idle, and a
+               baseline has no honest bucket for it. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -791,9 +808,9 @@ WITH per_collection AS (
 ),
 with_rate AS (
     SELECT collection_time, sample_interval_seconds,
-           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END AS ms_per_sec
+           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec
     FROM per_collection
-    WHERE interval_sec IS NOT NULL
+    WHERE interval_sec IS NOT NULL AND interval_sec > 0
 ),
 with_lag AS (
     SELECT collection_time, ms_per_sec, sample_interval_seconds,
@@ -825,8 +842,8 @@ clean AS (
     }
 
     /// <summary>
-    /// The pre-#3653 text of the three arms whose supply was superseded, VERBATIM, against the legacy relations
-    /// (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c>). Run by <see cref="ChooseSupplyAsync"/> only while a
+    /// The pre-#3653 text of the three arms whose supply was superseded, VERBATIM but for one spelling, against
+    /// the legacy relations (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c>). Run by <see cref="ChooseSupplyAsync"/> only while a
     /// legacy relation still reaches further back into a server's window than its successor — on a store
     /// upgraded with the default 30-day raw horizon, roughly the first day after the upgrade — and never on a
     /// store that was first installed at or after this build. <c>null</c> for every other metric.
@@ -838,6 +855,15 @@ clean AS (
     /// magnitude test was the only restart guard there was. The row-selection arguments for the QUALIFY
     /// rewrites (window-before-filter, LAG over the unfiltered series) are the ones on <see cref="GetBaselineQuery"/>
     /// and hold here unchanged.</para>
+    ///
+    /// <para>The one spelling that is not the pre-#3653 text: the WaitMsPerSec arm's <c>ms_per_sec</c> CASE ends
+    /// at <c>END</c> rather than <c>ELSE 0</c>, and its <c>with_rate</c> WHERE carries <c>interval_sec &gt; 0</c>
+    /// beside <c>IS NOT NULL</c> — the same edit the successor arm took (#3540 rule 1, readers NULL-not-0 on
+    /// unknowable; the reasoning is on that arm). Here the interval is ALWAYS the LAG derivation, so the
+    /// same-second case the successor arm describes is the ordinary way this text meets an interval of 0, and
+    /// under the old spelling it entered the legacy supply as a 0 ms/sec sample. Row selection is otherwise the
+    /// legacy text's; on a store where this arm still runs (the first day after an upgrade) the change removes
+    /// only rows the successor arm would also have refused to rate.</para>
     /// </summary>
     internal static string? GetLegacyBaselineQuery(string metricName)
     {
@@ -885,9 +911,9 @@ WITH per_collection AS (
 ),
 with_rate AS (
     SELECT collection_time,
-           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END AS ms_per_sec
+           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec
     FROM per_collection
-    WHERE interval_sec IS NOT NULL
+    WHERE interval_sec IS NOT NULL AND interval_sec > 0
 ),
 with_lag AS (
     SELECT collection_time, ms_per_sec,

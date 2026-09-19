@@ -38,13 +38,19 @@ namespace Darling.Tests;
 /// <see cref="EveryDerivedIntervalAlias_RoutesTheStoredValueThroughNullif_OrNamesTheAggregateThatAlreadyDid"/>
 /// asserts that source is a registered successor whose CREATE carries the predicate — so the allowance dies
 /// with the fact.</description></item>
-/// <item><description><b>Rule 1's zero-fallback roster</b> for these trees: the PostgreSQL I/O and database
-/// trends rate over a LAG-derived interval and fall back to <c>ELSE 0</c>; every one is dead text under the
-/// statement's own <c>interval_seconds IS NOT NULL</c> (a LAG over DISTINCT collection times is NULL or
-/// positive), and the two <c>PgBaselineProvider</c> wait arms fall back to 0 under
-/// <c>interval_sec IS NOT NULL</c> over a source that cannot hold a 0. Rostered for the reason the Lite half
-/// gives: the shape is the one rule 1 forbids, and a census that counts only live defects lets the next one
-/// arrive dead and go live in a refactor.</description></item>
+/// <item><description><b>Rule 1's zero-fallback roster</b> for these trees, EMPTY and asserted empty: the
+/// nine PostgreSQL I/O, database and wait trend rates over a LAG-derived interval and the two
+/// <c>PgBaselineProvider</c> wait arms all ended at <c>ELSE 0</c> when this census was written and were
+/// rostered as dead text under their statements' <c>IS NOT NULL</c> guards; #3653 retired every one to
+/// <c>END</c> (NULL) in the PR after this file landed. The roster is kept declared, in the
+/// <c>DeltaFamilyIntervalColumnTests.StillNaked</c> idiom, so a rate arm that ships with <c>ELSE 0</c> again
+/// has to name itself here to pass and the diff says so. Two of the eleven were not dead text after all:
+/// the baseline arms' LAG fallback for a pre-column collection derives 0 when two collections
+/// <c>date_trunc</c> to the same second, and on a PG18 rig that row was rated 0 ms/sec INTO the sample set
+/// (three planted collections: mean 66.7 where the rated two say 100). The fix also took Lite's
+/// <c>interval_sec &gt; 0</c> into <c>with_rate</c>'s WHERE, because <c>END</c> alone would have carried a
+/// NULL rate into <c>clean</c> and <c>COUNT(*)</c>ed it as a sample of nothing (same rig: count 3, mean
+/// 100); <c>DarlingAnomalyBaselineTests</c> pins both halves on both texts.</description></item>
 /// <item><description><b>Rule 5's roster.</b> Every continuous aggregate that aggregates a delta family's
 /// rows either carries <c>sample_interval_seconds IS DISTINCT FROM 0</c>, carries a predicate equivalent to
 /// it, or is named in <see cref="RollupsThatAggregateUnknowableRows"/>. Tonight that roster holds the
@@ -128,24 +134,15 @@ public sealed class MeasurementContractCensusTests
 
     /// <summary>
     /// Rate arms on these trees whose CASE falls back to <c>ELSE 0</c>, as <c>file: alias</c>, duplicates
-    /// kept (the two <c>ms_per_sec</c> entries are the successor-backed arm and the legacy arm of one metric).
-    /// Every entry is dead text under its own statement — see the class summary — and the roster exists so a
-    /// new one has to name itself. The honest end state is <c>END</c> (NULL) on each and an empty list.
+    /// kept. EMPTY since the #3653 rate-arm PR; until then it named eleven: the two <c>PgBaselineProvider</c>
+    /// <c>ms_per_sec</c> arms (the successor-backed and the legacy text of one metric) and
+    /// <c>DarlingPgTrendReader</c>'s <c>estimated_wait_ms_per_second</c>, <c>extends_per_second</c>,
+    /// <c>hits_per_second</c>, <c>read_bytes_per_second</c>, <c>reads_per_second</c>,
+    /// <c>temp_bytes_per_second</c>, <c>transactions_per_second</c>, <c>write_bytes_per_second</c> and
+    /// <c>writes_per_second</c> — each now <c>END</c>. Kept declared, and asserted empty below, so a new one
+    /// has to name itself here and the diff says so; the honest end state is this list staying empty.
     /// </summary>
-    private static readonly string[] RateArmsThatFallBackToZero =
-    {
-        "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs: ms_per_sec",
-        "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs: ms_per_sec",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: estimated_wait_ms_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: extends_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: hits_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: read_bytes_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: reads_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: temp_bytes_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: transactions_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: write_bytes_per_second",
-        "Darling/PerformanceMonitor.Darling.Storage/DarlingPgTrendReader.cs: writes_per_second",
-    };
+    private static readonly string[] RateArmsThatFallBackToZero = Array.Empty<string>();
 
     [Fact]
     public void NoReaderDividesByTheStoredIntervalBare()
@@ -261,6 +258,11 @@ public sealed class MeasurementContractCensusTests
 
         Assert.True(divisions >= 15, $"only {divisions} divisions by a derived interval alias found — the sweep is not reading the readers");
         Assert.Empty(unguarded);
+
+        /* Rule 1's quotient arm is complete on these trees: nothing falls back to 0. A rate arm added to the
+           roster has to be a deliberate diff, and the both-directions equality below is what makes forgetting
+           to remove a retired one loud. */
+        Assert.Empty(RateArmsThatFallBackToZero);
         Assert.Equal(
             RateArmsThatFallBackToZero.OrderBy(s => s, StringComparer.Ordinal),
             zeroFallbacks.OrderBy(s => s, StringComparer.Ordinal));

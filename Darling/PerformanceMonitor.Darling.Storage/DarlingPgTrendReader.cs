@@ -30,13 +30,17 @@ public static class DarlingPgTrendReader
 {
     /// <param name="EstimatedWaitMsPerSecond">Samples in the interval × <c>profile_period_ms</c>, over the
     /// interval's length. Per SECOND because collection intervals are not uniform — a restart or a slow
-    /// cycle stretches one — and a raw per-interval total would show that as a spike in the data.</param>
+    /// cycle stretches one — and a raw per-interval total would show that as a spike in the data. Null when
+    /// the SQL's rate arm yields NULL (no positive interval to rate over, #3653), which the statement's own
+    /// guard keeps unreachable today; the reader carries the NULL rather than reading it as 0, because a 0
+    /// here is a measured idle interval and an unknowable one is not that. The same rule holds for every
+    /// <c>*PerSecond</c> field on <see cref="PgIoTrendPoint"/> and <see cref="PgDatabaseTrendPoint"/>.</param>
     /// <param name="CounterReset">The profile was reset inside this interval, so the point covers only the
     /// time since the reset rather than the whole interval.</param>
     public readonly record struct PgWaitTrendPoint(
         DateTime CollectionTimeUtc,
         long SampleCount,
-        double EstimatedWaitMsPerSecond,
+        double? EstimatedWaitMsPerSecond,
         int BackendCount,
         bool CounterReset);
 
@@ -85,11 +89,13 @@ public static class DarlingPgTrendReader
             /* Across a reset the new value is taken WHOLE - it is everything since the reset, which is the
                only honest reading. GREATEST(delta, 0) would report zero waits across a restart. */
             CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END AS delta_samples,
+            /* END, not ELSE 0 (#3653; the reasoning is on IoTrendSql's rate arms). interval_seconds is a LAG
+               over GROUPED collection times - NULL on the first snapshot, which the WHERE below drops, and
+               positive on every other - so the NULL arm is unreachable today and is the honest spelling. */
             CASE
                 WHEN interval_seconds > 0
                 THEN (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END)
                      * coalesce(profile_period_ms, 0)::double precision / interval_seconds
-                ELSE 0
             END AS estimated_wait_ms_per_second,
             coalesce(backend_count, 0)          AS backend_count,
             (samples < prev_samples)            AS counter_reset
@@ -260,7 +266,7 @@ public static class DarlingPgTrendReader
             points.Add(new PgWaitTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : (int)reader.GetInt64(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4)));
         }
@@ -330,12 +336,12 @@ public static class DarlingPgTrendReader
         long Evictions,
         decimal ReadBytes,
         decimal WriteBytes,
-        double ReadsPerSecond,
-        double WritesPerSecond,
-        double ExtendsPerSecond,
-        double HitsPerSecond,
-        double ReadBytesPerSecond,
-        double WriteBytesPerSecond,
+        double? ReadsPerSecond,
+        double? WritesPerSecond,
+        double? ExtendsPerSecond,
+        double? HitsPerSecond,
+        double? ReadBytesPerSecond,
+        double? WriteBytesPerSecond,
         double? AvgReadMs,
         double? AvgWriteMs,
         double? CacheHitPct,
@@ -361,13 +367,13 @@ public static class DarlingPgTrendReader
         long XactCommit,
         long XactRollback,
         double? RollbackPct,
-        double TransactionsPerSecond,
+        double? TransactionsPerSecond,
         long BlksRead,
         long BlksHit,
         double? CacheHitPct,
         long TempFiles,
         long TempBytes,
-        double TempBytesPerSecond,
+        double? TempBytesPerSecond,
         long Deadlocks,
         bool CounterReset);
 
@@ -562,13 +568,25 @@ public static class DarlingPgTrendReader
             write_bytes,
             /* Per SECOND, because collection intervals are not uniform - measured on the rig at 60 s and
                75 s within one hour - and a per-interval total renders a slow sweep as a spike in the data
-               rather than in the server. */
-            CASE WHEN interval_seconds > 0 THEN reads::double precision / interval_seconds ELSE 0 END       AS reads_per_second,
-            CASE WHEN interval_seconds > 0 THEN writes::double precision / interval_seconds ELSE 0 END      AS writes_per_second,
-            CASE WHEN interval_seconds > 0 THEN extends::double precision / interval_seconds ELSE 0 END     AS extends_per_second,
-            CASE WHEN interval_seconds > 0 THEN hits::double precision / interval_seconds ELSE 0 END        AS hits_per_second,
-            CASE WHEN interval_seconds > 0 THEN read_bytes::double precision / interval_seconds ELSE 0 END  AS read_bytes_per_second,
-            CASE WHEN interval_seconds > 0 THEN write_bytes::double precision / interval_seconds ELSE 0 END AS write_bytes_per_second,
+               rather than in the server.
+
+               The arms end at END, not ELSE 0 (#3653; #3540 rule 1, readers NULL-not-0 on unknowable). An
+               interval that is not positive has no rate, and a 0 there would be a MEASURED idle second - the
+               reading rule 1 forbids for "unknowable". Today the arm cannot run: spans derives
+               interval_seconds from the DISTINCT collection times of the series, so it is NULL on the
+               window's first snapshot - which per_snapshot's WHERE drops - and strictly positive on every
+               other, and the same holds for WaitTrendSql's GROUPED times (DatabaseTrendSql's single series
+               states its one caveat). So this is the honest spelling of an arm the guard already keeps
+               dead, not a change in what any point reports; the day a guard moves, the point carries NULL
+               rather than 0 - the readers below keep the rate fields nullable and read DBNull as null, so
+               the C# side does not coerce back to the 0 the SQL stopped fabricating, and get_pg_io_trend
+               publishes null the way it already does for an untracked write side. */
+            CASE WHEN interval_seconds > 0 THEN reads::double precision / interval_seconds END       AS reads_per_second,
+            CASE WHEN interval_seconds > 0 THEN writes::double precision / interval_seconds END      AS writes_per_second,
+            CASE WHEN interval_seconds > 0 THEN extends::double precision / interval_seconds END     AS extends_per_second,
+            CASE WHEN interval_seconds > 0 THEN hits::double precision / interval_seconds END        AS hits_per_second,
+            CASE WHEN interval_seconds > 0 THEN read_bytes::double precision / interval_seconds END  AS read_bytes_per_second,
+            CASE WHEN interval_seconds > 0 THEN write_bytes::double precision / interval_seconds END AS write_bytes_per_second,
             CASE WHEN reads  > 0 THEN read_time_ms / reads   ELSE NULL END AS avg_read_ms,
             CASE WHEN writes > 0 THEN write_time_ms / writes ELSE NULL END AS avg_write_ms,
             /* Scoped to this (backend_type, context) pair, which is the only scope where it means anything.
@@ -658,9 +676,13 @@ public static class DarlingPgTrendReader
                       / (coalesce(d_xact_commit, 0) + coalesce(d_xact_rollback, 0)) * 100
                  ELSE NULL
             END                          AS rollback_pct,
+            /* END, not ELSE 0, on both rate arms (#3653; the reasoning is on IoTrendSql's). One series, one LAG:
+               interval_seconds is NULL on the first row, which differenced's WHERE drops, and positive on every
+               other row the collector writes (one row per database per collection; only a duplicated
+               collection time could derive a 0, and that row would now carry NULL rates rather than a
+               measured 0). The NULL arm is unreachable today and is the honest spelling. */
             CASE WHEN interval_seconds > 0
                  THEN (coalesce(d_xact_commit, 0) + coalesce(d_xact_rollback, 0))::double precision / interval_seconds
-                 ELSE 0
             END                          AS transactions_per_second,
             coalesce(d_blks_read, 0)     AS blks_read,
             coalesce(d_blks_hit, 0)      AS blks_hit,
@@ -676,7 +698,6 @@ public static class DarlingPgTrendReader
             coalesce(d_temp_bytes, 0)    AS temp_bytes,
             CASE WHEN interval_seconds > 0
                  THEN coalesce(d_temp_bytes, 0)::double precision / interval_seconds
-                 ELSE 0
             END                          AS temp_bytes_per_second,
             /* A count, not a rate. Deadlocks are discrete server-recorded events at a few per hour on a bad
                day, and per-second would render every real one as four leading zeros. */
@@ -942,14 +963,18 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0m : reader.GetDecimal(9),
                 reader.IsDBNull(10) ? 0m : reader.GetDecimal(10),
-                reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
-                reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
-                reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
-                reader.IsDBNull(14) ? 0 : reader.GetDouble(14),
-                reader.IsDBNull(15) ? 0 : reader.GetDouble(15),
-                reader.IsDBNull(16) ? 0 : reader.GetDouble(16),
-                /* Null-preserving, unlike the counts above: a null here means the quotient was not defined,
-                   which is a different statement from a latency of zero. */
+                /* Null-preserving, unlike the counts above (#3653): the six rates are NULL when the SQL had
+                   no positive interval to rate over, and a null here means exactly that, which is a
+                   different statement from a measured 0 per second. The counts stay coalesced: a NULL
+                   count is the first sample of a series and its interval's work is genuinely 0. */
+                reader.IsDBNull(11) ? (double?)null : reader.GetDouble(11),
+                reader.IsDBNull(12) ? (double?)null : reader.GetDouble(12),
+                reader.IsDBNull(13) ? (double?)null : reader.GetDouble(13),
+                reader.IsDBNull(14) ? (double?)null : reader.GetDouble(14),
+                reader.IsDBNull(15) ? (double?)null : reader.GetDouble(15),
+                reader.IsDBNull(16) ? (double?)null : reader.GetDouble(16),
+                /* Null-preserving too: a null here means the quotient was not defined, which is a different
+                   statement from a latency of zero. */
                 reader.IsDBNull(17) ? (double?)null : reader.GetDouble(17),
                 reader.IsDBNull(18) ? (double?)null : reader.GetDouble(18),
                 reader.IsDBNull(19) ? (double?)null : reader.GetDouble(19),
@@ -981,13 +1006,14 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? (double?)null : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                /* The two rates carry the SQL's NULL (#3653), as the ratios beside them always have. */
+                reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? (double?)null : reader.GetDouble(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
+                reader.IsDBNull(10) ? (double?)null : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 !reader.IsDBNull(12) && reader.GetBoolean(12)));
         }

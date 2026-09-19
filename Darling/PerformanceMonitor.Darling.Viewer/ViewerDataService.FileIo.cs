@@ -105,6 +105,13 @@ public sealed partial class ViewerDataService
     /// per-second MB rate is delta-bytes / interval-seconds / 1 MiB. Rows with no usable interval (NULL:
     /// the first sample per file, or a stored 0 meaning no delta was knowable) are dropped, never plotted
     /// as 0.
+    /// <para>#3653 (#3540 rule 1, readers NULL-not-0 on unknowable): the two rate arms end at <c>END</c>,
+    /// not <c>ELSE 0</c>. The outer <c>WHERE interval_seconds IS NOT NULL AND interval_seconds &gt; 0</c>
+    /// already excludes every row the ELSE could have run on, so this is the honest spelling of the arm and
+    /// not a behaviour change — the day the WHERE moves, a row with no knowable interval yields a NULL rate
+    /// rather than a measured 0.00 MB/s. The reader's <c>IsDBNull ? 0</c> on the two rate columns is a
+    /// DBNull-safe belt that the WHERE keeps unreachable; it never coerces a NULL rate today because no
+    /// NULL rate reaches it.</para>
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string FileIoThroughputTrendSql = """
@@ -147,10 +154,10 @@ public sealed partial class ViewerDataService
             file_label,
             CASE WHEN interval_seconds > 0
                  THEN CAST(delta_read_bytes AS double precision) / interval_seconds / 1048576.0
-                 ELSE 0 END AS read_mb_per_sec,
+            END AS read_mb_per_sec,
             CASE WHEN interval_seconds > 0
                  THEN CAST(delta_write_bytes AS double precision) / interval_seconds / 1048576.0
-                 ELSE 0 END AS write_mb_per_sec
+            END AS write_mb_per_sec
         FROM with_interval
         WHERE interval_seconds IS NOT NULL AND interval_seconds > 0
         ORDER BY collection_time, file_label
