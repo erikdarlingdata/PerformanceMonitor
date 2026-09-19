@@ -18,10 +18,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// Stats / Spinlock Stats into the Darling viewer, consolidated into ONE tab: the latch and spinlock
 /// per-second trend charts for the TOP 5 contenders (latch classes by delta wait time, spinlocks by delta
 /// collisions) stack vertically, each above a collapsed Expander holding its latest-snapshot grid of the
-/// most recent collection in the settable window. The Darling cumulative-delta tables carry no stored
-/// <c>sample_interval_seconds</c> (unlike the Dashboard's), so the ms/sec and collisions/sec rates are
-/// computed in SQL from the per-contender <c>LAG</c> interval — the same idiom the Wait Stats trend uses.
-/// Both charts and grids (re)load together on the parent tab's activation (mirroring the Memory tab's
+/// most recent collection in the settable window. Both tables carry a stored <c>sample_interval_seconds</c>
+/// since V127 (#3595; the per-contender <c>LAG</c> interval is the fallback for pre-V127 rows only), so the
+/// ms/sec and collisions/sec rates are computed in SQL from the row's own interval — the same idiom the Wait
+/// Stats trend uses — and the snapshot grids render a restart's (0, 0) as "—" with an Interval (sec) column
+/// saying why, never as a delta of 0 (#3653 A7; the rule is <c>DeltaSeriesShaping.ReadableDelta</c>, shared
+/// with Lite). Both charts and grids (re)load together on the parent tab's activation (mirroring the Memory tab's
 /// full-refresh branch), so the tab needs no SelectionChanged handler. Chart chrome / legend / line polish
 /// flow through the shared <see cref="ChartStyle"/> / <see cref="ChartPalette"/> and the
 /// <c>ViewerServerTab.ChartHelpers.cs</c> bridge, so the Y-floor-at-0 fix applies; series ride the cycling

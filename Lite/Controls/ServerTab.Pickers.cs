@@ -17,6 +17,7 @@ using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
@@ -527,6 +528,20 @@ public partial class ServerTab : UserControl
 
     private int _perfmonPickerGen;
 
+    /// <summary>
+    /// Redraws the picker's selected counters. Each series goes through the shared
+    /// <see cref="DeltaSeriesShaping"/> before it reaches ScottPlot (#3653 A7; the Darling viewer's
+    /// <c>ViewerServerTab.Perfmon.cs</c> is the twin): the reader has fetched <c>MAX(sample_interval_seconds)</c>
+    /// onto every row since #2234 and this chart plotted the raw delta beside it under a Y axis that said
+    /// "Value" — <c>Batch Requests/sec</c> drew batches-per-sweep, not per second, and a restart's fabricated
+    /// (0, 0) drew as a real trough. Now a counter the name-suffix PROXY calls a rate (its name ends in
+    /// <c>/sec</c>; <c>cntr_type</c> is not stored, the rung that stores it is queued under #3653 and is the
+    /// fix for the proxy's mis-classes, which <see cref="DeltaSeriesShaping"/> enumerates) plots
+    /// delta / interval; every other counter plots its raw delta with " (Δ/interval)" on its legend entry; a
+    /// stored interval of 0 plots NaN, which ScottPlot draws as a line break — the restart reads as absence,
+    /// composing with #1944's cadence gap rule that <c>Add.TimeSeries</c> already applies on X. The Y label is
+    /// composed from the bases actually plotted; the Y ceiling ignores the NaNs.
+    /// </summary>
     private async System.Threading.Tasks.Task UpdatePerfmonChartFromPickerAsync()
     {
         var gen = ++_perfmonPickerGen;
@@ -554,6 +569,7 @@ public partial class ServerTab : UserControl
                 }
             }
             double globalMax = 0;
+            var plottedBases = new List<DeltaBasis>();
 
             // Batched fetch: one query for all selected counters (was an N+1 query-per-counter loop).
             var trendsByCounter = await Task.Run(() => _dataService.GetPerfmonTrendsByCountersAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
@@ -563,16 +579,22 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
+                var counterName = selected[i].DisplayName;
+                var basis = DeltaSeriesShaping.BasisFor(counterName);
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-                var values = trend.Select(t => (double)t.DeltaValue).ToArray();
+                var values = DeltaSeriesShaping.Shape(
+                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds)).ToList(),
+                    basis);
+                var label = DeltaSeriesShaping.LegendLabel(counterName, basis);
 
                 var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
+                plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
-                _perfmonHover?.Add(plot, selected[i].DisplayName);
+                _perfmonHover?.Add(plot, label);
+                plottedBases.Add(basis);
 
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+                globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
             PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -589,7 +611,7 @@ public partial class ServerTab : UserControl
             }
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
-            PerfmonChart.Plot.YLabel("Value");
+            PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(PerfmonChart);
             PerfmonChart.Refresh();

@@ -122,7 +122,8 @@ ORDER BY collection_time";
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 DeltaValue = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                SampleIntervalSeconds = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3))
+                /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
+                SampleIntervalSeconds = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3))
             });
         }
 
@@ -180,7 +181,7 @@ ORDER BY counter_name, collection_time";
                 CollectionTime = reader.GetDateTime(1),
                 Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                SampleIntervalSeconds = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4))
+                SampleIntervalSeconds = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4))
             });
         }
 
@@ -209,6 +210,10 @@ public class PerfmonTrendPoint
     /// zero delta readable: the collector reports 0 in exactly the cases where no delta was knowable
     /// (first sighting, counter reset, gap past the policy), so (0, 0) is "unknown" while (0, n) is
     /// "genuinely idle" (#2234). MAX, never SUM, across a counter's instance rows — it is one measured
-    /// sweep gap repeated per instance, and Transactions/sec carries a median of 12 of them.</summary>
-    public long SampleIntervalSeconds { get; set; }
+    /// sweep gap repeated per instance, and Transactions/sec carries a median of 12 of them. Nullable
+    /// since #3653 A7 so the third state survives the read (#3540): <c>null</c> is a row that never stored
+    /// an interval, which the reader used to coerce to the 0 marker. The perfmon chart now plots THROUGH
+    /// this field via the shared <c>DeltaSeriesShaping</c>; <c>get_perfmon_trend</c> hands it to the caller
+    /// as it always did (a NULL row, which perfmon_stats has never written, would now publish null).</summary>
+    public long? SampleIntervalSeconds { get; set; }
 }

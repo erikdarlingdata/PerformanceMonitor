@@ -10,17 +10,20 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
     /* The Latches & Spinlocks readers — the Lite (DuckDB) port of the Darling viewer's
-       ViewerDataService.LatchSpinlock reads. Both are cumulative-counter DMV tables (like wait_stats),
-       so the per-second rates are computed in SQL from the per-contender LAG interval — the exact
-       date_trunc/extract(epoch)/LAG idiom GetWaitStatsTrendAsync uses — because the delta tables carry
-       no stored sample_interval_seconds. Reads run against the v_latch_stats / v_spinlock_stats archive
-       views (base table UNION the archived parquet), matching every other Lite trend reader. */
+       ViewerDataService.LatchSpinlock reads. Both are cumulative-counter DMV tables (like wait_stats);
+       the per-second rates are computed in SQL from each row's stored sample_interval_seconds (v60, #3595),
+       falling back to the per-contender LAG interval — the exact date_trunc/extract(epoch)/LAG idiom
+       GetWaitStatsTrendAsync uses — only for pre-v60 rows that never recorded one. The snapshot reads carry
+       the same column so the grids can tell a restart's (0, 0) from an idle interval's (0, n) (#3653 A7).
+       Reads run against the v_latch_stats / v_spinlock_stats archive views (base table UNION the archived
+       parquet), matching every other Lite trend reader. */
 
     /// <summary>
     /// The Latch Stats trend: the per-second wait rate for the TOP 5 latch classes (by total delta wait
@@ -137,7 +140,8 @@ SELECT
     max_wait_time_ms,
     delta_waiting_requests_count,
     delta_wait_time_ms,
-    collection_time
+    collection_time,
+    sample_interval_seconds
 FROM v_latch_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
@@ -153,15 +157,20 @@ LIMIT $4";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* #3653 A7: the stored interval decides whether the two deltas are readable. 0 is the calculator's
+               marker and the deltas beside it become null (the grid shows "—", get_latch_stats publishes null);
+               NULL is a pre-v60 row and its deltas stand. Selected as stored so the ORDER BY ranks the numbers. */
+            var interval = reader.IsDBNull(7) ? (int?)null : (int)ToInt64(reader.GetValue(7));
             items.Add(new LatchStatsSnapshotRow
             {
                 LatchClass = reader.GetString(0),
                 WaitingRequestsCount = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 WaitTimeMs = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 MaxWaitTimeMs = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                DeltaWaitingRequestsCount = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                DeltaWaitTimeMs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                CollectionTime = reader.GetDateTime(6)
+                DeltaWaitingRequestsCount = DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(4) ? 0 : reader.GetInt64(4), interval),
+                DeltaWaitTimeMs = DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(5) ? 0 : reader.GetInt64(5), interval),
+                CollectionTime = reader.GetDateTime(6),
+                SampleIntervalSeconds = interval
             });
         }
 
@@ -277,7 +286,8 @@ SELECT
     backoffs,
     delta_collisions,
     delta_spins,
-    collection_time
+    collection_time,
+    sample_interval_seconds
 FROM v_spinlock_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)
@@ -293,6 +303,8 @@ LIMIT $4";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* #3653 A7 — the same three-state read as the latch snapshot. */
+            var interval = reader.IsDBNull(9) ? (int?)null : (int)ToInt64(reader.GetValue(9));
             items.Add(new SpinlockStatsSnapshotRow
             {
                 SpinlockName = reader.GetString(0),
@@ -301,9 +313,10 @@ LIMIT $4";
                 SpinsPerCollision = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
                 SleepTime = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 Backoffs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                DeltaCollisions = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                DeltaSpins = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                CollectionTime = reader.GetDateTime(8)
+                DeltaCollisions = DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(6) ? 0 : reader.GetInt64(6), interval),
+                DeltaSpins = DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(7) ? 0 : reader.GetInt64(7), interval),
+                CollectionTime = reader.GetDateTime(8),
+                SampleIntervalSeconds = interval
             });
         }
 
@@ -312,7 +325,8 @@ LIMIT $4";
 }
 
 /// <summary>One point on a latch class's per-second wait trend (this interval's delta_wait_time_ms over
-/// the seconds since the previous collection of the SAME class, via a per-class LAG window).</summary>
+/// the seconds it accrued — the row's stored sample_interval_seconds, or for a pre-v60 row the seconds since
+/// the previous collection of the SAME class via a per-class LAG window; an unknowable row is not a point, #3540).</summary>
 public class LatchStatsTrendPoint
 {
     public string LatchClass { get; set; } = "";
@@ -321,7 +335,14 @@ public class LatchStatsTrendPoint
 }
 
 /// <summary>One row of the Latch Stats latest-snapshot grid: cumulative counters plus the last interval's
-/// deltas for one latch class at the most recent collection in the window.</summary>
+/// deltas for one latch class at the most recent collection in the window.
+/// <para>The two deltas are nullable (#3653 A7): <c>null</c> when <see cref="SampleIntervalSeconds"/> is the
+/// calculator's 0 marker — the stored (0, 0) of a restart or first sighting, whose zeros are fabricated, not
+/// measured (#3540) — so the grid renders "—" where it used to render a confident 0, and <c>get_latch_stats</c>
+/// (which shares this row) publishes null for them, the #3642 rule reaching that twin. <see cref="IntervalDisplay"/>
+/// says why beside them, or gives the seconds the deltas accrued over, or "not stored" for a pre-v60 row whose
+/// deltas are real and kept. The rule is <see cref="DeltaSeriesShaping.ReadableDelta"/>, shared with the Darling
+/// viewer's twin record.</para></summary>
 public class LatchStatsSnapshotRow
 {
     /// <summary>The snapshot this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
@@ -330,12 +351,24 @@ public class LatchStatsSnapshotRow
     public long WaitingRequestsCount { get; set; }
     public long WaitTimeMs { get; set; }
     public long MaxWaitTimeMs { get; set; }
-    public long DeltaWaitingRequestsCount { get; set; }
-    public long DeltaWaitTimeMs { get; set; }
+    public long? DeltaWaitingRequestsCount { get; set; }
+    public long? DeltaWaitTimeMs { get; set; }
+
+    /// <summary>#3540: the measured seconds the deltas accrued over. 0 is the calculator's "no delta
+    /// knowable" marker; null is a pre-v60 row that never recorded one.</summary>
+    public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0 (the
+    /// <c>FileIoStatsRow</c> / resource-semaphore idiom).</summary>
+    public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
+    public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
 }
 
 /// <summary>One point on a spinlock's per-second collision trend (this interval's delta_collisions over
-/// the seconds since the previous collection of the SAME spinlock, via a per-name LAG window).</summary>
+/// the seconds it accrued — the row's stored sample_interval_seconds, or for a pre-v60 row the seconds since
+/// the previous collection of the SAME spinlock via a per-name LAG window; an unknowable row is not a point, #3540).</summary>
 public class SpinlockStatsTrendPoint
 {
     public string SpinlockName { get; set; } = "";
@@ -344,7 +377,8 @@ public class SpinlockStatsTrendPoint
 }
 
 /// <summary>One row of the Spinlock Stats latest-snapshot grid: cumulative counters plus the last
-/// interval's deltas for one spinlock at the most recent collection in the window.</summary>
+/// interval's deltas for one spinlock at the most recent collection in the window. The deltas are nullable
+/// for the reason <see cref="LatchStatsSnapshotRow"/> gives (#3653 A7).</summary>
 public class SpinlockStatsSnapshotRow
 {
     /// <summary>The snapshot this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
@@ -355,6 +389,16 @@ public class SpinlockStatsSnapshotRow
     public double SpinsPerCollision { get; set; }
     public long SleepTime { get; set; }
     public long Backoffs { get; set; }
-    public long DeltaCollisions { get; set; }
-    public long DeltaSpins { get; set; }
+    public long? DeltaCollisions { get; set; }
+    public long? DeltaSpins { get; set; }
+
+    /// <summary>#3540: the measured seconds the deltas accrued over. 0 is the calculator's "no delta
+    /// knowable" marker; null is a pre-v60 row that never recorded one.</summary>
+    public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0.</summary>
+    public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
+    public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
 }

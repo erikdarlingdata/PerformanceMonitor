@@ -352,6 +352,33 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
             (int)ToolMethod(typeof(McpLatchSpinlockTools), "get_latch_stats").GetParameters().Single(p => p.Name == "limit").DefaultValue!);
     }
 
+    /// <summary>
+    /// #3653 A7 through the shared row: a restart / first-sample row (stored interval 0, the calculator's
+    /// marker) publishes <c>null</c> for both deltas and for the average — a caller could otherwise read the
+    /// fabricated (0, 0) as "a quiet latch" (#3642's zero-is-a-measurement rule reaching this twin). The
+    /// measured row beside it publishes its numbers as before, and the marker still ranks (the reader ranks
+    /// the STORED deltas) so it is not hidden from the page either.
+    /// </summary>
+    [Fact]
+    public async Task GetLatchStats_PublishesNullDeltas_OnTheRestartMarkerRow()
+    {
+        var now = DateTime.UtcNow;
+        await SeedLatchAsync(now, "LOG_MANAGER", 4000);
+        await SeedLatchAsync(now, "BUFFER", 0, intervalSeconds: 0);
+
+        var page = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 24, 10));
+        var latches = page.GetProperty("latches").EnumerateArray().ToDictionary(l => l.GetProperty("latch_class").GetString()!);
+        Assert.Equal(2, latches.Count);
+
+        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("delta_wait_time_ms").ValueKind);
+        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("delta_waiting_requests_count").ValueKind);
+        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("avg_wait_ms_per_request").ValueKind);
+
+        Assert.Equal(4000, latches["LOG_MANAGER"].GetProperty("delta_wait_time_ms").GetInt64());
+        Assert.Equal(100, latches["LOG_MANAGER"].GetProperty("delta_waiting_requests_count").GetInt64());
+        Assert.Equal(40.0, latches["LOG_MANAGER"].GetProperty("avg_wait_ms_per_request").GetDouble());
+    }
+
     [Fact]
     public async Task GetSpinlockStats_CapBindsToLimit_AndTruncationIsObserved()
     {
@@ -723,19 +750,19 @@ VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 10, $6, 100)",
 
     /* #3653: the latest-snapshot pair. The cumulative columns are constants; the delta is the ordering key. */
 
-    private Task SeedLatchAsync(DateTime at, string latchClass, long deltaWaitMs) => ExecAsync(@"
+    private Task SeedLatchAsync(DateTime at, string latchClass, long deltaWaitMs, int? intervalSeconds = 60) => ExecAsync(@"
 INSERT INTO latch_stats
     (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms,
      delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
-VALUES ($1, $2, $3, $4, $5, 1000, 20100, 50, 100, $6, 5, 60)",
-        _nextId--, Naive(at), _serverId, ServerName, latchClass, deltaWaitMs);
+VALUES ($1, $2, $3, $4, $5, 1000, 20100, 50, 100, $6, 5, $7)",
+        _nextId--, Naive(at), _serverId, ServerName, latchClass, deltaWaitMs, intervalSeconds);
 
-    private Task SeedSpinlockAsync(DateTime at, string spinlockName, long deltaCollisions) => ExecAsync(@"
+    private Task SeedSpinlockAsync(DateTime at, string spinlockName, long deltaCollisions, int? intervalSeconds = 60) => ExecAsync(@"
 INSERT INTO spinlock_stats
     (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs,
      delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
-VALUES ($1, $2, $3, $4, $5, 500000, 900000, 1.8, 10, 20, $6, 1000, 0, 0, 60)",
-        _nextId--, Naive(at), _serverId, ServerName, spinlockName, deltaCollisions);
+VALUES ($1, $2, $3, $4, $5, 500000, 900000, 1.8, 10, 20, $6, 1000, 0, 0, $7)",
+        _nextId--, Naive(at), _serverId, ServerName, spinlockName, deltaCollisions, intervalSeconds);
 
     /* #3541 A13 / A9 fixtures. */
 

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -24,7 +25,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// packs Lite/Dashboard use), the General-Throughput default selection, the 12-counter cap on pack
 /// fills / "Select All", the checked-to-top ordering, the search filter, "Clear All" clearing only the
 /// FILTERED visible set, the reentrancy guard on programmatic checkbox writes, and the
-/// generation-guarded batched chart update with its 12-series cap plotting <c>DeltaValue</c>. Series
+/// generation-guarded batched chart update with its 12-series cap plotting <c>DeltaValue</c> — THROUGH
+/// the row's stored interval since #3653 A7 (see <see cref="UpdatePerfmonChartFromPickerAsync"/>). Series
 /// ride the shared cycling <see cref="ChartPalette"/> colors (via <c>SeriesColors</c>, declared in
 /// ViewerServerTab.Charts.cs) and the <see cref="ChartStyle.StyleScatter"/> line polish, and the hover
 /// helper carries Lite's empty unit. Lite's per-chart drill-down context menu is intentionally NOT
@@ -179,6 +181,21 @@ public partial class ViewerServerTab
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    /// <summary>
+    /// Redraws the picker's selected counters (mirrors Lite's method of the same name). Each series goes
+    /// through <see cref="DeltaSeriesShaping"/> before it reaches ScottPlot (#3653 A7): the reader has
+    /// fetched <c>MAX(sample_interval_seconds)</c> onto every row since #2234 and this chart plotted the raw
+    /// delta beside it under a Y axis that said "Value" — <c>Batch Requests/sec</c> drew batches-per-sweep
+    /// (a ~300 s sweep on the measured fleet, so ~300x the number its name promises), and a restart's
+    /// fabricated (0, 0) drew as a real trough. Now a counter the name-suffix PROXY calls a rate (its name
+    /// ends in <c>/sec</c>; <c>cntr_type</c> is not stored, the rung that stores it is queued under #3653 and
+    /// is the fix for the proxy's mis-classes, which <see cref="DeltaSeriesShaping"/> enumerates) plots
+    /// delta / interval; every other counter plots its raw delta with " (Δ/interval)" on its legend entry;
+    /// a stored interval of 0 plots NaN, which ScottPlot draws as a line break — the restart reads as
+    /// absence, composing with #1944's cadence gap rule that <c>Add.TimeSeries</c> already applies on X. The
+    /// Y label is composed from the bases actually plotted, so a mixed selection is labelled as mixed rather
+    /// than under one unit. The Y ceiling ignores the NaNs (an all-restart window still gets an axis).
+    /// </summary>
     private async Task UpdatePerfmonChartFromPickerAsync()
     {
         /* Bump a generation on entry; after each (now genuinely async) query, bail if a newer
@@ -199,6 +216,7 @@ public partial class ViewerServerTab
                display converts via ViewerTimeHelper.ForDisplay. */
             var (startUtc, endUtc) = GetWindowUtc();
             double globalMax = 0;
+            var plottedBases = new List<DeltaBasis>();
 
             // Batched fetch: one query for all selected counters (mirrors Lite's batched read).
             var trendsByCounter = await _dataService.GetPerfmonTrendsByCountersAsync(
@@ -209,16 +227,22 @@ public partial class ViewerServerTab
             {
                 if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
+                var counterName = selected[i].DisplayName;
+                var basis = DeltaSeriesShaping.BasisFor(counterName);
                 var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
-                var values = trend.Select(t => (double)t.DeltaValue).ToArray();
+                var values = DeltaSeriesShaping.Shape(
+                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds)).ToList(),
+                    basis);
+                var label = DeltaSeriesShaping.LegendLabel(counterName, basis);
 
                 var plot = PerfmonChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
+                plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
-                _perfmonHover?.Add(plot, selected[i].DisplayName);
+                _perfmonHover?.Add(plot, label);
+                plottedBases.Add(basis);
 
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+                globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
             PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -226,7 +250,7 @@ public partial class ViewerServerTab
             var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
-            PerfmonChart.Plot.YLabel("Value");
+            PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(PerfmonChart);
             PerfmonChart.Refresh();

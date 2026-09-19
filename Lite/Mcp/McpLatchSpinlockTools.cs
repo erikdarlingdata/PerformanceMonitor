@@ -15,7 +15,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpLatchSpinlockTools
 {
-    [McpServerTool(Name = "get_latch_stats"), Description("Gets the latest latch-contention snapshot by latch class: cumulative waiting requests and wait time (with the max single wait) plus the last collection interval's delta waits. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or a page-latch class indicates allocation/page contention (often TempDB). LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: latches_returned is how many latch classes you got, heaviest last-interval wait first, and truncated says the snapshot held more than limit - a sum over the page is a sum over the page, not over the server. Raise limit when truncated is true.")]
+    [McpServerTool(Name = "get_latch_stats"), Description("Gets the latest latch-contention snapshot by latch class: cumulative waiting requests and wait time (with the max single wait) plus the last collection interval's delta waits. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or a page-latch class indicates allocation/page contention (often TempDB). LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: latches_returned is how many latch classes you got, heaviest last-interval wait first, and truncated says the snapshot held more than limit - a sum over the page is a sum over the page, not over the server. Raise limit when truncated is true. delta_waiting_requests_count, delta_wait_time_ms and avg_wait_ms_per_request are null on a restart / first-sample row (the interval they would have accrued over was unknowable) - null, never 0, so a restart cannot read as a quiet latch.")]
     public static async Task<string> GetLatchStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -65,10 +65,13 @@ public sealed class McpLatchSpinlockTools
                     waiting_requests_count = r.WaitingRequestsCount,
                     wait_time_ms = r.WaitTimeMs,
                     max_wait_time_ms = r.MaxWaitTimeMs,
+                    /* #3653 A7 (#3642's rule reaching this twin through the shared row): both deltas are null on
+                       the restart / first-sample row — the stored interval is the calculator's 0 marker and the
+                       zeros beside it were never measured — so a caller cannot read a restart as a quiet latch. */
                     delta_waiting_requests_count = r.DeltaWaitingRequestsCount,
                     delta_wait_time_ms = r.DeltaWaitTimeMs,
-                    avg_wait_ms_per_request = r.DeltaWaitingRequestsCount > 0
-                        ? Math.Round((double)r.DeltaWaitTimeMs / r.DeltaWaitingRequestsCount, 2)
+                    avg_wait_ms_per_request = r.DeltaWaitingRequestsCount is long requests && requests > 0 && r.DeltaWaitTimeMs is long waitMs
+                        ? Math.Round((double)waitMs / requests, 2)
                         : (double?)null
                 })
             }, McpHelpers.JsonOptions);
@@ -79,7 +82,7 @@ public sealed class McpLatchSpinlockTools
         }
     }
 
-    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets the latest spinlock-contention snapshot: cumulative collisions, spins, backoffs and spins-per-collision plus the last collection interval's delta collisions/spins. High spinlock contention is CPU-bound internal contention that does not appear in wait stats. LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: spinlocks_returned is how many spinlocks you got, most last-interval collisions first, and truncated says the snapshot held more than limit - sys.dm_os_spinlock_stats carries well over a hundred, so at the default the page is the hot tail, not the population. Raise limit when truncated is true.")]
+    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets the latest spinlock-contention snapshot: cumulative collisions, spins, backoffs and spins-per-collision plus the last collection interval's delta collisions/spins. High spinlock contention is CPU-bound internal contention that does not appear in wait stats. LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: spinlocks_returned is how many spinlocks you got, most last-interval collisions first, and truncated says the snapshot held more than limit - sys.dm_os_spinlock_stats carries well over a hundred, so at the default the page is the hot tail, not the population. Raise limit when truncated is true. delta_collisions and delta_spins are null on a restart / first-sample row (the interval they would have accrued over was unknowable) - null, never 0.")]
     public static async Task<string> GetSpinlockStats(
         LocalDataService dataService,
         ServerManager serverManager,
