@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 
 namespace PerformanceMonitor.Common;
@@ -325,6 +326,42 @@ internal static class McpHelpers
         if (top > MaxTop)
             return $"{paramName} value '{top}' exceeds maximum of {MaxTop}. Use a smaller value.";
         return null;
+    }
+
+    /// <summary>
+    /// Turns a read fetched at <c>limit + 1</c> into the page the caller asked for and the truncation the extra
+    /// row PROVES — the one place the page-contract rule "bound the page, not the request" (#3541 A3, #3594)
+    /// is spelled in code rather than re-derived at every tool.
+    ///
+    /// <para>The mechanism: a tool that wants to say whether its window held more than <c>limit</c> rows cannot
+    /// learn that from a page of <c>limit</c> rows. <c>rows.Count &gt;= limit</c> — the shape #3594 named and
+    /// #3653 kept finding (<c>get_pg_server_config</c> and its three siblings, then <c>get_pg_deadlocks</c>,
+    /// <c>get_pg_plan_capture_readiness</c>, <c>get_pg_index_bloat</c>) — says <b>more</b> for a window of
+    /// exactly <c>limit</c> rows, and on a tool that withholds its summaries when truncated, withholds figures
+    /// that were complete. Asking the reader for one row past the cap and testing <c>Count &gt; limit</c> is an
+    /// OBSERVATION: the extra row either came back or it did not.</para>
+    ///
+    /// <para>The returned <c>Page</c> is <paramref name="fetched"/> itself when nothing was cut and the first
+    /// <paramref name="limit"/> rows otherwise, so every count a caller takes off it — <c>*_returned</c>, the
+    /// coverage verdict's <c>returnedRows</c>, a per-row summary — is a count of the page and never of the
+    /// over-fetch. Any total meant to be the WINDOW's does not come from here: it is a <c>COUNT(*) OVER ()</c>
+    /// on the reader's own statement, above the <c>LIMIT</c> (#3613's idiom).</para>
+    ///
+    /// <para>Deliberately tolerant of a fetch larger than <c>limit + 1</c> (a fingerprint scan ceiling, say):
+    /// <c>Count &gt; limit</c> is the correct observation for any over-fetch, and the page is still the first
+    /// <c>limit</c> rows in the reader's order. Not tolerant of an unvalidated cap — callers run
+    /// <see cref="ValidateTop"/> first, as every paged tool already does, so <paramref name="limit"/> is
+    /// positive here by construction. <c>McpPageContractTests</c> accepts either this helper or the proven
+    /// inline spelling (<c>var truncated = rows.Count &gt; limit;</c> beside a <c>limit + 1</c> fetch); both
+    /// are the observation, and the census's only enemy is the inference.</para>
+    /// </summary>
+    /// <param name="fetched">The rows a reader returned for a request of <c>limit + 1</c>.</param>
+    /// <param name="limit">The caller's cap, already validated.</param>
+    public static (IReadOnlyList<T> Page, bool Truncated) BoundPage<T>(IReadOnlyList<T> fetched, int limit)
+    {
+        var truncated = fetched.Count > limit;
+        IReadOnlyList<T> page = truncated ? fetched.Take(limit).ToList() : fetched;
+        return (page, truncated);
     }
 
     /// <summary>

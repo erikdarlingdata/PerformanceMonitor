@@ -52,7 +52,7 @@ public sealed class DarlingMcpPgPlanTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum plan shapes to return. Default 10.")] int limit = 10,
+        [Description("Maximum plan shapes to return. Default 10. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 10,
         [Description("Only return plans for this queryid, as a string. Optional. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")] string? query_id = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
@@ -90,8 +90,12 @@ public sealed class DarlingMcpPgPlanTools
             /* The queryid pin travels INTO the SQL (#3533). It used to be applied here, over a fetched
                top-duration page, which made every plan ranked below the page unfindable and then reported
                the miss as "not captured" — the predicate has to run where the rows are. */
+            /* #3653 (the #3541 A3 class, found beside the readiness site below): limit + 1 as the fetch, so
+               BuildPlansJson can say whether the window held more shapes than the page. It used to Take(limit)
+               over a read already capped at `limit` and publish nothing about the cut, so a page of ten shapes
+               read as "this server's plans" whether the window held ten or ten thousand. */
             var rows = await DarlingPgPlanCaptureReader.GetPgPlanCaptureAsync(
-                postgres, resolved.ServerId, start, now, limit, wantedQueryId);
+                postgres, resolved.ServerId, start, now, limit + 1, wantedQueryId);
 
             if (rows.Count == 0)
             {
@@ -119,7 +123,7 @@ public sealed class DarlingMcpPgPlanTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to search for each facet's most recent reading. Default 24 - this collector runs hourly, so a window under an hour can legitimately find nothing.")] int hours_back = 24,
-        [Description("Maximum facet rows to return. Default 25 - the collector emits one row per facet, so the default is well clear of the whole set.")] int limit = 25,
+        [Description("Maximum facet rows to return. Default 25 - the collector emits one row per facet, so the default is well clear of the whole set. This is what bounds the page - read truncated to know whether a facet sat past it, in which case unsatisfied_facets is withheld; it is observed by fetching one row past this cap, so asking for exactly the number of facets the collector emits reads as complete.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -136,8 +140,13 @@ public sealed class DarlingMcpPgPlanTools
                the latest-per-facet reduction and the causal ordering already exist and are already proven
                against a live store. A second copy of that query here is how the two surfaces start
                disagreeing about what a server's readiness is. */
+            /* #3653 (the #3541 A3 class): limit + 1 as the fetch, so BuildReadinessJson can OBSERVE whether a
+               facet sat past the cap rather than infer it from a full page. This tool is where that
+               inference bit hardest: the collector emits exactly six facets, so a caller asking for
+               `limit = 6` - the whole set - used to be told the result was truncated and have its
+               unsatisfied_facets WITHHELD, for a page that was complete. */
             var rows = await DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
 
             if (rows.Count == 0)
             {
@@ -197,17 +206,24 @@ public sealed class DarlingMcpPgPlanTools
     /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the same reason
     /// <see cref="BuildPlansJson"/> is separate.
     /// </summary>
+    /// <param name="fetched">The rows the reader returned for a request of <paramref name="limit"/><c> + 1</c>:
+    /// up to one more than the caller asked for, the extra one being the truncation signal. The page this
+    /// emits is the first <paramref name="limit"/> of them.</param>
     internal static string BuildReadinessJson(
         string serverName,
         int hoursBack,
-        IReadOnlyList<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> rows,
+        IReadOnlyList<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> fetched,
         int limit)
     {
         /* #2629's lesson, applied to a read whose row count is small enough to make it look unnecessary: a
            summary taken over a CAPPED result describes the page and reads as a fact about the server. The
            collector emits a handful of facets and the default limit clears them all, but limit is a caller's
-           parameter — so the unsatisfied summary is WITHHELD rather than computed over whatever arrived. */
-        var truncated = rows.Count >= limit;
+           parameter — so the unsatisfied summary is WITHHELD rather than computed over whatever arrived.
+
+           And WHETHER it was capped is observed, not inferred (#3653, the #3541 A3 class): the tool fetches
+           limit + 1, and a page of exactly `limit` facets with nothing behind it is complete - the old
+           `rows.Count >= limit` called that page truncated and withheld a summary that was whole. */
+        var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
         var unsatisfied = rows.Where(r => !r.IsSatisfied).Select(r => r.Facet).ToArray();
 
@@ -370,13 +386,19 @@ public sealed class DarlingMcpPgPlanTools
     /// The response body, split out so the WIRE SHAPE can be asserted without a live store (#2548) — the
     /// same reason <c>BuildTopQueriesJson</c> is separate.
     /// </summary>
+    /// <param name="fetched">The rows the reader returned for a request of <paramref name="limit"/><c> + 1</c>;
+    /// the page is the first <paramref name="limit"/> of them and the extra row, when present, is the
+    /// truncation signal (#3653). Before that the parameter was the page already cut at <c>limit</c> and the
+    /// <c>Take(limit)</c> here was a no-op that said nothing about what lay past it.</param>
     internal static string BuildPlansJson(
         string serverName,
         int hoursBack,
-        IReadOnlyList<DarlingPgPlanCaptureReader.PgPlanCaptureRow> rows,
+        IReadOnlyList<DarlingPgPlanCaptureReader.PgPlanCaptureRow> fetched,
         int limit)
     {
-        var result = rows.Take(limit).Select(r => new
+        var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+
+        var result = rows.Select(r => new
         {
             /* #2548: a STRING. queryid is a signed int8 spread over the whole 64-bit range, so most values
                are past 2^53 and any parser decoding JSON numbers as doubles rounds one — and queryid is an
@@ -403,10 +425,18 @@ public sealed class DarlingMcpPgPlanTools
             server = serverName,
             hours_back = hoursBack,
             plan_shapes = result.Count,
+            /* Observed off the limit + 1 fetch, never inferred from a full page (#3653): true means the window
+               held at least one more plan shape, ranked below these by total duration, than this page shows. */
+            truncated,
             note = "Plans are REDACTED at collection: statement text is dropped and literals inside the "
                  + "plan are replaced with placeholders. Node types, relation names, costs, row estimates "
                  + "and tree shape are intact. Join queryid to get_pg_top_queries for the statement text "
-                 + "and its call counts.",
+                 + "and its call counts."
+                 + (truncated
+                     ? $" TRUNCATED at the row limit of {limit}: the window holds more plan shapes than this, "
+                       + "ranked below these by total duration. Raise limit, or pass query_id to pin one "
+                       + "statement's plans wherever they rank."
+                     : string.Empty),
             plans = result,
         }, McpHelpers.JsonOptions);
     }
