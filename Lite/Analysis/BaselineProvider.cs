@@ -23,6 +23,24 @@ namespace PerformanceMonitorLite.Analysis;
 ///
 /// Baselines are cached in memory with a 1-hour TTL to avoid redundant
 /// recomputation during rapid re-analysis.
+///
+/// <para>
+/// <b>The bucket key is the TARGET's local hour-of-week, not UTC (#3653 item 12, Q6).</b> <c>collection_time</c>
+/// is this host's <c>DateTime.UtcNow</c>, and keying <c>EXTRACT(HOUR/DOW FROM collection_time)</c> on it pooled two
+/// local hours into one bucket across a DST change — the "Tue 22:00" a finding named was 17:00 on the server in
+/// winter and 18:00 in summer. Three more parameters follow the window bounds: <c>$4</c> the offset transition
+/// inside the window (the window end when there is none), <c>$5</c>/<c>$6</c> the offset minutes before/after it,
+/// resolved ONCE per compute by <see cref="BaselineLocalClock"/> from the newest <c>v_server_properties</c> row's
+/// <c>time_zone_id</c> (preferred — it knows WHEN the offset changed) or <c>utc_offset_minutes</c> (a fixed shift),
+/// and 0/0 — the old UTC keying — when the server has no row. <see cref="RobustTierScaffold"/> and the two
+/// event-family arms extract from <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, and
+/// <see cref="GetBaselineAsync"/> looks the analysis time up through the SAME three numbers
+/// (<see cref="LocalClockWindow.LocalKey"/>), cached beside the buckets. Nothing keyed is stored, so the
+/// re-bucketing the ruling asks for is simply the next compute after the cache expires. DuckDB does not reject a
+/// statement that ignores <c>$4..$6</c> (measured on 1.5.5), so an arm that bypassed the scaffold would key on UTC
+/// silently — <c>LocalClockBucketKeyTests</c>' local-clock census is what forbids it. Darling's
+/// <c>PgBaselineProvider</c> carries the twin of this paragraph over the store table.
+/// </para>
 /// </summary>
 public class BaselineProvider
 {
@@ -32,6 +50,10 @@ public class BaselineProvider
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
+
+    /* Information, not Warning: "this host cannot resolve that zone id" is a statement about the host's
+       configuration, made once per zone per process by the resolver itself — see BaselineLocalClock. */
+    private readonly BaselineLocalClock _localClock = new(message => AppLogger.Info("Baselines", message));
 
     /// <summary>
     /// Resolves a collector's configured retention in days, or null when it cannot be determined (#1757).
@@ -121,12 +143,15 @@ public class BaselineProvider
     {
         WarnIfRetentionUndercutsBaselineWindow(metricName);
 
-        var hourOfDay = analysisTime.Hour;
-        var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0
-
-        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var cached = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var baselines = cached.Buckets;
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
+
+        /* #3653 Q6: the lookup key is the analysis time on the TARGET's clock, through the same three numbers
+           the SQL keyed the buckets with (cached beside them, so a cache hit and its lookup agree even if the
+           server's stored clock changed since) — Sunday=0 matches EXTRACT(DOW). */
+        var (hourOfDay, dayOfWeek) = cached.Clock.LocalKey(analysisTime);
 
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
@@ -142,7 +167,7 @@ public class BaselineProvider
     /// <summary>Forces full cache clear — used during testing.</summary>
     public void ClearCache() => _cache.Clear();
 
-    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> GetOrComputeBaselinesAsync(
+    private async Task<CachedBaseline> GetOrComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
@@ -152,26 +177,62 @@ public class BaselineProvider
             cached.ComputedAt == roundedHour &&
             (DateTime.UtcNow - cached.RealTime) < CacheTtl)
         {
-            return cached.Buckets;
+            return cached;
         }
 
-        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
-        _cache[cacheKey] = new CachedBaseline
+        var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
-            Buckets = buckets
+            Buckets = buckets,
+            Clock = clock
         };
+        _cache[cacheKey] = entry;
 
-        return buckets;
+        return entry;
     }
 
-    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
+    /// <summary>
+    /// The newest <c>server_properties</c> row that carries an offset, for the clock the buckets key on (#3653 Q6) —
+    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c>'s read with <c>time_zone_id</c> (v42) riding along, and
+    /// its reason for skipping NULL offsets: the column is nullable and a store migrated from earlier holds snapshots
+    /// that predate it. One row, on the compute's own connection, once per metric per cache period. A server with no
+    /// row reads (NULL, NULL), which <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what
+    /// every bucket was before Q6. Darling's <c>PgBaselineProvider.ServerClockSql</c> is this text over
+    /// <c>server_properties</c>; a source pin holds the two to that one-token difference.
+    /// </summary>
+    internal const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM v_server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+        DuckDBConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = ServerClockSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null);
+        }
+
+        return (reader.IsDBNull(0) ? null : Convert.ToInt32(reader.GetValue(0)),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var query = GetBaselineQuery(metricName);
-        if (query == null) return null;
+        var clock = LocalClockWindow.Utc(analysisTime);
+        if (query == null) return (null, clock);
 
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
@@ -182,11 +243,23 @@ public class BaselineProvider
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
+            /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
+               purpose — a store that cannot answer a one-row read of v_server_properties cannot answer the 30-day
+               scan either, and one catch is the right number of places for "no baseline this pass" to be said. */
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, cancellationToken);
+            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, windowStart, analysisTime);
+
             using var cmd = connection.CreateCommand();
             cmd.CommandText = query;
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = analysisTime });
+            /* $4..$6: the clock BaselineLocalClock.LocalCollectionTimeSql keys on — the transition instant and the
+               offset minutes before/after it. Every statement this method runs must reference all three; DuckDB
+               will not say so if one does not. */
+            cmd.Parameters.Add(new DuckDBParameter { Value = clock.TransitionAtUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = clock.OffsetBeforeMinutes });
+            cmd.Parameters.Add(new DuckDBParameter { Value = clock.OffsetAfterMinutes });
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
@@ -229,7 +302,7 @@ public class BaselineProvider
                 };
             }
 
-            return buckets;
+            return (buckets, clock);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
@@ -238,7 +311,7 @@ public class BaselineProvider
                called off, and five of the seven lines #2299 was filed about came from exactly this
                catch on the Darling twin. */
             AppLogger.Error("BaselineProvider", $"Failed to compute baselines for {metricName}: {ex.Message}");
-            return null;
+            return (null, clock);
         }
     }
 
@@ -253,13 +326,18 @@ public class BaselineProvider
     /// make this single-pass (mad() is the RAW median absolute deviation, matching
     /// BaselineBucket.Mad's unscaled contract — pinned by test against a hand-computed set);
     /// Darling's Postgres twin spells the same tiers with percentile_cont and a second pass.
+    /// <para>#3653 Q6: hh, dw and d are extracted from <see cref="LocalCollectionTime"/> — collection_time
+    /// shifted onto the target's clock by the $4..$6 step function — not from bare collection_time. That ONE
+    /// substitution re-keys every arm ending in <c>clean(collection_time, v)</c>; d is the LOCAL date, so
+    /// distinct_days counts the server's days and a Wednesday 03:00Z row at UTC−5 is a Tuesday-22h sample with
+    /// a Tuesday date. Internal (was private) so the tests can run the real text over a fixture.</para>
     /// </summary>
-    private const string RobustTierScaffold = @"
+    internal const string RobustTierScaffold = @"
 keyed AS (
     SELECT v,
-           EXTRACT(HOUR FROM collection_time)::INT AS hh,
-           EXTRACT(DOW FROM collection_time)::INT AS dw,
-           collection_time::DATE AS d
+           EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hh,
+           EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS dw,
+           " + LocalCollectionTime + @"::DATE AS d
     FROM clean
 )
 SELECT COALESCE(hh, -1) AS hour_of_day,
@@ -273,7 +351,17 @@ SELECT COALESCE(hh, -1) AS hour_of_day,
 FROM keyed
 GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
 
-    private static string? GetBaselineQuery(string metricName)
+    /// <summary>
+    /// The bucket key's time source (#3653 Q6): <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, the shared
+    /// assembly's ONE spelling, aliased here so the arms read as SQL. Never spell the shift by hand in an arm.
+    /// </summary>
+    internal const string LocalCollectionTime = BaselineLocalClock.LocalCollectionTimeSql;
+
+    /// <summary>
+    /// The eleven per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
+    /// arm to the local-clock key and run the real text over a DuckDB fixture; null for a metric with no baseline.
+    /// </summary>
+    internal static string? GetBaselineQuery(string metricName)
     {
         // All queries return: hour_of_day, day_of_week, mean_val, stddev_val, sample_count
         // Cumulative metrics (batch requests, wait stats, query duration) use CTEs for
@@ -399,25 +487,29 @@ WITH clean AS (
 
             // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
             // No restart exclusion needed (event counts, not cumulative).
+            /* #3653 Q6: the two event arms bypass the scaffold (six-column shape, no tiers), so they are the
+               two places that must extract from LocalCollectionTime by hand — hour, dow AND the distinct
+               DATE the per-day mean divides by. A bare collection_time here would run without complaint and
+               key on UTC; the local-clock census in LocalClockBucketKeyTests is what forbids it. */
             MetricNames.Blocking => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
+       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
+       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT collection_time::DATE) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
 FROM v_blocked_process_reports
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => @"
-SELECT EXTRACT(HOUR FROM collection_time)::INT AS hour_of_day,
-       EXTRACT(DOW FROM collection_time)::INT AS day_of_week,
-       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT collection_time::DATE), 1) AS mean_val,
+SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
+       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
+       COUNT(*)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
        0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT collection_time::DATE) AS sample_count,
-       COUNT(DISTINCT collection_time::DATE) AS distinct_days
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
+       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
 FROM v_deadlocks
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY hour_of_day, day_of_week",
@@ -493,5 +585,8 @@ clean AS (
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }
         public Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets { get; init; }
+
+        /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
+        public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);
     }
 }

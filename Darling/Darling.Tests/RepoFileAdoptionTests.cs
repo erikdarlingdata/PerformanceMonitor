@@ -124,6 +124,10 @@ public sealed class RepoFileAdoptionTests
            the exact shape they were in, which a single-line anchor could not tell from a rewrite. */
         "FleetCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
+           SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
+           identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
+        "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
            collection_time inside a Select is indented deeper and must not match), and its tool-body slicing
