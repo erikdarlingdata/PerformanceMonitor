@@ -21,12 +21,24 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #3653: the viewer's Performance Trends tab takes the route the MCP trio took in #3590 — raw for a window
-/// raw can serve, the hourly rollup otherwise, and the series says which. The routing and the hourly SQL now
-/// live in Storage (<see cref="DurationTrendRouting"/>) where both apps can call them; the MCP reader keeps its
-/// own named members, and what this class pins is that those members ARE the Storage definitions — same text,
-/// same constants, same decision for every input — so the two apps cannot drift about which relation answers a
-/// seven-day chart or about what the served series covers. The pin is deliberately over the compiled values,
-/// not over source text: a change to either side that is not made to both fails here.
+/// raw can serve, the hourly rollup otherwise, and the series says which. The routing and the hourly SQL live
+/// in Storage (<see cref="DurationTrendRouting"/>) where both apps can call them; the MCP reader keeps its own
+/// named members, and what this class pins is that those members ARE the Storage definitions.
+///
+/// <para><b>Equality became identity.</b> #3666 moved the definitions and pinned the MCP reader's copies EQUAL
+/// to them over compiled values — a pin that fails only after the two have drifted. The #3653 follow-up made
+/// every one of those members an ALIAS (a const bound to the Storage const, a static readonly bound to the
+/// builder's output, an expression-bodied delegation for the pure functions), so there is one definition and
+/// nothing left to drift. Two consequences for this class: the compiled-value comparisons that survive below
+/// are kept where they still pin something a source alias does not (the alias's ARGUMENT — that the MCP text
+/// is the builder's output WITHOUT the viewer's filter; the literal against the rollup's declared bucket), and
+/// the ones that had become a function compared with itself (the 1,680-cell resolver census, the coverage
+/// tuple loop) are gone, replaced by <see cref="McpTrendReaderMembers_AreAliasesOfTheStorageDefinitions"/>,
+/// which reads the declarations and fails the moment any of them is restated.</para>
+///
+/// <para>The same PR gave the fourth chart — the Query Store duration trend, whose routing is #2736's
+/// materialization watermark rather than this ladder — its own disclosure, in the same title idiom, off the
+/// floor the route already carried; those pins are here too, beside the siblings'.</para>
 /// </summary>
 public sealed class ViewerTrendRoutingPortTests
 {
@@ -34,7 +46,10 @@ public sealed class ViewerTrendRoutingPortTests
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
 
-    /// <summary>The MCP reader's hourly SQL is the Storage builder's output, byte for byte (line endings aside).</summary>
+    /// <summary>The MCP reader's hourly SQL is the Storage builder's output, byte for byte (line endings aside).
+    /// Since #3653 that is true by alias; what this still pins is the alias's argument — the MCP text is the
+    /// builder's output WITHOUT the viewer's <c>$4</c> filter, which a source pin on the declaration names but
+    /// only a value comparison proves the builder honours.</summary>
     [Fact]
     public void McpHourlySql_IsTheStorageBuilder_WithoutTheDatabaseFilter()
     {
@@ -70,7 +85,10 @@ public sealed class ViewerTrendRoutingPortTests
         Assert.DoesNotContain("$5", viewer, StringComparison.Ordinal);
     }
 
-    /// <summary>The constants the decision and the disclosure rest on are one number each, read by both.</summary>
+    /// <summary>The constants the decision and the disclosure rest on are one number each, read by both —
+    /// by alias since #3653 (see <see cref="McpTrendReaderMembers_AreAliasesOfTheStorageDefinitions"/>); the
+    /// last assertion, the literal against the rollup's declared bucket width, is the one that pins a fact no
+    /// alias can.</summary>
     [Fact]
     public void RoutingConstants_AreSharedNotRestated()
     {
@@ -83,44 +101,66 @@ public sealed class ViewerTrendRoutingPortTests
     }
 
     /// <summary>
-    /// The census: for every hours_back the tools accept, across the availability and coverage shapes the
-    /// ladder distinguishes (fully built / no rollup / rollup floor above the start with raw measured deeper /
-    /// with raw measured shallower / unmeasured), the viewer's resolver and the MCP's return the same tier. The
-    /// grid straddles the raw margin on purpose: the boundary hours are where a re-derivation would diverge.
+    /// The decision is the one the defect needed: a 7-day window on a built store leaves raw; a 1-day window
+    /// stays; a store without the rollup stays raw at any depth. Pinned on the Storage resolver directly —
+    /// the MCP reader's <c>ResolveTier</c> / <c>ShouldUseRawTier</c> ARE this resolver since #3653 (the
+    /// 1,680-cell census #3666 ran between the two here compared a function with itself once the aliases
+    /// landed and was retired; <see cref="McpTrendReaderMembers_AreAliasesOfTheStorageDefinitions"/> pins the
+    /// delegation, DarlingQueryTrendTieringTests walks the ladder's table).
     /// </summary>
     [Fact]
-    public void ResolveTier_ViewerAndMcp_AgreeOnEveryInput()
+    public void ResolveTier_TheDecisionTheDefectNeeded()
     {
-        var coverages = new[]
-        {
-            TierCoverage.Unknown,
-            new TierCoverage(HourlyFloorUtc: Now.AddDays(-2), DailyFloorUtc: null, RawOldestUtc: Now.AddDays(-9)),
-            new TierCoverage(HourlyFloorUtc: Now.AddDays(-2), DailyFloorUtc: null, RawOldestUtc: Now.AddDays(-1)),
-            new TierCoverage(HourlyFloorUtc: Now.AddDays(-30), DailyFloorUtc: null, RawOldestUtc: Now.AddDays(-3)),
-            new TierCoverage(HourlyFloorUtc: null, DailyFloorUtc: null, RawOldestUtc: Now.AddDays(-9)),
-        };
-
-        var compared = 0;
-        for (var hoursBack = 1; hoursBack <= McpHelpers.MaxHoursBack; hoursBack++)
-        {
-            var start = Now.AddHours(-hoursBack);
-            foreach (var hourlyAvailable in new[] { true, false })
-            foreach (var coverage in coverages)
-            {
-                Assert.Equal(
-                    DarlingTrendReader.ResolveTier(start, Now, hourlyAvailable, coverage),
-                    DurationTrendRouting.ResolveTier(start, Now, hourlyAvailable, coverage));
-                Assert.Equal(DarlingTrendReader.ShouldUseRawTier(start, Now), DurationTrendRouting.ShouldUseRawTier(start, Now));
-                compared++;
-            }
-        }
-
-        Assert.True(compared >= McpHelpers.MaxHoursBack * 2 * coverages.Length);
-
-        /* And the decision is the one the defect needed: a 7-day window on a built store leaves raw. */
         Assert.Equal(RetentionTier.Hourly, DurationTrendRouting.ResolveTier(Now.AddHours(-168), Now, hourlyAvailable: true, TierCoverage.Unknown));
         Assert.Equal(RetentionTier.Raw, DurationTrendRouting.ResolveTier(Now.AddHours(-24), Now, hourlyAvailable: true, TierCoverage.Unknown));
         Assert.Equal(RetentionTier.Raw, DurationTrendRouting.ResolveTier(Now.AddHours(-168), Now, hourlyAvailable: false, TierCoverage.Unknown));
+        Assert.True(DurationTrendRouting.ShouldUseRawTier(Now.AddHours(-24), Now));
+        Assert.False(DurationTrendRouting.ShouldUseRawTier(Now.AddHours(-168), Now));
+    }
+
+    /// <summary>
+    /// Identity, not equality (#3653): every member of <c>DarlingTrendReader</c> that #3666 pinned EQUAL to a
+    /// <see cref="DurationTrendRouting"/> member is declared AS that member — so the two cannot drift because
+    /// there are not two. Read off the source because that is the only place an alias is visible: a const
+    /// alias compiles to the same literal a restatement would, a static readonly bound to a builder call is a
+    /// fresh string each time (no reference to compare), and a delegating method body is indistinguishable
+    /// from a copied one by output — which is exactly why the old equality pins could not tell the two apart.
+    /// The negative half is the one that bites: the file must carry NONE of the definitions it used to.
+    /// </summary>
+    [Fact]
+    public void McpTrendReaderMembers_AreAliasesOfTheStorageDefinitions()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs");
+
+        Assert.Contains("public const string HourlyBucketSecondsSql = DurationTrendRouting.HourlyBucketSecondsSql;", source, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendHourlySql =\n        DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: false);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendHourlySql =\n        DurationTrendRouting.ProcedureDurationTrendHourlySql(withDatabaseFilter: false);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static readonly TimeSpan RawTierMargin = DurationTrendRouting.RawTierMargin;", source, StringComparison.Ordinal);
+        Assert.Contains("public static readonly TimeSpan TruncationSlack = DurationTrendRouting.TruncationSlack;", source, StringComparison.Ordinal);
+        Assert.Contains("public static bool ShouldUseRawTier(DateTime startUtc, DateTime nowUtc) =>\n        DurationTrendRouting.ShouldUseRawTier(startUtc, nowUtc);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static RetentionTier ResolveTier(DateTime startUtc, DateTime nowUtc, bool hourlyAvailable, TierCoverage coverage) =>\n        DurationTrendRouting.ResolveTier(startUtc, nowUtc, hourlyAvailable, coverage);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static (DateTime EffectiveStartUtc, bool Truncated) DescribeCoverage(DateTime? firstPointUtc, DateTime startUtc) =>\n        DurationTrendRouting.DescribeCoverage(firstPointUtc, startUtc);", Lf(source), StringComparison.Ordinal);
+
+        /* The tier word too: the route record and the query-history payload spell it through SourceWord. */
+        Assert.Equal(2, CountOf(source, "DurationTrendRouting.SourceWord("));
+        Assert.DoesNotContain("? \"raw\" : \"hourly\"", source, StringComparison.Ordinal);
+
+        /* None of the retired definitions survive as text — a restatement beside an alias is drift with a
+           head start. */
+        Assert.DoesNotContain("\"3600.0\"", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(elapsed_time_sum)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM {TimescaleSupport.QueryStatsHourlyView}", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM {TimescaleSupport.ProcedureStatsHourlyView}", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimeSpan.FromHours(1)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimeSpan.FromMinutes(90)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimescaleSupport.RawRetentionSpan + RawTierMargin", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TierCoverage.ReachesFurtherBack(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("first > startUtc + TruncationSlack", source, StringComparison.Ordinal);
+
+        /* And the values still land where the tools read them (the alias is public, the names unchanged). */
+        Assert.Equal(DurationTrendRouting.RawTierMargin, DarlingTrendReader.RawTierMargin);
+        Assert.Equal(DurationTrendRouting.TruncationSlack, DarlingTrendReader.TruncationSlack);
+        Assert.Equal(DurationTrendRouting.HourlyBucketSecondsSql, DarlingTrendReader.HourlyBucketSecondsSql);
     }
 
     /// <summary>The coverage description and the tier word are the MCP payload's, not a viewer restatement.</summary>
@@ -128,11 +168,10 @@ public sealed class ViewerTrendRoutingPortTests
     public void DescribeCoverage_AndSourceWord_MatchTheMcpPayload()
     {
         var start = Now.AddHours(-24);
-        foreach (var first in new DateTime?[] { null, start, start.AddMinutes(90), start.AddMinutes(91), start.AddHours(4) })
-        {
-            Assert.Equal(DarlingTrendReader.DescribeCoverage(first, start), DurationTrendRouting.DescribeCoverage(first, start));
-        }
 
+        /* The coverage rule at its edges (the MCP reader's DescribeCoverage IS this one since #3653). */
+        Assert.Equal((start, false), DurationTrendRouting.DescribeCoverage(null, start));
+        Assert.Equal((start.AddMinutes(90), false), DurationTrendRouting.DescribeCoverage(start.AddMinutes(90), start));
         Assert.Equal((start.AddMinutes(91), true), DurationTrendRouting.DescribeCoverage(start.AddMinutes(91), start));
 
         var rawRoute = DarlingTrendReader.ResolveQueryDurationTrendRoute(Now.AddHours(-2), RollupAvailability.All, RollupCoverage.Unknown, Now);
@@ -143,6 +182,14 @@ public sealed class ViewerTrendRoutingPortTests
         Assert.Equal(hourlyRoute.Source, DurationTrendRouting.SourceWord(RetentionTier.Hourly));
         Assert.Equal("raw", new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Raw, start, false).Source);
         Assert.Equal("hourly", new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, start, false).Source);
+
+        /* The Query Store chart's word is the Query Store payload's (#3653): rollup+raw / raw, one definition. */
+        var rawOnly = QueryStoreTrendRouting.QueryStoreTrendRoute.RawOnly;
+        var routed = QueryStoreTrendRouting.Resolve(rollupExists: true, oldestBucketUtc: Now.AddDays(-3), newestBucketUtc: Now.AddHours(-2));
+        Assert.Equal("raw", QueryStoreTrendRouting.SourceWord(rawOnly));
+        Assert.Equal("rollup+raw", QueryStoreTrendRouting.SourceWord(routed));
+        Assert.Equal("raw", new QueryStoreTrendSeries(new List<QueryTrendPoint>(), rawOnly, start, null).Source);
+        Assert.Equal("rollup+raw", new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, start, null).Source);
     }
 
     /// <summary>
@@ -158,9 +205,12 @@ public sealed class ViewerTrendRoutingPortTests
         var partial = source[source.IndexOf("public sealed partial class ViewerDataService", StringComparison.Ordinal)..];
 
         /* Two resolver calls: the shared body the two duration trends go through, and the execution-count read
-           (which routes on the query grain by itself). Two coverage descriptions, at the same two sites. */
+           (which routes on the query grain by itself). The Query Store read is NOT a third — its route is
+           #2736's watermark, not this ladder. Three coverage descriptions: the same two sites, plus the Query
+           Store read (#3653), which names its effective start by the same shared rule so the chart and the
+           MCP payload agree on the instant even though its unserved-head rule is its own. */
         Assert.Equal(2, CountOf(partial, "DurationTrendRouting.ResolveTier("));
-        Assert.Equal(2, CountOf(partial, "DurationTrendRouting.DescribeCoverage("));
+        Assert.Equal(3, CountOf(partial, "DurationTrendRouting.DescribeCoverage("));
         Assert.DoesNotContain("RetentionTierRouter.", partial, StringComparison.Ordinal);
         Assert.Contains("static rollups => rollups.QueryGrainHourly", partial, StringComparison.Ordinal);
         Assert.Contains("static rollups => rollups.ProcedureGrainHourly", partial, StringComparison.Ordinal);
@@ -230,22 +280,119 @@ public sealed class ViewerTrendRoutingPortTests
     }
 
     /// <summary>
+    /// The fourth chart's title (#3653), in the siblings' idiom through the siblings' composer: the payload's
+    /// route word always, what a point IS on that route (the grain changes at #2736's watermark, so the
+    /// rollup+raw parenthetical names the seam), and the "data begins" clause ONLY when the head went
+    /// unserved — the rollup's measured floor above the requested start — with this route's own reason and
+    /// remedy. A late first point on a route that reached the start is NOT disclosed: that is a quiet server,
+    /// and the sibling wording ("the store no longer holds") would be false here.
+    /// </summary>
+    [Fact]
+    public void DescribeQueryStoreTrendCoverage_NamesTheRoute_AndTheHeadOnlyWhenUnserved()
+    {
+        var start = new DateTime(2026, 8, 12, 12, 0, 0, DateTimeKind.Unspecified);
+        var rawFrom = new DateTime(2026, 8, 19, 10, 0, 0, DateTimeKind.Unspecified);
+        var rawOnly = QueryStoreTrendRouting.QueryStoreTrendRoute.RawOnly;
+        var routed = new QueryStoreTrendRouting.QueryStoreTrendRoute(UseRollup: true, RawStartUtc: rawFrom, RollupFloorUtc: start.AddDays(-30));
+
+        var raw = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), rawOnly, start, null));
+        Assert.Equal("Source: raw (one point per Query Store interval)", raw);
+
+        var served = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, start, null));
+        var rawFromText = ViewerTimeHelper.ForDisplay(rawFrom).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal($"Source: rollup+raw (one point per hour before {rawFromText}, one per Query Store interval from it)", served);
+        Assert.DoesNotContain("data begins", served, StringComparison.Ordinal);
+
+        /* A late head on a route that reached the start: quiet, not truncated — no clause. */
+        var quietHead = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, start.AddDays(3), null));
+        Assert.DoesNotContain("data begins", quietHead, StringComparison.Ordinal);
+
+        /* The floor above the start: the head was not served, and the title says from where and why. */
+        var head = start.AddDays(3);
+        var unserved = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, head, UnservedBeforeUtc: head));
+        Assert.StartsWith($"Source: rollup+raw (one point per hour before {rawFromText}, one per Query Store interval from it) — data begins ", unserved, StringComparison.Ordinal);
+        Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), unserved, StringComparison.Ordinal);
+        Assert.EndsWith("; the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it)", unserved, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer holds", unserved, StringComparison.Ordinal);
+
+        /* Same sentence shape as the siblings — "Source: {served} — data begins yyyy-MM-dd HH:mm; {why}" — because
+           both go through one composer; the two slots differ, the frame does not. */
+        var sibling = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
+        var frame = new System.Text.RegularExpressions.Regex(@"^Source: [^—]+ — data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2}; [^;]+$");
+        Assert.Matches(frame, sibling);
+        Assert.Matches(frame, unserved);
+        Assert.Matches(new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+$"), served);
+
+        /* The word the chart leads with is the word the tool publishes. */
+        Assert.StartsWith("Source: " + QueryStoreTrendRouting.SourceWord(routed), served, StringComparison.Ordinal);
+        Assert.StartsWith("Source: " + QueryStoreTrendRouting.SourceWord(rawOnly), raw, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The unserved-head rule is ONE definition the MCP tool's <c>routing.unserved_before</c> and the viewer's
+    /// title both read (#3653): the rollup's floor when it sits above the requested start, null when the route
+    /// reached the start, null on the raw-only route by construction (raw is complete wherever the rollup has
+    /// not armed its purge). No slack: a measured floor is not an ambiguous late head.
+    /// </summary>
+    [Fact]
+    public void QueryStoreUnservedBefore_IsOneRule_TheToolAndTheChartRead()
+    {
+        var start = Now.AddDays(-7);
+        var floorAbove = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, Now.AddHours(-1), start.AddDays(3));
+        var floorAt = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, Now.AddHours(-1), start);
+        var floorBelow = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, Now.AddHours(-1), start.AddDays(-10));
+        var floorSliver = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, Now.AddHours(-1), start.AddMinutes(1));
+        var floorUnknown = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, Now.AddHours(-1), null);
+
+        Assert.Equal(start.AddDays(3), QueryStoreTrendRouting.UnservedBefore(floorAbove, start));
+        Assert.Null(QueryStoreTrendRouting.UnservedBefore(floorAt, start));
+        Assert.Null(QueryStoreTrendRouting.UnservedBefore(floorBelow, start));
+        Assert.Equal(start.AddMinutes(1), QueryStoreTrendRouting.UnservedBefore(floorSliver, start));
+        Assert.Null(QueryStoreTrendRouting.UnservedBefore(floorUnknown, start));
+        Assert.Null(QueryStoreTrendRouting.UnservedBefore(QueryStoreTrendRouting.QueryStoreTrendRoute.RawOnly, start));
+        Assert.Null(QueryStoreTrendRouting.UnservedBefore(new QueryStoreTrendRouting.QueryStoreTrendRoute(false, default, start.AddDays(3)), start));
+
+        /* The series carries it as the chart's flag. */
+        Assert.True(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), floorAbove, start.AddDays(3), start.AddDays(3)).HeadUnserved);
+        Assert.False(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), floorBelow, start, null).HeadUnserved);
+
+        /* Both consumers call the Storage rule and the Storage word; neither restates them. */
+        var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTrendTools.cs");
+        Assert.Contains("QueryStoreTrendRouting.UnservedBefore(route, windowStartUtc) is DateTime floor", tool, StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(tool, "QueryStoreTrendRouting.SourceWord(route)"));
+        Assert.DoesNotContain("\"rollup+raw\"", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("route.RollupFloorUtc is DateTime floor && floor > windowStartUtc", tool, StringComparison.Ordinal);
+
+        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs");
+        Assert.Contains("QueryStoreTrendRouting.UnservedBefore(route, startUtc)", viewer, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreTrendRouting.SourceWord(Route)", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"rollup+raw\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("public async Task<QueryStoreTrendSeries> GetQueryStoreDurationTrendAsync(", viewer, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every chart update takes the series and shows its coverage before drawing — the disclosure is not
-    /// optional per chart. <c>chart.Reset()</c> inside <c>ClearChart</c> clears a previous title, so a stale
-    /// truncation note cannot survive a reload that came back empty.
+    /// optional per chart, and since #3653 that includes the Query Store chart #3666 left out.
+    /// <c>chart.Reset()</c> inside <c>ClearChart</c> clears a previous title, so a stale truncation note
+    /// cannot survive a reload that came back empty.
     /// </summary>
     [Fact]
     public void EveryRoutedTrendChart_ShowsItsCoverage()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.QueryTrends.cs");
-        foreach (var chart in new[] { "QueryDurationTrendChart", "ProcDurationTrendChart", "ExecutionCountTrendChart" })
+        foreach (var chart in new[] { "QueryDurationTrendChart", "ProcDurationTrendChart", "QueryStoreDurationTrendChart", "ExecutionCountTrendChart" })
         {
             Assert.Contains($"ShowTrendCoverage({chart}, series);", source, StringComparison.Ordinal);
         }
 
         Assert.Contains("private void UpdateQueryDurationTrendChart(QueryTrendSeries series", source, StringComparison.Ordinal);
         Assert.Contains("private void UpdateProcDurationTrendChart(QueryTrendSeries series", source, StringComparison.Ordinal);
+        Assert.Contains("private void UpdateQueryStoreDurationTrendChart(QueryStoreTrendSeries series", source, StringComparison.Ordinal);
         Assert.Contains("private void UpdateExecutionCountTrendChart(QueryTrendSeries series", source, StringComparison.Ordinal);
+
+        /* Both title arms go through the one composer, so the sentence shape cannot fork. */
+        Assert.Equal(2, CountOf(source, "=> ComposeTrendCoverage("));
+        Assert.Equal(1, CountOf(source, "private static string ComposeTrendCoverage("));
     }
 
     /// <summary>

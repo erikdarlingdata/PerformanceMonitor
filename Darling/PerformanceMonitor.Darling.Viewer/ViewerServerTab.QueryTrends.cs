@@ -97,24 +97,66 @@ public partial class ViewerServerTab
     /// told the same thing in the same vocabulary; the parenthetical says what the word means on a chart.
     /// </summary>
     internal static string DescribeTrendCoverage(QueryTrendSeries series)
+        => ComposeTrendCoverage(
+            series.Tier == PerformanceMonitor.Darling.Storage.RetentionTier.Raw
+                ? $"{series.Source} (one point per collection)"
+                : $"{series.Source} rollup (one point per hour)",
+            series.Truncated ? series.EffectiveStartUtc : null,
+            "the store no longer holds the rest of this window at this tier");
+
+    /// <summary>
+    /// The Query Store duration chart's coverage title (#3653) — the same idiom as
+    /// <see cref="DescribeTrendCoverage"/>, through the same composer, with this trend's own facts in the two
+    /// slots. The tier word is the payload's (<see cref="QueryStoreTrendSeries.Source"/>: <c>rollup+raw</c> /
+    /// <c>raw</c>) and the parenthetical says what a point IS on each route, because #2736's seam changes the
+    /// grain mid-series: one point per collection-hour bucket below the watermark, one per Query Store
+    /// interval from it — the payload's <c>bucket</c> sentence, on the chart. The "data begins" clause hangs
+    /// on <see cref="QueryStoreTrendSeries.HeadUnserved"/> — the rollup's measured floor sitting above the
+    /// requested start — and its reason is this route's own: the corrected rollup has not MATERIALIZED the
+    /// head (the rows may well exist and were deliberately not ranked, #2736), so the remedy is named, where
+    /// the sibling charts' reason is a tier that no longer HOLDS the head. Same shape, honest words. Before
+    /// this the chart carried no title at all, and a seven-day chart on a never-backfilled store plotted what
+    /// the rollup had under an axis that said seven — the exact defect #3666 removed from the three charts
+    /// beside it.
+    /// </summary>
+    internal static string DescribeQueryStoreTrendCoverage(QueryStoreTrendSeries series)
+        => ComposeTrendCoverage(
+            series.Route.UseRollup
+                ? $"{series.Source} (one point per hour before {ViewerTimeHelper.ForDisplay(series.Route.RawStartUtc):yyyy-MM-dd HH:mm}, one per Query Store interval from it)"
+                : $"{series.Source} (one point per Query Store interval)",
+            series.HeadUnserved ? series.EffectiveStartUtc : null,
+            "the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it)");
+
+    /// <summary>
+    /// The one composition every trend title here goes through (#3653): <c>Source: {what served}</c>, and only
+    /// when the series' head was not served, <c>— data begins {head}; {why}</c>. One method so the two series
+    /// types cannot drift in the shape of the sentence — the word order, the dash, the timestamp format —
+    /// while each says its own truth in the two slots. Terse in the common case on purpose: a long banner on
+    /// every chart teaches the eye to skip the one that matters.
+    /// </summary>
+    private static string ComposeTrendCoverage(string served, DateTime? dataBeginsUtc, string whyUnserved)
     {
-        var source = series.Tier == PerformanceMonitor.Darling.Storage.RetentionTier.Raw
-            ? $"{series.Source} (one point per collection)"
-            : $"{series.Source} rollup (one point per hour)";
-        if (!series.Truncated)
+        if (dataBeginsUtc is not DateTime head)
         {
-            return $"Source: {source}";
+            return $"Source: {served}";
         }
 
-        var from = ViewerTimeHelper.ForDisplay(series.EffectiveStartUtc);
-        return $"Source: {source} — data begins {from:yyyy-MM-dd HH:mm}; the store no longer holds the rest of this window at this tier";
+        var from = ViewerTimeHelper.ForDisplay(head);
+        return $"Source: {served} — data begins {from:yyyy-MM-dd HH:mm}; {whyUnserved}";
     }
 
     /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick
     /// labels (the heatmap's title idiom) so it reads as chart chrome rather than as a series.</summary>
     private static void ShowTrendCoverage(ScottPlot.WPF.WpfPlot chart, QueryTrendSeries series)
+        => ShowTrendCoverageTitle(chart, DescribeTrendCoverage(series));
+
+    /// <summary>The Query Store chart's arm of <see cref="ShowTrendCoverage(ScottPlot.WPF.WpfPlot, QueryTrendSeries)"/> (#3653).</summary>
+    private static void ShowTrendCoverage(ScottPlot.WPF.WpfPlot chart, QueryStoreTrendSeries series)
+        => ShowTrendCoverageTitle(chart, DescribeQueryStoreTrendCoverage(series));
+
+    private static void ShowTrendCoverageTitle(ScottPlot.WPF.WpfPlot chart, string coverage)
     {
-        chart.Plot.Title(DescribeTrendCoverage(series));
+        chart.Plot.Title(coverage);
         chart.Plot.Axes.Title.Label.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
         chart.Plot.Axes.Title.Label.FontSize = 11;
         chart.Plot.Axes.Title.Label.Bold = false;
@@ -180,12 +222,14 @@ public partial class ViewerServerTab
         ProcDurationTrendChart.Refresh();
     }
 
-    private void UpdateQueryStoreDurationTrendChart(List<QueryTrendPoint> data, DateTime startUtc, DateTime endUtc)
+    private void UpdateQueryStoreDurationTrendChart(QueryStoreTrendSeries series, DateTime startUtc, DateTime endUtc)
     {
+        var data = series.Points;
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
+        ShowTrendCoverage(QueryStoreDurationTrendChart, series);
 
         var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
         var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();

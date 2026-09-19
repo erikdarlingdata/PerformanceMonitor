@@ -813,9 +813,12 @@ public sealed class DarlingMcpTrendTools
             ? DarlingTrendReader.DescribeCoverage(points[0].CollectionTime, windowStartUtc)
             : DescribeEmptyCoverage(route.UseRollup ? route.RollupFloorUtc : null, windowStartUtc, windowEndUtc);
 
+        /* The tier word and the unserved-head rule are the Storage definitions the viewer's chart title also
+           reads (#3653) — QueryStoreTrendRouting.SourceWord / UnservedBefore — so the payload and the desktop
+           cannot disagree about what served a window or whether its head was reached. */
         if (!route.UseRollup)
         {
-            return new TrendDisclosure("raw", effectiveStart, windowEndUtc, truncated, "per-interval", null);
+            return new TrendDisclosure(QueryStoreTrendRouting.SourceWord(route), effectiveStart, windowEndUtc, truncated, "per-interval", null);
         }
 
         var routing = new Dictionary<string, object>
@@ -824,7 +827,7 @@ public sealed class DarlingMcpTrendTools
             ["raw_from"] = route.RawStartUtc.ToString("o"),
         };
 
-        if (route.RollupFloorUtc is DateTime floor && floor > windowStartUtc)
+        if (QueryStoreTrendRouting.UnservedBefore(route, windowStartUtc) is DateTime floor)
         {
             routing["unserved_before"] = floor.ToString("o");
             routing["unserved_note"] =
@@ -835,7 +838,7 @@ public sealed class DarlingMcpTrendTools
         }
 
         return new TrendDisclosure(
-            "rollup+raw", effectiveStart, windowEndUtc, truncated,
+            QueryStoreTrendRouting.SourceWord(route), effectiveStart, windowEndUtc, truncated,
             "1 hour before routing.raw_from, per-interval from it",
             "Points before routing.raw_from are 1-hour buckets from the corrected Query Store rollup (#1849): " +
             "bucketed on the COLLECTION hour, deduped at interval grain, with an interval whose " +
