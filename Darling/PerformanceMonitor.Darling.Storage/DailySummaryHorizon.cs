@@ -69,13 +69,17 @@ public static class DarlingRetentionHorizons
     /// window; the provider binds <c>analysisTime − BaselineWindowDays</c>) without a word said. Same mechanism,
     /// same constant: the purge floors these at <c>BaselineMath.BaselineWindowDays</c>, the detector's own
     /// minimum-history gate. The set is engine-agnostic on purpose — a store purges its shared tables once for
-    /// the whole fleet, so the floor cannot depend on which engine a given server is.</para>
+    /// the whole fleet, so the floor cannot depend on which engine a given server is. The v2 lanes add a member
+    /// the day their baseline arm reads a table directly (<c>pg_replication_stats</c>, lane 12's replay-lag point
+    /// series) — <c>BaselineSupplyTests</c> pins membership against the provider's arms so an arm without a floor
+    /// fails there rather than starving quietly.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "cpu_utilization", "file_io_stats",
             "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
+            "pg_replication_stats",
         };
 
     /// <summary>

@@ -202,13 +202,14 @@ public class BaselineSupplyTests
     /// silently shorten the CPU/I-O baseline supply. DarlingRetention floors the purge horizon for
     /// exactly the raw-reading baseline families at the baseline window — this pins the set's
     /// membership to the provider's raw-reading arms so neither side can drift alone. Since #3691 the
-    /// PostgreSQL-target provider's four raw sources are members too (the #1757 shape, PG edition): they have
+    /// PostgreSQL-target provider's raw sources are members too (the #1757 shape, PG edition): they have
     /// no rollup at all, so their user-editable schedule default was the only thing covering the window.
+    /// Four v1 sources, plus <c>pg_replication_stats</c> since lane 12's replay-lag arm.
     /// </summary>
     [Fact]
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
-        Assert.Equal(6, DarlingRetention.BaselineServingRawCollectors.Count);
+        Assert.Equal(7, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
         foreach (var table in s_pgTargetBaselineSources)
@@ -225,17 +226,17 @@ public class BaselineSupplyTests
     }
 
     /// <summary>
-    /// The four <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly — pinned by the PROVIDER's
-    /// own query text, not by a second list, so a fifth raw source added to the provider without a floor entry
-    /// fails here rather than starving quietly.
+    /// The <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly (four v1, plus lane 12's
+    /// <c>pg_replication_stats</c>) — pinned by the PROVIDER's own query text, not by a second list, so a raw source
+    /// added to the provider without a floor entry fails here rather than starving quietly.
     /// </summary>
     private static readonly string[] s_pgTargetBaselineSources =
-        ["pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization"];
+        ["pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization", "pg_replication_stats"];
 
     [Fact]
     public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
     {
-        var pgNames = new[] { MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu };
+        var pgNames = new[] { MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu, MetricNames.PgReplayLagBytes };
         var tablesRead = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         foreach (var name in pgNames)
         {
