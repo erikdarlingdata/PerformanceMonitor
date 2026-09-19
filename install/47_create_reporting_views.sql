@@ -575,6 +575,17 @@ WITH
 ),
     throughput AS
 (
+    /*
+    #3653 (#3540 A11): cntr_value_per_second was bigint / integer until this release, so these averages
+    were means of truncated integers (a store running under one batch per second averaged to 0). install/02
+    and install/06 redefine the column as real division and converge existing installs before this view is
+    re-created, so the AVG is now over numeric(33,12) rates. No interval filter is added here: the Full
+    edition's delta framework (install/05) does write a (0, 0) row for a series' first collection (the
+    previous_collection CTE's MIN(collection_id) arm makes the first row its own previous), but the column's
+    own NULLIF(sample_interval_seconds, 0) turns that row's rate into NULL, which AVG skips. The FILTER the
+    PG/DuckDB tiers needed in #3695 divides in the aggregate against a raw interval column; here the division
+    and its NULLIF live in the column, so the exclusion is already made before the aggregate sees the row.
+    */
     SELECT
         avg_batch_requests_sec = AVG(ps.cntr_value_per_second),
         avg_compilations_sec = AVG(ps2.cntr_value_per_second)
