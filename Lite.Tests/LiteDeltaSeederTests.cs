@@ -243,8 +243,33 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline()
     {
-        var older = DateTime.UtcNow.AddMinutes(-4);
-        var latest = DateTime.UtcNow.AddMinutes(-2);
+        /* ONE clock read, floored to the second, and every instant in the test is derived from it — the row
+           times AND the pass time handed to the calculator. Both ends of the interval this test measures
+           are therefore the test's own numbers, and the assertions below are exact.
+
+           Until this anchor the rows took their times from one UtcNow (floored to the second by the insert
+           helpers) and the pass from a SECOND UtcNow read after the inserts and the seed had run, so the
+           interval the calculator reported was 120 + floor(dropped fraction + however long DuckDB took in
+           between). The assertions allowed 118..122 for that and it was not enough: on a CI runner the seed
+           phase alone crossed three seconds twice in one day, on pull requests that touched nothing here —
+           123 against 118..122 in the afternoon, 243 against 238..242 in the evening — and both passed on
+           re-run, the signature of a test measuring the scheduler rather than the code. Widening the range
+           would only move the threshold at which the same jitter fails; a test that owns both instants has
+           no jitter to allow for, so the tolerance is removed rather than loosened. The seeder's one clock
+           read (CollectorDeltaCalculator.SeedCutoff, fifteen minutes back) never entered into this: the
+           rows sit eleven minutes inside that bound and the stale ones five minutes outside it, margins no
+           scheduler pause reaches, so no seam into production time was needed.
+
+           The anchor is floored to the second so that the exactness is a property of this test's own
+           arithmetic and not of anyone's rounding direction. The insert helpers floor what they store, the
+           store keeps microseconds against DateTime's 100-nanosecond ticks, and the calculator's
+           (int)TotalSeconds truncates: with a fractional anchor the assertion would still read 120 today,
+           but only because each of those happens to round toward the past — a reader would have to know
+           all three to trust it. With a whole-second anchor the value stored IS the value subtracted, by
+           construction, and nothing else has to be known. The three tests below anchor the same way. */
+        var now = Truncate(DateTime.UtcNow);
+        var older = now.AddMinutes(-4);
+        var latest = now.AddMinutes(-2);
         await InsertLatchStatsAsync(RecentServerId, older, requests: 100, waitMs: 1000, maxWaitMs: 50);
         await InsertLatchStatsAsync(RecentServerId, latest, requests: 140, waitMs: 1500, maxWaitMs: 60);
         await InsertSpinlockStatsAsync(RecentServerId, older, collisions: 10, spins: 100, sleepTime: 5, backoffs: 2);
@@ -253,17 +278,17 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         var deltas = new DeltaCalculator(NullLogger.Instance);
         await deltas.SeedFromDatabaseAsync(_duckDb);
 
-        var now = DateTime.UtcNow;
         const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
 
         /* 1500 is the baseline (the LATEST row): 1600 => 100. Had the older row seeded it would be 600;
-           unseeded, this first sighting is 0. The interval is the two minutes since that row. */
+           unseeded, this first sighting is 0. The interval is exactly the two minutes between that row
+           and the pass, both of which this test chose. */
         Assert.Equal(100, deltas.CalculateDeltaWithInterval(RecentServerId, "latch_stats_wait_time", "BUFFER", 1600, out var interval, now, Gap));
-        Assert.InRange(interval, 118, 122);
+        Assert.Equal(120, interval);
         Assert.Equal(10, deltas.CalculateDelta(RecentServerId, "latch_stats_waiting_requests", "BUFFER", 150, now, Gap));
         /* max_wait_time_ms is a high-water mark: unchanged is genuinely idle, (0, real interval). */
         Assert.Equal(0, deltas.CalculateDeltaWithInterval(RecentServerId, "latch_stats_max_wait", "BUFFER", 60, out var idle, now, Gap));
-        Assert.InRange(idle, 118, 122);
+        Assert.Equal(120, idle);
 
         Assert.Equal(5, deltas.CalculateDelta(RecentServerId, "spinlock_stats_collisions", "LOCK_HASH", 25, now, Gap));
         Assert.Equal(60, deltas.CalculateDelta(RecentServerId, "spinlock_stats_spins", "LOCK_HASH", 260, now, Gap));
@@ -281,9 +306,11 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task Seed_ProcedureStats_LatestRowPerKey_IncludingAKeyAbsentFromTheLatestPass()
     {
-        var stale = DateTime.UtcNow - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
-        var older = DateTime.UtcNow.AddMinutes(-4);
-        var latest = DateTime.UtcNow.AddMinutes(-2);
+        /* One whole-second anchor for every instant — see Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline. */
+        var now = Truncate(DateTime.UtcNow);
+        var stale = now - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
+        var older = now.AddMinutes(-4);
+        var latest = now.AddMinutes(-2);
         await InsertProcedureStatsAsync(RecentServerId, older, "0x01", "db", "dbo", "p1", executions: 10);
         await InsertProcedureStatsAsync(RecentServerId, latest, "0x01", "db", "dbo", "p1", executions: 15);
         await InsertProcedureStatsAsync(RecentServerId, stale, "0x02", "db", "dbo", "p2", executions: 1);
@@ -293,7 +320,6 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         var deltas = new DeltaCalculator(NullLogger.Instance);
         await deltas.SeedFromDatabaseAsync(_duckDb);
 
-        var now = DateTime.UtcNow;
         const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
 
         /* 0x01: the latest row (15) is the baseline => 18 - 15 = 3; every counter group, by its multiple. */
@@ -305,10 +331,10 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal(150, deltas.CalculateDelta(RecentServerId, "proc_stats_phys_reads", "0x01", 900, now, Gap));
         Assert.Equal(180, deltas.CalculateDelta(RecentServerId, "proc_stats_spills", "0x01", 1080, now, Gap));
 
-        /* 0x02: absent from the latest pass, seeded from the OLDER row (7) over its four-minute span — and
-           NOT from the stale row (1), which would make this 8. */
+        /* 0x02: absent from the latest pass, seeded from the OLDER row (7) over its exact four-minute span —
+           and NOT from the stale row (1), which would make this 8. */
         Assert.Equal(2, deltas.CalculateDeltaWithInterval(RecentServerId, "proc_stats_exec", "0x02", 9, out var span, now, Gap));
-        Assert.InRange(span, 238, 242);
+        Assert.Equal(240, span);
 
         /* The null-handle fallback key, spelled exactly as ProcedureStatsCollector spells it. */
         Assert.Equal(2, deltas.CalculateDelta(RecentServerId, "proc_stats_exec", "db.dbo.proc3", 5, now, Gap));
@@ -325,8 +351,10 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task Seed_QueryStats_RestoresKeysFromRowsWithOffsets_SpelledAsTheCollectorSpellsThem()
     {
-        var older = DateTime.UtcNow.AddMinutes(-4);
-        var latest = DateTime.UtcNow.AddMinutes(-2);
+        /* One whole-second anchor for every instant — see Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline. */
+        var now = Truncate(DateTime.UtcNow);
+        var older = now.AddMinutes(-4);
+        var latest = now.AddMinutes(-2);
 
         /* The whole-batch statement (0, -1) in both passes; a second statement of the same batch/plan
            (100, 240) only in the older pass; a null-handle row; and a pre-v61 row with no offsets. */
@@ -339,13 +367,12 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         var deltas = new DeltaCalculator(NullLogger.Instance);
         await deltas.SeedFromDatabaseAsync(_duckDb);
 
-        var now = DateTime.UtcNow;
         const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
 
-        /* The latest pass is the baseline for the key both passes wrote: 18 - 15, over ~120 s. The key
-           carries the raw -1, as the collector's $"{sh}:{start}:{end}:{ph}" does. */
+        /* The latest pass is the baseline for the key both passes wrote: 18 - 15, over exactly 120 s. The
+           key carries the raw -1, as the collector's $"{sh}:{start}:{end}:{ph}" does. */
         Assert.Equal(3, deltas.CalculateDeltaWithInterval(RecentServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 18, out var interval, now, Gap));
-        Assert.InRange(interval, 118, 122);
+        Assert.Equal(120, interval);
         /* Every one of the eight groups, from the same row (counters are multiples of the execution count). */
         Assert.Equal(30, deltas.CalculateDelta(RecentServerId, "query_stats_worker", "0xSH1:0:-1:0xPH1", 180, now, Gap));
         Assert.Equal(60, deltas.CalculateDelta(RecentServerId, "query_stats_elapsed", "0xSH1:0:-1:0xPH1", 360, now, Gap));
@@ -356,9 +383,9 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal(210, deltas.CalculateDelta(RecentServerId, "query_stats_spills", "0xSH1:0:-1:0xPH1", 1260, now, Gap));
 
         /* The statement that fell out of the TOP (n) on the latest pass: seeded from its OLDER row, over
-           ~240 s. The latest-collection shape would have missed it and this would be 0. */
+           exactly 240 s. The latest-collection shape would have missed it and this would be 0. */
         Assert.Equal(2, deltas.CalculateDeltaWithInterval(RecentServerId, "query_stats_exec", "0xSH1:100:240:0xPH1", 9, out var span, now, Gap));
-        Assert.InRange(span, 238, 242);
+        Assert.Equal(240, span);
 
         /* A null handle formats as EMPTY on both sides — the collector's interpolation and the seeder's. */
         Assert.Equal(2, deltas.CalculateDelta(RecentServerId, "query_stats_exec", ":0:-1:", 5, now, Gap));
@@ -384,9 +411,11 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task Seed_PassWindow_ArmsTheSeriesAgeRescueOnTheFirstPostRestartPass()
     {
-        var stale = DateTime.UtcNow - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
-        var older = DateTime.UtcNow.AddMinutes(-4);
-        var latest = DateTime.UtcNow.AddMinutes(-2);
+        /* One whole-second anchor for every instant — see Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline. */
+        var now = Truncate(DateTime.UtcNow);
+        var stale = now - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
+        var older = now.AddMinutes(-4);
+        var latest = now.AddMinutes(-2);
         foreach (var t in new[] { stale, older, latest })
         {
             await InsertQueryStatsAsync(RecentServerId, t);
@@ -398,12 +427,12 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
         var deltas = new DeltaCalculator(NullLogger.Instance);
         await deltas.SeedFromDatabaseAsync(_duckDb);
 
-        var now = DateTime.UtcNow;
         const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
 
-        /* A plan compiled 30 s ago, inside the ~120 s since the last pre-restart pass: credited in full. */
+        /* A plan compiled 30 s ago, inside the exactly 120 s since the last pre-restart pass: credited in
+           full, over that whole gap. */
         Assert.Equal(900, deltas.CalculateDeltaWithSeriesAge(RecentServerId, "query_stats_worker", "sh:0:99:newplan", 900, 30, out var interval, now, Gap));
-        Assert.InRange(interval, 118, 122);
+        Assert.Equal(120, interval);
 
         /* Every query_stats group is armed, not just the one the first assertion happened to use. */
         foreach (var group in new[] { "query_stats_exec", "query_stats_elapsed", "query_stats_reads", "query_stats_writes", "query_stats_phys_reads", "query_stats_rows", "query_stats_spills" })
