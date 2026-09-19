@@ -857,7 +857,15 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
         h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 910, UnallocatedMb = 90 }; /* 91% used */
 
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        /* #3653 (A5): the fire is behind the shared persistence gate, so it takes TempDbSpaceBreachSamples
+           observations to earn. The fixture carries no CollectionTimeUtc, which is the documented every-sweep-
+           counts fallback (pinned in AlertEngineTests.TempDb_NoCollectionTime_CountsEverySweep); the strings
+           below are what this pin is about and are unchanged. */
+        var engine = h.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("91% reserved (910 MB)", fired.CurrentValue);  /* :448 */
@@ -879,15 +887,27 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal(80, App.AlertTempDbSpaceThresholdPercent);
 
         var h = new Harness();
-        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. Held
+           for a full gate's worth of sweeps (#3653 A5), so the silence is the ceiling's and not the gate's. */
         h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        var withCeiling = h.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await withCeiling.EvaluateServerAsync(Harness.Snapshot());
+        }
+
         Assert.Empty(h.Deliverer.Outcomes);
 
-        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
+        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages — after the
+           same number of sweeps. */
         var withoutCeiling = new Harness();
         withoutCeiling.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
-        await withoutCeiling.Build().EvaluateServerAsync(Harness.Snapshot());
+        var engine = withoutCeiling.Build();
+        for (var i = 0; i < AlertEngine.TempDbSpaceBreachSamples; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
         var fired = Assert.Single(withoutCeiling.Deliverer.Outcomes);
         Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
         Assert.Equal("tempdb 96% reserved", fired.ShortMessage);

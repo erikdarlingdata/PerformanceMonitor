@@ -37,6 +37,26 @@ public class TempDbSpaceInfo
     /// </summary>
     public double MaxSizeMb { get; set; }
 
+    /// <summary>
+    /// The <c>collection_time</c> of the <c>tempdb_stats</c> row this snapshot was read from, or null when the
+    /// host has no instant for it. This is the tempdb Space alert's persistence-gate OBSERVATION IDENTITY
+    /// (#3653 A5), not display data — the twin of <c>AlertServerSnapshot.CpuSampleTimeUtc</c> for the CPU
+    /// gate, and it exists for the same reason: the gate counts consecutive breaching SAMPLES, the alert
+    /// sweep runs every 30 s and the collector lands a row about once a minute at the shipped cadence, so
+    /// without it a sweep re-reading the row it read last time would count one collection as two
+    /// observations and <c>AlertEngine.TempDbSpaceBreachSamples</c> would be reached inside 90 s on a
+    /// single collected sample — the measured flap intact behind a gate that looked like it fixed it.
+    ///
+    /// <para>Both SKUs' reads already <c>ORDER BY collection_time DESC LIMIT 1</c>, so the instant is one
+    /// projected column on a read that already exists — no new read, no new cadence. Nullable because two
+    /// producers legitimately have none: the deprecated Dashboard's local read (frozen twin, no gate) and
+    /// every pre-existing test fixture. A null degrades the gate to counting SWEEPS rather than samples —
+    /// weaker persistence, but the alert still fires, which is the direction the CPU gate chose for the
+    /// same null and for the same reason: silence is the one failure a monitoring product cannot
+    /// distinguish from health.</para>
+    /// </summary>
+    public DateTime? CollectionTimeUtc { get; set; }
+
     /// <summary>How much tempdb the files hold RIGHT NOW — reserved plus unallocated, both from
     /// <c>dm_db_file_space_usage</c>, which reports the files as currently allocated.</summary>
     public double AllocatedMb => TotalReservedMb + UnallocatedMb;

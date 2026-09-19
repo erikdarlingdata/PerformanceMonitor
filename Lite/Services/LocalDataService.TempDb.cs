@@ -68,7 +68,10 @@ ORDER BY collection_time";
     }
 
     /// <summary>
-    /// Gets the latest TempDB space snapshot for alert checking.
+    /// Gets the latest TempDB space snapshot for alert checking. <c>collection_time</c> rides as the last column
+    /// since #3653 (A5): the row the read already orders by, projected so the shared engine's tempdb persistence
+    /// gate can tell a fresh collection from a re-read of the last one — see
+    /// <see cref="TempDbSpaceInfo.CollectionTimeUtc"/>. Darling's <c>TempDbSpaceSql</c> twin projects the same.
     /// </summary>
     public async Task<TempDbSpaceInfo?> GetLatestTempDbSpaceAsync(int serverId)
     {
@@ -84,7 +87,8 @@ SELECT
     version_store_reserved_mb,
     top_session_tempdb_mb,
     top_session_id,
-    max_size_mb
+    max_size_mb,
+    collection_time
 FROM v_tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -107,7 +111,11 @@ LIMIT 1";
                 /* NULL on every row collected before the v56 migration, and 0 is what "no ceiling
                    measured" is spelled as — so history keeps reporting the percentage it always did
                    rather than dividing by a zero cap. Darling's twin reads the same column. */
-                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7))
+                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                /* #3653 (A5): the collector stamps UTC into DuckDB's tz-less TIMESTAMP, so the value comes back
+                   Kind Unspecified and is stamped Utc because that is what it is — the AG-topology reads' idiom.
+                   The engine only ever compares one server's stamps with each other. */
+                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             };
         }
 
