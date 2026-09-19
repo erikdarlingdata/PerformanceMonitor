@@ -18,17 +18,19 @@ namespace PerformanceMonitor.Analysis;
 /// <para><b>What the spill fact is in v1.</b> A SPOT fact: spilled bytes per second of observed time, graded
 /// against an ABSOLUTE floor. The design's trigger is baseline-relative — a z against the database's own
 /// 168-bucket temp-bytes-rate baseline, with the absolute floor only so a genuinely tiny spill never fires —
-/// and the z is lane 9's; until it lands this fact is the floor alone, and says so (<c>threshold_lineage =
-/// 0</c>). Below the floor the fact scores 0, not the formula's fraction (the <c>GradeArm</c> shape the buffer
+/// and a temp-rate z is not among lane 9's v1 detectors, so this fact is the floor alone. Below the floor the fact
+/// scores 0, not the formula's fraction (the <c>GradeArm</c> shape the buffer
 /// composite uses): "fired" has to mean "at least the floor", because <c>BaseSeverity &gt; 0</c> is what arms
 /// <c>work_mem</c>, and a trickle of temp files on every server that ever sorted would otherwise arm the knob
 /// on the whole fleet.</para>
 ///
-/// <para><b>Lineage.</b> Both bars are <b>unmeasured</b> — chosen, not measured. The calibrating read is the
-/// per-server distribution of <c>temp_bytes</c> per second over <c>pg_database_stats</c> on the dogfood
-/// PostgreSQL fleet; no such read exists tonight, and a number presented as measured without it would be the
-/// exact lie #3538 A5 names. No SQL Server constant is reused: the SQL Server pass grades tempdb by version
-/// store and file usage, which are different quantities.</para>
+/// <para><b>Lineage.</b> Both bars are <b>measured</b> (#3691 calibration, 2026-09-19): the per-server
+/// distribution of <c>temp_bytes</c> per second over <c>pg_database_stats</c>, 14 days × 50 Aurora PostgreSQL
+/// clusters of the dogfood fleet, pre-bucketed to 5-minute rates. The bars were chosen before the read and
+/// the read validated them where they stood — the constants below carry the percentile each sits at, and the
+/// facts this arm grades carry <c>threshold_lineage = 1</c>. The quantity is engine-neutral, but the population
+/// is Aurora; the stock-PostgreSQL population has not been measured. No SQL Server constant is reused: the SQL
+/// Server pass grades tempdb by version store and file usage, which are different quantities.</para>
 ///
 /// <para><b>D5, made structural.</b> <c>CONFIG_PG_WORK_MEM</c> is evidence-gated: it is NOT in
 /// <see cref="PgTargetFactKeys.ConfigAdvisoryRoots"/>, its base is 0 unless the collector stamped spill
@@ -71,33 +73,42 @@ public static partial class PgTargetScorer
     public const string CounterRewindCountKey = "counter_rewind_count";
     public const string CounterObservedMsKey = "observed_ms";
 
-    /* unmeasured: chosen, not measured — calibrate against pg_database_stats (per-server temp_bytes per second
-       of observed time) before the next release. One mebibyte per second of observed time is the floor: ~3.5 GB
-       of temp-file writes per observed hour, which is a sustained sort/hash working set exceeding work_mem, not
-       one report's cold sort. Below it the fact is 0 and arms nothing. */
+    /* measured: ≈ p99.7 of 5-minute temp_bytes-per-second buckets over 14 days × 50 Aurora PostgreSQL clusters of
+       the dogfood fleet, 2026-09-19 (pg_database_stats). Per-server p50 ranged 0 – 1.06 MB/s (median 46 KB/s);
+       per-server p99 median 58 KB/s, fleet p90 313 KB/s, max 2.06 MB/s. The share of buckets at or above this
+       floor was 0 on the median cluster and 0.27 % at the fleet p90 — and 61.8 % on one chronic spiller, where a
+       permanent finding is the correct one. Measured on Aurora; the stock-PostgreSQL population is not yet
+       measured. One mebibyte per second of observed time is ~3.5 GB of temp-file writes per observed hour: a
+       sustained sort/hash working set exceeding work_mem, not one report's cold sort. Below it the fact is 0 and
+       arms nothing. */
     public const double TempSpillConcerningBytesPerSec = 1024 * 1024;
 
-    /* unmeasured: chosen, not measured — calibrate against pg_database_stats before the next release. Ten
-       mebibytes per second (~35 GB per observed hour) is the critical line: temp-file I/O at that rate competes
-       with the data files for the same storage, and a temp_file_limit that would contain it is unusual. */
+    /* measured: inside the empty interval of the same 14 days × 50 Aurora PostgreSQL clusters of the dogfood
+       fleet, 2026-09-19 — the share of 5-minute buckets at or above 10 MiB/s was 0 on 49 of 50 clusters and
+       0.42 % on the worst (the chronic spiller above), so the line sits above the fleet's routine maximum.
+       Measured on Aurora; the stock-PostgreSQL population is not yet measured. Ten mebibytes per second (~35 GB
+       per observed hour) is the critical line: temp-file I/O at that rate competes with the data files for the
+       same storage, and a temp_file_limit that would contain it is unusual. */
     public const double TempSpillCriticalBytesPerSec = 10 * 1024 * 1024;
 
     /// <summary>Whether a spill rate is at or above the floor — the ONE predicate both the spill fact's base and
     /// the knob's stamped base are graded on, so the two cannot disagree about whether the evidence exists.</summary>
-    /* unmeasured: the floor is TempSpillConcerningBytesPerSec (see the constant). */
+    /* measured: the floor is TempSpillConcerningBytesPerSec (see the constant for the 2026-09-19 lineage). */
     private static bool SpillClearsFloor(double bytesPerSec) => bytesPerSec >= TempSpillConcerningBytesPerSec;
 
     /// <summary>
     /// The spill fact's base: 0 below the floor, the shared formula from the floor to the critical line
-    /// above it. Stamps <c>threshold_lineage = 0</c> on every fact it grades — including the ones it grades to
-    /// 0 — so <c>get_analysis_facts</c> shows the bar is a judgment. Any other <c>pg_temp</c> key is 0.
+    /// above it. Stamps <c>threshold_lineage = 1</c> on every fact it grades — including the ones it grades to
+    /// 0 — so <c>get_analysis_facts</c> shows both bars are fleet-measured (0 would mean at least one chosen
+    /// bar decided; the stamp is on every fact this arm grades so the reader never infers it from absence). Any other
+    /// <c>pg_temp</c> key is 0.
     /// </summary>
     private static partial double ScoreTempFact(Fact fact)
     {
         if (fact.Key != PgTargetFactKeys.TempSpill) return 0.0;
 
-        fact.Metadata["threshold_lineage"] = 0;
-        /* unmeasured: TempSpillConcerningBytesPerSec / TempSpillCriticalBytesPerSec (see the constants). */
+        fact.Metadata["threshold_lineage"] = 1;
+        /* measured: TempSpillConcerningBytesPerSec / TempSpillCriticalBytesPerSec (see the constants, 2026-09-19). */
         return SpillClearsFloor(fact.Value)
             ? FactScorer.ApplyThresholdFormula(fact.Value, TempSpillConcerningBytesPerSec, TempSpillCriticalBytesPerSec)
             : 0.0;
@@ -108,16 +119,16 @@ public static partial class PgTargetScorer
     /// <see cref="ConfigAdvisoryBase"/> when the collector stamped spill evidence at or above the floor onto the
     /// fact, 0 otherwise. The fact's <see cref="Fact.Value"/> (megabytes) is NOT graded: there is no right
     /// <c>work_mem</c> without the workload, and the paper's directional-wrongness example is exactly a memory
-    /// knob raised on a convention. <c>threshold_lineage = 0</c> is stamped only when the floor was consulted —
-    /// an un-stamped knob is context and makes no claim.
+    /// knob raised on a convention. <c>threshold_lineage = 1</c> (the floor is the spill fact's measured one) is
+    /// stamped only when the floor was consulted — an un-stamped knob is context and makes no claim.
     /// </summary>
     private static double ScoreConfigWorkMem(Fact fact)
     {
         if (!fact.Metadata.TryGetValue(WorkMemSpillBytesPerSecKey, out var spillBytesPerSec))
             return 0.0;
 
-        fact.Metadata["threshold_lineage"] = 0;
-        /* unmeasured: the same TempSpillConcerningBytesPerSec floor the spill fact is graded on. */
+        fact.Metadata["threshold_lineage"] = 1;
+        /* measured: the same TempSpillConcerningBytesPerSec floor the spill fact is graded on (see the constant). */
         return SpillClearsFloor(spillBytesPerSec) ? ConfigAdvisoryBase : 0.0;
     }
 

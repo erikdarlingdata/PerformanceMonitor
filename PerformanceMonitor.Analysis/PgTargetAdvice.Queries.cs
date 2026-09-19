@@ -38,8 +38,9 @@ public static partial class PgTargetAdvice
         Investigation:
             "PostgreSQL's pg_stat_statements attributes elapsed execution time to statement shapes, and one shape " +
             "holds enough of the window's total that the window's story is largely that statement. The share is " +
-            "taken over EVERY shape that ran in the window, not over the handful returned; the number that decided " +
-            "is an unmeasured judgment (threshold_lineage = 0) until the fleet distribution is read. The statement " +
+            "taken over EVERY shape that ran in the window, not over the handful returned; a large share alone is " +
+            "routine on an idle server, so the number that decided is the fleet-measured busy floor (the window's total " +
+            "statement time as a fraction of observed time) and the share bars are read given it (threshold_lineage = 1). The statement " +
             "is identified by queryid, which is stable within a PostgreSQL major version and is RE-KEYED by a major " +
             "upgrade (and by a change to compute_query_id or the extension version), so this finding's occurrence " +
             "history restarts at one across an upgrade — the drill-down carries the normalised text and a hash of " +
@@ -87,7 +88,7 @@ public static partial class PgTargetAdvice
             inv.Append(CultureInfo.InvariantCulture, $" The same shape ran against {databases:0} databases; the figures are the total across them.");
         if (tempBlocks > 0)
             inv.Append(CultureInfo.InvariantCulture, $" It wrote {tempBlocks:N0} temp blocks in the window — part of any work_mem spill story on this server.");
-        inv.Append(" The share is taken over every statement shape that ran in the window, and the bar it crossed is an unmeasured judgment (threshold_lineage = 0).");
+        inv.Append(" The share is taken over every statement shape that ran in the window; the busy floor that admitted it and the share bars it crossed are fleet-measured (threshold_lineage = 1) — a large share alone is routine on an idle server, which is why the floor decides.");
         inv.Append(" queryid is stable within a PostgreSQL major and is re-keyed by a major upgrade (or a compute_query_id change), so this finding's occurrence history restarts at one across an upgrade; the drill-down carries the normalised text and its hash for recognising the statement on the other side.");
 
         var rem = new StringBuilder();

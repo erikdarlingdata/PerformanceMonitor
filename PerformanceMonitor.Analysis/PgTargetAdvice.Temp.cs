@@ -155,7 +155,7 @@ public static partial class PgTargetAdvice
 
         sb.Append("The floor this fact fired at (")
           .Append(RatePerSec(PgTargetScorer.TempSpillConcerningBytesPerSec))
-          .Append(") is a chosen bar, not a fleet measurement (threshold_lineage = 0); the baseline-relative comparison " +
+          .Append(") is fleet-measured — about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1); the baseline-relative comparison " +
                   "against this database's own hour-of-week temp rate is the later slice. ");
 
         sb.Append(WorkMemStatement(knob, spill));

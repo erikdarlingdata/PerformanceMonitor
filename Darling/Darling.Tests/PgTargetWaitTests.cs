@@ -264,13 +264,13 @@ public sealed class PgTargetWaitTests
     }
 
     [Fact]
-    public void TheFraction_ScoresZeroBelowConcerning_HalfAtIt_OneAtCritical_AndStampsTheUnmeasuredLineage()
+    public void TheFraction_ScoresZeroBelowConcerning_HalfAtIt_OneAtCritical_AndStampsTheLineage()
     {
         var bars = PgTargetScorer.GetPgWaitThresholds(LockRelation)!.Value;
 
         var below = Aurora(LockRelation, bars.Concerning * 0.9);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(below));
-        Assert.Equal(0, below.Metadata["threshold_lineage"]);   /* stated even when not fired */
+        Assert.Equal(0, below.Metadata["threshold_lineage"]);   /* stated even when not fired; a standout's per-event bars are unmeasured */
 
         Assert.Equal(0.5, PgTargetScorer.ScoreBase(Aurora(LockRelation, bars.Concerning)), precision: 9);
         var mid = (bars.Concerning + bars.Critical) / 2;
@@ -283,11 +283,23 @@ public sealed class PgTargetWaitTests
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Rollup(Io, PgTargetScorer.WaitRollupConcerning, maxStandout: 0.0)));
         Assert.Equal(0.5, PgTargetScorer.ScoreBase(Rollup(Lock, PgTargetScorer.WaitRollupConcerning, maxStandout: 0.0)), precision: 9);
 
+        /* An Aurora ROLLUP graded on its own fraction is graded on the fleet-measured type bars (#3691, 2026-09-19)
+           and says so; a standout on the same fraction is graded on the unmeasured per-event bars and says 0. */
+        var measuredRollup = Rollup(Lock, PgTargetScorer.WaitRollupConcerning, maxStandout: 0.0);
+        PgTargetScorer.ScoreBase(measuredRollup);
+        Assert.Equal(1, measuredRollup.Metadata["threshold_lineage"]);
+        var quietRollup = Rollup(Io, PgTargetScorer.WaitIoConcerning * 0.5, maxStandout: 0.0);
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(quietRollup));
+        Assert.Equal(1, quietRollup.Metadata["threshold_lineage"]);   /* the verdict is on the bars, not the grade */
+        var standout = Aurora(LockRelation, bars.Concerning);
+        PgTargetScorer.ScoreBase(standout);
+        Assert.Equal(0, standout.Metadata["threshold_lineage"]);
+
         /* One wait is graded once: a rollup whose named standout is itself a finding yields to it (scores 0,
            lineage still stated); a rollup whose standouts sit under their bar grades on its whole fraction. */
         var yielded = Rollup(Lock, 0.9, maxStandout: PgTargetScorer.WaitStandoutConcerning);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(yielded));
-        Assert.Equal(0, yielded.Metadata["threshold_lineage"]);
+        Assert.Equal(0, yielded.Metadata["threshold_lineage"]);   /* the yield was decided on the unmeasured standout bar */
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Rollup(Io, 1.5, maxStandout: 0.6)));
         var unnamed = Rollup(Lock, 0.9, maxStandout: PgTargetScorer.WaitStandoutConcerning * 0.9);
         Assert.InRange(PgTargetScorer.ScoreBase(unnamed), 0.9, 1.0);
@@ -314,6 +326,14 @@ public sealed class PgTargetWaitTests
         Assert.Equal(PgTargetScorer.ScoreBase(measured), PgTargetScorer.ScoreBase(estimated), precision: 9);
         Assert.Equal(0.75, PgTargetScorer.ScoreBase(estimated), precision: 9);
         Assert.Equal(0, estimated.Metadata["threshold_lineage"]);
+
+        /* The 2026-09-19 measurement is of Aurora's engine-measured waits; a stock sampled ESTIMATE is another
+           instrument on another population, so even a sampled ROLLUP keeps 0 where the Aurora rollup says 1. */
+        var sampledRollup = Sampled(Lock, PgTargetScorer.WaitRollupConcerning, deltaSamples: 3);
+        sampledRollup.Metadata[PgTargetScorer.WaitIsStandoutKey] = 0;
+        sampledRollup.Metadata[PgTargetScorer.WaitMaxStandoutFractionKey] = 0.0;
+        Assert.Equal(0.5, PgTargetScorer.ScoreBase(sampledRollup), precision: 9);
+        Assert.Equal(0, sampledRollup.Metadata["threshold_lineage"]);
 
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Sampled(LockRelation, mid, deltaSamples: 2)));
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Sampled(LockRelation, 5.0, deltaSamples: 0)));

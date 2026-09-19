@@ -36,8 +36,8 @@ public static partial class PgTargetAdvice
             "five-minute averages. This is the figure the fleet card and the High CPU alert band on; the raw " +
             "cpu_percent is percent of the capacity currently allocated and is reported beside it, never graded, " +
             "because on a serverless instance it reads 100 whenever one core stays busy for a minute. The 80% / 95% " +
-            "bands are the fleet ladder repeated on the same quantity and are an unmeasured judgment " +
-            "(threshold_lineage = 0) until the fleet distribution is read.",
+            "bands are the fleet ladder repeated on the same quantity and are fleet-measured: 80% is about the 99.8th " +
+            "and 95% about the 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1).",
         Remediation:
             "Find what is consuming the capacity before buying more of it: get_pg_statement_stats over this window " +
             "ranks statements by total execution time, and the top few are where the CPU went. Raising the maximum " +
@@ -94,7 +94,7 @@ public static partial class PgTargetAdvice
                 "(acu_utilization_percent from pg_cpu_utilization — AWS Performance Insights, Aurora only; the window's peak of the " +
                 "collector's five-minute averages). This is the figure the fleet card and the High CPU alert band on." + rawClause +
                 (fired
-                    ? " At or past the 80% warning bar the instance has little headroom for a burst; the 80% / 95% bands are the fleet ladder repeated and are an unmeasured judgment (threshold_lineage = 0)."
+                    ? " At or past the 80% warning bar the instance has little headroom for a burst; the 80% / 95% bands are the fleet ladder repeated and are fleet-measured — about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)."
                     : " Under the 80% warning bar this fact is context: it is stated so a sibling finding can read it, and it roots nothing."),
         };
     }

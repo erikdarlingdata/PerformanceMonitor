@@ -59,8 +59,8 @@ public sealed class PgTargetTempTests
     {
         var fact = Spill(bytesPerSec);
         Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 6);
-        /* Unmeasured bar: the fact says so, including when graded to 0. */
-        Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+        /* Measured bars (#3691, 2026-09-19): the fact says so, including when graded to 0. */
+        Assert.Equal(1, fact.Metadata["threshold_lineage"]);
     }
 
     [Fact]
@@ -94,7 +94,8 @@ public sealed class PgTargetTempTests
 
         var atFloor = StampedWorkMem(4, 1024 * 1024);
         Assert.Equal(PgTargetScorer.ConfigAdvisoryBase, PgTargetScorer.ScoreBase(atFloor));
-        Assert.Equal(0, atFloor.Metadata["threshold_lineage"]);
+        /* The knob is graded on the spill fact's measured floor, so it carries the same verdict. */
+        Assert.Equal(1, atFloor.Metadata["threshold_lineage"]);
 
         /* The VALUE is not graded: a 64 MB work_mem beside a spill is the same 0.4 as a 4 MB one. */
         Assert.Equal(PgTargetScorer.ConfigAdvisoryBase, PgTargetScorer.ScoreBase(StampedWorkMem(64, 5e6)));
@@ -239,8 +240,8 @@ public sealed class PgTargetTempTests
     {
         var fact = new Fact { Source = PgTargetSources.DatabaseSource, Key = PgTargetFactKeys.DeadlockRate, Value = perHour };
         Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 10);
-        /* Measured bars carry no unmeasured flag. */
-        Assert.False(fact.Metadata.ContainsKey("threshold_lineage"));
+        /* Measured bars: since #3691 the stamp is a verdict on every graded fact, and 1 means every bar is measured. */
+        Assert.Equal(1, fact.Metadata["threshold_lineage"]);
     }
 
     [Fact]
@@ -266,7 +267,7 @@ public sealed class PgTargetTempTests
         Assert.Equal("Temp-file spill: 2 MB/s of observed time — 28 GB across 239 temp files in the window, 100% of it in appdb", block.Headline);
         Assert.Contains("this server wrote 28 GB in 239 temp files — 2 MB/s, 0.017 files/s, an average of 120 MB per file", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("the counters were reset 1 time(s) in the window (1 rewind(s) seen), each clamped to zero", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("is a chosen bar, not a fleet measurement (threshold_lineage = 0)", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("is fleet-measured — about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("work_mem on this host is 4 MB, the shipped default", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_temp_spill_statements", block.Investigation, StringComparison.Ordinal);
         /* The counter-objective with the host's numbers: 4 MB × 200 = 800 MB. */
@@ -566,8 +567,10 @@ public sealed class PgTargetTempTests
             Assert.Equal(0.5, knob.Severity, precision: 10);
             Assert.Equal(1.0, deadlock.Severity, precision: 10);
             Assert.Equal(0.0, tps.Severity);
-            Assert.Equal(0, spill.Metadata["threshold_lineage"]);
-            Assert.False(deadlock.Metadata.ContainsKey("threshold_lineage"));
+            /* Both facts are graded on measured bars (#3691, 2026-09-19); the context fact is not graded and carries no stamp. */
+            Assert.Equal(1, spill.Metadata["threshold_lineage"]);
+            Assert.Equal(1, deadlock.Metadata["threshold_lineage"]);
+            Assert.False(tps.Metadata.ContainsKey("threshold_lineage"));
 
             /* ── THE EXIT CRITERION: the real analyze_server, ANCHORED at the planted window's end. Un-anchored it
                ends at UtcNow, a minute or two past windowEnd, and its window start slides past the first planted

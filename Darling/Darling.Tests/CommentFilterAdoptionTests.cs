@@ -80,7 +80,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Six <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -161,6 +161,18 @@ public sealed class CommentFilterAdoptionTests
             + "The window it cuts (the outer SELECT through FROM differenced) holds no comment today, so the "
             + "/* and * arms are inert; a comment added there whose continuation line contains ' AS ' would "
             + "over-count the select list and fail the 19 pin loudly.",
+
+        ["Darling.Tests/PgTargetMeasuredLineageTests.cs"] =
+            "COLLECTS a doc run. CommentBlockAbove walks upward from a named constant through the contiguous "
+            + "/// lines and /* */ block above it and collapses them, so that the #3691 lineage citation (date and "
+            + "population) can be matched across the wrapping of the prose it lives in - the lineage exists ONLY "
+            + "in those comments, so asking for the walker would leave nothing to read. Stated bound: the walk "
+            + "recognises /// lines and block-comment lines (entered at a trailing */, left at the line carrying "
+            + "/*) and STOPS at a blank line or any other line, so a comment separated from its constant by a "
+            + "line of code, or a // line, is invisible to it and the constant reads as UNCITED - a spurious red, "
+            + "the loud direction. A sibling public const between the comment and the constant (a pair declared "
+            + "under one comment) is skipped only while nothing has been collected yet; the arranged-input test "
+            + "in the class pins both edges.",
     };
 
     /// <summary>

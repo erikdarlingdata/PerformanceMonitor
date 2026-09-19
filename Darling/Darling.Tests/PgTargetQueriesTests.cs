@@ -29,9 +29,10 @@ namespace Darling.Tests;
 /// <c>pg_statement_stats</c> — the query-shaped leaf every PostgreSQL story needs from day one.
 ///
 /// <para><b>What is pinned, and why each.</b> The scorer grades ONE decision variable, the statement's share of
-/// the WINDOW's total execution time, between two unmeasured bars, gated on an idle-server floor, and stamps
-/// <c>threshold_lineage = 0</c> (the rule <c>PgTargetThresholdLineageTests</c> enforces on the source; this
-/// pins the behaviour). The collector's read reads the STORED deltas (never re-differences the cumulative
+/// the WINDOW's total execution time, between two share bars, gated on an idle-server floor, and stamps
+/// <c>threshold_lineage = 1</c> (the floor and the bars are fleet-measured since the #3691 calibration of
+/// 2026-09-19 — the shares conditionally on the floor; the rule <c>PgTargetThresholdLineageTests</c> enforces the
+/// comment shape on the source, this pins the behaviour). The collector's read reads the STORED deltas (never re-differences the cumulative
 /// columns), differences the one unstored counter it needs over the full series identity, takes the share's
 /// denominator over the window with the <c>SUM(…) OVER ()</c> idiom (#3541 A7), and computes the call rate's
 /// span with the three-state interval idiom (#3540, V128) — each a source pin, because each is a way the read
@@ -80,7 +81,7 @@ public sealed class PgTargetQueriesTests
     /* ── the scorer ── */
 
     [Fact]
-    public void ScoreQueriesFact_GradesTheShareBetweenTheTwoBars_AndStampsTheUnmeasuredLineage()
+    public void ScoreQueriesFact_GradesTheShareBetweenTheTwoBars_AndStampsTheMeasuredLineage()
     {
         var critical = BadActor(1, 0.60);
         var concerning = BadActor(2, 0.25);
@@ -94,9 +95,9 @@ public sealed class PgTargetQueriesTests
         /* Between the bars: 0.5 + 0.5 × (0.30 − 0.25) / (0.60 − 0.25). */
         Assert.Equal(0.5 + 0.5 * (0.05 / 0.35), PgTargetScorer.ScoreBase(between), precision: 9);
 
-        /* Every graded fact says its bar is a judgment. */
+        /* Every graded fact says its bars are fleet-measured (#3691, 2026-09-19). */
         foreach (var fact in new[] { critical, concerning, under, between })
-            Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+            Assert.Equal(1, fact.Metadata["threshold_lineage"]);
 
         Assert.Equal(0.25, PgTargetScorer.BadActorShareConcerning);
         Assert.Equal(0.60, PgTargetScorer.BadActorShareCritical);
@@ -105,11 +106,11 @@ public sealed class PgTargetQueriesTests
     [Fact]
     public void ScoreQueriesFact_IsZeroOnAnIdleWindow_WithoutAShare_AndForAnyOtherKeyUnderTheSource()
     {
-        /* 60% of nothing: the busy floor gates the share, and the gate is itself an unmeasured bar, so the
+        /* 60% of nothing: the busy floor gates the share, and the gate is itself a (fleet-measured) bar, so the
            lineage stamp lands even on the fact it zeroes. */
         var idle = BadActor(1, 0.60, busy: 0.04);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(idle));
-        Assert.Equal(0, idle.Metadata["threshold_lineage"]);
+        Assert.Equal(1, idle.Metadata["threshold_lineage"]);
         Assert.Equal(0.05, PgTargetScorer.BadActorBusyFloor);
 
         /* At the floor exactly, the gate opens. */
@@ -195,7 +196,7 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("ran against 2 databases", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("wrote 1,912 temp blocks", block.Investigation, StringComparison.Ordinal);
         /* Honest about the bar and the identity. */
-        Assert.Contains("threshold_lineage = 0", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the busy floor that admitted it and the share bars it crossed are fleet-measured (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("re-keyed by a major upgrade", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("occurrence history restarts at one", block.Investigation, StringComparison.Ordinal);
 
@@ -236,7 +237,7 @@ public sealed class PgTargetQueriesTests
         Assert.DoesNotContain("%", statik!.Headline, StringComparison.Ordinal);
         Assert.Contains("queryid", statik.Investigation, StringComparison.Ordinal);
         Assert.Contains("RE-KEYED by a major", statik.Investigation, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0", statik.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the share bars are read given it (threshold_lineage = 1)", statik.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("CREATE INDEX", statik.Remediation, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -430,7 +431,7 @@ public sealed class PgTargetQueriesTests
             Assert.Equal(1.0, heavy.Severity, precision: 9);
             Assert.Equal(0.5 + 0.5 * ((medium.Value - 0.25) / 0.35), medium.Severity, precision: 6);
             Assert.Equal(0.5 * (light.Value / 0.25), light.Severity, precision: 6);
-            Assert.All(badActors, f => Assert.Equal(0, f.Metadata["threshold_lineage"]));
+            Assert.All(badActors, f => Assert.Equal(1, f.Metadata["threshold_lineage"]));
 
             /* ── THE EXIT CRITERION: the real analyze_server tool. */
             var service = new DarlingAnalysisService(postgres);
@@ -483,7 +484,7 @@ public sealed class PgTargetQueriesTests
                 foreach (var fact in root.GetProperty("facts").EnumerateArray())
                 {
                     Assert.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, fact.GetProperty("key").GetString(), StringComparison.Ordinal);
-                    Assert.Equal(0, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                    Assert.Equal(1, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
                 }
             }
 

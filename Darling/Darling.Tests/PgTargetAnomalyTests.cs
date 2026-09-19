@@ -52,7 +52,9 @@ namespace Darling.Tests;
 /// the display cap, corroborated by the session and CPU anomalies and the measured CPU confirmer, storied above
 /// 1.5 (the lone-anomaly cap does not hold an extreme, corroborated one); the CPU anomaly folded onto the
 /// <c>PG_CPU_PERCENT</c> story's incident; the first-occurrence deadlock-rate anomaly folded onto
-/// <c>PG_DEADLOCK_RATE</c>'s; and every anomaly fact carrying the gate's metadata with <c>threshold_lineage = 0</c>.</para>
+/// <c>PG_DEADLOCK_RATE</c>'s; and every anomaly fact carrying the gate's metadata with a <c>threshold_lineage</c>
+/// verdict — 1 on the TPS and CPU anomalies (floors and fallbacks fleet-measured, #3691 2026-09-19), 0 on the session
+/// (count floors unmeasured), deadlock-rate and wait-profile (chosen ratio multiple) anomalies.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgTargetAnomalyTests
@@ -526,7 +528,8 @@ public sealed class PgTargetAnomalyTests
         var fact = CpuFact(value, measured);
         new FactScorer().ScoreAll([fact]);
         Assert.Equal(expected, fact.BaseSeverity, precision: 9);
-        Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+        /* Both bars are fleet-measured (#3691, 2026-09-19: 80 ≈ p99.8, 95 ≈ p99.9); the stamp lands graded or not. */
+        Assert.Equal(1, fact.Metadata["threshold_lineage"]);
 
         /* The two bars are the fleet ladder, repeated and pinned equal; the young-store fallback is its Critical line. */
         Assert.Equal(ServerHealthThresholds.CpuWarningPercent, PgTargetScorer.CpuCapacityWarningPercent);
@@ -700,7 +703,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("peaked at 90% of its configured capacity ceiling — 10.8 of 12 configured ACUs at the peak", block.Headline, StringComparison.Ordinal);
         Assert.Contains("averaged 62.5% across 48 five-minute samples", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated — a core was pinned — which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_statement_stats", block.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("SQL Server", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
 
@@ -853,7 +856,7 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
             Assert.Equal(AnomalyThresholds.SigmaDisplayCap, tpsAnomaly.Metadata["deviation_sigma"]);
             Assert.Equal(AnomalyThresholds.ModifiedZThreshold, tpsAnomaly.Metadata["fire_threshold"]);
             Assert.Equal(0, tpsAnomaly.Metadata["baseline_low_quality"]);
-            Assert.Equal(0, tpsAnomaly.Metadata["threshold_lineage"]);
+            Assert.Equal(1, tpsAnomaly.Metadata["threshold_lineage"]);   /* PgTpsFloor / PgTpsFallback: fleet-measured 2026-09-19 */
             Assert.Equal(1.0, tpsAnomaly.Metadata["confidence"]);
 
             var deadlockAnomaly = anomalies.Single(a => a.Key == PgTargetFactKeys.AnomalyDeadlockRate);
@@ -924,13 +927,17 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
                 Assert.Equal(AnomalyThresholds.SigmaDisplayCap, tpsMetadata.GetProperty("deviation_sigma").GetDouble());
                 Assert.Equal(AnomalyThresholds.ModifiedZThreshold, tpsMetadata.GetProperty("fire_threshold").GetDouble());
                 Assert.True(tpsMetadata.GetProperty("baseline_samples").GetDouble() > 0);
-                Assert.Equal(0, tpsMetadata.GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, tpsMetadata.GetProperty("threshold_lineage").GetDouble());   /* PgTpsFloor / PgTpsFallback fleet-measured 2026-09-19 */
                 Assert.Equal(1.0, tpsMetadata.GetProperty("baseline_confidence").GetDouble());
                 Assert.False(tpsMetadata.TryGetProperty("confidence", out _), "the tool projects an anomaly fact's confidence as baseline_confidence");
             }
             foreach (var anomaly in anomalies)
             {
-                Assert.Equal(0, anomaly.Metadata["threshold_lineage"]);
+                /* The verdict per detector: TPS and CPU are gated only on fleet-measured floors and fallbacks (1);
+                   the session detector's COUNT floors are unmeasured and the deadlock-rate detector's firing
+                   multiple is chosen (0). */
+                var measuredGate = anomaly.Key is PgTargetFactKeys.AnomalyTps or PgTargetFactKeys.AnomalyCpuSpike;
+                Assert.Equal(measuredGate ? 1 : 0, anomaly.Metadata["threshold_lineage"]);
                 Assert.True(anomaly.Metadata.ContainsKey("fire_threshold"), anomaly.Key);
                 Assert.True(anomaly.Metadata.ContainsKey("confidence"), anomaly.Key);
                 Assert.StartsWith(PgTargetFactKeys.AnomalyPrefix, anomaly.Key, StringComparison.Ordinal);

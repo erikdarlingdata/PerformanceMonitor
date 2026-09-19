@@ -181,9 +181,10 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal(0.55, wraparound.BaseSeverity, precision: 6);
             Assert.InRange(backlog.BaseSeverity, 0.72, 0.73);
             Assert.InRange(hold.BaseSeverity, 0.53, 0.54);
-            /* Lineage: the backlog's critical bar is unmeasured and the fact says so; the wraparound and hold
-               grade on engine-defined bars only and carry no flag. */
-            Assert.Equal(0, backlog.Metadata["threshold_lineage"]);
+            /* Lineage: the backlog's persistence gate and critical multiple are fleet-measured (#3691, 2026-09-19)
+               and its concerning line is the engine's, so the fact says 1; the wraparound and hold grade on
+               engine-defined bars only and carry no flag. */
+            Assert.Equal(1, backlog.Metadata["threshold_lineage"]);
             Assert.False(wraparound.Metadata.ContainsKey("threshold_lineage"));
             Assert.False(hold.Metadata.ContainsKey("threshold_lineage"));
             Assert.Contains(backlog.AmplifierResults, a => a.Matched && a.Description.Contains("running and losing", StringComparison.Ordinal));

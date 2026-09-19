@@ -165,8 +165,10 @@ public sealed class PgTargetVacuumTests
         var fact = Backlog(ratio, trailing);
         Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 9);
         Assert.Equal(3, PgTargetScorer.BacklogPersistenceSamples);
+        /* The persistence gate and the critical multiple are fleet-measured (#3691, 2026-09-19); the concerning
+           line is the engine's own — so a graded fact says every bar that decided is measured or engine-defined. */
         if (expected > 0)
-            Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+            Assert.Equal(1, fact.Metadata["threshold_lineage"]);
     }
 
     [Fact]
