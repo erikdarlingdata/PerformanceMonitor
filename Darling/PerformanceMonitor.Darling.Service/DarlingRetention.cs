@@ -75,8 +75,31 @@ public static class DarlingRetention
     /// schedule — the product-controlled insulation the rollups' fixed retention used to provide.
     /// BaselineSupplyTests pins membership against the provider's raw-reading arms. Aliased from Storage
     /// (#3653, see <see cref="DataRetentionBaseDays"/>): the daily-summary horizon floors the same collectors.
+    /// Since #3691 the set also carries the four <c>pg_*</c> hypertables the PostgreSQL-target baselines read
+    /// directly; the Storage declaration says why.
     /// </summary>
     internal static readonly IReadOnlySet<string> BaselineServingRawCollectors = DarlingRetentionHorizons.BaselineServingRawCollectors;
+
+    /// <summary>
+    /// The horizon the purge ACTUALLY applies to one collector, given the days the schedule resolver produced:
+    /// clamped at one day (a retention of 0/negative would flip the cutoff into the present/future and
+    /// drop_chunks / DELETE the entire table — belt-and-suspenders with the resolver + the V17 CHECK), then
+    /// floored at <see cref="BaselineMath.BaselineWindowDays"/> for the <see cref="BaselineServingRawCollectors"/>
+    /// (#1743 follow-up / #1757, and #3691 for the PostgreSQL four) — the raw hypertables that serve baselines
+    /// directly get a product-controlled floor at the baseline window, restoring at the purge itself the
+    /// insulation the retired rollups' fixed retention used to provide by construction. Without it, lowering
+    /// one of these collectors' user-editable retention below 30 days silently shortens that family's baseline
+    /// supply; with it, the operator's shorter setting applies to nothing on these tables (their floor IS the
+    /// product's baseline contract). Pure, and the ONLY place the two rules meet, so BaselineSupplyTests can
+    /// drive a 7-day setting through the real seam for each member instead of reading the sweep's source.
+    /// </summary>
+    internal static int EffectivePurgeRetentionDays(string collectorName, int resolvedDays)
+    {
+        var retentionDays = Math.Max(1, resolvedDays);
+        return BaselineServingRawCollectors.Contains(collectorName)
+            ? Math.Max(retentionDays, BaselineMath.BaselineWindowDays)
+            : retentionDays;
+    }
 
     /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
@@ -252,22 +275,12 @@ public static class DarlingRetention
                     continue;
                 }
 
-                /* Clamp at the destructive sink (belt-and-suspenders with the resolver + the V17 CHECK): a
-                   retention of 0/negative would flip the cutoff into the present/future and drop_chunks /
-                   DELETE the entire table. Never purge with a horizon under 1 day. */
-                var retentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
-
-                /* #1743 follow-up: the two raw hypertables that SERVE BASELINES directly (their retired
-                   sum/sumsq rollups could not produce a median) get a product-controlled floor at the
-                   baseline window — restoring, at the purge itself, the insulation the rollups' own
-                   fixed retention used to provide by construction. Without this, lowering either
-                   collector's user-editable retention below 30 days would silently shorten the CPU or
-                   I/O baseline supply (#1757's shape); with it, the operator's shorter setting still
-                   applies to nothing (these two families' floors ARE the product's baseline contract). */
-                if (BaselineServingRawCollectors.Contains(definition.Name))
-                {
-                    retentionDays = Math.Max(retentionDays, BaselineMath.BaselineWindowDays);
-                }
+                /* Clamp at the destructive sink (never purge with a horizon under 1 day), then the baseline
+                   floor for the raw hypertables that SERVE BASELINES directly — SQL Server's cpu/file-io pair
+                   (#1757's shape) and the PostgreSQL-target four (#3691). EffectivePurgeRetentionDays carries
+                   the full argument; it is the seam the tests drive. */
+                var retentionDays = EffectivePurgeRetentionDays(
+                    definition.Name, retentionDaysFor?.Invoke(definition.Name) ?? schedule.RetentionDays);
 
                 /* #1784: this sweep and the tiered retention POLICY drop the same chunks, but only the policy
                    was coverage-gated. On a store where the #1680 gate is deliberately holding that policy —

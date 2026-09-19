@@ -90,5 +90,16 @@ public class SharedBaselineModelPinTests
         Assert.Equal(4.0, BaselineMath.AbsStdDevFloorFor(MetricNames.Memory));
         Assert.Equal(2.5, BaselineMath.AbsStdDevFloorFor(MetricNames.IoLatency));
         Assert.Equal(0.0, BaselineMath.AbsStdDevFloorFor(MetricNames.BatchRequests));
+
+        /* #3691: the PostgreSQL-target CPU metric is percent of the capacity ceiling — percentage points, the
+           unit the SQL Server CPU floor is stated in — so it carries the SAME floor by unit parity, not a new
+           number. Every other PostgreSQL name is server-relative (tps, sessions, deadlocks/h, wait ms/s) and
+           floors at 0 exactly as its SQL Server sibling does. */
+        Assert.Equal(BaselineMath.AbsStdDevFloorFor(MetricNames.Cpu), BaselineMath.AbsStdDevFloorFor(MetricNames.PgCpu));
+        Assert.Equal(5.0, BaselineMath.AbsStdDevFloorFor(MetricNames.PgCpu));
+        Assert.Equal(0.0, BaselineMath.AbsStdDevFloorFor(MetricNames.PgWaitMsPerSec));
+        Assert.Equal(0.0, BaselineMath.AbsStdDevFloorFor(MetricNames.PgTps));
+        Assert.Equal(0.0, BaselineMath.AbsStdDevFloorFor(MetricNames.PgSessionCount));
+        Assert.Equal(0.0, BaselineMath.AbsStdDevFloorFor(MetricNames.PgDeadlockRate));
     }
 }

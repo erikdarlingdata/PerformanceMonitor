@@ -201,14 +201,85 @@ public class BaselineSupplyTests
     /// these collectors is user-editable, so a defaults pin alone leaves a deployed store able to
     /// silently shorten the CPU/I-O baseline supply. DarlingRetention floors the purge horizon for
     /// exactly the raw-reading baseline families at the baseline window — this pins the set's
-    /// membership to the provider's raw-reading arms so neither side can drift alone.
+    /// membership to the provider's raw-reading arms so neither side can drift alone. Since #3691 the
+    /// PostgreSQL-target provider's four raw sources are members too (the #1757 shape, PG edition): they have
+    /// no rollup at all, so their user-editable schedule default was the only thing covering the window.
     /// </summary>
     [Fact]
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
-        Assert.Equal(2, DarlingRetention.BaselineServingRawCollectors.Count);
+        Assert.Equal(6, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
+        foreach (var table in s_pgTargetBaselineSources)
+        {
+            Assert.Contains(table, DarlingRetention.BaselineServingRawCollectors);
+        }
+
+        /* Every member is a real collector with a schedule row — a misspelt member would floor nothing and the
+           purge would never notice, because Contains() on a name no collector carries is simply false. */
+        foreach (var member in DarlingRetention.BaselineServingRawCollectors)
+        {
+            Assert.True(CollectorScheduleDefaults.All.ContainsKey(member), $"{member} is floored but is not a scheduled collector");
+        }
+    }
+
+    /// <summary>
+    /// The four <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly — pinned by the PROVIDER's
+    /// own query text, not by a second list, so a fifth raw source added to the provider without a floor entry
+    /// fails here rather than starving quietly.
+    /// </summary>
+    private static readonly string[] s_pgTargetBaselineSources =
+        ["pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization"];
+
+    [Fact]
+    public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
+    {
+        var pgNames = new[] { MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu };
+        var tablesRead = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in pgNames)
+        {
+            var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(name);
+            Assert.False(string.IsNullOrWhiteSpace(sql), $"{name} has no PostgreSQL-target baseline query");
+            foreach (var table in s_pgTargetBaselineSources.Where(t => sql!.Contains("FROM " + t, StringComparison.Ordinal)))
+            {
+                tablesRead.Add(table);
+            }
+        }
+
+        Assert.Equal(s_pgTargetBaselineSources.OrderBy(t => t, StringComparer.Ordinal), tablesRead.OrderBy(t => t, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// The purge SEAM, driven the way an operator drives it (#3691): a schedule shortened to 7 days yields the
+    /// baseline-window horizon for every baseline-serving collector — the SQL Server pair (#1757) and the
+    /// PostgreSQL four — and yields 7 for a collector that serves no baseline, so the floor is a floor and not a
+    /// blanket. A setting ABOVE the window is honoured as given (the floor never shortens), and the destructive
+    /// sink's one-day clamp still runs first, so a 0 becomes 1 for an unfloored table and 30 for a floored one.
+    /// </summary>
+    [Fact]
+    public void EffectivePurgeRetentionDays_FloorsEveryBaselineServingCollectorAtTheWindow_AndNothingElse()
+    {
+        const int shortened = 7;
+        Assert.True(shortened < BaselineMath.BaselineWindowDays);
+
+        foreach (var collector in DarlingRetention.BaselineServingRawCollectors)
+        {
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(collector, shortened));
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(collector, 0));
+            Assert.Equal(90, DarlingRetention.EffectivePurgeRetentionDays(collector, 90));
+        }
+
+        foreach (var table in s_pgTargetBaselineSources)
+        {
+            Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(table, shortened));
+        }
+
+        /* Not baseline-serving: the operator's number stands, clamped at one. */
+        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", shortened));
+        Assert.Equal(shortened, DarlingRetention.EffectivePurgeRetentionDays("pg_blocking", shortened));
+        Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", 0));
+        Assert.Equal(1, DarlingRetention.EffectivePurgeRetentionDays("deadlocks", -5));
     }
 
     /// <summary>

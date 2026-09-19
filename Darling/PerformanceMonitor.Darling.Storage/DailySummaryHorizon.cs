@@ -58,9 +58,25 @@ public static class DarlingRetentionHorizons
     /// rollups could not produce a median). Their effective purge horizon is floored at the baseline window
     /// regardless of the user-editable schedule — the product-controlled insulation the rollups' fixed retention
     /// used to provide. BaselineSupplyTests pins membership against the provider's raw-reading arms.
+    ///
+    /// <para>#3691 (the #1757 shape, PostgreSQL edition): the four <c>pg_*</c> raw hypertables
+    /// <c>PgTargetBaselineProvider</c> reads DIRECTLY for the PostgreSQL-target baselines — <c>pg_database_stats</c>
+    /// (tps, deadlock rate), <c>pg_session_states</c> (session count), <c>pg_wait_stats</c> (wait ms/s) and
+    /// <c>pg_cpu_utilization</c> (percent of the capacity ceiling) — join the set. They have no rollup at all, so
+    /// their 30-day schedule default was the ONLY thing covering the 30-day baseline window, and that default is
+    /// user-editable: an operator shortening PostgreSQL retention to 7 d would have starved every PostgreSQL
+    /// anomaly detector (<c>PgTargetAnomalyDetector.HasBaselineDataSql</c> asks about the 30 days before the
+    /// window; the provider binds <c>analysisTime − BaselineWindowDays</c>) without a word said. Same mechanism,
+    /// same constant: the purge floors these at <c>BaselineMath.BaselineWindowDays</c>, the detector's own
+    /// minimum-history gate. The set is engine-agnostic on purpose — a store purges its shared tables once for
+    /// the whole fleet, so the floor cannot depend on which engine a given server is.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cpu_utilization", "file_io_stats" };
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "cpu_utilization", "file_io_stats",
+            "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
+        };
 
     /// <summary>
     /// The effective FLEET-WIDE retention for a collector: the fleet override's <c>retention_days</c> when it
