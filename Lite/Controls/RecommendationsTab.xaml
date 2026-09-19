@@ -63,6 +63,14 @@
                                    Visibility="{Binding HasAdvice, Converter={StaticResource BoolToVis}}"
                                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 
+                        <!-- #3712: the corroboration gate kept this finding off email / webhooks / tray. Muted and
+                             italic like the Settings hints: a status about delivery, not more advice. Collapsed for
+                             a delivered finding and for one below the notify floor. -->
+                        <TextBlock Text="{Binding NotPagedText}" TextWrapping="Wrap"
+                                   Visibility="{Binding ShowNotPaged, Converter={StaticResource BoolToVis}}"
+                                   FontSize="11" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,4"/>
+
                         <!-- Affordances (advise-only): Copy fix (when derivable) + Ask AI. -->
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
                             <Button Content="Copy fix" Padding="10,3" Margin="0,0,8,0"

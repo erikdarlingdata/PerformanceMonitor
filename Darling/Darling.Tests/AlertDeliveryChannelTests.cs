@@ -490,6 +490,8 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(false, AlertDelivery.ChannelUndelivered, null, AlertDeliveryStatus.NotSent)]
     [InlineData(false, AlertDelivery.ChannelThrottled, null, AlertDeliveryStatus.Throttled)]
     [InlineData(false, AlertDelivery.ChannelFolded, null, AlertDeliveryStatus.ReportedElsewhere)]
+    /* #3712: routed to the digest by the corroboration gate — reported, not paged, and never "Shown". */
+    [InlineData(false, AlertDelivery.ChannelDigest, null, AlertDeliveryStatus.Digest)]
     [InlineData(false, AlertDelivery.ChannelFailed, null, AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelFailed, "Slack: 500", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelMuted, null, AlertDeliveryStatus.Muted)]
@@ -577,6 +579,7 @@ public sealed class AlertDeliveryChannelTests
             (false, AlertDelivery.ChannelUndelivered, null),
             (false, AlertDelivery.ChannelThrottled, null),
             (false, AlertDelivery.ChannelFolded, null),
+            (false, AlertDelivery.ChannelDigest, null),
             (false, AlertDelivery.ChannelFailed, "Slack: 500 Internal Server Error"),
             (false, AlertDelivery.ChannelMuted, null),
             (false, AlertDelivery.ChannelEmail, "relay refused"),

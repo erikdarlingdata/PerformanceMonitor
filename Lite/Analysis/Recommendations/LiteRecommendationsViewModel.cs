@@ -109,6 +109,16 @@ public sealed class LiteRecommendationCardViewModel
     /// <summary>Whether there is advice prose to render.</summary>
     public bool HasAdvice => !string.IsNullOrEmpty(Item.AdviceText);
 
+    /// <summary>#3712: the "not paged" line — the gate's reason this finding was kept off email, the webhooks
+    /// and the tray, prefixed so the line reads as a status rather than as more advice.</summary>
+    public string NotPagedText => string.IsNullOrEmpty(Item.NotPagedReason)
+        ? string.Empty
+        : "Not paged — " + Item.NotPagedReason;
+
+    /// <summary>Whether the not-paged line should be shown (a delivered finding, or one below the notify
+    /// floor, has nothing to say here).</summary>
+    public bool ShowNotPaged => !string.IsNullOrEmpty(Item.NotPagedReason);
+
     /// <summary>The copy-paste-ready fix T-SQL, if any.</summary>
     public string? CopyPasteSql => Item.CopyPasteSql;
 

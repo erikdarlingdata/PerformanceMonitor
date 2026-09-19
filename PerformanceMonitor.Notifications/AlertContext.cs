@@ -61,6 +61,20 @@ public class AlertContext
     /// written before the member existed; never rendered to a channel.
     /// </summary>
     public AlertRouteDto? Route { get; set; }
+
+    /// <summary>
+    /// The corroboration gate's decision for an analysis finding (#3712): <c>page</c> or <c>digest</c>, with
+    /// the reason naming the corroboration components it read. Set by <c>AnalysisNotificationService</c> on
+    /// every finding it routes — the paged ones too, so "why DID this page" is as answerable as "why didn't
+    /// it" — and persisted as the trailing <c>Routing</c> member of the JSON projection, the way
+    /// <see cref="SeverityOverride"/> is persisted so <c>severity_source</c> can be read off the row. Null
+    /// on every engine alert (the gate does not apply to them) and on every row written before the member
+    /// existed. Never rendered to a channel: a paged finding's card is unchanged, and a digest-routed finding
+    /// reaches no card.
+    /// <para>Distinct from <see cref="Route"/>, which records WHERE the posts went after the fan-out ran;
+    /// this records whether the fan-out was allowed to run at all, one decision upstream of it.</para>
+    /// </summary>
+    public AlertRoutingDto? Routing { get; set; }
 }
 
 /// <summary>
@@ -292,7 +306,18 @@ public record AlertContextDto(
     List<AlertDetailItemDto> Details,
     List<AlertIncidentDto>? Incidents = null,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null,
-    AlertRouteDto? Route = null);
+    AlertRouteDto? Route = null,
+    AlertRoutingDto? Routing = null);
+
+/// <summary>
+/// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
+/// <see cref="AlertContextDto"/> like <c>Route</c>, so a row written before it existed rehydrates to null,
+/// which reads as "this row carries no routing decision" (every engine alert, every pre-#3712 row).
+/// <c>Route</c> is the persisted spelling <see cref="FindingRouting.RouteText"/> produces — <c>page</c> or
+/// <c>digest</c> — a NAME rather than an ordinal for the reason <c>Severity</c> is; <c>Reason</c> is the one
+/// sentence the gate wrote naming the corroboration components it read.
+/// </summary>
+public record AlertRoutingDto(string Route, string Reason);
 
 /// <summary>
 /// The persisted routing provenance of one alert-history row (#3598): trailing and nullable on
@@ -568,8 +593,41 @@ public static class AlertContextSerializer
                either engine persists its grade here with no store change on either side. */
             context.SeverityOverride,
             /* #3598: where the posts went. Already the persisted shape, so it rides through as-is. */
-            context.Route);
+            context.Route,
+            /* #3712: whether the fan-out was allowed to run, and why. Already the persisted shape. */
+            context.Routing);
         return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// The routing decision a persisted alert-history row carries (#3712), or <c>null</c> when it carries none
+    /// — an engine alert, a row written before the member existed, or unparseable JSON. Reads the one property
+    /// rather than rehydrating the whole context, for the reason <see cref="TryReadRoute"/> gives: the MCP
+    /// history read calls this once per row, and the digest reader once per digest-routed row.
+    /// </summary>
+    public static AlertRoutingDto? TryReadRouting(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Routing), out var routing)
+                || routing.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = routing.Deserialize<AlertRoutingDto>();
+            /* A record with a null Route is a hand-edited or foreign shape; "no decision" is the honest read. */
+            return dto is { Route: not null } ? dto : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -717,6 +775,9 @@ public static class AlertContextSerializer
 
             /* #3598: the routing record, null on every row written before it existed. */
             context.Route = dto.Route;
+
+            /* #3712: the corroboration gate's decision, null on engine alerts and pre-#3712 rows. */
+            context.Routing = dto.Routing;
 
             foreach (var d in dto.Details)
             {

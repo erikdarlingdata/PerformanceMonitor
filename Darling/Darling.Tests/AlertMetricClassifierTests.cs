@@ -112,6 +112,7 @@ public class AlertMetricClassifierTests
     [Theory]
     [InlineData("Collector Cost Digest")]
     [InlineData("Fleet Sweep Rollup")]
+    [InlineData("Analysis Singles Digest")]
     public void IsWarning_False_ForTheDeliberateInfoReports(string metric)
     {
         Assert.True(AlertMetricClassifier.IsInformational(metric));

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using Xunit;
 
@@ -458,6 +459,42 @@ public class LiteRecommendationsReaderTests
         Assert.NotNull(item.WindowEndUtc);
         Assert.Equal(DateTimeKind.Utc, item.WindowStartUtc!.Value.Kind);
         Assert.Equal(DateTimeKind.Utc, item.WindowEndUtc!.Value.Kind);
+    }
+
+    // ── #3712: the not-paged marker ─────────────────────────────────────────────────
+
+    /// <summary>The grid marks exactly the findings the gate kept off the channels: a notify-worthy lone fact
+    /// at the confidence floor reads "not paged" with the gate's reason; a chain, a below-floor finding and a
+    /// mapping with no lens (the pure-mapping default every other test here takes) carry no marker.</summary>
+    [Fact]
+    public void MapFinding_MarksANotifyWorthyUncorroboratedSingle_AndNothingElse()
+    {
+        var lens = new FindingRoutingLens(NotifySeverity: 1.5, UncorroboratedRoute: FindingRoute.Digest);
+
+        var single = Finding("ANOMALY_CPU_SPIKE", 1.8);
+        single.Confidence = StoryConfidence.Floor;
+        var marked = LiteRecommendationsReader.MapFinding(single, ServerName, lens);
+        Assert.NotNull(marked.NotPagedReason);
+        Assert.Contains("uncorroborated", marked.NotPagedReason, StringComparison.Ordinal);
+
+        var chain = Finding("ANOMALY_CPU_SPIKE", 1.8);
+        chain.FactCount = 2;
+        chain.Confidence = 0.6;
+        Assert.Null(LiteRecommendationsReader.MapFinding(chain, ServerName, lens).NotPagedReason);
+
+        var belowFloor = Finding("ANOMALY_CPU_SPIKE", 1.2);
+        belowFloor.Confidence = StoryConfidence.Floor;
+        Assert.Null(LiteRecommendationsReader.MapFinding(belowFloor, ServerName, lens).NotPagedReason);
+
+        Assert.Null(LiteRecommendationsReader.MapFinding(single, ServerName).NotPagedReason);
+
+        /* The card renders it as a status line, prefixed, and hides the line when there is nothing to say. */
+        var card = new LiteRecommendationCardViewModel(marked);
+        Assert.True(card.ShowNotPaged);
+        Assert.StartsWith("Not paged — ", card.NotPagedText, StringComparison.Ordinal);
+        var quiet = new LiteRecommendationCardViewModel(LiteRecommendationsReader.MapFinding(chain, ServerName, lens));
+        Assert.False(quiet.ShowNotPaged);
+        Assert.Equal(string.Empty, quiet.NotPagedText);
     }
 
     // ── latest-batch-only trim ──────────────────────────────────────────────────

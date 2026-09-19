@@ -105,6 +105,9 @@ public sealed class PgSelfAlertDeliveryStampStore : ISelfAlertDeliveryStampStore
     /// <summary>The fleet-sweep rollup's stamp key.</summary>
     public const string FleetSweepRollupStateKey = "sweep_rollup_delivered_at";
 
+    /// <summary>The analysis singles digest's stamp key (#3712) — the third daily document, same shape.</summary>
+    public const string AnalysisSinglesDigestStateKey = "singles_digest_delivered_at";
+
     /// <summary>The alert pass's own deadline (<c>DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds</c>),
     /// because this read runs inside it: a stamp read that outlives the pass's budget is a stamp read that
     /// should have failed toward the memory gate.</summary>

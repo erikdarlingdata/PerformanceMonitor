@@ -130,6 +130,25 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         public async Task SendFindingAlertAsync(FindingAlert alert)
         {
+            if (alert.Route == FindingRoute.Digest)
+            {
+                /* #3712: the corroboration gate routed this finding to the digest — no channel is consulted.
+                   The deprecated SKU has no digest document; the row is the whole record here, written with the
+                   shared disposition so its grid and MCP read label it the way the live SKUs do. */
+                RecordAlert(
+                    alert.ServerId,
+                    alert.ServerName,
+                    alert.MetricName,
+                    alert.CurrentValue,
+                    alert.ThresholdValue,
+                    alertSent: false,
+                    notificationType: AlertDelivery.ChannelDigest,
+                    muted: false,
+                    detailText: alert.DetailText,
+                    contextJson: AlertContextSerializer.Serialize(alert.Context));
+                return;
+            }
+
             await TrySendAlertEmailAsync(
                 alert.MetricName,
                 alert.ServerName,

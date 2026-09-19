@@ -1202,6 +1202,14 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
+            /* #3712: analysis.uncorroboratedRoute is FILE-LEVEL — config_alert_settings has no column for it
+               (no rung window) — and it lives inside the AnalysisConfig section that ApplyToConfig swaps
+               WHOLESALE, so the fresh store-built section would drop it on the first reload. Carried across
+               from the held config, which is darling.json's value on the first load and the previous carry
+               on every later one: the BuildServerFromRow shape (a file-only value backfilled from bootstrap
+               onto a store-built object). When the column exists this line becomes a reader.GetString. */
+            analysis.UncorroboratedRoute = bootstrap.Analysis.UncorroboratedRoute;
+
             /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
                username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
                revokes table-wide SELECT on config_notification from BOTH viewer and mcp and re-grants only

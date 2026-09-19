@@ -140,6 +140,17 @@ public class EmailAlertService : IFindingAlertSender
     public Task SendFindingAlertAsync(FindingAlert alert)
     {
         var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
+
+        if (alert.Route == FindingRoute.Digest)
+        {
+            /* #3712: the corroboration gate routed this finding to the digest — no channel is consulted, so
+               this does NOT go through TrySendAlertEmailAsync (which would spend the send core's cooldown and
+               stamp the row `tray`, a toast that was never shown). One row, disposition `digest`, the routing
+               record already on the context; the Alerts tab, the MCP history read and the Recommendations grid
+               all read it from there. */
+            return RecordDigestRoutedFindingAsync(alert, serverId);
+        }
+
         return TrySendAlertEmailAsync(
             alert.MetricName,
             alert.ServerName,
@@ -152,5 +163,30 @@ public class EmailAlertService : IFindingAlertSender
             muted: false,
             detailText: alert.DetailText,
             deliverProse: alert.DeliverDetailText);
+    }
+
+    /// <summary>
+    /// The digest arm of <see cref="SendFindingAlertAsync"/> (#3712): Lite's one combined
+    /// <c>config_alert_log</c> row, written with <see cref="AlertDelivery.RoutedToDigest"/> and nothing
+    /// attempted. Mirrors the row <see cref="TrySendAlertEmailAsync"/> writes column for column — the same
+    /// numeric severity/threshold, the full detail text, the serialized context — so every reader of the
+    /// table sees one shape. Never throws.
+    /// </summary>
+    private async Task RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
+    {
+        try
+        {
+            string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                serverId.ToString(), alert.ServerName, alert.MetricName,
+                alert.CurrentValue, alert.ThresholdValue,
+                alert.Severity, alert.NotifyThreshold,
+                AlertDelivery.RoutedToDigest(),
+                false, alert.DetailText, contextJson));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"RecordDigestRoutedFindingAsync error: {ex.Message}");
+        }
     }
 }

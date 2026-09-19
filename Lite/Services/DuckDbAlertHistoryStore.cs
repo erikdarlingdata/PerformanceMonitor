@@ -266,7 +266,10 @@ AND   notification_type IN ('webhook', 'email+webhook')"
     /// to seed its per-finding cooldown across restarts — unlike the
     /// email cooldown (which filters to successful sends), the analysis
     /// cooldown is stamped unconditionally, so the persisted equivalent
-    /// is the latest row for that metric_name, period.
+    /// is the latest row for that metric_name — with one exclusion (#3712): a row the corroboration gate
+    /// routed to the digest (<c>notification_type = 'digest'</c>) is not a page and must not seed the page
+    /// bucket, or the page a story earns when it gains corroboration would be held as a repeat. See
+    /// <see cref="IAlertHistoryStore.GetLastAlertTimeAsync"/>.
     /// <para>
     /// #2716: when <paramref name="dedupKey"/> is supplied, the same #1154 anchored-LIKE filter its
     /// email/webhook siblings use is applied here too, reconstructing a per-fingerprint last-alerted
@@ -305,6 +308,9 @@ SELECT MAX(alert_time)
 FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2"
+            /* #3712: the digest exclusion, spelled through the constant the writer uses (a literal, like the
+               webhook filter above, because it is a compile-time constant of this codebase). */
+            + "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'"
             + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });

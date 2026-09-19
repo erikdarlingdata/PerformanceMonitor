@@ -41,6 +41,11 @@ public interface IFindingAlertSender
     /// <summary>
     /// Sends a composed analysis-finding alert through this app's channels and records it
     /// per this app's alert-history cadence. Never throws.
+    /// <para>#3712: when <see cref="FindingAlert.Route"/> is <see cref="FindingRoute.Digest"/> the
+    /// implementation consults NO channel — no email, no webhook fan-out, no tray — and records the row
+    /// with <see cref="AlertDelivery.RoutedToDigest"/>. The routing record itself
+    /// (<see cref="AlertContext.Routing"/>) is already on the context when the alert arrives; the sender's
+    /// only job on that arm is to keep the channels shut and write the row.</para>
     /// </summary>
     Task SendFindingAlertAsync(FindingAlert alert);
 }
@@ -66,6 +71,13 @@ public interface IFindingAlertSender
 /// it built the pair — <c>AlertDetailText.ProseForDelivery</c> compares the two texts and cannot see it
 /// when the labels and separators differ.
 /// </param>
+/// <param name="Route">
+/// #3712: where the corroboration gate sent this finding. <see cref="FindingRoute.Page"/> is the pre-#3712
+/// path — the channels run and the row records what they did. <see cref="FindingRoute.Digest"/> means no
+/// channel is consulted and the row records <see cref="AlertDelivery.RoutedToDigest"/>. Trailing and
+/// defaulted to Page so a caller that predates the gate (the deprecated Dashboard, the test-send paths) keeps
+/// its behaviour byte for byte; the shared notification service always states it.
+/// </param>
 public sealed record FindingAlert(
     string MetricName,
     string ServerName,
@@ -76,7 +88,8 @@ public sealed record FindingAlert(
     double Severity,
     double NotifyThreshold,
     string DetailText,
-    bool DeliverDetailText)
+    bool DeliverDetailText,
+    FindingRoute Route = FindingRoute.Page)
 {
     /// <summary>
     /// The prose a delivery channel should render for this alert, or null when the structured

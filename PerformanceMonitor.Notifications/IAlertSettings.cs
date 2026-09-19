@@ -91,6 +91,21 @@ public interface IAlertSettings
     int    AnalysisNotifyCooldownMinutes { get; }
 
     /// <summary>
+    /// Where an UNCORROBORATED analysis finding goes (#3712) — <c>analysis.uncorroborated_route</c>: a lone
+    /// fact with no second fact in its chain and no matched co-fire check. <see cref="FindingRoute.Digest"/>
+    /// (shipped) keeps it off the paging channels and puts it in the daily digest and the web/MCP surfaces;
+    /// <see cref="FindingRoute.Page"/> restores the pre-#3712 behaviour where every notify-worthy finding
+    /// pages. A CORROBORATED finding pages under either value — the knob moves only the uncorroborated arm.
+    /// See <see cref="FindingRouting.Classify(PerformanceMonitor.Analysis.AnalysisFinding, FindingRoute)"/>.
+    ///
+    /// <para>Defaulted on the interface rather than declared abstract, on <see cref="NotificationRoutes"/>'
+    /// precedent and for the same reason: the default IS the ruling, so an adapter that does not implement
+    /// this member has opted into nothing but the shipped behaviour. Darling reads it from darling.json
+    /// (<c>analysis.uncorroboratedRoute</c>); Lite from its settings file.</para>
+    /// </summary>
+    FindingRoute UncorroboratedFindingRoute => FindingRoute.Digest;
+
+    /// <summary>
     /// The externally reachable base URL of the app's own web dashboard (#2710) — e.g.
     /// <c>http://10.0.0.5:5153</c> — used ONLY to build the per-alert triage-page link every webhook channel
     /// carries (<see cref="TriageLink.Build"/>). Empty means "no link" and every payload renders exactly as it

@@ -863,6 +863,24 @@ public sealed class AnalysisConfig
     /// <summary>Minimum finding severity (0.0–2.0) to notify on — the shared AnalysisNotificationService floor.</summary>
     [JsonPropertyName("notifySeverity")]
     public double NotifySeverity { get; set; } = 1.5;
+
+    /// <summary>
+    /// Where a notify-worthy but UNCORROBORATED finding goes (#3712) — <c>digest</c> (default) or <c>page</c>;
+    /// see <c>FindingRouting</c>. A string rather than the enum so a hand-edited value that is neither parses
+    /// to "no opinion" (<c>DarlingAlertSettings</c> falls to the shipped default) instead of failing the
+    /// whole config load.
+    ///
+    /// <para><b>FILE-LEVEL, not a store column</b> — the <c>web.publicBaseUrl</c> / force-plan-bot posture:
+    /// <c>config_alert_settings</c> gains no column for it (one un-landed migration rung at a time, repo-wide,
+    /// and two were in flight when this shipped), so the value is authoritative from darling.json and a store
+    /// reload does not change it. It lives inside this section for the JSON shape an operator expects
+    /// (<c>analysis.uncorroboratedRoute</c> beside <c>analysis.notifySeverity</c>), which means
+    /// <c>StoreConfigProvider.LoadViewAsync</c> has to CARRY it across the wholesale <c>config.Analysis</c>
+    /// swap — the same backfill-from-bootstrap shape <c>BuildServerFromRow</c> uses for a file-only secret.
+    /// When a rung window opens, the column replaces the carry and the MCP write tool gains the field.</para>
+    /// </summary>
+    [JsonPropertyName("uncorroboratedRoute")]
+    public string UncorroboratedRoute { get; set; } = PerformanceMonitor.Notifications.FindingRouting.DigestText;
 }
 
 /// <summary>

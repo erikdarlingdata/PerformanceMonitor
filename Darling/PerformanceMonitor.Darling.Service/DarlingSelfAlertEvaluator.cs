@@ -427,6 +427,49 @@ internal sealed class DarlingSelfAlertEvaluator
     /// report of a period, not a condition: no active flag, no resolution edge, nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastSweepRollup = new();
 
+    /// <summary>
+    /// The metric name the ANALYSIS SINGLES DIGEST fires under (#3712) — the third daily document, beside the
+    /// collector-cost digest and the fleet-sweep rollup. A WEBHOOK AUTOMATION KEY like its siblings (the
+    /// alert-history grids, the severity map's declared INFO arm, the family census and any downstream
+    /// consumer key on it), so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string AnalysisSinglesDigestMetric = "Analysis Singles Digest";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string AnalysisSinglesDigestKey = "singlesdigest";
+
+    /// <summary>
+    /// How often the singles digest is sent. Daily, and the interval is also its COVERED SPAN, the rollup's
+    /// exact reasoning: what the post claims to cover and how often one can arrive are one number. It exists
+    /// because of what #3712 measured — forty-plus uncorroborated anomaly pages in seven hours on a large
+    /// production fleet, interleaved with the handful that needed a human — and the action a lone-fact
+    /// anomaly invites is "look at the day's singles as a distribution and decide which to promote", which is
+    /// a document to read, not a card to act on at 3am. The findings themselves are live on the web and MCP
+    /// surfaces the instant they fire; this is the once-a-day channel copy, and its ceiling.
+    ///
+    /// <para>Gated on delivered-today in the store like both siblings (#3580): the same stamp store, the same
+    /// failed-writes-nothing rule, the same fail-open fallback, under its own key. Recomputed from the
+    /// ledger every time rather than accumulated in process, so a restart loses nothing in either
+    /// direction.</para>
+    /// </summary>
+    internal static readonly TimeSpan AnalysisSinglesDigestInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many top movers the singles digest spells out, on <see cref="MaxListedCostMovers"/>'
+    /// reasoning — one bounded message that states the population it selected from.</summary>
+    private const int MaxListedSinglesMovers = 10;
+
+    /// <summary>How many servers a family block names before eliding, and how many singles a server line
+    /// names — the ledger block's <see cref="MaxListedRollupLedgerServers"/> reasoning: readable on the
+    /// fleet-wide day it exists for.</summary>
+    private const int MaxListedSinglesServersPerFamily = 10;
+    private const int MaxListedSinglesPerServer = 3;
+
+    /// <summary>When the singles digest was last known DELIVERED — the <see cref="_lastCostDigest"/> idiom:
+    /// one fixed key, a cache of the store's stamp rather than the authority (#3580). A digest is a report of
+    /// a period, not a condition: no active flag, no resolution edge, nothing to clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastSinglesDigest = new();
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
@@ -1814,6 +1857,347 @@ internal sealed class DarlingSelfAlertEvaluator
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
             delivery, now, "fleet-sweep rollup", cancellationToken);
+    }
+
+    /* ------------------------- #3712: the analysis singles digest ------------------------- */
+
+    /// <summary>
+    /// FLEET-level (#3712): the ANALYSIS SINGLES DIGEST — the third daily document, beside the collector-cost
+    /// digest and the fleet-sweep rollup: one message, at most once per <see cref="AnalysisSinglesDigestInterval"/>,
+    /// naming every analysis finding the corroboration gate routed to the digest in the trailing day —
+    /// "Anomaly singles: N across M servers" — grouped by family then server, with the top movers by
+    /// severity, each carrying the same dedup keys a page would have carried (design point 3), so an operator
+    /// can promote any single to a full drill-down without archaeology.
+    ///
+    /// <para><b>Why this document exists.</b> The first day the recalibrated engine ran on a large production
+    /// fleet it paged forty-plus times in seven hours on anomaly stories at severity 1.5–1.9 and confidence
+    /// 0.20–0.35 — lone facts, mostly true and mostly redundant with a page something else had already sent.
+    /// <c>AnalysisNotificationService</c> now routes those to the digest road: persisted, visible on the web
+    /// and MCP surfaces the instant they fire, recorded in the ledger with the reason, and delivered to no
+    /// paging channel. This is the one channel copy that road gets, once a day, as a distribution to read
+    /// rather than a card to act on.</para>
+    ///
+    /// <para><b>The source is the LEDGER, not the findings table</b> (<see cref="AnalysisSinglesDigestReader"/>):
+    /// a digest-routed ledger row exists for exactly the findings the gate decided about, one per
+    /// fresh-or-worsening story, and it already carries the reason and the fingerprints. Rows are deduplicated
+    /// per (server, story) at the newest severity, so a story re-recorded after a restart counts once.</para>
+    ///
+    /// <para><b>Gated on the master switch up front and inside</b>, like every sibling; <b>empty sends
+    /// nothing</b> and does not consume the interval (the rollup's argument verbatim — a report that says a
+    /// read returned no rows is the channel noise #3443 exists to end); a failed read <b>skips the tick
+    /// WITHOUT consuming the interval</b> and is counted into the #3013 census, because a fault folded into
+    /// "no singles today" would convert an unreadable store into a permanently quiet document. Called from the
+    /// worker's hourly store-metrics tick beside the two siblings; 23 of every 24 ticks cost one dictionary
+    /// lookup. Testable through <see cref="ApplyAnalysisSinglesDigestAsync"/> with a recording deliverer, a
+    /// controllable clock and fixture rows.</para>
+    /// </summary>
+    public async Task EvaluateAnalysisSinglesDigestAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+                AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken))
+        {
+            return;
+        }
+
+        var spanStartUtc = now - AnalysisSinglesDigestInterval;
+
+        List<AnalysisSinglesDigestReader.DigestRoutedRow> rows;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            rows = await AnalysisSinglesDigestReader.GetDigestRoutedRowsAsync(postgres, spanStartUtc, now, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed read skips the tick WITHOUT consuming the interval, and it is counted: the digest posts
+               nothing on an empty day by design, so a fault folded into "empty" would convert an unreadable
+               store into a permanently quiet document — the quiet-is-not-clean misreading at the delivery
+               end. The next hourly tick asks again. */
+            _logger?.LogDebug(ex, "analysis singles digest read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "analysis singles digest self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyAnalysisSinglesDigestAsync(rows, spanStartUtc, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// The apply half of <see cref="EvaluateAnalysisSinglesDigestAsync"/>, split out so the fire/dedup
+    /// lifecycle is unit-testable with a recording deliverer, a controllable clock and fixture rows — the
+    /// <see cref="ApplyFleetSweepRollupAsync"/> shape, seam for seam. No resolution edge and no severity
+    /// override, for the digest's reason: a report of a period fires with <c>severity: null</c> so the
+    /// per-metric map's DECLARED INFO arm decides. Muted through the shared seam like every sibling.
+    /// </summary>
+    internal async Task ApplyAnalysisSinglesDigestAsync(
+        IReadOnlyList<AnalysisSinglesDigestReader.DigestRoutedRow> rows,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+                AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken))
+        {
+            return;
+        }
+
+        var facts = ExtractSinglesDigestFacts(rows);
+        if (facts.Singles == 0)
+        {
+            return;
+        }
+
+        var (shortMessage, detail) = RenderAnalysisSinglesDigest(facts, spanStartUtc, spanEndUtc);
+
+        /* #3580: stamped after the fire, and only on a delivery not reported failed — the digest's rule. */
+        var delivery = await FireAsync(
+            StoreKey(AnalysisSinglesDigestKey), _storeLabel, AnalysisSinglesDigestMetric,
+            currentValue: facts.Singles.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold — the digest's exact posture, stated in the string because the NOT NULL
+               column demands a value and "report" is the honest one. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* The count of distinct singles the digest covers — a genuine whole number (AlertMetricClassifier
+               renders it as a count, the digest's shape). */
+            numericCurrentValue: facts.Singles,
+            numericThresholdValue: 0,
+            cancellationToken);
+
+        await RecordDocumentDeliveredAsync(
+            _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
+            delivery, now, "analysis singles digest", cancellationToken);
+    }
+
+    /// <summary>One uncorroborated finding the digest names: the server, the family (the finding's category,
+    /// parsed from its metric name), the KEY a page would have carried (<c>Analysis: {category} [{hash8}]</c> —
+    /// the same <c>metric_name</c> the ledger row and <c>get_alert_history</c> spell, and the short story hash
+    /// <c>get_analysis_findings</c> resolves), its newest severity, the gate's reason, the #1140 dedup
+    /// fingerprints its context carried, and when it was last recorded.</summary>
+    internal sealed record AnalysisSingle(
+        string Server, string Family, string Key, double Severity, string Reason,
+        IReadOnlyList<string> DedupKeys, DateTime LastRecordedUtc);
+
+    /// <summary>One server's singles inside a family block, newest-severity-first.</summary>
+    internal sealed record SinglesServer(string Server, IReadOnlyList<AnalysisSingle> Singles);
+
+    /// <summary>One family block: how many singles, on how many servers, and the per-server lines.</summary>
+    internal sealed record SinglesFamily(string Family, int Singles, IReadOnlyList<SinglesServer> Servers);
+
+    /// <summary>
+    /// Everything one singles digest says, extracted pure from the span's ledger rows — so the empty
+    /// decision and the render read one value and the tests drive both with fixtures. <see cref="Singles"/>
+    /// and <see cref="Servers"/> are distinct counts over the deduplicated population; <see cref="Rows"/> is
+    /// the raw row count, stated in the document when it differs so a reader can see the dedup happened.
+    /// </summary>
+    internal sealed record AnalysisSinglesDigestFacts(
+        int Singles,
+        int Servers,
+        int Rows,
+        IReadOnlyList<AnalysisSingle> TopMovers,
+        IReadOnlyList<SinglesFamily> Families);
+
+    /// <summary>
+    /// Extracts the digest's facts from the span's digest-routed rows — PURE (no clock, no I/O). Rows are
+    /// deduplicated per (server, key): the newest row's severity and reason win, because a story that kept
+    /// firing is one single, not one per re-record. The family is the category between the metric name's
+    /// <c>Analysis: </c> prefix and its <c> [</c> hash bracket, the shape <c>FindingMessageFormatter.MetricName</c>
+    /// writes; a name that does not parse keeps its whole text as the family, so nothing is dropped for
+    /// having an unexpected shape. Reason and fingerprints come off the row's context JSON through the shared
+    /// serializer; a row whose context does not parse keeps its place with an empty reason and no keys.
+    /// </summary>
+    internal static AnalysisSinglesDigestFacts ExtractSinglesDigestFacts(
+        IReadOnlyList<AnalysisSinglesDigestReader.DigestRoutedRow> rows)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        /* Oldest-first input (the reader's ORDER BY), so the LAST write for a key is the newest row. */
+        var byKey = new Dictionary<(int ServerId, string Key), AnalysisSingle>();
+        foreach (var row in rows)
+        {
+            if (row is null || string.IsNullOrEmpty(row.MetricName))
+            {
+                continue;
+            }
+
+            var reason = AlertContextSerializer.TryReadRouting(row.ContextJson)?.Reason ?? string.Empty;
+            var dedupKeys = ReadDedupKeys(row.ContextJson);
+            var server = string.IsNullOrEmpty(row.ServerName)
+                ? row.ServerId.ToString(CultureInfo.InvariantCulture)
+                : row.ServerName;
+
+            byKey[(row.ServerId, row.MetricName)] = new AnalysisSingle(
+                server, FamilyOf(row.MetricName), row.MetricName, row.Severity, reason, dedupKeys, row.AlertTime);
+        }
+
+        var singles = byKey.Values.ToList();
+        var topMovers = singles
+            .OrderByDescending(s => s.Severity)
+            .ThenBy(s => s.Server, StringComparer.Ordinal)
+            .ThenBy(s => s.Key, StringComparer.Ordinal)
+            .Take(MaxListedSinglesMovers)
+            .ToList();
+
+        /* Families ordered most-populous first, then by name; servers inside a family the same way; singles
+           on a server severity-desc. Deterministic, so the document a human reads is assertable. */
+        var families = singles
+            .GroupBy(s => s.Family, StringComparer.Ordinal)
+            .Select(g => new SinglesFamily(
+                g.Key,
+                g.Count(),
+                g.GroupBy(s => s.Server, StringComparer.Ordinal)
+                    .Select(sg => new SinglesServer(
+                        sg.Key,
+                        sg.OrderByDescending(s => s.Severity).ThenBy(s => s.Key, StringComparer.Ordinal).ToList()))
+                    .OrderByDescending(sg => sg.Singles.Count)
+                    .ThenBy(sg => sg.Server, StringComparer.Ordinal)
+                    .ToList()))
+            .OrderByDescending(f => f.Singles)
+            .ThenBy(f => f.Family, StringComparer.Ordinal)
+            .ToList();
+
+        return new AnalysisSinglesDigestFacts(
+            singles.Count,
+            singles.Select(s => s.Server).Distinct(StringComparer.Ordinal).Count(),
+            rows.Count,
+            topMovers,
+            families);
+    }
+
+    /// <summary>The finding's category out of <c>Analysis: {category} [{hash8}]</c>, or the whole name when
+    /// it is not that shape.</summary>
+    internal static string FamilyOf(string metricName)
+    {
+        const string prefix = "Analysis: ";
+        if (!metricName.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return metricName;
+        }
+
+        var bracket = metricName.IndexOf(" [", prefix.Length, StringComparison.Ordinal);
+        var end = bracket < 0 ? metricName.Length : bracket;
+        var category = metricName[prefix.Length..end].Trim();
+        return category.Length == 0 ? metricName : category;
+    }
+
+    /// <summary>The #1140 dedup fingerprints a row's context carries, in order — the keys a page would have
+    /// delivered under <c>{{dedup_key}}</c>. Empty for a row with no incidents or an unparseable context.</summary>
+    private static IReadOnlyList<string> ReadDedupKeys(string? contextJson)
+    {
+        if (!AlertContextSerializer.TryDeserialize(contextJson, out var context) || context.Incidents is not { Count: > 0 })
+        {
+            return Array.Empty<string>();
+        }
+
+        return context.Incidents
+            .Select(i => i.DedupKey)
+            .Where(k => !string.IsNullOrEmpty(k))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Renders the singles digest (#3712). PURE and static, so the DOCUMENT a human reads is assertable — the
+    /// rollup's discipline. The short message is the headline the issue asked for; the detail states the
+    /// span, what a single IS and where the full finding lives, then the top movers by severity (each with
+    /// its key, its reason and its dedup fingerprints), then the by-family blocks. Every cap states the
+    /// remainder it did not list, so the digest never implies it showed everything.
+    /// </summary>
+    internal static (string ShortMessage, string Detail) RenderAnalysisSinglesDigest(
+        AnalysisSinglesDigestFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Anomaly singles: {facts.Singles} across {facts.Servers} servers — uncorroborated findings routed to this digest, not paged");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident (#3712): the once-a-day channel copy of the analysis findings"
+            + $" the corroboration gate kept off the paging channels between {spanStartUtc:o} and {spanEndUtc:o}"
+            + $" — the trailing day only. A single is a finding at or above the notify severity with ONE fact in"
+            + $" its chain and no matched co-fire check; it was persisted the instant it fired and is readable now"
+            + $" in get_analysis_findings (by the story hash in its key) and get_alert_history (notification_type"
+            + $" 'digest', with routing_reason). A single that gains corroboration pages at that moment as a new"
+            + $" firing; nothing here waits on this digest."));
+
+        if (facts.Rows != facts.Singles)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.Rows} ledger rows collapsed to {facts.Singles} distinct singles (a story re-recorded"
+                + $" after a service restart counts once, at its newest severity)."));
+        }
+
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nTop movers by severity ({Math.Min(facts.TopMovers.Count, MaxListedSinglesMovers)} of {facts.Singles}):"));
+        var rank = 0;
+        foreach (var single in facts.TopMovers)
+        {
+            rank++;
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{rank}. {single.Server} — {single.Key} — severity {single.Severity:F2}"));
+            if (!string.IsNullOrEmpty(single.Reason))
+            {
+                sb.Append(" — ").Append(single.Reason);
+            }
+            if (single.DedupKeys.Count > 0)
+            {
+                sb.Append(" — dedup: ").Append(string.Join(", ", single.DedupKeys));
+            }
+        }
+        if (facts.Singles > facts.TopMovers.Count)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n+ {facts.Singles - facts.TopMovers.Count} more singles below the top {MaxListedSinglesMovers}, listed by family below."));
+        }
+
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nBy family ({facts.Families.Count} families):"));
+        foreach (var family in facts.Families)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {family.Family}: {family.Singles} singles across {family.Servers.Count} servers"));
+            foreach (var server in family.Servers.Take(MaxListedSinglesServersPerFamily))
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"\n    {server.Server}: "));
+                sb.Append(string.Join("; ", server.Singles.Take(MaxListedSinglesPerServer).Select(s =>
+                    string.Create(CultureInfo.InvariantCulture, $"{s.Key} {s.Severity:F2}"))));
+                if (server.Singles.Count > MaxListedSinglesPerServer)
+                {
+                    sb.Append(string.Create(CultureInfo.InvariantCulture,
+                        $" + {server.Singles.Count - MaxListedSinglesPerServer} more"));
+                }
+            }
+            if (family.Servers.Count > MaxListedSinglesServersPerFamily)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n    + {family.Servers.Count - MaxListedSinglesServersPerFamily} more servers"));
+            }
+        }
+
+        sb.Append("\nTo promote a single: open its finding on the web surface or read it with get_analysis_findings;"
+            + " the key above is its alert-history metric_name and the dedup fingerprints are the ones a page"
+            + " would have delivered. To page every notify-worthy finding again, set analysis.uncorroboratedRoute"
+            + " to 'page' in darling.json.");
+
+        return (shortMessage, sb.ToString());
     }
 
     /* ------------------------- #3580: the daily documents' delivered-today gate ------------------------- */

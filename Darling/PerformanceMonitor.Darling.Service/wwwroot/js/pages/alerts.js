@@ -99,7 +99,11 @@ function statusCell(a) {
     label = "Not sent";
     sev = "Unknown";
   }
-  return el("span", { class: "status-cell sev-" + sev, title: a.send_error || null }, [
+  /* #3712: an analysis finding's routing_reason — why it paged, or why it went to the digest — rides as the
+     cell's title the way severity_source rides on the severity cell: "why didn't this page" answered on
+     hover, from the row, without opening the detail. A delivery error keeps precedence; it is the rarer and
+     costlier fact. */
+  return el("span", { class: "status-cell sev-" + sev, title: a.send_error || a.routing_reason || null }, [
     el("span", { class: "glyph", text: glyph }),
     el("span", { text: label }),
     /* The channel chip names a real channel only. The state-carrying values are already in the label

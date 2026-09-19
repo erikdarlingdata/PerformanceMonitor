@@ -218,6 +218,15 @@ public class InferenceEngine
         // examples, and why a lone uncorroborated symptom now scores LOW rather than 1.0.
         var confidence = StoryConfidence.Compute(rootFact, path.Count);
 
+        /* #3712: the two corroboration COMPONENTS the confidence just folded together, kept apart on the
+           story so the notification layer can route on them by name. Read here, at the one place the root
+           fact is in hand, rather than re-derived from the scalar downstream: the inverse of the formula
+           is exact today (a lone symptom above the 0.20 floor has a matched check) and stops being exact
+           the day a weight moves, which is the silent-bar-shift design point 1 of #3712 forbids. */
+        var amplifierResults = rootFact?.AmplifierResults;
+        var definedAmplifiers = amplifierResults?.Count ?? 0;
+        var matchedAmplifiers = amplifierResults?.Count(r => r.Matched) ?? 0;
+
         return new AnalysisStory
         {
             RootFactKey = rootKey,
@@ -237,6 +246,8 @@ public class InferenceEngine
             LeafFactKey = leafKey,
             LeafFactValue = leafFact?.Value,
             FactCount = path.Count,
+            MatchedAmplifiers = matchedAmplifiers,
+            DefinedAmplifiers = definedAmplifiers,
             IsAbsolution = false,
             RootFactMetadata = rootFact?.Metadata,
             // Carry the root fact's database through so findings/recommendation cards can show it.

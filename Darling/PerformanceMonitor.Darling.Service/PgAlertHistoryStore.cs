@@ -144,9 +144,20 @@ AND   send_error IS NULL", "EmailAlert");
 AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
 
     public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
-        /* Unfiltered — any channel/result (the analysis cooldown is stamped unconditionally). #2716
-           reuses the dedupKey filter to seed Postgres Tier-0-predictor cooldowns across a restart. */
-        ReadMaxAlertTimeAsync(serverId, metricName, dedupKey, extraFilter: "", logScope: "AnalysisNotify");
+        /* Any channel/result (the analysis cooldown is stamped unconditionally) EXCEPT a row the #3712
+           corroboration gate routed to the digest: that row is not a page and must not seed a page bucket,
+           or the escalation that arrives when the story gains corroboration is held as a repeat. Spelled as
+           a parameter rather than inlined so the constant the writer uses is the constant the reader
+           excludes. #2716 reuses the dedupKey filter to seed Postgres Tier-0-predictor cooldowns across a
+           restart; none of those rows carry the digest disposition, so the exclusion is inert there. */
+        ReadMaxAlertTimeAsync(serverId, metricName, dedupKey, DigestExclusionFilter, logScope: "AnalysisNotify");
+
+    /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the
+    /// email/webhook filters above are: <see cref="AlertDelivery.ChannelDigest"/> is a compile-time constant
+    /// of this codebase, and spelling it through the constant is what keeps the writer's value and the
+    /// reader's exclusion one symbol. <c>internal</c> so the test can pin that the filter names the
+    /// constant.</summary>
+    internal const string DigestExclusionFilter = "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'";
 
     private async Task<DateTime?> ReadMaxAlertTimeAsync(
         string serverId, string metricName, string? dedupKey, string extraFilter, string logScope)

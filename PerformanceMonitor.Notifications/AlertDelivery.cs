@@ -81,6 +81,15 @@ public sealed record AlertDelivery
     /// bool for four channels.</summary>
     public const string ChannelFailed = "failed";
 
+    /// <summary>#3712: a channel applied to this analysis finding and the corroboration gate routed it to the
+    /// daily digest instead, so nothing was attempted on any paging channel. Not a suppression and not a fault:
+    /// the finding is persisted, visible on the web and MCP surfaces the instant it fired, and named in the
+    /// digest under the same dedup key a page would have carried. The row's context JSON carries the
+    /// <see cref="AlertContext.Routing"/> record with the reason (a lone fact, no matched co-fire check), so
+    /// "why didn't this page" is answered by the row. Written only by the analysis-finding senders; an engine
+    /// alert never carries it.</summary>
+    public const string ChannelDigest = "digest";
+
     public const string ChannelEmail = "email";
     public const string ChannelWebhook = "webhook";
     public const string ChannelEmailAndWebhook = "email+webhook";
@@ -94,7 +103,7 @@ public sealed record AlertDelivery
     public static IReadOnlyList<string> StateCarryingChannels { get; } = new[]
     {
         ChannelNotApplicable, ChannelNoneConfigured, ChannelMuted, ChannelUndelivered, ChannelTray,
-        ChannelThrottled, ChannelFolded, ChannelFailed,
+        ChannelThrottled, ChannelFolded, ChannelFailed, ChannelDigest,
     };
 
     /// <summary>
@@ -145,6 +154,16 @@ public sealed record AlertDelivery
     /// in <see cref="Channel"/>, which is where a reader can act on it.</para>
     /// </summary>
     public static AlertDelivery NoChannelApplies() => new(false, ChannelNotApplicable, null);
+
+    /// <summary>
+    /// #3712: the corroboration gate routed this analysis finding to the daily digest, so no paging channel
+    /// was consulted. <see cref="Sent"/> is <c>false</c> as a measurement — nothing was delivered — and
+    /// <see cref="Channel"/> is <see cref="ChannelDigest"/>, which is what lets the cooldown seed
+    /// (<c>IAlertHistoryStore.GetLastAlertTimeAsync</c>) leave these rows out: a digest row must not seed a
+    /// PAGE cooldown, or the escalation that arrives when the story gains corroboration would be held as a
+    /// repeat of a page that never happened (design point 2).
+    /// </summary>
+    public static AlertDelivery RoutedToDigest() => new(false, ChannelDigest, null);
 
     /// <summary>
     /// A disposition rebuilt from three already-computed column values. <b>The deprecated Dashboard SKU's
@@ -406,6 +425,13 @@ public static class AlertDeliveryStatus
             return ReportedElsewhere;
         }
 
+        /* #3712: routed to the digest by the corroboration gate. Reached before the tray arm so a Lite row can
+           never read "Shown" for a finding that raised no toast — the digest route skips the tray too. */
+        if (channel == AlertDelivery.ChannelDigest)
+        {
+            return Digest;
+        }
+
         /* Lite's tray toast is a real delivery to a real channel. On a store whose producer had no tray
            the same stored value carries no information at all, so it gets #2781's neutral "Logged" — the
            label the web surface already chose for this exact row, rather than a second word for it. */
@@ -433,6 +459,11 @@ public static class AlertDeliveryStatus
     /// <see cref="AlertDelivery.ChannelFolded"/>'s roster heading. It reached the channel — on someone
     /// else's card — so the label says reported rather than suppressed.</summary>
     public const string ReportedElsewhere = "Reported elsewhere";
+
+    /// <summary>#3712: an analysis finding the corroboration gate routed to the daily digest and the web/MCP
+    /// surfaces instead of a paging channel. Reported, not paged — the word says where it went rather than
+    /// what it was denied.</summary>
+    public const string Digest = "Digest";
 
     /// <summary>#2781/#2814's label for a stored <c>tray</c> row on a surface with no tray: a history row
     /// was written and no channel was involved, with no claim either way. Reached only by rows written

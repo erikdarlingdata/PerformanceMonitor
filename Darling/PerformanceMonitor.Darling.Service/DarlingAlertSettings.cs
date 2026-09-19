@@ -343,6 +343,13 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        Lite always passed a configured one through — the Darling parity gap gotqn called out. */
     public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
 
+    /// <summary>#3712: where an uncorroborated finding goes — <c>analysis.uncorroboratedRoute</c> in darling.json,
+    /// file-level (see <see cref="AnalysisConfig.UncorroboratedRoute"/> for why, and how it survives the store
+    /// reload). Read live through the by-reference seam like every sibling. A value that is neither
+    /// <c>digest</c> nor <c>page</c> is "no opinion" and takes the shipped default, which is the interface's.</summary>
+    public FindingRoute UncorroboratedFindingRoute =>
+        FindingRouting.TryParseRoute(_config.Analysis.UncorroboratedRoute) ?? FindingRoute.Digest;
+
     /// <summary>#2710: the triage-link base — <c>web.publicBaseUrl</c>, read live through the by-reference
     /// config seam like every sibling. File-authoritative on purpose (see the WebConfig doc comment): a store
     /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.</summary>

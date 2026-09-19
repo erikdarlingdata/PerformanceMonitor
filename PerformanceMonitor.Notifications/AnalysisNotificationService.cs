@@ -34,6 +34,16 @@ namespace PerformanceMonitor.Notifications;
 /// back to the int id) and the <see cref="IFindingAlertSender"/> (which owns the per-app
 /// record cadence — Approach B, plan §4.6).
 /// </para>
+///
+/// <para><b>#3712: confidence chooses the channel.</b> Crossing the severity floor makes a finding
+/// notify-worthy; it does not by itself earn a PAGE. Each notify-worthy incident is routed by
+/// <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute)"/> on its members' corroboration
+/// components: an incident with a corroborated member takes the page road (the channels, Lite's tray),
+/// an incident of uncorroborated singles takes the digest road — persisted as a finding, recorded in the
+/// ledger with the <see cref="AlertContext.Routing"/> decision and <see cref="AlertDelivery.RoutedToDigest"/>,
+/// named in the daily digest, and delivered to no channel. The two roads cool in separate key namespaces so
+/// a story that later gains corroboration pages as a NEW firing rather than as a repeat of a digest entry.
+/// The knob is <see cref="IAlertSettings.UncorroboratedFindingRoute"/>.</para>
 /// </summary>
 public sealed class AnalysisNotificationService
 {
@@ -151,6 +161,9 @@ public sealed class AnalysisNotificationService
         // the service consumes the already-clamped values.
         var threshold = _settings.AnalysisNotifySeverity;
         var cooldown = TimeSpan.FromMinutes(_settings.AnalysisNotifyCooldownMinutes);
+        /* #3712: the one knob the routing gate takes — where a lone uncorroborated fact goes. Read once per
+           batch like the threshold, so one cycle routes every incident by the same rule. */
+        var uncorroboratedRoute = _settings.UncorroboratedFindingRoute;
         var now = DateTime.UtcNow;
 
         /* Drop entries UNSEEN for 2× cooldown so the dict stays bounded AND a resolved story becomes
@@ -158,7 +171,8 @@ public sealed class AnalysisNotificationService
            bucket every cycle it fires and so never ages back into freshness while it persists, while
            a chain that genuinely stopped firing is forgotten and re-alerts on recurrence. If a key
            here also matches an incident in this batch, the per-incident seed below re-adds it from
-           history; that's a wash, not a bug. */
+           history; that's a wash, not a bug. Both key namespaces (page and digest, see BucketKey) age
+           out through this one loop. */
         var pruneBefore = now - TimeSpan.FromTicks(cooldown.Ticks * 2);
         foreach (var stale in _cooldowns)
         {
@@ -171,7 +185,9 @@ public sealed class AnalysisNotificationService
            when empty — a legacy or absolution finding has no incident id, and without the fallback
            every empty-id finding would collapse into a single bucket. ServerId is part of the key so
            two servers never share a bucket. GroupBy preserves first-seen order, keeping alert ordering
-           stable. */
+           stable. The severity floor stays UPSTREAM of the routing gate: a finding below it is not
+           notify-worthy on any channel, and the gate only ever decides between the channels a
+           notify-worthy finding may reach. */
         var incidents = findings
             .Where(f => f is not null && f.Severity >= threshold)
             .GroupBy(f => $"{f.ServerId}:{IncidentToken(f)}");
@@ -196,33 +212,68 @@ public sealed class AnalysisNotificationService
             if (_isServerSilenced is not null && _isServerSilenced(serverId))
                 continue;
 
+            /* #3712: confidence chooses the channel. Every member is classified on its corroboration
+               COMPONENTS (a second fact in the chain, a matched co-fire check, or one of the two
+               by-construction stories) — never on the confidence scalar — and the incident takes the
+               PAGE road when any member earned it, the DIGEST road when none did. An uncorroborated
+               single riding in a paging incident is named on the page as co-fired, exactly as before: it
+               is accounted for by the corroborated finding it attached to, which is the "true and
+               redundant" shape the live batch was made of. */
+            var decisions = new Dictionary<AnalysisFinding, FindingRouteDecision>(ReferenceEqualityComparer.Instance);
+            foreach (var m in members)
+                decisions[m] = FindingRouting.Classify(m, uncorroboratedRoute);
+
+            var anyPage = members.Any(m => decisions[m].Route == FindingRoute.Page);
+            var route = anyPage ? FindingRoute.Page : FindingRoute.Digest;
+
             /* Per-member re-notification bucket (escalate-on-CRITICAL): a CRITICAL-band member
                (severity >= the shared >= 1.5 cutoff) gets its OWN per-finding bucket keyed on its
                StoryPathHash, so a NEW critical symptom escalates past the incident dedup and e-mails
                even when the incident already alerted on another member. A below-critical member stays
                on the shared per-incident bucket, so co-fired non-critical symptoms remain one-e-mail-
-               per-incident. */
-            string BucketKey(AnalysisFinding f) =>
-                f.Severity >= CriticalSeverityCutoff
+               per-incident.
+
+               #3712: the ROUTE is a key component. A digest-routed incident cools in its own namespace
+               ("digest|…"), so the day its story gains corroboration — a fact joins the chain (a new
+               hash, so a new key on either road) or a co-fire check starts matching (the SAME hash, a
+               flipped route) — the page namespace holds no bucket for it and it pages as a NEW firing.
+               Escalation is the corroboration event (design point 2); a digest entry must never be the
+               cooldown that eats it. The page namespace keeps the pre-#3712 key text byte for byte. */
+            string BucketKey(AnalysisFinding f)
+            {
+                var key = f.Severity >= CriticalSeverityCutoff
                     ? $"{serverId}:{f.StoryPathHash}"
                     : $"{serverId}:{IncidentToken(f)}";
+                return route == FindingRoute.Digest ? DigestBucketPrefix + key : key;
+            }
 
-            /* Seed each not-yet-known bucket from the alert log on first lookup so a symptom that
+            /* Seed each not-yet-known PAGE bucket from the alert log on first lookup so a symptom that
                fired shortly before an app restart is not re-fired afterward. The persisted equivalent
                is the latest row for that member's metric_name (which embeds the finding's hash).
                History carries no severity, so the seed conservatively assumes the notify threshold —
                the minimum a notified finding can have had — and the first post-restart re-notify needs
                threshold + WorseningStep (#2054). Below-critical members share one bucket, so only the
                first (highest-severity) below-critical member — the one that would lead a
-               below-critical e-mail — is looked up. */
-            foreach (var m in members)
+               below-critical e-mail — is looked up.
+
+               #3712: the store's seed read EXCLUDES digest-routed rows (IAlertHistoryStore.GetLastAlertTimeAsync,
+               both SKUs), so a digest entry written before a restart cannot seed the page bucket of the
+               escalation that follows it. The DIGEST namespace is deliberately NOT seeded: there is no
+               route-filtered seed on the sender seam, and the cost of not having one is bounded and
+               channel-free — after a restart a standing single is re-recorded in the ledger once, no
+               channel is consulted, and the digest document reads distinct stories over its span rather
+               than counting rows. */
+            if (route == FindingRoute.Page)
             {
-                var seedKey = BucketKey(m);
-                if (_cooldowns.ContainsKey(seedKey))
-                    continue;
-                var lastPersisted = await _sender.GetLastAlertTimeAsync(serverId, FindingMessageFormatter.MetricName(m));
-                if (lastPersisted.HasValue)
-                    _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
+                foreach (var m in members)
+                {
+                    var seedKey = BucketKey(m);
+                    if (_cooldowns.ContainsKey(seedKey))
+                        continue;
+                    var lastPersisted = await _sender.GetLastAlertTimeAsync(serverId, FindingMessageFormatter.MetricName(m));
+                    if (lastPersisted.HasValue)
+                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
+                }
             }
 
             /* Lead = the highest-severity member whose bucket allows a notification (#2054
@@ -233,10 +284,16 @@ public sealed class AnalysisNotificationService
                band-jumping, and a new critical already gets its own fresh hash bucket). Steady
                severity holds forever while the story keeps firing — the whole point: an ambient
                fleet truth notifies once per server, not once per cooldown expiry. The whole incident
-               is held only when EVERY member holds (send-if-any-fresh, unchanged). */
+               is held only when EVERY member holds (send-if-any-fresh, unchanged).
+
+               #3712: on the page road only a PAGE-routed member may lead — a digest-routed single in a
+               paging incident is named as co-fired, never put at the head of a page it did not earn.
+               On the digest road every member is digest-routed and any may lead. */
             AnalysisFinding? lead = null;
             foreach (var m in members)
             {
+                if (route == FindingRoute.Page && decisions[m].Route != FindingRoute.Page)
+                    continue;
                 if (_cooldowns.TryGetValue(BucketKey(m), out var state)
                     && (now - state.LastNotified < cooldown || m.Severity < state.LastNotifiedSeverity + WorseningStep))
                     continue;
@@ -261,6 +318,13 @@ public sealed class AnalysisNotificationService
             {
                 var context = FindingMessageFormatter.BuildContext(lead, threshold);
 
+                /* #3712: the gate's decision rides the row on BOTH roads — a page says why it earned the
+                   channel, a digest entry says why it did not — persisted as the trailing Routing member of
+                   the context JSON, the way the fired tier rides for severity_source. Never rendered to a
+                   channel: BuildContext's card is unchanged, and the digest road reaches no card. */
+                var decision = decisions[lead];
+                context.Routing = new AlertRoutingDto(decision.RouteText, decision.Reason);
+
                 /* Name the OTHER findings that co-fired in THIS incident, in the one message, so the
                    single alert still accounts for everything the incident surfaced. Reuses the shared
                    CoFiredSummary the viewer/MCP surfaces use, but with the INCIDENT-scoped lead-in so the
@@ -278,7 +342,9 @@ public sealed class AnalysisNotificationService
                 /* SendFindingAlertAsync fans out to email + Slack + Teams and records the
                    alert per this app's cadence. It returns no success/failure signal, so the
                    buckets are stamped regardless — a symptom whose delivery failed is
-                   suppressed for the full cooldown (accepted best-effort behavior). */
+                   suppressed for the full cooldown (accepted best-effort behavior). On the digest
+                   road (#3712) the sender consults no channel and records the row with the digest
+                   disposition; the same call, so the two roads cannot drift in what they persist. */
                 await _sender.SendFindingAlertAsync(new FindingAlert(
                     FindingMessageFormatter.MetricName(lead),
                     lead.ServerName,
@@ -299,13 +365,15 @@ public sealed class AnalysisNotificationService
                        producer has to say so. Delivery is the only half suppressed: DetailText remains
                        config_alert_log.detail_text, which is the sole copy of these facts on the surfaces
                        that render no structured context, and the input the mute pre-fill parses. */
-                    DeliverDetailText: false));
+                    DeliverDetailText: false,
+                    Route: route));
 
                 /* Always raise the tray balloon for a notify-worthy incident (user choice), the
                    same visible signal threshold alerts already pop — so a local-only user with no
                    email/webhook still sees it. No-op when the host wired no sink (Lite) or tray
-                   notifications are disabled (the sink checks the pref). */
-                if (_showTrayNotification is not null)
+                   notifications are disabled (the sink checks the pref). #3712: the tray is a paging
+                   channel — it interrupts — so the digest road raises nothing here either. */
+                if (route == FindingRoute.Page && _showTrayNotification is not null)
                 {
                     var (title, message) = FindingMessageFormatter.BalloonText(lead);
                     _showTrayNotification(title, message);
@@ -317,7 +385,8 @@ public sealed class AnalysisNotificationService
                    below-critical member on the shared incident bucket. Members arrive severity-DESC,
                    so the FIRST write to a shared bucket carries its highest member's severity; later
                    (lower) members must not overwrite it downward, or a mid-severity member would
-                   spuriously "worsen" past the lowest next cycle. */
+                   spuriously "worsen" past the lowest next cycle. Stamped in the namespace of the road
+                   taken (BucketKey), so a digest entry never occupies a page bucket. */
                 var stamped = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var m in members)
                 {
@@ -335,6 +404,14 @@ public sealed class AnalysisNotificationService
             }
         }
     }
+
+    /// <summary>
+    /// The key-namespace prefix a digest-routed incident cools under (#3712). The page namespace has NO
+    /// prefix — its keys are the pre-#3712 text byte for byte, so a restart-seeded page bucket and an
+    /// in-process one spell the same key — and the pipe cannot occur in a serverId (an int, or a GUID) or
+    /// a StoryPathHash (hex), so the two namespaces can never collide.
+    /// </summary>
+    private const string DigestBucketPrefix = "digest|";
 
     /// <summary>
     /// The batch/cooldown grouping token for a finding: its incident id, or its StoryPathHash when the

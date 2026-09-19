@@ -70,8 +70,14 @@ public interface IAlertHistoryStore
     Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null);
 
     /// <summary>
-    /// MAX(alert_time) UNFILTERED (any channel/result) — seeds the analysis
+    /// MAX(alert_time) over every row that was a PAGING candidate (any channel/result) — seeds the analysis
     /// per-finding cooldown across restart. Stamped unconditionally upstream.
+    /// <para>#3712: rows the corroboration gate routed to the digest (<c>notification_type =
+    /// <see cref="AlertDelivery.ChannelDigest"/></c>) are EXCLUDED. A digest entry is not a page, and a
+    /// seed that read one would hold the page a story earns when it later gains corroboration as a repeat
+    /// of a page that never happened — design point 2 of #3712 makes that escalation a NEW firing. Before
+    /// #3712 this read was unfiltered, and every row it could see was a paging candidate, so the exclusion
+    /// changes nothing about the rows that existed then.</para>
     /// <para>
     /// When <paramref name="dedupKey"/> is non-null (#1154 per-fingerprint cooldown, reused by #2716 to
     /// seed Darling's Postgres Tier-0-predictor cooldowns), the result is additionally restricted to rows

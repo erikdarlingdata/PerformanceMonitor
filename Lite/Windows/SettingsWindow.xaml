@@ -456,6 +456,14 @@
                     <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
+                <!-- #3712: confidence chooses the channel. Checked (the default) keeps a LONE-FACT finding — one fact in
+                     its chain, no matched co-fire check — off email, the webhooks and the tray; it is still recorded in
+                     the Alerts tab (status Digest) and shown in Recommendations with a not-paged marker. Unchecked
+                     restores pre-#3712 delivery of every finding at or above the severity floor. A corroborated
+                     finding is delivered either way. -->
+                <CheckBox x:Name="AnalysisUncorroboratedDigestCheckBox"
+                          Content="Only notify on corroborated findings (a lone uncorroborated fact is recorded, not delivered)"
+                          Margin="20,6,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,4,0,0" TextWrapping="Wrap"/>

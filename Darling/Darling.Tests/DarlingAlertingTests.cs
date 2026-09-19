@@ -433,6 +433,72 @@ WHERE server_id = $1 AND metric_name = $2", connection))
         }
     }
 
+    /// <summary>
+    /// #3712: a row the corroboration gate routed to the digest must NOT seed the page cooldown. Design point 2
+    /// makes the escalation that arrives when a story gains corroboration a NEW firing, and a seed that read the
+    /// digest row would hold that page as a repeat of a page that never happened — across a restart, which is
+    /// exactly when the seed is consulted. The exclusion is on the DIGEST disposition, so a page row on the
+    /// same (server, metric) still seeds, and a digest row written AFTER a page row does not move the seed.
+    /// </summary>
+    [Fact]
+    public async Task PgAlertHistoryStore_GetLastAlertTimeAsync_ExcludesDigestRoutedRows_FromThePageSeed()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-history test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var historyStore = new PgAlertHistoryStore(postgres);
+            const string metricName = "Analysis: anomaly [3712abcd]";
+
+            /* Only a digest row: the page seed sees nothing, the same answer as no history at all. */
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.8", "1.5", 1.8, 1.5,
+                Delivery: AlertDelivery.RoutedToDigest(),
+                Muted: false, DetailText: null, ContextJson: null));
+            Assert.Null(await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName));
+
+            /* A page row (no channel configured is still a paging candidate) seeds… */
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.8", "1.5", 1.8, 1.5,
+                Delivery: AlertDelivery.FromFanout(
+                    new EmailFanoutResult(AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.NotAttempted, null, AnyChannelConfigured: false),
+                    muted: false, trayChannelPresent: false),
+                Muted: false, DetailText: null, ContextJson: null));
+            var pageSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName);
+            Assert.NotNull(pageSeed);
+
+            /* …and a NEWER digest row does not move it. */
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "1.9", "1.5", 1.9, 1.5,
+                Delivery: AlertDelivery.RoutedToDigest(),
+                Muted: false, DetailText: null, ContextJson: null));
+            Assert.Equal(pageSeed, await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task EndToEnd_PgMuteRuleStore_CrudRoundTrip()
     {

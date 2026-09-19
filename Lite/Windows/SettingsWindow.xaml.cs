@@ -685,6 +685,8 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = App.AnalysisIntervalMinutes.ToString();
         AnalysisNotifySeverityBox.Text = App.AnalysisNotifySeverity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = App.AnalysisNotifyCooldownMinutes.ToString();
+        /* #3712: checked = digest (the shipped default), unchecked = page. */
+        AnalysisUncorroboratedDigestCheckBox.IsChecked = App.AnalysisUncorroboratedRoute == FindingRoute.Digest;
         UpdateAlertControlStates();
     }
 
@@ -805,6 +807,10 @@ public partial class SettingsWindow : Window
             App.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
             validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
+        /* #3712: the checkbox IS the route — no third state, so no validation arm. */
+        App.AnalysisUncorroboratedRoute = AnalysisUncorroboratedDigestCheckBox.IsChecked == true
+            ? FindingRoute.Digest
+            : FindingRoute.Page;
 
         root["minimize_to_tray"] = App.MinimizeToTray;
         root["alerts_enabled"] = App.AlertsEnabled;
@@ -867,6 +873,8 @@ public partial class SettingsWindow : Window
         root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
         root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
         root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
+        /* #3712: persisted as its wire spelling ('digest' / 'page'), the one App.LoadAlertSettings parses back. */
+        root["analysis_uncorroborated_route"] = FindingRouting.RouteText(App.AnalysisUncorroboratedRoute);
 
         if (validationErrors.Count > 0)
         {
@@ -912,6 +920,7 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
         AnalysisNotifyCooldownBox.Text = "360";
+        AnalysisUncorroboratedDigestCheckBox.IsChecked = true;
         AlertExcludedDatabasesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
