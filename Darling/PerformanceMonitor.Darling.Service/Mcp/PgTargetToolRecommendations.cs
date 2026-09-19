@@ -44,6 +44,7 @@ internal static class PgTargetToolRecommendations
         [PgTargetFactKeys.ConfigAutovacuumOff] = ConfigReads(),
         [PgTargetFactKeys.ConfigMaxConnections] = ConfigReads(),
         [PgTargetFactKeys.ConfigSuperuserReserved] = ConfigReads(),
+        [PgTargetFactKeys.ConfigReservedConnections] = ConfigReads(),
         [PgTargetFactKeys.ConfigWorkMem] = ConfigReads(),
         [PgTargetFactKeys.ConfigMaintWorkMem] = ConfigReads(),
         [PgTargetFactKeys.ConfigStatStatementsMissing] =
@@ -145,8 +146,11 @@ internal static class PgTargetToolRecommendations
 
         if (key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
         {
+            /* The advice (PgTargetAdvice.Queries.cs) ends on "which is the first question": whether the mean STEPPED
+               (a plan change) or the calls did (a workload change). The read that answers it leads. */
             return
             [
+                new("get_pg_query_duration_trend", "Whether this statement's mean execution time stepped or its call count did — the first question"),
                 new("get_pg_top_queries", "This statement's deltas beside the rest of the window's top statements"),
                 new("get_pg_plans", "Captured plans for the statement, when plan capture is configured"),
             ];

@@ -183,6 +183,11 @@ public sealed class PgTargetFactCollectorTests
     {
         var tables = CollectorCatalog.All.Select(s => s.TargetTable).ToHashSet(StringComparer.Ordinal);
         tables.Add("servers");
+        /* One admission beyond the collector tables and the registry (#3542, between waves): the xmin-horizon arm
+           of the vacuum family (#3537 / #3642's honest denominator) counts SUCCESS captures from collection_log,
+           because "how many minutes of the window did the collector actually observe" is a question only the log
+           answers. Not a v_ view, not a SQL Server table by another name; nothing else is admitted. */
+        tables.Add("collection_log");
 
         foreach (var sql in PgTargetFactCollector.AllSql)
         {

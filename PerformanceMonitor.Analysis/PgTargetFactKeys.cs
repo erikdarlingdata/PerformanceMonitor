@@ -169,6 +169,30 @@ public static class PgTargetFactKeys
 
     public const string BadActorKeyPrefix = "PG_BAD_ACTOR_";
 
+    /* ── Between-waves shared-vocabulary block (#3542, after wave A). Additions here are delimited so a lane
+       landing concurrently can rebase around one block rather than a scatter. ── */
+
+    /// <summary>
+    /// The stable ALIAS an edge names when its destination is "the bad actor" — whichever
+    /// <c>PG_BAD_ACTOR_&lt;queryid&gt;</c> fact the pass emitted. Never a fact's key: no collector stamps it, and
+    /// <see cref="BadActorKeyPrefix"/> does not match it (the alias lacks the trailing underscore), so the
+    /// queries scorer, advice and tool-recommendation arms cannot claim it by prefix. It exists because
+    /// <see cref="RelationshipGraph.AddEdge"/> takes an exact destination string and this family's keys are
+    /// dynamic (lane 7's note in <c>PgTargetRelationshipGraph.Query.cs</c>): the families whose symptom a
+    /// statement explains (<c>PG_TEMP_SPILL</c>, <c>PG_CPU_PERCENT</c>) declare their edge INTO this alias, and
+    /// <see cref="PgTargetRelationshipGraph.GetActiveEdges"/> resolves it at story-build time to the
+    /// highest-severity bad actor present, or drops the edge when none is. One alias, one resolution rule,
+    /// declared once so lanes 6 and 9 do not each invent one.
+    /// </summary>
+    public const string BadActorFamily = "PG_BAD_ACTOR";
+
+    /// <summary>The PostgreSQL 16+ second carve-out of connection slots (<c>reserved_connections</c>, for
+    /// members of <c>pg_use_reserved_connections</c>; default 0; absent before 16). Context, base 0, read at
+    /// collect time by lane 3's ceiling beside <see cref="ConfigMaxConnections"/> and
+    /// <see cref="ConfigSuperuserReserved"/>: <c>usable = max_connections − superuser_reserved_connections −
+    /// reserved_connections</c>.</summary>
+    public const string ConfigReservedConnections = "CONFIG_PG_RESERVED_CONNECTIONS";
+
     /* ── Lane 8 — durability posture (D6): posture-only, isolated from every amplifier and edge. ── */
 
     public const string PostureFsync = "PG_POSTURE_FSYNC";
@@ -236,7 +260,8 @@ public static class PgTargetFactKeys
     /// default, an extension missing, a durability setting off) may root a card on a quiet server; an
     /// EVIDENCE-gated check (<c>work_mem</c>, <c>maintenance_work_mem</c>) may not — it scores above zero
     /// only when its workload co-fire exists, and then the co-fire is the root. The context facts
-    /// (<c>max_connections</c>, <c>superuser_reserved_connections</c>) score 0 and are not here either.
+    /// (<c>max_connections</c>, <c>superuser_reserved_connections</c>, <c>reserved_connections</c>) score 0 and
+    /// are not here either.
     ///
     /// <para>Pre-declared here rather than left for the lanes so that four parallel content lanes do not
     /// each edit this one shared file. A lane whose design moves a key between the two classes edits this

@@ -41,12 +41,14 @@ public sealed class PgTargetMcpSurfaceTests
     {
         Assert.True(RegisteredTools.Count > 40, "the tool sweep found too few registered tools");
 
-        /* The fixed keys (the *Prefix consts are routing vocabulary, not keys a story can carry) plus one
-           instance of each dynamic family. */
+        /* The fixed keys (the *Prefix consts are routing vocabulary, not keys a story can carry; the bad-actor
+           ALIAS is an edge destination the PG graph resolves before any path is built, so no story carries it
+           either) plus one instance of each dynamic family. */
         var keys = typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
             .Where(f => f.IsLiteral && f.FieldType == typeof(string) && !f.Name.EndsWith("Prefix", StringComparison.Ordinal))
             .Select(f => (string)f.GetRawConstantValue()!)
             .Where(PgTargetFactKeys.IsPgKey)
+            .Where(k => !PgTargetRelationshipGraph.IsBadActorAlias(k))
             .Append(PgTargetFactKeys.WaitKey("Lock", "relation"))
             .Append(PgTargetFactKeys.BadActorKey(42))
             .ToList();

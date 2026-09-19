@@ -39,8 +39,11 @@ public class RelationshipGraph
     /// <summary>
     /// Returns all edges originating from the given fact key,
     /// filtered to only those whose predicates are true.
+    /// Virtual (#3542, between waves) for the one derived graph whose edges can name an ALIAS destination
+    /// (<see cref="PgTargetFactKeys.BadActorFamily"/>) that must be resolved against the fact set at
+    /// story-build time; the SQL Server graph never overrides it and this body is byte-for-byte what it was.
     /// </summary>
-    public List<Edge> GetActiveEdges(string sourceKey, IReadOnlyDictionary<string, Fact> factsByKey)
+    public virtual List<Edge> GetActiveEdges(string sourceKey, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         if (!_edges.TryGetValue(sourceKey, out var edges))
             return [];

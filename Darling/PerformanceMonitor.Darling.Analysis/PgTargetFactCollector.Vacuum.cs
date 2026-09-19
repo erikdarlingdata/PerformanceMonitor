@@ -358,6 +358,15 @@ CROSS JOIN window_stats AS w";
             if (lastAutovacuum.HasValue)
                 fact.Metadata[PgTargetScorer.BacklogHoursSinceLastAutovacuumKey] = (AsNaive(context.TimeRangeEnd) - lastAutovacuum.Value).TotalHours;
 
+            /* The D5 stamp onto the knob, off the config fact emitted a moment ago (emission order: Config before
+               Vacuum) — the same seam PgTargetFactCollector.Database.cs uses to stamp the spill rate onto work_mem.
+               CONFIG_PG_MAINT_WORK_MEM's source is pg_config, so its base comes from ScoreConfigFact, which receives
+               one fact and no lookup; the backlog ratio has to be ON the fact for the knob to score anything
+               (PgTargetScorer.Config.cs, ScoreConfigMaintWorkMem). Absent (no backlog fact) the knob stays context. */
+            var maintWorkMem = facts.Find(f => f.Key == PgTargetFactKeys.ConfigMaintWorkMem);
+            if (maintWorkMem is not null)
+                maintWorkMem.Metadata[PgTargetScorer.MaintWorkMemBacklogRatioKey] = ratio;
+
             facts.Add(fact);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))

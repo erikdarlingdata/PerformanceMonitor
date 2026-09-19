@@ -120,7 +120,18 @@ public static class ComparisonBanding
     public const string PresenceComparisonOnly = "comparison_only";
     public const string PresenceBaselineOnly = "baseline_only";
 
-    /// <summary>The <c>BAD_ACTOR_&lt;query_hash&gt;</c> family — per-query identity, reported as churn.</summary>
+    /// <summary>The <c>BAD_ACTOR_&lt;query_hash&gt;</c> family — per-query identity, reported as churn.
+    ///
+    /// <para><b>Deliberately NOT <c>PG_BAD_ACTOR_</c> (#3542, decided between waves).</b> The PostgreSQL twin is keyed
+    /// on <c>pg_stat_statements.queryid</c>, which is stable for the life of a PostgreSQL major (it changes only
+    /// across a major upgrade or a <c>compute_query_id</c> change — the advice says so), whereas SQL Server's
+    /// <c>query_hash</c> is a plan-cache identity that a recompile can re-key inside one window. So for a
+    /// PostgreSQL bad actor the key-set arithmetic is HONEST: a statement present in one window and absent from
+    /// the other did start or stop being a top consumer (or fell out of the top-5 cut — the one churn source that
+    /// remains, and the presence text is read with that in mind). The churn band would hide a real new offender
+    /// behind "the cache held a different plan", which is not a thing PostgreSQL's identity does. A
+    /// <c>PG_BAD_ACTOR_*</c> key therefore falls through <see cref="IsPlanCacheIdentityKey"/> (no shared prefix)
+    /// and takes the presence path.</para></summary>
     public const string PlanCacheIdentityPrefix = "BAD_ACTOR_";
 
     /// <summary>

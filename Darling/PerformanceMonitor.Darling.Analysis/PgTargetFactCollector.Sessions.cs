@@ -125,12 +125,14 @@ CROSS JOIN latest AS l";
     /// scoring. The three numbers ride the fact as metadata so the advice states them and a reader of
     /// <c>get_analysis_facts</c> can redo the division.</para>
     ///
-    /// <para><b>usable = max_connections − superuser_reserved_connections</b>, engine-defined: PostgreSQL refuses
-    /// the connection that would take the last <c>superuser_reserved_connections</c> slots unless the role is a
-    /// superuser, so an ordinary application sees the cliff there, not at <c>max_connections</c>. PostgreSQL 16
-    /// added <c>reserved_connections</c> (slots for <c>pg_use_reserved_connections</c> members, default 0) as a
-    /// second carve-out; lane 2's snapshot name list does not carry it yet, so on a target that set it this
-    /// ceiling reads that many slots HIGH — noted, not compensated.</para>
+    /// <para><b>usable = max_connections − superuser_reserved_connections − reserved_connections</b>, engine-defined:
+    /// PostgreSQL refuses the connection that would take the last <c>superuser_reserved_connections</c> slots
+    /// unless the role is a superuser, so an ordinary application sees the cliff there, not at
+    /// <c>max_connections</c>. PostgreSQL 16 added <c>reserved_connections</c> (slots held for members of
+    /// <c>pg_use_reserved_connections</c>, default 0) as a second carve-out ahead of the superuser one, and an
+    /// ordinary role hits that cliff first; the snapshot name list carries it since the between-waves pass, so
+    /// the third context fact is subtracted when present and 0 when absent (a pre-16 target has no such setting,
+    /// which is the same arithmetic as the 16+ default).</para>
     ///
     /// <para><b>Precedence: redaction first.</b> A majority-redacted window emits the permissions advisory and
     /// returns — no saturation fact, no ratio — because under redaction the state columns and the collector's own
@@ -211,9 +213,12 @@ CROSS JOIN latest AS l";
                 return;
             }
 
-            /* ── The ceiling, off lane 2's two context facts (emission order: Config before Sessions). ── */
+            /* ── The ceiling, off lane 2's context facts (emission order: Config before Sessions). The third is
+               PostgreSQL 16+'s reserved_connections (pg_use_reserved_connections); absent on a pre-16 snapshot and
+               then 0, so the two mandatory facts alone still make a ceiling. ── */
             var maxConnections = facts.Find(f => f.Key == PgTargetFactKeys.ConfigMaxConnections);
             var reserved = facts.Find(f => f.Key == PgTargetFactKeys.ConfigSuperuserReserved);
+            var reservedForRole = facts.Find(f => f.Key == PgTargetFactKeys.ConfigReservedConnections)?.Value ?? 0;
             if (maxConnections is null || reserved is null)
             {
                 _logger?.LogDebug(
@@ -222,9 +227,9 @@ CROSS JOIN latest AS l";
                 return;
             }
 
-            var usable = maxConnections.Value - reserved.Value;
-            /* PostgreSQL refuses to start with superuser_reserved_connections >= max_connections, so a
-               non-positive ceiling is a snapshot that does not describe a running server; no claim. */
+            var usable = maxConnections.Value - reserved.Value - reservedForRole;
+            /* PostgreSQL refuses to start with superuser_reserved_connections + reserved_connections >= max_connections,
+               so a non-positive ceiling is a snapshot that does not describe a running server; no claim. */
             if (usable <= 0)
                 return;
 
@@ -250,6 +255,7 @@ CROSS JOIN latest AS l";
                     ["latest_idle_in_transaction_sessions"] = latestIdleInTransaction,
                     ["max_connections"] = maxConnections.Value,
                     ["superuser_reserved_connections"] = reserved.Value,
+                    ["reserved_connections"] = reservedForRole,
                     ["usable_connections"] = usable,
                     ["max_connections_pending_restart"] = maxConnections.Metadata.GetValueOrDefault("pending_restart"),
                     ["config_snapshot_age_s"] = maxConnections.Metadata.GetValueOrDefault("snapshot_age_s"),

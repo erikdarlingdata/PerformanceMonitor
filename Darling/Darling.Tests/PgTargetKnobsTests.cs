@@ -86,9 +86,12 @@ public sealed class PgTargetKnobsTests
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigMaxConnections, 100)));
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigSuperuserReserved, 3)));
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ServerMajorVersion, 18)));
-        /* Other lanes' keys fall to 0 through this arm until they fill it. */
+        /* The evidence-gated keys are 0 without their stamp (D5); the vacuum family's posture arm is graded in
+           PgTargetBetweenWavesTests. */
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigWorkMem, 4)));
-        Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigAutovacuumOff, 1)));
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigMaintWorkMem, 64)));
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigAutovacuumOff, 0)));
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config(PgTargetFactKeys.ConfigReservedConnections, 2)));
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Config("PG_PROBE", 99)));
     }
 
@@ -611,7 +614,7 @@ public sealed class PgTargetKnobsTests
                  {
                      "shared_buffers", "max_wal_size", "min_wal_size", "effective_cache_size", "random_page_cost", "track_io_timing",
                      "checkpoint_timeout", "checkpoint_completion_target", "wal_compression", "bgwriter_delay", "bgwriter_lru_maxpages",
-                     "max_connections", "superuser_reserved_connections", "work_mem", "maintenance_work_mem", "autovacuum",
+                     "max_connections", "superuser_reserved_connections", "reserved_connections", "work_mem", "maintenance_work_mem", "autovacuum",
                  })
         {
             Assert.Contains($"'{name}'", sql, StringComparison.Ordinal);
