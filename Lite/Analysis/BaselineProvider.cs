@@ -329,7 +329,7 @@ LIMIT 1";
     /// <para>#3653 Q6: hh, dw and d are extracted from <see cref="LocalCollectionTime"/> — collection_time
     /// shifted onto the target's clock by the $4..$6 step function — not from bare collection_time. That ONE
     /// substitution re-keys every arm ending in <c>clean(collection_time, v)</c>; d is the LOCAL date, so
-    /// distinct_days counts the server's days and a Wednesday-03:00Z row at UTC−5 is a Tuesday-22h sample with
+    /// distinct_days counts the server's days and a Wednesday 03:00Z row at UTC−5 is a Tuesday-22h sample with
     /// a Tuesday date. Internal (was private) so the tests can run the real text over a fixture.</para>
     /// </summary>
     internal const string RobustTierScaffold = @"

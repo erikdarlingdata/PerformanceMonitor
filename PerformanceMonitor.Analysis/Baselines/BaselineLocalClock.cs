@@ -242,7 +242,7 @@ public sealed class BaselineLocalClock
     {
         var sign = minutes < 0 ? "-" : "+";
         var magnitude = Math.Abs(minutes);
-        return string.Create(CultureInfo.InvariantCulture, $"UTC{sign}{magnitude / 60:00}:{magnitude % 60:00}");
+        return string.Create(CultureInfo.InvariantCulture, $"UTC offset {sign}{magnitude / 60:00}:{magnitude % 60:00}");
     }
 }
 

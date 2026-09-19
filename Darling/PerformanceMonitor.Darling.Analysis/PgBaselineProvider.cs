@@ -510,7 +510,7 @@ LIMIT 1";
        what re-keys every arm ending in clean(collection_time, v): the SQL Server arms here, the legacy arms,
        and every PgTargetBaselineProvider arm, the quarter-hour I/O grain included (every real offset is a
        multiple of 15 minutes, so a date_bin'd sample and its rows shift into the same local hour). d is the
-       LOCAL date, so distinct_days counts the server's days, and a Wednesday-03:00Z row at UTC−5 is a
+       LOCAL date, so distinct_days counts the server's days, and a Wednesday 03:00Z row at UTC−5 is a
        Tuesday-22h sample with a Tuesday date.
     */
     internal const string RobustTierScaffold = @"

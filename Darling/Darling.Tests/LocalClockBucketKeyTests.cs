@@ -178,7 +178,7 @@ public sealed class LocalClockBucketKeyTests
 
         var note = Assert.Single(notes);
         Assert.Contains("'Not/A_Zone' is not resolvable on this host", note, StringComparison.Ordinal);
-        Assert.Contains("using the offset in force at the snapshot (UTC-05:00)", note, StringComparison.Ordinal);
+        Assert.Contains("using the offset in force at the snapshot (UTC offset -05:00)", note, StringComparison.Ordinal);
         Assert.Contains("off by an hour across a DST transition", note, StringComparison.Ordinal);
 
         /* A different unresolvable id is a different statement about the host. */
