@@ -22,8 +22,18 @@ namespace Lite.Tests;
 /// fallback), the 20-column payload and its WritePayload ordinals, the attention handling (its duration is
 /// dropped to NULL because the attention event's own duration is cancellation-handling time, not query
 /// runtime), and the shared session DDL builders (the duration predicate on the COMPLETED events only,
-/// attention unfiltered, the SET collect_* customizable columns, the 9 actions with nt_username omitted on
-/// the Azure database-scoped form, and the idempotent guarded DROP).
+/// attention unfiltered, the SET collect_* customizable columns, the 9 actions server-scoped, and the
+/// idempotent guarded DROP).
+///
+/// <para><b>The Azure action list is pinned against a CLOSED list of rejects (#3753).</b> Azure SQL DB
+/// refuses the whole CREATE when a database-scoped session names an action it does not offer (error
+/// 25744), so one bad action means the session never exists and the collector is dead on every Azure
+/// database. #1496 stripped <c>nt_username</c> by hand and left <c>server_principal_name</c> in; the
+/// reporter's Azure server rejected that one on every sweep. The pins here assert the Azure DDL carries
+/// NONE of <see cref="LongQueryCompletionsCollector.AzureSqlDbUnavailableActions"/>, that the list
+/// itself is exactly the two known rejects (so a third is a conscious edit here, not a drive-by), that
+/// the on-prem DDL still emits all nine, and that the stand-in <c>sqlserver.username</c> is emitted on
+/// Azure only and read by the shared shred into the <c>server_principal_name</c> column.</para>
 /// </summary>
 public sealed class LongQueryCompletionsCollectorDefinitionTests
 {
@@ -274,21 +284,158 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Contains("package0.ring_buffer", sql, StringComparison.Ordinal);
     }
 
+    /* The nine actions the server-scoped DDL has emitted since #1496, spelled out here rather than read
+       off the collector so a member silently dropping out of the source list reds this pin instead of
+       shrinking both sides at once. Order is the emission order. */
+    private static readonly string[] s_onPremActions =
+    {
+        "sqlserver.client_app_name",
+        "sqlserver.client_pid",
+        "sqlserver.database_id",
+        "sqlserver.database_name",
+        "package0.event_sequence",
+        "sqlserver.nt_username",
+        "sqlserver.query_hash",
+        "sqlserver.server_principal_name",
+        "sqlserver.session_id",
+    };
+
     [Fact]
-    public void BuildCreateSessionSql_Azure_DatabaseScoped_OmitsNtUsername_AndPartitionMode()
+    public void BuildCreateSessionSql_ServerScoped_EmitsAllNineActions_InOrder_OnEveryEvent_AndNoAzureStandIn()
+    {
+        /* #3753 made the Azure branch generate from lists instead of splicing a string; this pins that the
+           on-prem branch came through that refactor emitting exactly what it emitted before — all nine,
+           in the same order, on each of the three events — and that the Azure stand-in did NOT leak into
+           the on-prem DDL (on-prem keeps server_principal_name itself; sqlserver.username is Azure-only). */
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: false, 2_000_000);
+
+        foreach (var action in s_onPremActions)
+        {
+            Assert.Equal(3, CountOf(sql, action));
+        }
+
+        var actionBlock = string.Join(",", s_onPremActions.Select(a => "\n        " + a));
+        Assert.Equal(3, CountOf(sql, actionBlock));
+
+        Assert.DoesNotContain(LongQueryCompletionsCollector.AzureSqlDbUsernameAction, sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AzureSqlDbUnavailableActions_IsExactlyTheTwoKnownRejects_AndEveryMemberIsAnOnPremAction()
+    {
+        /* A CLOSED list: the two actions Azure SQL DB has actually refused in this session's DDL —
+           nt_username (#1496, stripped ad hoc then) and server_principal_name (#3753, the one that killed
+           the session on the reporter's Azure server). Pinned by literal so growing it is a deliberate
+           edit here with the evidence attached, not a drive-by. */
+        Assert.Equal(
+            new[] { "sqlserver.nt_username", "sqlserver.server_principal_name" },
+            LongQueryCompletionsCollector.AzureSqlDbUnavailableActions);
+
+        /* Every member must be something the on-prem list actually emits — a misspelled member would
+           strip nothing, the Azure DDL would still carry the real action, and the CREATE would still fail
+           while this list claimed otherwise. */
+        foreach (var action in LongQueryCompletionsCollector.AzureSqlDbUnavailableActions)
+        {
+            Assert.Contains(action, s_onPremActions);
+        }
+
+        /* The stand-in is not itself a reject, or the Azure branch would strip what it just added. */
+        Assert.DoesNotContain(LongQueryCompletionsCollector.AzureSqlDbUsernameAction, LongQueryCompletionsCollector.AzureSqlDbUnavailableActions);
+        Assert.Equal("sqlserver.username", LongQueryCompletionsCollector.AzureSqlDbUsernameAction);
+    }
+
+    [Fact]
+    public void BuildCreateSessionSql_Azure_DatabaseScoped_CarriesNoRejectedAction_SubstitutesUsername_AndOmitsPartitionMode()
     {
         var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: true, 2_000_000);
 
         Assert.Contains("ON DATABASE", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON SERVER", sql, StringComparison.Ordinal);
-        /* nt_username is Windows-auth-specific and may be absent in an Azure database-scoped session. */
+
+        /* #3753 — the field failure this pin now ENFORCES: Azure SQL DB rejects the whole CREATE (error
+           25744) for any action a database-scoped session may not carry, so the Azure DDL must name NONE
+           of the closed reject list. Before this pin the DDL stripped nt_username and still emitted
+           server_principal_name, and the session never existed on any Azure database. */
+        Assert.NotEmpty(LongQueryCompletionsCollector.AzureSqlDbUnavailableActions);
+        foreach (var rejected in LongQueryCompletionsCollector.AzureSqlDbUnavailableActions)
+        {
+            Assert.DoesNotContain(rejected, sql, StringComparison.Ordinal);
+        }
+
+        /* The two field failures by name, independent of the list above — so this pin still reds if the
+           list itself is edited down, which is what the mutation check that wrote it confirmed. */
+        Assert.DoesNotContain("sqlserver.server_principal_name", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("sqlserver.nt_username", sql, StringComparison.Ordinal);
+
+        /* The seven actions Azure allows still ride on all three events, in on-prem order, and the
+           stand-in for the principal name is appended — eight per event. */
+        var azureActions = s_onPremActions
+            .Where(a => !LongQueryCompletionsCollector.AzureSqlDbUnavailableActions.Contains(a))
+            .Append(LongQueryCompletionsCollector.AzureSqlDbUsernameAction)
+            .ToArray();
+        Assert.Equal(8, azureActions.Length);
+        foreach (var action in azureActions)
+        {
+            Assert.Equal(3, CountOf(sql, action));
+        }
+
+        var actionBlock = string.Join(",", azureActions.Select(a => "\n        " + a));
+        Assert.Equal(3, CountOf(sql, actionBlock));
+
         /* Azure database-scoped sessions do not accept MEMORY_PARTITION_MODE. */
         Assert.DoesNotContain("MEMORY_PARTITION_MODE", sql, StringComparison.Ordinal);
-        /* The other actions + the predicate + the SET clauses still apply. */
-        Assert.Contains("sqlserver.server_principal_name", sql, StringComparison.Ordinal);
+        /* The predicate + the SET clauses still apply. */
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "WHERE duration >= 2000000").Count);
+        Assert.Contains("collect_statement = 1", sql, StringComparison.Ordinal);
+        Assert.Contains("collect_batch_text = 1", sql, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildQuery_ShredReadsEitherPrincipalAction_IntoServerPrincipalName(bool isAzureSqlDb)
+    {
+        /* The shred is shared by both scopes, so the server_principal_name column must read whichever of
+           the two principal actions the session actually carries: server_principal_name on-prem,
+           sqlserver.username on Azure (#3753). An action[@name=...] path with no matching node yields
+           NULL, so exactly one arm of the COALESCE is ever non-NULL for a given session's payload — the
+           on-prem result is unchanged and Azure stops landing NULL. Pinned on both scopes because a
+           scope-conditional shred would be the drift this collector centralizes its DDL to prevent. */
+        var plan = LongQueryCompletionsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: isAzureSqlDb));
+
+        Assert.Contains(
+            "server_principal_name =\n        COALESCE\n        (\n" +
+            "            evt.value('(action[@name=\"server_principal_name\"]/value/text())[1]', 'nvarchar(256)'),\n" +
+            "            evt.value('(action[@name=\"username\"]/value/text())[1]', 'nvarchar(256)')\n" +
+            "        ),",
+            Lf(plan.Text), StringComparison.Ordinal);
+
+        /* nt_username keeps its plain single-action read — on Azure that action is absent and the column
+           lands NULL by the same no-node rule; nothing stands in for it. */
+        Assert.Contains("nt_username = evt.value('(action[@name=\"nt_username\"]/value/text())[1]', 'nvarchar(256)'),", plan.Text, StringComparison.Ordinal);
+
+        /* The projection order the reader's ordinals depend on is untouched: server_principal_name is still
+           the 19th column (ordinal 18), between query_hash and session_id. */
+        var qh = plan.Text.IndexOf("query_hash = evt.value", StringComparison.Ordinal);
+        var spn = plan.Text.IndexOf("server_principal_name =", StringComparison.Ordinal);
+        var sid = plan.Text.IndexOf("session_id = evt.value", StringComparison.Ordinal);
+        Assert.True(qh > 0 && qh < spn && spn < sid, "server_principal_name must stay between query_hash and session_id in the shred");
+    }
+
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+        return count;
+    }
+
+    /* The collector source is CRLF (repo .gitattributes), so verbatim-literal lines carry \r\n while the
+       generated action lines carry \n; multi-line asserts normalize to LF first, the same way
+       QueryStoreCollectorDefinitionTests does. */
+    private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
     public void BuildStartSessionSql_ScopeSelected()
