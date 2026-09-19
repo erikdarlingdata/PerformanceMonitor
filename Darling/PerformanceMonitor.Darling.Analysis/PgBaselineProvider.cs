@@ -223,38 +223,19 @@ public class PgBaselineProvider
     };
 
     /// <summary>
-    /// THE SUPPLY RULE (#3653), pure so the tests can walk it: read the successor when the legacy relation is
-    /// absent, or when the successor reaches at least as far back into THIS server's window as the legacy
-    /// does. <paramref name="windowStart"/> bounds what "as far back" can mean — history older than the
-    /// window is never read, so a legacy relation reaching 35 days back buys nothing over a successor reaching
-    /// 30 when the question is a 30-day window.
-    ///
-    /// <para><b>Compared against the legacy's OWN reach for this server, not against the window alone.</b> A
-    /// server registered three days ago has three days in BOTH relations; a rule of "successor covers the
-    /// window" would send that server to the legacy, contaminated supply for twenty-seven days for no gain.
-    /// The comparison is <c>successorOldest &lt;= GREATEST(legacyOldest, windowStart)</c>: the successor must
-    /// reach the later of the legacy's first bucket and the window's start, which is exactly the first instant
-    /// the legacy could contribute a row the successor cannot.</para>
-    ///
-    /// <para>An EMPTY successor (<c>null</c> oldest — created but not yet backfilled) never wins while a legacy
-    /// with rows exists; an empty legacy always loses. Both empty: successor, since there is nothing to read
-    /// either way and the successor is the relation that will fill.</para>
+    /// THE SUPPLY RULE (#3653) as this provider applies it — per metric, against THIS server's reach into the
+    /// two baseline supplies: read the successor when the legacy relation is absent, or when the successor
+    /// reaches at least as far back into the server's window as the legacy does. The rule itself lives ONCE, on
+    /// <see cref="TimescaleSupport.PrefersSuccessor"/>, since Q12 gave it a second caller (the hourly rollup
+    /// readers, through <c>RollupCoverage.HourlyRelationFor</c>, over a store's materialized floors rather than
+    /// one server's); the argument for the comparison — against the legacy's OWN reach, never the window alone,
+    /// so a server registered three days ago is not sent to the contaminated supply for twenty-seven days for
+    /// no gain — is stated there. This alias keeps the provider's tests reading the rule under the name they
+    /// pinned it by, and keeps the per-server inputs (<see cref="SupplyOldestBucketSql"/>) where the rollup
+    /// readers have none.
     /// </summary>
     internal static bool PrefersSuccessor(bool legacyExists, DateTime? legacyOldest, DateTime? successorOldest, DateTime windowStart)
-    {
-        if (!legacyExists || legacyOldest is null)
-        {
-            return true;
-        }
-
-        if (successorOldest is null)
-        {
-            return false;
-        }
-
-        var legacyReach = legacyOldest.Value > windowStart ? legacyOldest.Value : windowStart;
-        return successorOldest.Value <= legacyReach;
-    }
+        => TimescaleSupport.PrefersSuccessor(legacyExists, legacyOldest, successorOldest, windowStart);
 
     /// <summary>
     /// One server's oldest bucket in a baseline relation. <c>WHERE server_id = $1</c> is what keeps this cheap on a

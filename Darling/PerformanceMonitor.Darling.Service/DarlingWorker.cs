@@ -1379,6 +1379,10 @@ public sealed class DarlingWorker : BackgroundService
            plain-PostgreSQL mode or if the TimescaleDB block faults before reaching it. Drained at shutdown. */
         Task? baselineBackfill = null;
 
+        /* And the materialization-hole repair's (#3653, Q10), launched the same way right after the ensure
+           sweep; same lifetime, same drain. */
+        Task? holeRepair = null;
+
         try
         {
             await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
@@ -1412,6 +1416,27 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(timescaleConnection, _logger, stoppingToken);
 
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #3653 (Q12): one line per superseded hourly rollup — where the interval-honest successor's
+                   materialized floor stands against the legacy's and against the hourly tier's horizon — so the
+                   hand-over from legacy to successor is visible in the log while it happens. An instrument,
+                   not a mechanism (nothing here changes a policy or drops a relation; SupersededHourlyRollups
+                   states why the legacy trio stays). AFTER the ensure so both relations exist on the start that
+                   creates the successors; two min(bucket) reads per pair, failure-isolated, never fatal. */
+                await TimescaleSupport.LogSupersededHourlyRollupCoverageAsync(timescaleConnection, _logger, DateTime.UtcNow, stoppingToken);
+
+                /* #3653 (Q10): the materialization-hole repair — for every continuous aggregate, the bucket ranges
+                   inside its materialized span where the source holds rows and the aggregate holds none (the
+                   pre-outage tail a refresh policy can never reach back to once its window has moved past it),
+                   each closed with ONE forced refresh over exactly its bounds, oldest first, capped per aggregate
+                   at one policy window's worth of buckets. AFTER the ensure so every aggregate exists, and BEFORE
+                   the compression and retention ensures below, on its own connection and NOT awaited — the scan
+                   is a few hundred index probes per aggregate and starts at once, but a capped repair on the
+                   heaviest aggregate is a policy run's worth of work, and holding a restarted service dark for
+                   it is the trade #1757 already declined for the baseline backfill. Ordering against the
+                   retention re-arm is not load-bearing (TimescaleSupport.MaterializationHoles states why).
+                   Drained with the command loop at shutdown. */
+                holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
 
                 /* #3597: AFTER the aggregates exist and BEFORE compression, take the eleven per-column group
                    indexes off the interval-dedup materialization on any store whose aggregate predates
@@ -2375,6 +2400,21 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* And the hole repair (#3653, Q10), for the same reason: a forced refresh cut short at shutdown is
+           re-found by the next start's scan, because the scan reads the materialization rather than a ledger
+           of what this start meant to do. */
+        if (holeRepair is not null)
+        {
+            try
+            {
+                await holeRepair;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
+        }
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 
@@ -2620,6 +2660,32 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning(
                 "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Scans every continuous aggregate for materialization holes and closes each with one targeted forced
+    /// refresh (#3653, Q10 — <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>), concurrently with
+    /// the rest of startup rather than ahead of it, for the reason <see cref="RunBaselineBackfillAsync"/> gives:
+    /// the work is bounded but not small on the largest store, and a restarted service must not go dark for it.
+    ///
+    /// <para>Its OWN connection, like the backfill's — the startup connection is scoped to the TimescaleDB
+    /// block. Everything but cancellation is swallowed here: the pass is failure-isolated per aggregate
+    /// already, so this catch is for the connection-open path, and a store whose holes cannot be repaired
+    /// degrades to the holes it had, never to a service that did not start.</para>
+    /// </summary>
+    private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
                 ex.Message);
         }
     }

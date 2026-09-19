@@ -429,9 +429,13 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("public const string ProcedureDurationTrendSql", reader, StringComparison.Ordinal);
 
         /* And the tool still reaches the read under the name it always used: the alias is public, the reader
-           passes it as command text, and the viewer's procedure query keeps its $4 (DatabaseFilterTests). */
-        Assert.Contains("QueryDurationTrendSql, QueryDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
-        Assert.Contains("ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
+           passes it as command text, and the viewer's procedure query keeps its $4 (DatabaseFilterTests).
+           Since #3653 (Q12) only the RAW alias is passed: the hourly text is built inside the routed read from
+           the route's resolved relation (the interval-honest successor where it reaches as far as the legacy),
+           so the hourly constants stay as the pinned legacy text and are no longer the routed read's argument. */
+        Assert.Contains("QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("DurationTrendRouting.BuildHourlyTrendSql(route.HourlyView, withDatabaseFilter: false)", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);

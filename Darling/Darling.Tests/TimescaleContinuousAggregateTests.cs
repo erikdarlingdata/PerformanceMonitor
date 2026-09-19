@@ -195,9 +195,13 @@ public sealed class TimescaleContinuousAggregateTests
     {
         Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
 
-        /* Thirteen hourly refreshes: the six named rollups plus the seven baseline aggregates. */
-        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
+        /* Sixteen hourly refreshes since #3653 (Q12): the nine registered hourly rollups — the six #3174
+           counted plus the three interval-honest successors appended beside the legacy trio they supersede —
+           and the seven baseline aggregates. Fifteen of them light; the heaviest is answered by identity. */
+        Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
+        Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
+        Assert.Equal(16, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(15, TimescaleSupport.LightHourlyRefreshCount);
 
         var phases = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
@@ -443,8 +447,12 @@ public sealed class TimescaleContinuousAggregateTests
 
         /* Positive control on the extraction itself, in the identical form: the two relations whose
            multi-consumer shape this test exists for must both come back with the consumers we know they have.
-           A control that only proved "some regex matched something" would not exercise the case at issue. */
-        Assert.Equal(3, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
+           A control that only proved "some regex matched something" would not exercise the case at issue.
+           collect.query_stats feeds FIVE hourly policies since #3653 (Q12): the query-grain rollup, the
+           per-database rollup, the query_stats baseline, and the two interval-honest successors of the first
+           two — the widest contention group on the grid, and every one of the five on its own minute. */
+        Assert.Equal(5, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
+        Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "procedure_stats", StringComparison.Ordinal)));
         Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "query_store_stats", StringComparison.Ordinal)));
 
         var views = new HashSet<string>(definitions.Select(a => a.View), StringComparer.Ordinal);

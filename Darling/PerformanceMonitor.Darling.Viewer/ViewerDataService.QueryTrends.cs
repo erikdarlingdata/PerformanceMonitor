@@ -355,8 +355,20 @@ public sealed partial class ViewerDataService
         var tier = DurationTrendRouting.ResolveTier(
             startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable(rollups), coverage.For(hourlyView, dailyView));
 
+        /* #3653 (Q12): the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
+           upgraded store); the hourly RELATION is then the interval-honest successor where the store has it
+           and it reaches as far back as the legacy for this window, the legacy otherwise
+           (RollupCoverage.HourlyRelationFor). The hourly text is built for that relation with the viewer's $4
+           database filter — the same builder hourlySql came from, over the legacy name; hourlySql is what a
+           store without the successors still runs, and stays byte-equal to the MCP reader's pinned text. */
+        var hourlyRelation = coverage.HourlyRelationFor(hourlyView, startUtc);
         var points = await ReadDurationTrendAsync(
-            tier == RetentionTier.Raw ? rawSql : hourlySql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+            tier == RetentionTier.Raw
+                ? rawSql
+                : string.Equals(hourlyRelation, hourlyView, StringComparison.Ordinal)
+                    ? hourlySql
+                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyRelation, withDatabaseFilter: true),
+            serverId, startUtc, endUtc, databaseNames, cancellationToken);
         var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new QueryTrendSeries(points, tier, effectiveStart, truncated);
     }

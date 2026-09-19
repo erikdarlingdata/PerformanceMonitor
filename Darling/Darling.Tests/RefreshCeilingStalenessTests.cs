@@ -572,11 +572,28 @@ public sealed class RefreshCeilingStalenessTests
     /// existence is the concrete demonstration that the recorded ceiling was overtaken from inside the
     /// routine band (#3182).
     ///
-    /// <para><b>This case is written to EXPIRE, and the expiry is the useful part.</b> Its guards require the
-    /// quoted run to still be ABOVE the recorded ceiling and BELOW the watch line. A re-derivation that
-    /// raised the ceiling past this run turns it red — correctly, because the reading would then no longer
-    /// demonstrate anything and the evidence has to be re-read rather than the case silently continuing to
-    /// pass on a premise that has gone. Nothing else in this file depends on the value.</para>
+    /// <para><b>This case was written to EXPIRE, and it EXPIRED at #3653 (Q12) — from the other side.</b> Its
+    /// guards required the quoted run to be ABOVE the recorded ceiling and BELOW the watch line, so that a
+    /// re-derivation which raised the ceiling past the run would turn it red and force a re-read. What moved
+    /// instead was the WATCH LINE: three interval-honest hourly successors joined the grid, the heaviest
+    /// refresh's window re-derived from 21 to 18 minutes by the grid's own method, and the five-sixths line
+    /// fell from 1,050 s to 900 s — BELOW this 952 s run. The evidence was re-read rather than re-typed, and
+    /// this is what it now says: the run still falsifies the 896 s constant (that half of #3182 stands, and
+    /// the staleness line still fires on it), but at today's grid the same run classifies
+    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot"/>, so the slot watch would have
+    /// spoken too — the run is no longer INVISIBLE, which was the specific defect. The band in which a run
+    /// can overtake the constant while the slot watch stays at Debug is now <c>[896, 900)</c>: four seconds
+    /// wide, pinned below as the difference of the two constants, with a DERIVED reading inside it showing
+    /// the mechanism this file guards is still reachable. That the band nearly closed is a side-effect of
+    /// the re-derivation and not a repair of #3182 — the two findings keep their separate subjects and
+    /// remedies (<see cref="TheTwoFindings_NameDifferentRemedies"/>).</para>
+    ///
+    /// <para><b>What the re-read also puts on the record, because it is the cost the re-derived grid
+    /// carries.</b> A run the fleet has ALREADY produced sits above the new watch line by 52 s. A recurrence
+    /// of the 2026-09-08 17:00Z shape therefore logs an <c>ApproachingSlot</c> warning where #3174's grid
+    /// logged at Debug — the correct remedy (re-derive the grid: fewer compression minutes, a longer cadence
+    /// for this aggregate, or splitting it) rather than a false alarm, but a warning on a run inside the
+    /// 1,080 s wall by 128 s. It is stated here rather than discovered on a store.</para>
     /// </summary>
     [Fact]
     public void TheMeasuredRunThatDemonstratedTheDefect_StillFalsifiesTheRecordedCeiling()
@@ -591,16 +608,27 @@ public sealed class RefreshCeilingStalenessTests
             + "still outside it, or drop this case and keep the derived ones — or the reading is being "
             + "cited against a constant it was not measured against (#3182)");
 
+        /* #3653: the run sits ABOVE the re-derived watch line, so it is VISIBLE to the slot watch now — the
+           invisibility it used to demonstrate is gone for this reading. Pinned in this direction with the
+           margin, so a grid that moved the line back above 952 s (a wider window) has to re-read this case
+           again rather than pass on a premise that has gone — the same discipline, the other edge. */
         Assert.True(
-            MeasuredCleanRunSeconds < WatchLine,
-            $"the quoted {MeasuredCleanRunSeconds} s run is at or past the {WatchLine} s watch line, so it "
-            + "no longer demonstrates a falsification from INSIDE the routine band, which is the specific "
-            + "invisibility #3182 is about");
-
+            MeasuredCleanRunSeconds >= WatchLine,
+            $"the quoted {MeasuredCleanRunSeconds} s run is back BELOW the {WatchLine} s watch line, so it "
+            + "demonstrates a falsification from INSIDE the routine band again — re-read #3182 and restore the "
+            + "InsideSlot half of this case rather than editing the assertion");
+        Assert.Equal(52, MeasuredCleanRunSeconds - WatchLine);
         Assert.Equal(
-            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
             TimescaleSupport.ClassifyRefreshSlotHeadroom(MeasuredCleanRunSeconds));
+        Assert.True(
+            MeasuredCleanRunSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"the quoted {MeasuredCleanRunSeconds} s run is at or past the {TimescaleSupport.RefreshPhaseSlotSeconds} s "
+            + "wall — the grid's precondition is falsified by a run the fleet has already made, which is the "
+            + "re-derive-not-renumber ruling on its own");
 
+        /* The half that still stands: the constant is falsified, and the staleness line says so — a separate
+           finding from the slot band, whatever band the run lands in. */
         Assert.Equal(
             TimescaleSupport.RefreshCeilingFreshness.CeilingFalsified,
             TimescaleSupport.ClassifyRefreshCeilingFreshness(MeasuredCleanRunSeconds, Ceiling));
@@ -610,6 +638,24 @@ public sealed class RefreshCeilingStalenessTests
             HeaviestConstant, Ceiling, TimescaleSupport.HeaviestHourlyRefreshView,
             MeasuredCleanRunSeconds, new RefreshCeilingStalenessWatch(), log);
         Assert.StartsWith("Warning:", log.Joined, StringComparison.Ordinal);
+
+        /* THE BAND THAT IS LEFT for #3182's mechanism — overtaking the constant while the slot watch logs at
+           Debug — is the gap between the two constants: 900 - 896 = 4 s at #3653's grid (was 154). A DERIVED
+           reading one second above the ceiling still sits inside it, still classifies InsideSlot, and still
+           falsifies the constant, so the mechanism this file guards is reachable and not vacuous; a grid that
+           closed the band entirely (watch line at or below the ceiling) is red in TimescaleSupportTests, not
+           here. */
+        var invisibleBandSeconds = WatchLine - Ceiling;
+        Assert.Equal(4, invisibleBandSeconds);
+        Assert.True(invisibleBandSeconds > 0, "the watch line is at or below the recorded ceiling (#3653)");
+
+        var insideTheBand = Ceiling + 1d;
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(insideTheBand));
+        Assert.Equal(
+            TimescaleSupport.RefreshCeilingFreshness.CeilingFalsified,
+            TimescaleSupport.ClassifyRefreshCeilingFreshness(insideTheBand, Ceiling));
     }
 
     /// <summary>

@@ -37,8 +37,12 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
-    /// <summary>The tier-routed form. See <see cref="DailySummarySql.RangeSqlFor"/>.</summary>
+    /// <summary>The tier-routed form. See <see cref="DailySummarySql.RangeSqlFor(RetentionTier)"/>.</summary>
     public static string DailySummaryRangeSqlFor(RetentionTier tier) => DailySummarySql.RangeSqlFor(tier);
+
+    /// <summary>The tier-routed form over a resolved hourly relation (#3653, Q12). See
+    /// <see cref="DailySummarySql.RangeSqlFor(RetentionTier, string)"/>.</summary>
+    public static string DailySummaryRangeSqlFor(RetentionTier tier, string hourlyRelation) => DailySummarySql.RangeSqlFor(tier, hourlyRelation);
 
     /// <summary>
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
@@ -89,7 +93,10 @@ public sealed partial class ViewerDataService
            Analysis assembly that owns it is one Storage does not reference. */
         var horizon = await ReadRetentionHorizonAsync(cancellationToken);
 
-        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier));
+        /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
+           interval-honest successor where it reaches as far back as the legacy for this window, so the calendar
+           and get_daily_health (DarlingHealthReader, same call) count the same queries for the same day. */
+        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, fromDate)));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromDate.Date, DateTimeKind.Unspecified) });

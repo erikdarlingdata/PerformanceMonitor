@@ -419,12 +419,22 @@ public class BaselineSupplyTests
 
     /// <summary>
     /// The successors REPLACED the legacy pair in the registry rather than joining it — the count is still
-    /// seven and every other position is where it was — because <c>HourlyRefreshPhaseOrder</c>,
+    /// seven and the pair holds the first two positions — because <c>HourlyRefreshPhaseOrder</c>,
     /// <c>AggregateCompressionTargets</c> and <c>RetentionPolicies</c> derive from that list by position and
-    /// count. An append would widen the light band by two minutes and drop the heaviest refresh's watch line
-    /// from 1,050 s to 950 s against its 896 s ceiling (the arithmetic is on
-    /// <c>SupersededBaselineRelations</c>); TimescaleSupportTests' grid pins would go red on it, and this pin
-    /// names the reason before they do.
+    /// count. An append would have widened the light band by two minutes and dropped the heaviest refresh's
+    /// watch line from 1,050 s to 950 s against its 896 s ceiling (the arithmetic is on
+    /// <c>SupersededBaselineRelations</c>); this pin names the reason.
+    ///
+    /// <para><b>The grid DID move at #3653 (Q12), and not because of this pair.</b> The three interval-honest
+    /// HOURLY successors could not replace their legacies (the daily tier is hierarchical from those —
+    /// <c>SupersededHourlyRollups</c>), so they were appended to <c>HourlyAggregates</c> and the grid
+    /// re-derived by its own method: sixteen policies, the heaviest at :18, the watch line at 900 s. The two
+    /// bounded hourly successors are dealt into the bounded class ahead of the baselines, so this pair's
+    /// minutes moved 3→6 and 5→7 — the converge re-phases them once. What this pin still holds is the
+    /// baseline half: seven members, the pair in front, and the baseline pair adding NOTHING to the count the
+    /// grid derives from. The grid's own figures are pinned with their derivation in TimescaleSupportTests
+    /// (<c>CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole</c> and
+    /// <c>TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned</c>), not restated here.</para>
     /// </summary>
     [Fact]
     public void Successors_TookTheLegacyPositions_SoThePhaseGridDidNotMove()
@@ -432,11 +442,15 @@ public class BaselineSupplyTests
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
         Assert.Equal(TimescaleSupport.PerfmonIntervalBaselineView, TimescaleSupport.BaselineAggregates[0].View);
         Assert.Equal(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.BaselineAggregates[1].View);
-        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(3, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
-        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
-        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
+
+        /* The order's count is the hourly registry plus the seven baselines — 9 + 7 = 16 since #3653 — and
+           the baseline pair contributes exactly its two positions to it, no more. */
+        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + 7, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(16, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(6, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal(7, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal(18, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(900, TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>

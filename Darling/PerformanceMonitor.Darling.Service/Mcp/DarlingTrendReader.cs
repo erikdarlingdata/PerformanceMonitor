@@ -138,7 +138,20 @@ internal static class DarlingTrendReader
     /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
     /// underneath a caller that got a raw answer last time.</para>
     /// </summary>
-    public const string QueryHistoryHourlySql = """
+    public static readonly string QueryHistoryHourlySql = QueryHistoryHourlySqlFor(TimescaleSupport.QueryStatsHourlyView);
+
+    /// <summary>
+    /// <see cref="QueryHistoryHourlySql"/> over <paramref name="hourlyRelation"/> — the legacy
+    /// <c>query_stats_hourly</c> or its interval-honest successor <c>query_stats_interval_hourly</c> (#3653,
+    /// Q12), which carries the same column names, so the text differs in the relation and nothing else. The
+    /// caller resolves which through <see cref="RollupCoverage.HourlyRelationFor"/>; the constant above is this
+    /// builder over the legacy name, which is what every pre-#3653 pin reads.
+    /// </summary>
+    public static string QueryHistoryHourlySqlFor(string hourlyRelation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
+        return $"""
         SELECT
             bucket AS collection_time,
             execution_count_sum AS delta_execution_count,
@@ -152,7 +165,7 @@ internal static class DarlingTrendReader
             CAST(NULL AS int) AS min_dop,
             CAST(NULL AS int) AS max_dop,
             CAST(NULL AS text) AS query_plan_hash
-        FROM query_stats_hourly
+        FROM {hourlyRelation}
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
@@ -160,6 +173,7 @@ internal static class DarlingTrendReader
         AND   bucket <= $5
         ORDER BY bucket
         """;
+    }
 
     /* ─────────────────────────── memory trend ─────────────────────────── */
 
@@ -512,7 +526,11 @@ internal static class DarlingTrendReader
     ///
     /// <para><see cref="RawTable"/> and <see cref="HourlyView"/> are the pair this trend reads at each tier;
     /// <see cref="Relation"/> is the one <see cref="Tier"/> picked, so a payload or an empty message can say
-    /// WHAT WAS READ rather than what was asked for. <see cref="HourlyAvailable"/> and <see cref="Coverage"/>
+    /// WHAT WAS READ rather than what was asked for. Since #3653 (Q12) <see cref="HourlyView"/> is the hourly
+    /// relation RESOLVED for this window — the interval-honest successor where the store has it and it reaches
+    /// as far back as the legacy for this window (<see cref="RollupCoverage.HourlyRelationFor"/>), the legacy
+    /// otherwise — and the routed read builds its hourly SQL from it, so the payload's relation is the one
+    /// that was walked. The TIER was still decided over the legacy pair's coverage, the deeper of the two. <see cref="HourlyAvailable"/> and <see cref="Coverage"/>
     /// are kept on the route so the empty branch can say why the tier it read holds nothing — a rollup that
     /// has materialized nothing and a rollup whose floor sits above the window's start are different facts
     /// with different remedies, and both differ from a quiet server.</para>
@@ -603,7 +621,8 @@ internal static class DarlingTrendReader
         var tierCoverage = coverage.For(hourlyView, dailyView);
         return new DurationTrendRoute(
             ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
-            rawTable, hourlyView, hourlyAvailable, tierCoverage,
+            /* Tier over the legacy pair's coverage; relation by the supply rule (#3653, Q12) — see the record. */
+            rawTable, coverage.HourlyRelationFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
             /* Grain-scoped, not rollups != None — see the record's remarks: the arming gate is per table. */
             RawRetentionApplies: hourlyAvailable,
             ResolvedAtUtc: nowUtc);
@@ -618,7 +637,7 @@ internal static class DarlingTrendReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            QueryDurationTrendSql, QueryDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
+            QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
 
     /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
 
@@ -752,7 +771,7 @@ internal static class DarlingTrendReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
+            ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
 
     /// <summary>
     /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
@@ -760,13 +779,21 @@ internal static class DarlingTrendReader
     /// route, read, or describe coverage.
     /// </summary>
     private static async Task<DurationTrendResult> ReadRoutedDurationTrendAsync(
-        string rawSql, string hourlySql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        string rawSql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         DurationTrendRoute route, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(route);
 
+        /* The hourly text is BUILT from the route's resolved relation (#3653, Q12) rather than taken from the
+           QueryDurationTrendHourlySql / ProcedureDurationTrendHourlySql constants: those are the builder over
+           the LEGACY view, and the route may have resolved the interval-honest successor. Same builder, same
+           shape — the constants stay as the pinned legacy text and as what a store without the successors
+           still runs. */
         var points = await ReadDurationTrendAsync(
-            route.Tier == RetentionTier.Raw ? rawSql : hourlySql, postgres, serverId, startUtc, endUtc, cancellationToken);
+            route.Tier == RetentionTier.Raw
+                ? rawSql
+                : DurationTrendRouting.BuildHourlyTrendSql(route.HourlyView, withDatabaseFilter: false),
+            postgres, serverId, startUtc, endUtc, cancellationToken);
         var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new DurationTrendResult(points, route, effectiveStart, truncated);
     }
@@ -947,17 +974,24 @@ internal static class DarlingTrendReader
     ///
     /// <para><paramref name="hourlyAvailable"/> and <paramref name="coverage"/> are the store's measured shape
     /// (#3541 A2 — see <see cref="ResolveTier"/>); the defaults reproduce the age-only #2353 decision for a
-    /// caller that has not probed, which is what every pre-existing test of this read exercises.</para>
+    /// caller that has not probed, which is what every pre-existing test of this read exercises.
+    /// <paramref name="hourlyRelation"/> (#3653, Q12) is the hourly relation that caller resolved for the window
+    /// through <see cref="RollupCoverage.HourlyRelationFor"/> — the interval-honest successor where it reaches
+    /// as far back as the legacy — and defaults to the legacy, which every store has.</para>
     /// </summary>
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
-        DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, CancellationToken cancellationToken = default)
+        DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, string? hourlyRelation = null,
+        CancellationToken cancellationToken = default)
     {
         var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
 
+        /* #3653 (Q12): the caller that probed the store passes the hourly relation it resolved
+           (RollupCoverage.HourlyRelationFor — the interval-honest successor where it reaches as far as the
+           legacy for this window); a caller that has not probed reads the legacy, which every store has. */
         var items = tier == RetentionTier.Raw
             ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
-            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
+            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
 
         var (effectiveStart, truncated) = DescribeCoverage(items.Count > 0 ? items[0].CollectionTime : null, startUtc);
 
