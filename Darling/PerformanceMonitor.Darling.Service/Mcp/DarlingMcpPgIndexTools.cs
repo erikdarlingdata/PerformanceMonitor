@@ -51,7 +51,7 @@ public sealed class DarlingMcpPgIndexTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the census held more indexes than were returned; it is observed by fetching one row past this cap, never inferred from a full page, and the coverage field is measured independently of it.")] int limit = 25,
         [Description("Return ONLY the indexes that have an answer, ranked by reclaimable bytes descending. "
             + "Default false, which leaves the answerless-first order alone. Set this when you want the "
             + "RANKING: answerless rows sort first by design, so on a server whose answerless population "
@@ -71,9 +71,19 @@ public sealed class DarlingMcpPgIndexTools
 
         try
         {
-            var rows = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit,
+            /* #3653 (the #3541 A3 class, the residue #3679 named): limit + 1 as the fetch, the extra row as the
+               OBSERVED truncation signal, and the page trimmed back to `limit` HERE - before the empty branch,
+               the coverage verdict and the reach classifier - so every `rows.Count` below is a count of the
+               page and never of the over-fetch. The old `rows.Count >= limit` said "more" for a server whose
+               candidate census was exactly `limit` indexes long and, because this tool withholds its three
+               per-page counts when truncated, withheld answered_count / estimated_count /
+               exactly_measured_count for a page that was the whole census. PgCappedRead.Classify still
+               receives the page count and the cap, as it did: its `ReturnedRows < Limit -> Complete` test is
+               documented as deliberately pessimistic and is not this change's to soften. */
+            var fetched = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1,
                 answered_only);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Asked on BOTH paths, not just the empty one (#3278). A returned page that is 100% suppressed
                rows is the same defect as an unexplained empty and strictly harder to see: the read looks
@@ -146,8 +156,6 @@ public sealed class DarlingMcpPgIndexTools
 
             coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
                 postgres, resolved.ServerId, windowEnd, rows.Count);
-
-            var truncated = rows.Count >= limit;
 
             /* WHETHER THE ANSWERS ARE REACHABLE AT ALL, which `truncated` cannot say (#3424). #3278 gave
                this read a denominator and that shipped; it did not give the answers a route, and its own

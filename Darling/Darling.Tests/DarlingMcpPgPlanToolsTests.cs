@@ -312,18 +312,83 @@ public class DarlingMcpPgPlanToolsTests
     /// #2629's lesson, on a read whose row count makes it look unnecessary: a summary taken over a CAPPED
     /// result describes the page and reads as a fact about the server. <c>limit</c> is the caller's, so the
     /// unsatisfied summary is withheld with a sentence saying why rather than computed over what arrived.
+    ///
+    /// <para>And the cap is OBSERVED, not inferred (#3653, the #3541 A3 class). The builder receives what the
+    /// tool fetched at <c>limit + 1</c>: three facets against a limit of two is a truncated page of TWO, and
+    /// the summary is withheld. The first shape of this pin handed it two rows at a limit of two and
+    /// expected <c>truncated</c> — which is exactly the <c>rows.Count &gt;= limit</c> inference the tool
+    /// shipped, encoded as its own proof. That case is now the boundary the other way: a population of
+    /// exactly <c>limit</c> is complete, and its summary is published.</para>
     /// </summary>
     [Fact]
     public void ACappedResult_WithholdsTheUnsatisfiedSummary_RatherThanDescribingThePage()
+    {
+        var firstThree = Facets().GetRange(0, 3);
+
+        using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, firstThree, 2));
+        var root = doc.RootElement;
+
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        /* The PAGE is the caller's two, not the three that were fetched — the third row was the signal. */
+        Assert.Equal(2, root.GetProperty("facet_count").GetInt32());
+        Assert.Equal(2, root.GetProperty("facets").GetArrayLength());
+        Assert.Equal("library_loaded", root.GetProperty("facets")[1].GetProperty("facet").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("unsatisfied_facets").ValueKind);
+        Assert.Contains("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The boundary <c>&gt;= limit</c> got wrong: a fetch at <c>limit + 1</c> that returns exactly <c>limit</c>
+    /// rows is a COMPLETE page, so <c>truncated</c> is false and the unsatisfied summary — the reason the
+    /// tool exists — is published rather than withheld. The two-facet slice carries no unsatisfied facet, so
+    /// the summary is asserted as an EMPTY array, not null: absent-because-withheld and absent-because-none
+    /// are different answers and the wire tells them apart.
+    /// </summary>
+    [Fact]
+    public void APageOfExactlyLimit_IsComplete_AndPublishesTheUnsatisfiedSummary()
     {
         var firstTwo = Facets().GetRange(0, 2);
 
         using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, firstTwo, 2));
         var root = doc.RootElement;
 
-        Assert.True(root.GetProperty("truncated").GetBoolean());
-        Assert.Equal(JsonValueKind.Null, root.GetProperty("unsatisfied_facets").ValueKind);
-        Assert.Contains("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, root.GetProperty("facet_count").GetInt32());
+        Assert.Equal(JsonValueKind.Array, root.GetProperty("unsatisfied_facets").ValueKind);
+        Assert.Equal(0, root.GetProperty("unsatisfied_facets").GetArrayLength());
+        Assert.DoesNotContain("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+        /* And the same boundary on the six-facet whole set, which is the shape a real caller who asked for
+           exactly the collector's facet count hits: complete, with all three unsatisfied facets named. */
+        using var whole = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 6));
+        Assert.False(whole.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(3, whole.RootElement.GetProperty("unsatisfied_facets").GetArrayLength());
+    }
+
+    /// <summary>
+    /// <c>get_pg_plans</c> joined the same dialect in the same lane: it used to <c>Take(limit)</c> over a
+    /// read already cut at <c>limit</c> and publish nothing about the cut. The builder now receives the
+    /// <c>limit + 1</c> fetch, trims to the page, and says <c>truncated</c> either way.
+    /// </summary>
+    [Fact]
+    public void ThePlansPage_ObservesItsCut_AndSaysSoOnlyWhenARowSatPastIt()
+    {
+        var one = Rows()[0];
+        var three = new List<DarlingPgPlanCaptureReader.PgPlanCaptureRow>
+        {
+            one, one with { PlanHash = "DEF456" }, one with { PlanHash = "GHI789" },
+        };
+
+        using var cut = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildPlansJson("srv", 24, three, 2));
+        Assert.True(cut.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, cut.RootElement.GetProperty("plan_shapes").GetInt32());
+        Assert.Equal(2, cut.RootElement.GetProperty("plans").GetArrayLength());
+        Assert.Contains("TRUNCATED at the row limit of 2", cut.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+        using var whole = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildPlansJson("srv", 24, three.GetRange(0, 2), 2));
+        Assert.False(whole.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, whole.RootElement.GetProperty("plan_shapes").GetInt32());
+        Assert.DoesNotContain("TRUNCATED", whole.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
     }
 }
 

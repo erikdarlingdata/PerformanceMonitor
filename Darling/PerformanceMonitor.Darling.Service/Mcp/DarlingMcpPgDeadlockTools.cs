@@ -25,7 +25,7 @@ public sealed class DarlingMcpPgDeadlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum deadlocks to return. Default 25.")] int limit = 25,
+        [Description("Maximum deadlocks to return. Default 25. This is what bounds the page - read truncated to know whether the window held more distinct deadlocks than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -39,8 +39,15 @@ public sealed class DarlingMcpPgDeadlockTools
 
         try
         {
-            var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+            /* #3653 (the #3541 A3 class, the residue #3679 named): the caller's limit + 1 as the fetch, the
+               extra row as the OBSERVED truncation signal. This used to publish `rows.Count >= limit`, which
+               says "more" for a window holding exactly `limit` distinct deadlocks - the one case an
+               inference cannot tell from a busier window - and on the default limit of 25 that is a
+               plausible shape for a bad afternoon, not a corner. McpHelpers.BoundPage trims the page back to
+               `limit`, so deadlock_count below stays a count of what is returned. */
+            var fetched = await DarlingPgDeadlockReader.GetDeadlocksAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -79,7 +86,7 @@ public sealed class DarlingMcpPgDeadlockTools
                 hours_back,
                 status = "deadlocks",
                 deadlock_count = rows.Count,
-                truncated = rows.Count >= limit,
+                truncated,
                 note = "occurred_at is when PostgreSQL wrote the report, not when the collector found it. "
                      + "times_seen counts how often the collector saw the SAME report, never how many times "
                      + "the deadlock happened - a genuine repeat appears as its own row with different "

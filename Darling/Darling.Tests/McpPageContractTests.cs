@@ -138,6 +138,13 @@ public sealed class McpPageContractTests
     /// <summary>Truncation observed: the row past <c>limit</c> came back.</summary>
     private static readonly Regex TruncationObserved = new(@"var truncated = \w+\.Count > limit;", RegexOptions.Compiled);
 
+    /// <summary>The same observation through the shared helper (#3653): <c>McpHelpers.BoundPage</c> is the ONE
+    /// place <c>(fetched at limit + 1, limit)</c> becomes <c>(page, truncated)</c>, and a census can grep for
+    /// its use instead of for the absence of the anti-pattern. Either spelling satisfies the rule; the inline
+    /// one is proven at forty-odd sites and is not swept onto the helper tonight (other lanes hold those
+    /// files), so the census accepts both and says so.</summary>
+    private static readonly Regex TruncationObservedThroughHelper = new(@"var \(\w+, truncated\) = McpHelpers\.BoundPage\(\w+, limit\);", RegexOptions.Compiled);
+
     /// <summary>A literal row cap in a paged read. <c>LIMIT 1), 0)</c> is the single-row offset CTE and is not a
     /// page cap; it is stripped before the match rather than allow-listed by number, because <c>LIMIT 1</c>
     /// elsewhere WOULD be a defect.</summary>
@@ -287,6 +294,17 @@ public sealed class McpPageContractTests
         Assert.Matches(TruncationInferred, "            var truncated = rows.Count >= limit;");
         Assert.DoesNotMatch(TruncationInferred, "            var truncated = rows.Count > limit;");
         Assert.Matches(TruncationObserved, "            var truncated = candidates.Count > limit;");
+        /* #3653: the three sites #3679 left were in files no roster here named, and one of them spelled the
+           inference as an object-initializer member rather than a local. The matcher always caught BOTH
+           spellings — witnessed here against the deadlock tool's line as it shipped — so the gap was the
+           roster, not the regex; NoTool_InfersTruncationFromItsCap_OnEitherSku is the sweep that closes it. */
+        Assert.Matches(TruncationInferred, "                truncated = rows.Count >= limit,");
+        Assert.Matches(TruncationInferred, "            var truncated = rows.Count >= limit;");
+        Assert.DoesNotMatch(TruncationInferred, "                limit_reached = tables.Count >= limit,");
+        /* The helper spelling is an observation, not an inference, and is matched as one. */
+        Assert.Matches(TruncationObservedThroughHelper, "            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);");
+        Assert.DoesNotMatch(TruncationInferred, "            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);");
+        Assert.DoesNotMatch(TruncationObserved, "            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);");
 
         Assert.Matches(LiteralLimit, "        ORDER BY event_time DESC\n        LIMIT 200\n");
         Assert.DoesNotMatch(LiteralLimit, "        ORDER BY event_time DESC\n        LIMIT $4\n");
@@ -767,6 +785,146 @@ public sealed class McpPageContractTests
         Assert.Contains("pending_restart", includeDefaults.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
     }
 
+    /* ───────────────────────── #3653: the class, swept — and the three sites #3679 named ───────────────────────── */
+
+    /// <summary>
+    /// <b>Why the census above missed three sites.</b> <see cref="EveryPagedTool_ObservesTruncation_AndNeverInfersIt_OnEitherSku"/>
+    /// walks <see cref="PagedTools"/> — the ten tools #3541 A3 named — and <see cref="EveryPgServerStatePage_ObservesTruncation_AndNeverInfersIt"/>
+    /// walks one file. <c>get_pg_deadlocks</c>, <c>get_pg_plan_capture_readiness</c> and <c>get_pg_index_bloat</c>
+    /// were in neither roster, so their <c>rows.Count &gt;= limit</c> was never read; the matcher itself catches
+    /// both spellings they used (witnessed in <see cref="TheDiscriminators_FlagTheDefectShapes_AndPassTheFixedOnes"/>).
+    /// A roster is the right instrument for the POSITIVE contract — which tools must observe, bind and publish
+    /// their bounds — because it names what a paged tool is; it is the wrong instrument for the anti-pattern,
+    /// which is a defect wherever it appears. So the anti-pattern is swept over every tool body on both SKUs,
+    /// the way <see cref="NoTool_ReadsAParameterAsItsAbsoluteValue_OnEitherSku"/> sweeps <c>Math.Abs</c>, with
+    /// the same population floor so a marker that stops matching cannot pass for free.
+    ///
+    /// <para>What this does NOT sweep: <c>limit_reached = x.Count &gt;= limit</c>. That key says the page is as
+    /// long as the cap — true by construction — and its prose says "more MAY exist"; it is a weaker dialect,
+    /// not an inference, and whether it collapses into an observed <c>truncated</c> is the vocabulary lane's
+    /// call. <c>McpPayloadContractCensusTests</c> holds it in the truncation-key inventory.</para>
+    /// </summary>
+    [Fact]
+    public void NoTool_InfersTruncationFromItsCap_OnEitherSku()
+    {
+        var examined = 0;
+        var offenders = new List<string>();
+        foreach (var (file, source) in AllMcpToolSources())
+        {
+            var marks = Regex.Matches(source, @"\[McpServerTool\(Name = ""([a-z_0-9]+)""");
+            for (var i = 0; i < marks.Count; i++)
+            {
+                var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                var body = Strip(source[marks[i].Index..end]);
+                examined++;
+                var hit = TruncationInferred.Match(body);
+                if (hit.Success)
+                {
+                    offenders.Add($"{file} {marks[i].Groups[1].Value}: {hit.Value.Trim()}");
+                }
+            }
+
+            /* The whole file too: a builder split out below the last tool (BuildReadinessJson, BuildPlansJson)
+               is where two of the three lived, and a body slice ends at the next tool marker. */
+            var whole = TruncationInferred.Match(Strip(source));
+            if (whole.Success && !offenders.Any(o => o.StartsWith(file, StringComparison.Ordinal)))
+            {
+                offenders.Add($"{file} (outside any tool body): {whole.Value.Trim()}");
+            }
+        }
+
+        Assert.True(examined >= 150, $"only {examined} tool bodies were examined across both SKUs; the marker has stopped matching");
+        Assert.True(offenders.Count == 0,
+            "these sites infer truncation from a full page — fetch limit + 1 and observe it (var truncated = x.Count > limit; or McpHelpers.BoundPage): "
+            + string.Join("; ", offenders));
+    }
+
+    /// <summary>
+    /// The three tools #3679 left, plus <c>get_pg_plans</c>, found beside the readiness builder with a
+    /// <c>Take(limit)</c> over a read already cut at <c>limit</c> and no word about the cut. All four are the
+    /// first consumers of <c>McpHelpers.BoundPage</c>. Darling-only — Lite has no PostgreSQL tools — so, as
+    /// with the A7 and server-state rosters, there is no twin-parity arm. The observation for the two plan
+    /// tools lives in their wire-shape builders (<c>BuildPlansJson</c> / <c>BuildReadinessJson</c>), which
+    /// receive the <c>limit + 1</c> fetch and trim it; <c>DarlingMcpPgPlanToolsTests</c> executes both
+    /// boundaries against the builders, and <see cref="McpPageContractLivePostgresTests.PgPagedTools_FlipTruncatedExactlyAtTheBoundary_AgainstDevPostgres"/>
+    /// executes the deadlock and index reads against live Postgres.
+    /// </summary>
+    public static readonly (Type Tools, string ToolName, string? Builder, string ReadName, string Sql)[] PgPagedToolsThroughTheHelper =
+    [
+        (typeof(DarlingMcpPgDeadlockTools), "get_pg_deadlocks", null, nameof(DarlingPgDeadlockReader.DeadlocksSql), DarlingPgDeadlockReader.DeadlocksSql),
+        (typeof(DarlingMcpPgPlanTools), "get_pg_plans", "BuildPlansJson", nameof(DarlingPgPlanCaptureReader.PgPlanCaptureSql), DarlingPgPlanCaptureReader.PgPlanCaptureSql),
+        (typeof(DarlingMcpPgPlanTools), "get_pg_plan_capture_readiness", "BuildReadinessJson", nameof(DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessSql), DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessSql),
+        (typeof(DarlingMcpPgIndexTools), "get_pg_index_bloat", null, nameof(DarlingPgIndexBloatReader.PgIndexBloatSql), DarlingPgIndexBloatReader.PgIndexBloatSql),
+    ];
+
+    [Fact]
+    public void EveryPgPagedToolThroughTheHelper_FetchesOnePastTheCap_AndObservesThroughBoundPage()
+    {
+        foreach (var (type, name, builder, _, _) in PgPagedToolsThroughTheHelper)
+        {
+            var source = ReadRepoFileLf(DarlingFileOf(type).Split('/'));
+            var body = Strip(ToolBody(source, name));
+            Assert.True(FetchesLimitPlusOne.IsMatch(body), $"{name}: the reader is not asked for the row past the cap");
+            Assert.False(TruncationInferred.IsMatch(body), $"{name}: `{TruncationInferred.Match(body).Value}` infers truncation from the cap");
+
+            /* Where the observation is made: the body itself, or the builder the body hands the fetch to. */
+            var observing = builder is null ? body : Strip(MemberBody(source, builder));
+            if (builder is not null)
+            {
+                Assert.Contains(builder + "(", body, StringComparison.Ordinal);
+            }
+
+            Assert.True(TruncationObservedThroughHelper.IsMatch(observing),
+                $"{name}: no `var (x, truncated) = McpHelpers.BoundPage(y, limit);` in {(builder ?? "the tool body")} — the first consumers of the helper must use it, so the census has a use to grep for");
+            /* And the payload publishes what was observed, under the one key. */
+            Assert.Matches(new Regex(@"\n\s+truncated,"), observing);
+
+            /* The parameter says what it bounds and names the flag, in the #3679 wording. */
+            var limit = ToolMethod(type, name).GetParameters().Single(p => p.Name == "limit");
+            var description = limit.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            Assert.Contains("This is what bounds the page", description, StringComparison.Ordinal);
+            Assert.Contains("truncated", description, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void EveryPgPagedReadThroughTheHelper_BindsItsCapAsAParameter_NeverALiteral()
+    {
+        foreach (var (_, _, _, name, sql) in PgPagedToolsThroughTheHelper)
+        {
+            Assert.False(LiteralLimit.IsMatch(sql), $"{name} caps with a literal the caller cannot see: {LiteralLimit.Match(sql).Value}");
+            Assert.True(ParameterLimit.IsMatch(sql.TrimEnd()),
+                $"{name} does not end in a parameterised LIMIT, so the tool's limit + 1 over-fetch has nothing to bind to");
+        }
+    }
+
+    /// <summary>
+    /// The helper itself, executed: the page is the caller's <c>limit</c> and the flag flips exactly when the
+    /// fetch ran past it — including the case <c>&gt;= limit</c> got wrong, a fetch of exactly <c>limit</c>
+    /// rows. And a fetch larger than <c>limit + 1</c> (a scan ceiling) is still bounded to the page.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 3, 0, false)]
+    [InlineData(2, 3, 2, false)]
+    [InlineData(3, 3, 3, false)]
+    [InlineData(4, 3, 3, true)]
+    [InlineData(9, 3, 3, true)]
+    [InlineData(1, 1, 1, false)]
+    [InlineData(2, 1, 1, true)]
+    public void BoundPage_TrimsToTheCap_AndFlipsOnlyWhenARowSatPastIt(int fetched, int limit, int expectedPage, bool expectedTruncated)
+    {
+        var rows = Enumerable.Range(1, fetched).ToList();
+        var (page, truncated) = McpHelpers.BoundPage(rows, limit);
+        Assert.Equal(expectedTruncated, truncated);
+        Assert.Equal(expectedPage, page.Count);
+        /* The page is the reader's leading rows in the reader's order — never a re-sort, never the tail. */
+        Assert.Equal(Enumerable.Range(1, expectedPage), page);
+        if (!truncated)
+        {
+            Assert.Same(rows, page);
+        }
+    }
+
     /* ───────────────────────── #3541 A13: a filter is part of the query ───────────────────────── */
 
     /// <summary>
@@ -953,6 +1111,18 @@ public sealed class McpPageContractTests
         return next < 0 ? source[start..] : source[start..next];
     }
 
+    /// <summary>A non-tool member's span (LF source): from its <c>static &lt;type&gt; Name(</c> declaration to the
+    /// first line that is exactly the class-member closing brace. The wire-shape builders this file needs are
+    /// methods at member indent whose bodies close that way; a member that does not would return its first
+    /// statement block only, and the callers assert on content that would then be missing.</summary>
+    private static string MemberBody(string source, string memberName)
+    {
+        var declaration = Regex.Match(source, @"static\s+[\w<>\[\]?,. ]+\s+" + Regex.Escape(memberName) + @"\(");
+        Assert.True(declaration.Success, $"no member named {memberName} in the source");
+        var close = source.IndexOf("\n    }\n", declaration.Index, StringComparison.Ordinal);
+        return close < 0 ? source[declaration.Index..] : source[declaration.Index..(close + 6)];
+    }
+
     private static HashSet<string> KeysOf(string body)
     {
         var keys = new HashSet<string>(StringComparer.Ordinal);
@@ -992,6 +1162,9 @@ public sealed class McpPageContractLivePostgresTests
         "pg_statement_stats", "pg_wait_stats", "pg_wait_sampling", "pg_kernel_stats", "pg_io_stats",
         /* #3653: get_pg_server_config's snapshot. */
         "pg_server_config",
+        /* #3653: the three `>= limit` sites #3679 named, and get_pg_plans beside one of them; the index tool's
+           coverage census needs a succeeding pg_index_bloat run in collection_log or it answers Undetermined. */
+        "pg_deadlocks", "pg_plan_capture", "pg_plan_capture_readiness", "pg_index_bloat", "collection_log",
     ];
 
     /// <summary>
@@ -1431,6 +1604,169 @@ VALUES ($1, $2, $3, $4, 'client backend', 'relation', $5, $6, $7, 5, 1, 0, 0, 1,
         Assert.Equal(new[] { 60.0, 30.0, 10.0 },
             whole.GetProperty(rowsKey).EnumerateArray().Select(r => r.GetProperty(shareKey).GetDouble()).ToArray());
     }
+
+    /// <summary>
+    /// #3653 against live PostgreSQL, for the four PostgreSQL pages that joined the dialect through
+    /// <c>McpHelpers.BoundPage</c>: the same boundary PAIR per tool. <c>N</c> rows seeded, <c>limit = N - 1</c>
+    /// reads truncated with a page of <c>N - 1</c>, and <c>limit = N</c> — the population exactly the cap, the
+    /// case <c>Count &gt;= limit</c> called truncated — reads complete with a page of <c>N</c>. On the two tools
+    /// that WITHHOLD summaries when truncated, the complete page publishes them: the readiness tool's
+    /// <c>unsatisfied_facets</c> and the index tool's <c>answered_count</c> were the figures the old shape
+    /// withheld for a whole census.
+    ///
+    /// <para>The deadlock rows carry DISTINCT hashes so each is its own row (the read groups by hash); the
+    /// readiness rows are the collector's six facets, so <c>limit = 6</c> is the shape a caller who asked
+    /// for exactly the whole set hits; the index rows are all ANSWERED (no <c>skipped_reason</c>) so the
+    /// answerless-first sort has nothing to put ahead of them and the page is a ranking; the plan rows are
+    /// distinct <c>(query_id, plan_hash)</c> shapes.</para>
+    /// </summary>
+    [Fact]
+    public async Task PgPagedTools_FlipTruncatedExactlyAtTheBoundary_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live PostgreSQL page-boundary test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            /* get_pg_deadlocks: five distinct reports, one seen twice (the grouped read collapses the repeat).
+               Hashes are spelled without a hyphen and a zero-padded ordinal: FleetIdentifierScrubTests reads
+               that shape as a tenant's short name and ordinal, which this public repository must never carry. */
+            for (var i = 0; i < 5; i++)
+            {
+                await SeedDeadlockAsync(connection, ct, now.AddMinutes(-i), $"deadlockhash{i}");
+            }
+            await SeedDeadlockAsync(connection, ct, now.AddMinutes(-1), "deadlockhash1");
+
+            var cutDeadlocks = JsonDocument.Parse(await DarlingMcpPgDeadlockTools.GetPgDeadlocks(postgres, ServerName, 24, 4)).RootElement;
+            Assert.Equal("deadlocks", cutDeadlocks.GetProperty("status").GetString());
+            Assert.True(cutDeadlocks.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, cutDeadlocks.GetProperty("deadlock_count").GetInt32());
+            Assert.Equal(4, cutDeadlocks.GetProperty("deadlocks").GetArrayLength());
+            /* Newest first, and the repeat is one row with times_seen = 2. */
+            Assert.Equal("deadlockhash0", cutDeadlocks.GetProperty("deadlocks")[0].GetProperty("deadlock_hash").GetString());
+            Assert.Equal(2, cutDeadlocks.GetProperty("deadlocks")[1].GetProperty("times_seen").GetInt32());
+
+            var wholeDeadlocks = JsonDocument.Parse(await DarlingMcpPgDeadlockTools.GetPgDeadlocks(postgres, ServerName, 24, 5)).RootElement;
+            Assert.False(wholeDeadlocks.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, wholeDeadlocks.GetProperty("deadlock_count").GetInt32());
+            Assert.Equal(5, wholeDeadlocks.GetProperty("deadlocks").GetArrayLength());
+
+            /* get_pg_plan_capture_readiness: the collector's six facets, three unsatisfied. */
+            var facets = new (string Facet, bool Satisfied)[]
+            {
+                ("extension_available", true), ("library_loaded", true), ("capture_threshold", false),
+                ("plan_text_setting", true), ("plan_attribution", false), ("message_locale", false),
+            };
+            foreach (var (facet, satisfied) in facets)
+            {
+                await SeedReadinessAsync(connection, ct, now, facet, satisfied);
+            }
+
+            var cutReadiness = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(postgres, ServerName, 24, 5)).RootElement;
+            Assert.True(cutReadiness.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, cutReadiness.GetProperty("facet_count").GetInt32());
+            Assert.Equal(JsonValueKind.Null, cutReadiness.GetProperty("unsatisfied_facets").ValueKind);
+            /* The page is the reader's CAUSAL order cut at five: message_locale is the one past the cap. */
+            Assert.Equal("plan_attribution", cutReadiness.GetProperty("facets")[4].GetProperty("facet").GetString());
+
+            var wholeReadiness = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(postgres, ServerName, 24, 6)).RootElement;
+            Assert.False(wholeReadiness.GetProperty("truncated").GetBoolean());
+            Assert.Equal(6, wholeReadiness.GetProperty("facet_count").GetInt32());
+            Assert.Equal(new[] { "capture_threshold", "plan_attribution", "message_locale" },
+                wholeReadiness.GetProperty("unsatisfied_facets").EnumerateArray().Select(f => f.GetString()).ToArray());
+
+            /* get_pg_plans: four plan shapes, ranked by total duration. */
+            for (var i = 0; i < 4; i++)
+            {
+                await SeedPlanCaptureAsync(connection, ct, now.AddMinutes(-i), 1000 + i, $"shape-{i}", 1000 - i * 100);
+            }
+
+            var cutPlans = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlans(postgres, ServerName, 24, 3)).RootElement;
+            Assert.True(cutPlans.GetProperty("truncated").GetBoolean());
+            Assert.Equal(3, cutPlans.GetProperty("plan_shapes").GetInt32());
+            Assert.Equal(3, cutPlans.GetProperty("plans").GetArrayLength());
+            Assert.Equal("shape-0", cutPlans.GetProperty("plans")[0].GetProperty("plan_hash").GetString());
+            Assert.Contains("TRUNCATED at the row limit of 3", cutPlans.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+            var wholePlans = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlans(postgres, ServerName, 24, 4)).RootElement;
+            Assert.False(wholePlans.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, wholePlans.GetProperty("plan_shapes").GetInt32());
+            Assert.DoesNotContain("TRUNCATED", wholePlans.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+            /* get_pg_index_bloat: three ANSWERED indexes and nothing answerless ahead of them, plus the
+               succeeding collector run the coverage census requires before it will count candidates. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
+VALUES ($1::bigint, $2::integer, $3::text, 'pg_index_bloat', $4::timestamp, 'SUCCESS')",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(now));
+            await SeedIndexAsync(connection, ct, now, "orders", "ix_orders_a", 3_000_000, 900_000);
+            await SeedIndexAsync(connection, ct, now, "orders", "ix_orders_b", 2_000_000, 500_000);
+            await SeedIndexAsync(connection, ct, now, "orders", "ix_orders_c", 1_000_000, 100_000);
+
+            var cutIndexes = JsonDocument.Parse(await DarlingMcpPgIndexTools.GetPgIndexBloat(postgres, ServerName, 24, 2)).RootElement;
+            Assert.True(cutIndexes.GetProperty("truncated").GetBoolean());
+            Assert.Equal(2, cutIndexes.GetProperty("index_count").GetInt32());
+            Assert.Equal(2, cutIndexes.GetProperty("indexes").GetArrayLength());
+            Assert.Equal("ix_orders_a", cutIndexes.GetProperty("indexes")[0].GetProperty("index_name").GetString());
+            /* Withheld on a cut page, as before. */
+            Assert.Equal(JsonValueKind.Null, cutIndexes.GetProperty("answered_count").ValueKind);
+            /* And the coverage census is of the SERVER whatever the page did. */
+            Assert.Equal(3, cutIndexes.GetProperty("coverage").GetProperty("candidate_index_count").GetInt64());
+
+            var wholeIndexes = JsonDocument.Parse(await DarlingMcpPgIndexTools.GetPgIndexBloat(postgres, ServerName, 24, 3)).RootElement;
+            Assert.False(wholeIndexes.GetProperty("truncated").GetBoolean());
+            Assert.Equal(3, wholeIndexes.GetProperty("index_count").GetInt32());
+            /* The population is exactly the cap: the old shape withheld this figure for a complete census. */
+            Assert.Equal(3, wholeIndexes.GetProperty("answered_count").GetInt32());
+            Assert.Equal(3, wholeIndexes.GetProperty("coverage").GetProperty("candidate_index_count").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static Task SeedDeadlockAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime occurredAt, string hash) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
+VALUES ($1, $2, $3, $4, $2, 4242, 2, $5, 'ShareLock', 'relation', 'UPDATE t SET x = $1', 'graph')",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(occurredAt), ServerId, ServerName, hash);
+
+    private static Task SeedReadinessAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime collectionTime, string facet, bool satisfied) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_plan_capture_readiness
+    (collection_id, collection_time, server_id, server_name, facet, is_satisfied, observed, detail)
+VALUES ($1, $2, $3, $4, $5, $6, 'observed', 'detail')",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName, facet, satisfied);
+
+    private static Task SeedPlanCaptureAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime collectionTime, long queryId, string planHash, double durationMs) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_plan_capture
+    (collection_id, collection_time, server_id, server_name, query_id, plan_hash, duration_ms, node_count, top_node_type, plan_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 3, 'Seeded', '{""Plan"":{""Node Type"":""Seq Scan""}}')",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName, queryId, planHash, durationMs);
+
+    private static Task SeedIndexAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime collectionTime, string tableName, string indexName, long indexBytes, long reclaimable) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_index_bloat
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, index_name, index_bytes, skipped_reason, est_tuple_bytes, est_reclaimable_bytes)
+VALUES ($1::bigint, $2::timestamp, $3::integer, $4::text, 'appdb', 'public', $5::text, $6::text, $7::bigint, NULL, 40, $8::bigint)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName, tableName, indexName, indexBytes, reclaimable);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
