@@ -874,7 +874,7 @@ public partial class SettingsWindow : Window
         root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
         root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
         /* #3712: persisted as its wire spelling ('digest' / 'page'), the one App.LoadAlertSettings parses back. */
-        root["analysis_uncorroborated_route"] = FindingRouting.RouteText(App.AnalysisUncorroboratedRoute);
+        root["analysis_uncorroborated_route"] = App.AnalysisUncorroboratedRoute.ToWireText();
 
         if (validationErrors.Count > 0)
         {

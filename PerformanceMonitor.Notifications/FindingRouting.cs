@@ -132,6 +132,11 @@ public static class FindingRouting
     /// <summary>The persisted / wire spelling of a route — see <see cref="FindingRouteDecision.RouteText"/>.</summary>
     public static string RouteText(FindingRoute route) => route == FindingRoute.Digest ? DigestText : PageText;
 
+    /// <summary>The persisted / wire spelling as an extension, for a settings writer that has to read as
+    /// <c>root["…"] = App.X.…</c> — Lite's <c>AlertSettingsControlWiringTests</c> census keys the "every assigned
+    /// static is persisted" pin on that shape, so the conversion hangs off the value rather than wrapping it.</summary>
+    public static string ToWireText(this FindingRoute route) => RouteText(route);
+
     /// <summary>
     /// Parses a route's persisted or configured spelling (<c>page</c> / <c>digest</c>, case-insensitive,
     /// trimmed). Null for anything else, so a hand-edited value neither throws nor silently becomes a page.

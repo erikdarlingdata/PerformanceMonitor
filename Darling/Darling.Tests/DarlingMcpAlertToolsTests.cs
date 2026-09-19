@@ -337,62 +337,63 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     /// that MATCHES the published file value is accepted with a warning (a whole-payload round-trip must not
     /// fail on a field the caller did not choose to change); a value that would CHANGE it is refused by name
     /// with the file key, because accepting it silently would present as the setting not sticking.
+    ///
+    /// <para>The ambient publish is reset at both ends WITHOUT a <c>finally</c>: this class carries the
+    /// live-collection attribute, and the #1902 ratchet reads every <c>finally</c> in such a file as a store
+    /// teardown. A leaked value is harmless to the siblings here — a published <c>digest</c> round-trips with a
+    /// warning and an unparseable value publishes nothing — so the discipline costs nothing on a failure.</para>
     /// </summary>
     [Fact]
     public void UncorroboratedRoute_IsReportedFromThePublish_WithItsNote_AndTheWriterRefusesToChangeIt()
     {
         DarlingFileLevelAlertSettings.ResetForTests();
-        try
-        {
-            /* Unpublished: the read says null and the note; the null coming home claims nothing. */
-            var payload = SerializedSettingsPayload(SampleSettingsRow());
-            Assert.Null(payload["analysis"]!["uncorroborated_route"]);
-            Assert.Equal(DarlingMcpAlertTools.UncorroboratedRouteNote, payload["analysis"]!["uncorroborated_route_note"]!.GetValue<string>());
-            Assert.StartsWith("FILE-LEVEL (#3712)", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
 
-            var (unpublishedTargets, unpublishedError, unpublishedWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-                "{\"analysis\":{\"uncorroborated_route\":null,\"uncorroborated_route_note\":\"anything\"}}")!);
-            Assert.Null(unpublishedError);
-            Assert.Empty(unpublishedTargets);
-            Assert.Empty(unpublishedWarnings);
+        /* Unpublished: the read says null and the note; the null coming home claims nothing. */
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Null(payload["analysis"]!["uncorroborated_route"]);
+        Assert.Equal(DarlingMcpAlertTools.UncorroboratedRouteNote, payload["analysis"]!["uncorroborated_route_note"]!.GetValue<string>());
+        Assert.StartsWith("FILE-LEVEL (#3712)", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
 
-            /* A value sent while nothing is published cannot be honored — refused with the file key. */
-            var (_, changeError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-                "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
-            Assert.NotNull(changeError);
-            Assert.Contains("analysis.uncorroboratedRoute", changeError, StringComparison.Ordinal);
-            Assert.Contains("darling.json", changeError, StringComparison.Ordinal);
+        var (unpublishedTargets, unpublishedError, unpublishedWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":null,\"uncorroborated_route_note\":\"anything\"}}")!);
+        Assert.Null(unpublishedError);
+        Assert.Empty(unpublishedTargets);
+        Assert.Empty(unpublishedWarnings);
 
-            /* Published: the read reports the file's value in its wire spelling. */
-            DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "Digest" });
-            Assert.Equal("digest", SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        /* A value sent while nothing is published cannot be honored — refused with the file key. */
+        var (_, changeError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
+        Assert.NotNull(changeError);
+        Assert.Contains("analysis.uncorroboratedRoute", changeError, StringComparison.Ordinal);
+        Assert.Contains("darling.json", changeError, StringComparison.Ordinal);
 
-            /* The published value coming home, in either case: accepted, no column, one warning. */
-            var (matchTargets, matchError, matchWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-                "{\"analysis\":{\"uncorroborated_route\":\"DIGEST\"}}")!);
-            Assert.Null(matchError);
-            Assert.Empty(matchTargets);
-            Assert.Single(matchWarnings);
-            Assert.Contains("file-level", matchWarnings[0], StringComparison.Ordinal);
+        /* Published: the read reports the file's value in its wire spelling. */
+        DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "Digest" });
+        Assert.Equal("digest", SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]!.GetValue<string>());
 
-            /* A DIFFERENT value: refused. */
-            var (_, flipError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-                "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
-            Assert.NotNull(flipError);
+        /* The published value coming home, in either case: accepted, no column, one warning. */
+        var (matchTargets, matchError, matchWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"DIGEST\"}}")!);
+        Assert.Null(matchError);
+        Assert.Empty(matchTargets);
+        Assert.Single(matchWarnings);
+        Assert.Contains("file-level", matchWarnings[0], StringComparison.Ordinal);
 
-            /* A file value that parses to neither spelling publishes nothing, so the read stays honest. */
-            DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "sometimes" });
-            Assert.Null(SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]);
+        /* A DIFFERENT value: refused. */
+        var (_, flipError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
+        Assert.NotNull(flipError);
 
-            /* Both descriptions say it, where an agent reads before calling. */
-            Assert.Contains("analysis.uncorroborated_route", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
-            Assert.Contains("FILE-LEVEL", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
-            Assert.Contains("analysis.uncorroborated_route is FILE-LEVEL (#3712)", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
-        }
-        finally
-        {
-            DarlingFileLevelAlertSettings.ResetForTests();
-        }
+        /* A file value that parses to neither spelling publishes nothing, so the read stays honest. */
+        DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "sometimes" });
+        Assert.Null(SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]);
+
+        /* Both descriptions say it, where an agent reads before calling. */
+        Assert.Contains("analysis.uncorroborated_route", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("FILE-LEVEL", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is FILE-LEVEL (#3712)", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+
+        DarlingFileLevelAlertSettings.ResetForTests();
     }
 
     /// <summary>
