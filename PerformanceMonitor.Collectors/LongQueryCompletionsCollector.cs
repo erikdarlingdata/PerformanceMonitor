@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -37,16 +38,20 @@ namespace PerformanceMonitor.Collectors;
 /// disabling DROPS it there (the session itself is the cost, so merely skipping collection is not
 /// enough). Both SKUs drive that reconcile from the shared <see cref="BuildCreateSessionSql"/> /
 /// <see cref="BuildStartSessionSql"/> / <see cref="BuildDropSessionSql"/> here so the two hosts can
-/// never drift on the (complex, 3-event / 9-action) DDL — the same "reader and lifecycle never
-/// disagree" reason <see cref="XeSessionName"/> lives here.</para>
+/// never drift on the (complex, 3-event / 9-action on-prem, 8-action Azure) DDL — the same "reader and
+/// lifecycle never disagree" reason <see cref="XeSessionName"/> lives here.</para>
 ///
 /// <para>Reads the ring buffer exactly like <see cref="BlockedProcessReportCollector"/>: server-scoped
 /// on on-prem/MI/RDS, database-scoped per monitored database on Azure SQL DB (#1535 — a single session
 /// only ever captured the connection's own database; rpc_completed/sql_batch_completed/attention are
 /// all available in an Azure database-scoped session, verified against MS Learn), with an
 /// <c>event_time</c> watermark (10-minute first-run fallback) that keeps ring-buffer lingerers from
-/// re-inserting. The event payload + the 9 QuickSessionStandard actions are shredded in the SQL/read
-/// phase into typed columns.</para>
+/// re-inserting. The event payload + the QuickSessionStandard actions are shredded in the SQL/read
+/// phase into typed columns. The ACTION surface is narrower on Azure SQL DB than the event surface
+/// (#3753): two of the nine actions are rejected by a database-scoped session outright, so the Azure
+/// DDL is built from a closed list of the rejects (<see cref="AzureSqlDbUnavailableActions"/>) and
+/// substitutes <see cref="AzureSqlDbUsernameAction"/> for the principal name — see
+/// <see cref="ActionList"/>.</para>
 /// </summary>
 public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<LongQueryCompletionsCollector.Row>
 {
@@ -86,6 +91,9 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
         public string? ClientAppName { get; set; }
         public int? ClientPid { get; set; }
         public string? NtUserName { get; set; }
+        /* server_principal_name on-prem; on Azure SQL DB the sqlserver.username action's value (the
+           connecting login / Entra principal), because server_principal_name is not an action a
+           database-scoped session may carry (#3753). NULL when neither action is in the payload. */
         public string? ServerPrincipalName { get; set; }
         public string? QueryHash { get; set; }
         public long? EventSequence { get; set; }
@@ -140,7 +148,14 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
        session DDL (BuildCreateSessionSql), not here. The customizable text columns (statement /
        batch_text) are turned on in the DDL's SET clause; object_name is rpc_completed's own default
        data field (#2129 — SETting a collect_object_name there fails the CREATE), so all three are
-       present in the payload here. */
+       present in the payload here.
+
+       Every action read below is an XQuery over action[@name="..."] — an action the session does not
+       carry has no node, the path yields NULL, and the column lands NULL. That is what lets ONE shred
+       serve both action lists: nt_username is simply absent on Azure and reads NULL, and the
+       server_principal_name column COALESCEs the on-prem server_principal_name action with the Azure
+       stand-in sqlserver.username (#3753) — exactly one of the two is ever present in a given session's
+       payload, so the COALESCE is a selector, not a merge. */
     private const string ShredSelect = @"
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -166,7 +181,12 @@ SELECT
     event_sequence = evt.value('(action[@name=""event_sequence""]/value/text())[1]', 'bigint'),
     nt_username = evt.value('(action[@name=""nt_username""]/value/text())[1]', 'nvarchar(256)'),
     query_hash = evt.value('(action[@name=""query_hash""]/value/text())[1]', 'nvarchar(64)'),
-    server_principal_name = evt.value('(action[@name=""server_principal_name""]/value/text())[1]', 'nvarchar(256)'),
+    server_principal_name =
+        COALESCE
+        (
+            evt.value('(action[@name=""server_principal_name""]/value/text())[1]', 'nvarchar(256)'),
+            evt.value('(action[@name=""username""]/value/text())[1]', 'nvarchar(256)')
+        ),
     session_id = evt.value('(action[@name=""session_id""]/value/text())[1]', 'integer')
 FROM @PerformanceMonitor_LongQueryCompletions AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""rpc_completed"" or @name=""sql_batch_completed"" or @name=""attention""]') AS q(evt)
@@ -312,29 +332,102 @@ OPTION(RECOMPILE);
 
     /* ---------------------------------------------------------------------------------------------
        Session DDL — shared by both hosts' lifecycle code (Lite's RemoteCollectorService and Darling's
-       DarlingXeSessions) so the two can never drift on the 3-event / 9-action / SET-collect / duration-
-       predicate CREATE. The lifecycle STRUCTURE (existence check, create, start, drop) still lives
-       per-host, mirroring the blocked-process/deadlock pattern; only this DDL TEXT is centralized.
+       DarlingXeSessions) so the two can never drift on the 3-event / 9-action (8 on Azure, #3753) /
+       SET-collect / duration-predicate CREATE. The lifecycle STRUCTURE (existence check, create, start,
+       drop) still lives per-host, mirroring the blocked-process/deadlock pattern; only this DDL TEXT is
+       centralized.
        --------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The 9 QuickSessionStandard actions, minus <c>nt_username</c> on the database-scoped (Azure SQL
-    /// DB) variant — Azure SQL DB uses Entra/SQL authentication, so an NT username is meaningless there
-    /// and the action may not exist database-scoped; the column simply lands NULL on Azure. All other
-    /// actions are available in an Azure database-scoped session (verified against MS Learn).
+    /// The 9 QuickSessionStandard actions this collector adopted in #1496, in the order the
+    /// server-scoped DDL emits them (client_app_name, client_pid, database_id, database_name,
+    /// event_sequence, nt_username, query_hash, server_principal_name, session_id). On-prem/MI/RDS emit
+    /// all nine, unchanged since #1496.
+    /// </summary>
+    private static readonly string[] QuickSessionStandardActions =
+    {
+        "sqlserver.client_app_name",
+        "sqlserver.client_pid",
+        "sqlserver.database_id",
+        "sqlserver.database_name",
+        "package0.event_sequence",
+        "sqlserver.nt_username",
+        "sqlserver.query_hash",
+        "sqlserver.server_principal_name",
+        "sqlserver.session_id",
+    };
+
+    /// <summary>
+    /// The QuickSessionStandard actions Azure SQL DB REJECTS in a database-scoped session (#3753) — a
+    /// CLOSED list, and the ONLY thing the Azure DDL strips. The engine refuses the whole CREATE with
+    /// error 25744, <c>The action '%.*ls' is not available for Azure SQL Database</c> (MS Learn,
+    /// Database Engine events and errors 23000–25999:
+    /// https://learn.microsoft.com/sql/relational-databases/errors-events/database-engine-events-and-errors-23000-to-25999),
+    /// so a single rejected action means the session never exists and the collector is dead on every
+    /// Azure database, every sweep — which is exactly what #3753 reported for
+    /// <c>server_principal_name</c> after #1496 had already stripped <c>nt_username</c> ad hoc. The
+    /// first strip was a one-off string splice; the second showed the shape wants to be a list the
+    /// DDL is generated FROM and a pin asserts AGAINST, so that a third member is a one-line edit here
+    /// and the pin is what says the Azure DDL is clean.
+    ///
+    /// <para><b>Why a list here rather than a lookup on the server.</b> MS Learn publishes no static
+    /// per-action availability table for Azure SQL DB; its Extended Events page
+    /// (https://learn.microsoft.com/azure/azure-sql/database/xevent-db-diff-from-svr) directs you to
+    /// query <c>sys.dm_xe_objects</c> on the database itself. The DDL is built before any connection is
+    /// opened, and the reconcile that runs it is a create-or-start by session NAME (both hosts), not a
+    /// compare of the live definition against the desired one — so a wrong member here cannot make the
+    /// session flap; it can only fail the CREATE the way the reporter saw. Membership is verified
+    /// against Microsoft's own Azure profiler template instead: Azure Data Studio ships
+    /// <c>Standard_OnPrem</c> and <c>Standard_Azure</c> side by side on the same <c>attention</c> /
+    /// <c>rpc_completed</c> / <c>sql_batch_completed</c> events, and the Azure one drops exactly these
+    /// two actions and substitutes <see cref="AzureSqlDbUsernameAction"/>
+    /// (https://github.com/microsoft/azuredatastudio/blob/main/src/sql/workbench/contrib/profiler/browser/profiler.contribution.ts).
+    /// The seven actions that remain each appear in a Microsoft-authored <c>ON DATABASE</c> session on
+    /// Azure SQL DB (that template; the Azure DB Support team's login-audit session for
+    /// <c>database_name</c>, which the template happens not to carry). Consistent with that, the
+    /// reporter's own engine run named <c>server_principal_name</c> as the reject — the seventh action
+    /// in the Azure DDL as it then stood — and not any of the six emitted before it.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> AzureSqlDbUnavailableActions = new[]
+    {
+        "sqlserver.nt_username",
+        "sqlserver.server_principal_name",
+    };
+
+    /// <summary>
+    /// The action that carries the connecting principal's name in an Azure SQL DB database-scoped
+    /// session, emitted in place of the two rejected identity actions (#3753) so the
+    /// <c>server_principal_name</c> column is populated on Azure rather than landing NULL forever. It is
+    /// what Microsoft's own <c>Standard_Azure</c> profiler template substitutes for
+    /// <c>nt_username</c> + <c>server_principal_name</c> (link on
+    /// <see cref="AzureSqlDbUnavailableActions"/>), and it is the identity action in the Azure DB
+    /// Support team's published <c>ON DATABASE</c> sessions that capture a login (their login-audit and
+    /// change-tracking-audit examples). The value is the session's login name — a SQL login or an Entra principal on Azure —
+    /// which is the same information <c>server_principal_name</c> carries on-prem. The shred reads
+    /// either action into the one column (see <c>ShredSelect</c>); on-prem does NOT emit this action,
+    /// so the on-prem DDL and payload are unchanged.
+    /// </summary>
+    public const string AzureSqlDbUsernameAction = "sqlserver.username";
+
+    /// <summary>
+    /// The action block shared by all three events. Server-scoped: the nine
+    /// <see cref="QuickSessionStandardActions"/> verbatim. Database-scoped (Azure SQL DB): every member
+    /// of <see cref="AzureSqlDbUnavailableActions"/> stripped and <see cref="AzureSqlDbUsernameAction"/>
+    /// appended, for eight. Generated from the lists rather than spliced by hand so the Azure branch
+    /// can never again carry an action the closed list says it must not (#3753).
     /// </summary>
     private static string ActionList(bool databaseScoped)
     {
-        var ntUsername = databaseScoped ? "" : "\n        sqlserver.nt_username,";
-        return $@"
-        sqlserver.client_app_name,
-        sqlserver.client_pid,
-        sqlserver.database_id,
-        sqlserver.database_name,
-        package0.event_sequence,{ntUsername}
-        sqlserver.query_hash,
-        sqlserver.server_principal_name,
-        sqlserver.session_id";
+        IEnumerable<string> actions = QuickSessionStandardActions;
+
+        if (databaseScoped)
+        {
+            actions = actions
+                .Where(action => !AzureSqlDbUnavailableActions.Contains(action, StringComparer.Ordinal))
+                .Append(AzureSqlDbUsernameAction);
+        }
+
+        return string.Join(",", actions.Select(action => "\n        " + action));
     }
 
     /// <summary>
