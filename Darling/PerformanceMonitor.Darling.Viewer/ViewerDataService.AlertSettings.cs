@@ -76,7 +76,9 @@ public sealed partial class ViewerDataService
         /* #3466: V124's fleet-sweep cadence knobs, APPENDED for the same reason. */
         "fleet_sweep_enabled, fleet_sweep_interval_minutes, " +
         /* #3528: V126's store-disk-warn GB floor, APPENDED for the same reason. */
-        "self_disk_free_warn_gb";
+        "self_disk_free_warn_gb, " +
+        /* #3653 (A5, Q5): the Long-Running Query opt-out lists (text[], the excluded_databases shape), APPENDED. */
+        "long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -93,7 +95,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67,
+        $63, $64, $65, $66, $67, $68, $69,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -163,6 +165,8 @@ ON CONFLICT (id) DO UPDATE SET
     fleet_sweep_enabled = EXCLUDED.fleet_sweep_enabled,
     fleet_sweep_interval_minutes = EXCLUDED.fleet_sweep_interval_minutes,
     self_disk_free_warn_gb = EXCLUDED.self_disk_free_warn_gb,
+    long_running_query_excluded_program_name_prefixes = EXCLUDED.long_running_query_excluded_program_name_prefixes,
+    long_running_query_excluded_logins = EXCLUDED.long_running_query_excluded_logins,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -261,6 +265,11 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.FleetSweepEnabled });            // $65 (#3466, V124)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FleetSweepIntervalMinutes });     // $66 (#3466, V124)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.SelfDiskFreeWarnGb });            // $67 (#3528, V126)
+        /* #3653 (A5, Q5): normalised on the way in (trim, blanks dropped, case-insensitive dedupe) so the store
+           holds the list the engine applies and get_alert_settings reports back. An emptied box is an explicit
+           empty array — the operator clearing a seeded default — and is stored as such, never re-seeded. */
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(r.LongRunningQueryExcludedProgramNamePrefixes));   // $68
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(r.LongRunningQueryExcludedLogins));         // $69
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -344,6 +353,10 @@ ON CONFLICT (id) DO UPDATE SET
         FleetSweepIntervalMinutes = reader.GetInt32(65),
         /* #3528 store-disk-warn GB floor appended (V126) at ordinal 66. */
         SelfDiskFreeWarnGb = reader.GetInt32(66),
+        /* #3653 (A5, Q5) Long-Running Query opt-out lists appended at ordinals 67-68 (V135; text[] NOT NULL, DEFAULT
+           the production read's seeds, so a pre-rung row reads as the defaults Lite ships with). */
+        LongRunningQueryExcludedProgramNamePrefixes = reader.IsDBNull(67) ? new List<string>() : reader.GetFieldValue<string[]>(67).ToList(),
+        LongRunningQueryExcludedLogins = reader.IsDBNull(68) ? new List<string>() : reader.GetFieldValue<string[]>(68).ToList(),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -490,6 +503,20 @@ public sealed class AlertSettingsRow
     public int FailedJobLookbackMinutes { get; set; } = 60;
     public int CooldownMinutes { get; set; } = 5;
     public List<string> ExcludedDatabases { get; set; } = new();
+
+    /// <summary>#3653 (A5, Q5): the Long-Running Query opt-out knob's <c>program_name</c> PREFIXES — sessions whose
+    /// program name starts with one are NOT EVALUATED by the alert (case-insensitive, no wildcard grammar; the rule
+    /// is <c>LongRunningQueryExclusions</c> in the Alerting library, applied in the read ahead of its row cap).
+    /// Seeded with <c>SQLAgent - TSQL JobStep</c> from the production read; empty = evaluate every program. Stored as
+    /// <c>long_running_query_excluded_program_name_prefixes</c> (<c>text[]</c>, V135), edited as comma-separated text
+    /// on the Settings window like <see cref="ExcludedDatabases"/>.</summary>
+    public List<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+
+    /// <summary>#3653 (A5, Q5): the knob's EXACT <c>login_name</c> arm (case-insensitive, whole name); a session is
+    /// excluded when EITHER arm matches and counted once, under the prefix. Seeded with <c>NT AUTHORITY\SYSTEM</c> and
+    /// <c>NT AUTHORITY\NETWORK SERVICE</c>; the application's admin login is deliberately not a default. Stored as
+    /// <c>long_running_query_excluded_logins</c> (V135).</summary>
+    public List<string> LongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
     public bool AnalysisEnabled { get; set; } = true;
     public int AnalysisIntervalMinutes { get; set; } = 30;
 
@@ -606,6 +633,8 @@ public sealed class AlertSettingsRow
             && PgDeadlockCountThreshold == other.PgDeadlockCountThreshold
             && PgBlockingCountThreshold == other.PgBlockingCountThreshold
             && FleetSweepEnabled == other.FleetSweepEnabled
-            && FleetSweepIntervalMinutes == other.FleetSweepIntervalMinutes;
+            && FleetSweepIntervalMinutes == other.FleetSweepIntervalMinutes
+            && (LongRunningQueryExcludedProgramNamePrefixes ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedProgramNamePrefixes ?? new List<string>())
+            && (LongRunningQueryExcludedLogins ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedLogins ?? new List<string>());
     }
 }

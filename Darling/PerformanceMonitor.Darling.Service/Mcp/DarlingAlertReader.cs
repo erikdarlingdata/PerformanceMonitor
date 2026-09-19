@@ -253,7 +253,12 @@ AND   dismissed = TRUE";
         bool FleetSweepEnabled,
         int FleetSweepIntervalMinutes,
         /* #3528 (V126): the Store Disk Pressure warning's GB floor. APPENDED, same reason. */
-        int SelfDiskFreeWarnGb);
+        int SelfDiskFreeWarnGb,
+        /* #3653 (A5, Q5): the Long-Running Query opt-out knob's two lists — program_name PREFIXES and exact
+           logins (text[], the excluded_databases shape; V135, DEFAULT the production read's seeds). APPENDED,
+           same reason. */
+        IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes,
+        IReadOnlyList<string> LongRunningQueryExcludedLogins);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -285,7 +290,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
-       self_disk_free_warn_gb
+       self_disk_free_warn_gb,
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -338,7 +344,10 @@ WHERE id = 1";
             /* #3466: V124 fleet-sweep cadence knobs at 64–65. */
             reader.GetBoolean(64), reader.GetInt32(65),
             /* #3528: V126 store-disk-warn GB floor at 66. */
-            reader.GetInt32(66));
+            reader.GetInt32(66),
+            /* #3653 (A5, Q5): the Long-Running Query opt-out lists at 67–68. */
+            reader.IsDBNull(67) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(67),
+            reader.IsDBNull(68) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(68));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

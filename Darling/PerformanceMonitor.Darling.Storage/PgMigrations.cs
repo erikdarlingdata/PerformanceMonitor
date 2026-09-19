@@ -214,6 +214,7 @@ public static class PgMigrations
         new Migration(132, "perfmon-counter-type", V132Sql),
         new Migration(133, "pg-numbackends-and-sampled-ms", V133Sql),
         new Migration(134, "time-honesty", V134Sql),
+        new Migration(135, "lrq-exclusion-knob", V135Sql),
     };
 
     /// <summary>
@@ -1337,6 +1338,57 @@ CREATE OR REPLACE VIEW collect.v_cpu_utilization_stats AS SELECT * FROM collect.
 /* server_properties has no v_ passthrough (V16), so this ALTER stands alone. */
 ALTER TABLE collect.server_properties
     ADD COLUMN IF NOT EXISTS time_zone_id text;";
+
+    /// <summary>
+    /// V135 — the Long-Running Query alert's OPT-OUT knob on the singleton <c>config_alert_settings</c> row
+    /// (#3653 A5, ruling Q5): two <c>text[]</c> lists — <c>program_name</c> PREFIXES and exact <c>login_name</c>
+    /// values — whose sessions the alert does NOT EVALUATE: not read into the decision, not counted, not
+    /// fingerprinted, as opposed to a mute rule, which silences a fire already decided. The shape is
+    /// <c>excluded_databases</c>'s (V17), <c>text[] NOT NULL</c>; the DEFAULT is not.
+    ///
+    /// <para><b>Why a knob and not a gate.</b> Measured on one production store class: 191 distinct sessions over
+    /// the 30-minute bar in 7 days, the p90 of them seen in 6,192 snapshots — permanent background requests that
+    /// are over any duration threshold forever, so no persistence gate can separate them from a runaway query.
+    /// Coverage is the fix. The match rule (programs by case-insensitive PREFIX — job-step names embed the job
+    /// id; logins EXACT, case-insensitive — a prefix would let <c>svc</c> swallow <c>svc_owner</c>; no wildcard
+    /// grammar) is spelled once in <c>PerformanceMonitor.Alerting.LongRunningQueryExclusions</c> and applied
+    /// INSIDE both SKUs' reads ahead of the row cap; the store holds the normalised lists (trimmed, blanks
+    /// dropped, de-duplicated case-insensitively).</para>
+    ///
+    /// <para><b>The DEFAULT is the production read's seeds, and this is the one place a knob rung on this row
+    /// has shipped a non-empty list.</b> A 7-day read of one large production store split the long-running
+    /// population into four classes: (1) SQL Agent job-step programs — <c>program_name</c> starting
+    /// <c>SQLAgent - TSQL JobStep</c>, ~460 sessions a week across 11 single-server jobs, medians 35–62 minutes
+    /// — the seeded PREFIX; (2) the <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> logins —
+    /// the permanent multi-DAY background, ~70 sessions across 42 servers, medians 4.8–8.6 days, 300K+
+    /// snapshots, CDC-capture shaped — the seeded LOGINS; (3) the application's admin login — deliberately NOT
+    /// a default, because it carries the job wave but also real ad-hoc long-runners, and the job-step prefix
+    /// already removes its share; (4) named humans — 3 sessions a week, never excluded: they are what the page
+    /// is for. A pre-rung row therefore reads as the seeds, which is exactly what <c>DarlingAlertSettings</c>
+    /// returned before this rung and what Lite ships, so the two SKUs and the two sides of the rung all
+    /// evaluate one population. The seeds are DEFAULTS an operator may clear: a cleared list is stored as an
+    /// explicit empty array and excludes nothing on that arm — present-and-empty is a decision, and nothing
+    /// re-seeds it. <c>LongRunningQueryExclusionKnobRungTests</c> pins the literal defaults here equal to
+    /// <c>LongRunningQueryExclusions.DefaultProgramNamePrefixes</c> / <c>DefaultLogins</c>.</para>
+    ///
+    /// <para><b>Readers and writers.</b> <c>StoreConfigProvider</c> seeds them as the 69th/70th bindings and reads
+    /// them at ordinals 67–68 (the reachability rule: a column selected but not read resets the knob on every
+    /// worker start); the Viewer's <c>ViewerDataService.AlertSettings</c> binds them as $68/$69;
+    /// <c>DarlingAlertReader.AlertSettingsSelectSql</c> reads them at 67–68 for <c>get_alert_settings</c>;
+    /// <c>update_alert_settings</c> writes <c>long_running_query.excluded_program_name_prefixes</c> /
+    /// <c>.excluded_logins</c>. No reload beacon of its own: V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write here. No
+    /// ACL or provisioning change: <c>config_alert_settings</c> carries table-level grants (no column carve),
+    /// the same fact every knob rung on this row has relied on. Rides after V134 (#3653 item 13's time-honesty
+    /// rung), one un-landed rung at a time.</para>
+    /// </summary>
+    private const string V135Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS long_running_query_excluded_program_name_prefixes text[] NOT NULL
+        DEFAULT ARRAY['SQLAgent - TSQL JobStep']::text[];
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS long_running_query_excluded_logins text[] NOT NULL
+        DEFAULT ARRAY['NT AUTHORITY\SYSTEM', 'NT AUTHORITY\NETWORK SERVICE']::text[];";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

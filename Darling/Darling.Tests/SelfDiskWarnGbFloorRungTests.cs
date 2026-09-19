@@ -284,9 +284,12 @@ public sealed class SelfDiskWarnGbFloorRungTests
             .Max();
         Assert.Equal(command.Parameters.Count, highestPlaceholder);
 
-        /* The new column rides at the END — appended, the rule every knob rung on this table follows,
-           so every earlier ordinal keeps its column. */
-        Assert.Equal(75, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^1]).TypedValue);
+        /* The V126 column rides at its APPENDED position — the rule every knob rung on this table follows,
+           so every earlier ordinal keeps its column. It was the END until #3653 (A5, Q5) appended the two
+           Long-Running Query opt-out lists after it (LongRunningQueryExclusionKnobRungTests pins those two
+           at the end now); [^3] is the V126 slot, and the equality is what would catch a rung inserted
+           anywhere but after it. */
+        Assert.Equal(75, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^3]).TypedValue);
     }
 
     /* ---- the seam reaches the gate -------------------------------------------------------------------- */

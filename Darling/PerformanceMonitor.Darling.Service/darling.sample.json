@@ -215,6 +215,16 @@
     "longRunningQueryExcludeBackups": true,
     "longRunningQueryExcludeMiscWaits": true,
     "longRunningQueryExcludeCdc": true,
+    // The Long-Running Query opt-out knob (#3653): sessions whose program_name STARTS WITH a prefix below, or
+    // whose login_name IS a login below (case-insensitive, no wildcards), are not evaluated by that alert at
+    // all - the opposite of a mute. Applied ahead of longRunningQueryMaxResults; the fired card counts what
+    // each list removed. The values below are the SEEDED DEFAULTS from a 7-day read of one large production
+    // store: SQL Agent job steps (the program name embeds the job id, hence a prefix) and the two NT AUTHORITY
+    // service logins (the permanent multi-day background). The application's admin login is deliberately NOT
+    // a default - it also runs real ad-hoc long-runners. Seeded into the store row on first run (V135); the
+    // store row wins afterwards, and a list cleared there stays cleared. [] excludes nothing on that arm.
+    "longRunningQueryExcludedProgramNamePrefixes": ["SQLAgent - TSQL JobStep"],
+    "longRunningQueryExcludedLogins": ["NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\NETWORK SERVICE"],
     "excludedDatabases": []
   },
 

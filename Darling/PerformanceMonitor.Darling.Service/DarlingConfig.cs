@@ -836,6 +836,39 @@ public sealed class AlertsConfig
     /// <summary>Exclude CDC capture sessions (default true).</summary>
     [JsonPropertyName("longRunningQueryExcludeCdc")]
     public bool LongRunningQueryExcludeCdc { get; set; } = true;
+
+    /// <summary>
+    /// The Long-Running Query OPT-OUT knob's <c>program_name</c> arm (#3653 A5, ruling Q5): sessions whose
+    /// program name STARTS WITH an entry are not evaluated by the alert at all — not read into the decision,
+    /// not counted, not fingerprinted; the opposite of a mute rule. Case-insensitive prefix, no wildcard grammar
+    /// — <c>LongRunningQueryExclusions</c> in the Alerting library is the one rule both SKUs apply, IN the read
+    /// and ahead of its row cap (a post-read drop would let permanent background requests fill the cap; the type
+    /// says why). Stored as <c>config_alert_settings.long_running_query_excluded_program_name_prefixes</c>
+    /// (<c>text[]</c>, V135), the same shape as <c>excludedDatabases</c>, and the store row wins over this file
+    /// like every other alert knob.
+    ///
+    /// <para><b>Seeded default</b>: <c>SQLAgent - TSQL JobStep</c> — class 1 of the 7-day read of one large
+    /// production store, whose long-running population was (1) SQL Agent job steps, ~460 sessions a week across
+    /// 11 jobs, medians 35–62 min (the program name embeds the job id, hence a PREFIX); (2) the
+    /// <c>NT AUTHORITY\SYSTEM</c> / <c>NT AUTHORITY\NETWORK SERVICE</c> logins, the multi-day background — see
+    /// <see cref="LongRunningQueryExcludedLogins"/>; (3) the application's admin login — NOT excluded, because it
+    /// carries the job wave AND real ad-hoc long-runners, and this prefix already removes its share; (4) named
+    /// humans — never excluded. The seed is a DEFAULT: this initialiser and the rung's column default agree, so a
+    /// fresh file and a pre-rung row read the same; an operator clearing the list stores an empty array, which
+    /// excludes nothing on this arm.</para>
+    /// </summary>
+    [JsonPropertyName("longRunningQueryExcludedProgramNamePrefixes")]
+    public List<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+
+    /// <summary>The knob's <c>login_name</c> arm (#3653 A5, Q5) — EXACT, case-insensitive (a prefix would let
+    /// <c>svc</c> swallow <c>svc_owner</c>), for the service principals whose program name is a generic driver
+    /// string; a session is excluded when EITHER arm matches and counted once, under the prefix. Stored as
+    /// <c>config_alert_settings.long_running_query_excluded_logins</c> (V135). <b>Seeded default</b>:
+    /// <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> — class 2 of the production read, ~70
+    /// sessions across 42 servers with medians of 4.8–8.6 DAYS, CDC-capture shaped. The application's admin login
+    /// is deliberately absent (see <see cref="LongRunningQueryExcludedProgramNamePrefixes"/>).</summary>
+    [JsonPropertyName("longRunningQueryExcludedLogins")]
+    public List<string> LongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
 }
 
 /// <summary>

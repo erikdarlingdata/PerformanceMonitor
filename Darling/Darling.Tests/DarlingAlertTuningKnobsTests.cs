@@ -87,10 +87,10 @@ public sealed class DarlingAlertTuningKnobsTests
         Assert.True(settings.LongRunningQueryExcludeMiscWaits);
         Assert.True(settings.LongRunningQueryExcludeCdc);
 
-        /* #3653 (A5, Q5): the opt-out knob is the SEEDED DEFAULTS on Darling until its store home (V135) lands —
-           the job-step program prefix and the two NT AUTHORITY logins the production read found — never an empty
-           knob, so both SKUs evaluate the same population from day one. Not yet by reference: there is no
-           config member for a reload to mutate, and this pin flips to the by-reference shape with the rung. */
+        /* #3653 (A5, Q5): the opt-out knob's fresh-config value is the SEEDED DEFAULTS — the job-step program prefix
+           and the two NT AUTHORITY logins the production read found — never an empty knob, so both SKUs evaluate
+           the same population from day one. By reference since V135 (LongRunningQueryExclusionKnobRungTests holds
+           the reload half); before the rung the seam returned the seeds directly, and the values here did not move. */
         Assert.Equal(LongRunningQueryExclusions.DefaultProgramNamePrefixes, settings.LongRunningQueryExcludedProgramNamePrefixes);
         Assert.Equal(LongRunningQueryExclusions.DefaultLogins, settings.LongRunningQueryExcludedLogins);
         Assert.Equal(new[] { "SQLAgent - TSQL JobStep" }, settings.LongRunningQueryExcludedProgramNamePrefixes);
@@ -199,6 +199,12 @@ public sealed class DarlingAlertTuningKnobsTests
         config.Alerts.LongRunningQueryExcludeMiscWaits = false;
         config.Alerts.LongRunningQueryExcludeCdc = true;
         config.Alerts.NotifyConnectionChanges = false;
+        /* #3653 (A5, Q5), V135: the opt-out knob's two text[] columns ride the same seed → read path. The prefix
+           list is un-normalised on purpose (padding, a case-duplicate) and the login list is CLEARED — the
+           operator's decision to evaluate every login, which must survive the round-trip as an empty array and
+           not come back re-seeded. */
+        config.Alerts.LongRunningQueryExcludedProgramNamePrefixes = new() { " QueueWorker ", "queueworker", "SQLAgent - TSQL JobStep" };
+        config.Alerts.LongRunningQueryExcludedLogins = new();
         config.Servers.Add(new MonitoredServer { Name = "v20-lrq", Host = "v20-scratch-host", Auth = "integrated" });
 
         await provider.SeedIfEmptyAsync(config, ct);
@@ -213,5 +219,26 @@ public sealed class DarlingAlertTuningKnobsTests
         Assert.False(view.Alerts.LongRunningQueryExcludeMiscWaits);
         Assert.True(view.Alerts.LongRunningQueryExcludeCdc);
         Assert.False(view.Alerts.NotifyConnectionChanges);
+        Assert.Equal(new[] { "QueueWorker", "SQLAgent - TSQL JobStep" }, view.Alerts.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Empty(view.Alerts.LongRunningQueryExcludedLogins);
+
+        /* And the rung's column DEFAULTs on the live store are the seeds — what a pre-rung row reads as. Read
+           back from the catalogue, not restated: the pin is that the DDL PostgreSQL accepted carries them. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(
+                "SELECT column_name, column_default FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_alert_settings' AND column_name IN ('long_running_query_excluded_program_name_prefixes', 'long_running_query_excluded_logins') ORDER BY column_name",
+                connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("long_running_query_excluded_logins", reader.GetString(0));
+            Assert.Contains(@"NT AUTHORITY\SYSTEM", reader.GetString(1), StringComparison.Ordinal);
+            Assert.Contains(@"NT AUTHORITY\NETWORK SERVICE", reader.GetString(1), StringComparison.Ordinal);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("long_running_query_excluded_program_name_prefixes", reader.GetString(0));
+            Assert.Contains("SQLAgent - TSQL JobStep", reader.GetString(1), StringComparison.Ordinal);
+            Assert.False(await reader.ReadAsync(ct));
+        }
     }
 }

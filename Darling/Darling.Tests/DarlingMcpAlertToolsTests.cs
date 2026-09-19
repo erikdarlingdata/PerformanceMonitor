@@ -1028,7 +1028,13 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #3528 (V126): inside the write bound (>= 0), deliberately NOT the shipped 50 — a sample equal
            to the default would let a payload that dropped the column and fell back to the default still
            match. */
-        SelfDiskFreeWarnGb: 75);
+        SelfDiskFreeWarnGb: 75,
+        /* #3653 (A5, Q5): in the stored canonical form (already normalised) and deliberately NOT the seeded
+           defaults (the job-step prefix; the two NT AUTHORITY logins) — a sample equal to the V135 DEFAULT would
+           let a payload that dropped the column and fell back to the default still match, and an un-normalised
+           sample would let the writer's normaliser change what the round-trip compares. */
+        LongRunningQueryExcludedProgramNamePrefixes: new[] { "HammerDB", "QueueWorker" },
+        LongRunningQueryExcludedLogins: new[] { "svc_replication" });
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

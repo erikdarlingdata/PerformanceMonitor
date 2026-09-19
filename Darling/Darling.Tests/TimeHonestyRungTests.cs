@@ -34,10 +34,11 @@ namespace Darling.Tests;
 /// arm, the two windowed CPU readers that now prefer the stored UTC instant, the latest-row reads that
 /// deliberately do not, and the <c>get_server_properties</c> payload that publishes the clock pair.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>PgNumbackendsAndSampledMsRungTests</c>
-/// (V133) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current. When the next rung lands, those claims move on
-/// and what stays is everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this file carried when it landed (moved here off
+/// <c>PgNumbackendsAndSampledMsRungTests</c>, V133) moved on again to <c>LongRunningQueryExclusionKnobRungTests</c>
+/// when V135 (#3653 A5, Q5 — the Long-Running Query opt-out knob's store home) landed on top of it. What stays
+/// is everything true of this rung wherever it sits: its name, its DDL, its probe sentinel at its own ordinal,
+/// and that a store which stopped here maps to exactly 134.</para>
 ///
 /// <para>The collectors' write shapes (the UTC twin projected LAST on every arm off <c>SYSUTCDATETIME()</c> with
 /// <c>sample_time</c> unchanged; the zone read in its own version/edition-gated <c>sp_executesql</c> batch inside
@@ -50,7 +51,8 @@ public sealed class TimeHonestyRungTests
     private const int RungVersion = 134;
     private const int PreviousVersion = 133;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V135 appended its
+    /// own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 109;
 
     private const string CpuTable = "cpu_utilization_stats";
@@ -75,14 +77,17 @@ public sealed class TimeHonestyRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("time-honesty", V134.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped being
+           true when V135 landed. The invariant that outlives the handoff is that the LADDER's top and the
+           declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -189,16 +194,16 @@ public sealed class TimeHonestyRungTests
         Assert.Contains("twinning Darling's V134", block, StringComparison.Ordinal);
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites) --------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
+    /// The viewer probe's three sites carry this rung's sentinel, and a store that stopped here maps to it. The
     /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// only some of them shifts every LATER ordinal onto the wrong column. The top-arm claims (last argument,
+    /// returns the build's version) moved to <c>LongRunningQueryExclusionKnobRungTests</c> with V135.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"table_name = '{CpuTable}'\n                                                     AND   column_name = '{CpuColumn}'",
@@ -206,7 +211,6 @@ public sealed class TimeHonestyRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasTimeHonesty", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -214,8 +218,9 @@ public sealed class TimeHonestyRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V135 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
@@ -227,14 +232,16 @@ public sealed class TimeHonestyRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's own literal — not the
+           build's version: the "returns StorageVersion.SchemaVersion" half of the top-arm claim moved to V135's
+           test with the top. */
         var thisArm = viewer.IndexOf("if (hasTimeHonesty)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf(PreviousArmSource, StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V134 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V134 sentinel arm — a store that stopped here would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V134 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V134 arm sits below the previous rung's, so a V134 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
@@ -351,8 +358,8 @@ public sealed class TimeHonestyRungTests
 
 /// <summary>
 /// The rung against a real PostgreSQL + TimescaleDB store (<c>DARLING_TEST_PG</c>): both columns present, nullable,
-/// default-less and LAST after <c>MigrateAsync</c>, the refreshed view serving the twin; a simulated 133 → 134 climb
-/// applying exactly one rung; then rows through each collector's real <c>WritePayload</c> over a real binary COPY
+/// default-less and LAST-of-their-tables after <c>MigrateAsync</c>, the refreshed view serving the twin; a simulated
+/// 133 → top climb applying this rung and the one above it (V135) in order; then rows through each collector's real <c>WritePayload</c> over a real binary COPY
 /// — <c>DarlingCollectorRunner</c>'s loop in shape — read back by the viewer's CPU read, the MCP CPU read, the
 /// worker's latest-row read and <c>get_server_properties</c>. The planted rows are the DST shape the rung exists
 /// for: a batch whose local stamp lies on the far side of a transition from what the de-skew recovers. Serialized
@@ -383,21 +390,32 @@ public sealed class TimeHonestyRungLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* A store that stopped one rung short: both columns gone (the view has to go first — Postgres will
-               not drop a column a view selects — and the rung must put it back), the stamp gone. MigrateAsync
-               must apply EXACTLY this rung and put everything back. Both tables are hypertables here (the fixture
-               store converts them), so this is the ADD COLUMN the fleet will run. */
+            /* A store that stopped one rung short OF THIS ONE: both columns gone (the view has to go first — Postgres
+               will not drop a column a view selects — and the rung must put it back), the stamp gone. The applier
+               ascends with `version <= MAX(version) ? skip`, so everything ABOVE this rung has to go too or this
+               rung is skipped as already-passed — the exact hazard MigrationLadderPins.TheLadder_IsDenseAboveTheHistoricalGap
+               guards at authoring time. Since V135 (#3653 A5, Q5 — the Long-Running Query opt-out knob's two
+               config_alert_settings columns) landed on top, that is V135's two columns and its stamp as well, and
+               MigrateAsync must apply EXACTLY the two rungs, this one first, and put everything back. Both tables
+               are hypertables here (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "DROP VIEW IF EXISTS collect.v_cpu_utilization_stats");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.cpu_utilization_stats DROP COLUMN IF EXISTS sample_time_utc");
             await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE VIEW collect.v_cpu_utilization_stats AS SELECT * FROM collect.cpu_utilization_stats");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.server_properties DROP COLUMN IF EXISTS time_zone_id");
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version = 134");
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS long_running_query_excluded_program_name_prefixes");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS long_running_query_excluded_logins");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 134");
+            Assert.Equal(2, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
             {
-                Assert.Equal(134, Convert.ToInt32(await version.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+                Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+            }
+
+            using (var stamped = new NpgsqlCommand("SELECT COUNT(*) FROM darling_schema_version WHERE version IN (134, 135)", connection))
+            {
+                Assert.Equal(2L, await stamped.ExecuteScalarAsync(ct));
             }
 
             await AssertColumnAsync(connection, ct, "cpu_utilization_stats", "sample_time_utc", "timestamp without time zone");
