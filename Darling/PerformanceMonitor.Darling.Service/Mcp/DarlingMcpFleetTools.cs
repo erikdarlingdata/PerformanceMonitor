@@ -60,7 +60,15 @@ public sealed class DarlingMcpFleetTools
         "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +
         "blocking band's count tiers were measured in engine-recorded reports per hour, so a sighting count " +
         "through them would band on a denominator they were never measured against — the PostgreSQL " +
-        "Blocking alert speaks for that condition until a sampled-shape band is measured.")]
+        "Blocking alert speaks for that condition until a sampled-shape band is measured. " +
+        "collection_health_age_seconds says how old the COLLECTOR-HEALTH half of the payload is: the per-card " +
+        "healthy/failed/collector_count, collector_severity, deadlock_collector_band and deadlock_source, and the " +
+        "fleet's servers_with_collection_failures and deadlock_coverage, come from one 7-day scan of the collection " +
+        "log that does not depend on hours_back and is shared by every overview call of the same minute on this " +
+        "host — 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
+        "did. Everything else on the payload was read for this call. Racing several calls with different " +
+        "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
+        "with the widest window and derive, or sequence the calls.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)
