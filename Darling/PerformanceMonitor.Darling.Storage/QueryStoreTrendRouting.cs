@@ -84,6 +84,40 @@ public static class QueryStoreTrendRouting
     }
 
     /// <summary>
+    /// The one word both apps use for what a Query Store trend was served from — get_query_store_duration_trend's
+    /// payload vocabulary (<c>source</c>): <c>rollup+raw</c> when the materialized region came from the corrected
+    /// hourly and the tail from the raw arms, <c>raw</c> when the original single-estimator read ran. Shared with
+    /// the viewer's chart title (#3653) for the reason <see cref="DurationTrendRouting.SourceWord"/> is: a user
+    /// reading the chart and an agent reading the tool must be told the same thing in the same word.
+    /// </summary>
+    public static string SourceWord(QueryStoreTrendRoute route) => route.UseRollup ? "rollup+raw" : "raw";
+
+    /// <summary>
+    /// The instant before which the rollup route served NOTHING for a window, or null when the route reached
+    /// the window's start (#2736's boundary disclosure, made one rule for both apps by #3653).
+    ///
+    /// <para>On the rollup route, history below <see cref="QueryStoreTrendRoute.RollupFloorUtc"/> — the oldest
+    /// bucket the corrected hourly has materialized — is not served by falling back to ranking the raw slab
+    /// (that rank IS the #2736 timeout); it is missing, not zero, and <c>--backfill-rollups</c> is the remedy.
+    /// So a window whose start sits below the floor has an unserved HEAD, and whoever renders the series owes
+    /// the reader that fact: the MCP payload publishes it as <c>routing.unserved_before</c>, the viewer's
+    /// chart as its title's "data begins" clause. This is a MEASURED boundary, not an inference from a late
+    /// first point, which is why it carries no slack: <see cref="DurationTrendRouting.TruncationSlack"/>
+    /// exists because a series legitimately opens a cadence or a bucket late and a late head is ambiguous;
+    /// a rollup floor above the requested start is not ambiguous — the store provably did not answer for
+    /// the stretch below it, however short.</para>
+    ///
+    /// <para>On the raw-only route there is no unserved head by construction, and the rule says so with null:
+    /// raw <c>query_store_stats</c> is dropped at four days only once its rollup covers what it holds (the
+    /// #1680 arming gate), so a store whose route is raw-only — plain PostgreSQL, or a rollup that has
+    /// materialized nothing — has its raw purge held and raw complete. A late first point there is a quiet
+    /// server, not a dropped one, and calling it truncated would be the false narrative this routing exists
+    /// to remove.</para>
+    /// </summary>
+    public static DateTime? UnservedBefore(QueryStoreTrendRoute route, DateTime windowStartUtc) =>
+        route.UseRollup && route.RollupFloorUtc is DateTime floor && floor > windowStartUtc ? floor : null;
+
+    /// <summary>
     /// The pure decision, split from the probing so it is testable without a store: rollup absent or empty
     /// (no <paramref name="newestBucketUtc"/>) routes raw-only; otherwise the raw arms start at the bucket
     /// AFTER the newest materialized one — <c>newest + 1 hour</c> — so the two regions partition the window

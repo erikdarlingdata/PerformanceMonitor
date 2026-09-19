@@ -940,7 +940,12 @@ public sealed class ViewerQueriesLivePostgresTests
                   before tier 2 — three plotted, because the first has no predecessor to rate against and is
                   no longer drawn as a fabricated 0 (#3653). The corrected arm has its own live test below. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(DedupServerId, start, end);
-            Assert.Equal(3, trend.Count);
+            Assert.Equal(3, trend.Points.Count);
+            /* #3653: the series says what served it. The fixture has no corrected rollup materialized, so the
+               route is raw-only, the word is the payload's, and there is no unserved head to disclose. */
+            Assert.False(trend.Route.UseRollup);
+            Assert.Equal("raw", trend.Source);
+            Assert.False(trend.HeadUnserved);
 
             /* ── the slicer overlay ── one point for the one interval, at its final values, so the overlay
                   agrees with the deduped bars it is drawn over instead of showing a rising staircase. */
@@ -1049,9 +1054,9 @@ public sealed class ViewerQueriesLivePostgresTests
 
             /* The duration trend carries the identical mismatch, and the two charts share a screen. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(WindowEdgeServerId, start, end);
-            Assert.DoesNotContain(trend, p => p.CollectionTime < start || p.CollectionTime > end);
-            Assert.Contains(trend, p => p.CollectionTime == h3);
-            Assert.DoesNotContain(trend, p => p.CollectionTime == h0);
+            Assert.DoesNotContain(trend.Points, p => p.CollectionTime < start || p.CollectionTime > end);
+            Assert.Contains(trend.Points, p => p.CollectionTime == h3);
+            Assert.DoesNotContain(trend.Points, p => p.CollectionTime == h0);
 
             bodySucceeded = true;
         }
@@ -1123,9 +1128,11 @@ public sealed class ViewerQueriesLivePostgresTests
                   #3642's class) — the same convention the delta trends now use; the second divides interval
                   2's true total (5 x 2,000us = 10 ms) by the 3,600s between interval starts. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(IntervalIdentityServerId, start, end);
-            var placed = Assert.Single(trend);
+            var placed = Assert.Single(trend.Points);
             Assert.Equal(h1, placed.CollectionTime);
             Assert.Equal(10.0 / 3600.0, placed.Value, 9);
+            /* #3653: effective_start is the first SERVED point, the MCP payload's rule (DescribeCoverage). */
+            Assert.Equal(h1, trend.EffectiveStartUtc);
 
             /* ── the slicer OVERLAY (#1921, Erik's option 1) ── the point sits at the hour the work RAN, the
                   same h0 the bar above is drawn at, NOT at h1+10m where the collector observed it. That is

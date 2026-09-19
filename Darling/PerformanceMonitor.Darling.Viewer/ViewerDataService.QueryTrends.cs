@@ -48,6 +48,36 @@ public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTie
     public static QueryTrendSeries Empty(DateTime startUtc) => new(new List<QueryTrendPoint>(), RetentionTier.Raw, startUtc, false);
 }
 
+/// <summary>
+/// The Query Store duration trend and what it actually covers (#3653): the points, the #2736 route that
+/// produced them, and the coverage facts get_query_store_duration_trend publishes beside its points — so the
+/// chart can say what it served the way the tool's payload does. Not a <see cref="QueryTrendSeries"/>, and the
+/// difference is the point: that record's tier is <see cref="RetentionTier"/> (raw or hourly, one relation per
+/// read) because its ladder picks ONE tier; this trend's route is a materialization WATERMARK — the corrected
+/// hourly serves the window below <see cref="QueryStoreTrendRouting.QueryStoreTrendRoute.RawStartUtc"/> and
+/// the raw arms serve from it — so "which tier" is not a question it can answer with one enum value, and
+/// forcing it into one (Hourly for a rollup+raw read) would have the chart lie in the payload's own vocabulary.
+/// </summary>
+/// <param name="Points">The plotted points, oldest first; the window's first united point (NULL rate, #3541 A12) is not among them.</param>
+/// <param name="Route">The #2736 route the read took: raw-only, or the rollup below <c>RawStartUtc</c> and raw from it.</param>
+/// <param name="EffectiveStartUtc">The first served point, or the requested start when nothing came back — <see cref="DurationTrendRouting.DescribeCoverage"/>, the MCP payload's <c>effective_start</c>.</param>
+/// <param name="UnservedBeforeUtc">
+/// The rollup's materialized floor when it sits ABOVE the requested start — <see cref="QueryStoreTrendRouting.UnservedBefore"/>,
+/// the payload's <c>routing.unserved_before</c> — or null when the route reached the window's start. This, not the
+/// sibling series' <c>Truncated</c>, is what the chart discloses on: a floor above the start is a MEASURED fact
+/// that the head was not served (missing, not zero; <c>--backfill-rollups</c> reaches it), where a late first
+/// point on a route that DID reach the start is a quiet server, which is data and not a defect in the axis.
+/// </param>
+public sealed record QueryStoreTrendSeries(
+    List<QueryTrendPoint> Points, QueryStoreTrendRouting.QueryStoreTrendRoute Route, DateTime EffectiveStartUtc, DateTime? UnservedBeforeUtc)
+{
+    /// <summary>The payload word for the route — <see cref="QueryStoreTrendRouting.SourceWord"/> (<c>rollup+raw</c> / <c>raw</c>), so the chart and the tool use one vocabulary.</summary>
+    public string Source => QueryStoreTrendRouting.SourceWord(Route);
+
+    /// <summary>Whether the window's head went unserved — <see cref="UnservedBeforeUtc"/> is set. The chart's "data begins" clause hangs on this.</summary>
+    public bool HeadUnserved => UnservedBeforeUtc is not null;
+}
+
 public sealed partial class ViewerDataService
 {
     /* The four Performance-Trends reads — Lite's Get{Query,Procedure,ExecutionCount}DurationTrendAsync
@@ -72,8 +102,9 @@ public sealed partial class ViewerDataService
        that said 7. The execution-count trend routes the same way and, on the hourly tier, reads the
        duration statement's second column (it is that read drawn on its own chart). The Query Store trend
        keeps its own routing (#2736, QueryStoreTrendRouting): its rollup is the corrected hourly and its
-       seam is a materialization watermark rather than a tier choice, so it is not on this ladder and its
-       chart-side disclosure is not part of this port. */
+       seam is a materialization watermark rather than a tier choice, so it is not on this ladder; its
+       chart-side disclosure (the floor the rollup has materialized to, which the MCP tool has published as
+       routing.unserved_before since #2736) rides its own series type, QueryStoreTrendSeries. */
 
     /// <summary>Query-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot. The
     /// first collection in the window has NO rate — its LAG is NULL and the CASE has no ELSE (#3653, the
@@ -355,16 +386,34 @@ public sealed partial class ViewerDataService
     /// Query Store duration trend over the window — routed through the corrected rollup where the store has
     /// one (#2736; see <see cref="QueryStoreDurationTrendRollupSql"/>). The raw-only read is kept unchanged
     /// as the fallback for stores without a materialized rollup, where it is affordable.
+    /// <para>#3653: returns the series WITH its route and coverage (<see cref="QueryStoreTrendSeries"/>) rather
+    /// than bare points, so the chart can disclose what it served. Before this the read already knew the
+    /// rollup's floor (<see cref="QueryStoreTrendRouting.QueryStoreTrendRoute.RollupFloorUtc"/>, resolved for
+    /// the seam) and threw it away, and a seven-day chart on a store whose rollup was never backfilled plotted
+    /// the days it had under an axis that said seven — the sibling charts' #3666 defect, on the one chart that
+    /// PR left out because its routing is a watermark and not the tier ladder. The MCP tool has disclosed
+    /// this floor as <c>routing.unserved_before</c> since #2736; the chart now reads the same rule.</para>
     /// </summary>
-    public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(
+    public async Task<QueryStoreTrendSeries> GetQueryStoreDurationTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var route = await QueryStoreTrendRouting.ResolveAsync(_dataSource, cancellationToken);
-        if (!route.UseRollup)
-        {
-            return await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
-        }
+        var points = route.UseRollup
+            ? await ReadQueryStoreRollupTrendAsync(route, serverId, startUtc, endUtc, databaseNames, cancellationToken)
+            : await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
+        /* Coverage the MCP tool's way: effective_start from the first served point (the shared rule, so the
+           chart and the payload name the same instant), the unserved head from the route's measured floor. */
+        var (effectiveStart, _) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
+        return new QueryStoreTrendSeries(points, route, effectiveStart, QueryStoreTrendRouting.UnservedBefore(route, startUtc));
+    }
+
+    /// <summary>The rollup-routed read (#2736): <see cref="QueryStoreDurationTrendRollupSql"/> with the route's
+    /// raw boundary as $4 and the database filter as $5.</summary>
+    private async Task<List<QueryTrendPoint>> ReadQueryStoreRollupTrendAsync(
+        QueryStoreTrendRouting.QueryStoreTrendRoute route, int serverId, DateTime startUtc, DateTime endUtc,
+        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
         var items = new List<QueryTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreDurationTrendRollupSql);
