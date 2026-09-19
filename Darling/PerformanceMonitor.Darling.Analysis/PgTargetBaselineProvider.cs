@@ -13,12 +13,27 @@ using PerformanceMonitor.Analysis.Baselines;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with ONE thing swapped —
-/// which SQL computes a metric's hour×day-of-week buckets. Everything else is inherited by construction
-/// rather than copied: the bucket cache, the naive-UTC parameter binding, the eight-column robust reader,
-/// the timeout classification (<see cref="PgBaselineProvider.IsCommandTimeout"/> — one definition,
+/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with TWO things swapped —
+/// which SQL computes a metric's hour×day-of-week buckets, and where the target's clock is read from (#3691,
+/// <c>PgTargetBaselineProvider.Clock.cs</c>). Everything else is inherited by construction rather than copied:
+/// the bucket cache, the naive-UTC parameter binding, the eight-column robust reader, the timeout
+/// classification (<see cref="PgBaselineProvider.IsCommandTimeout"/> — one definition,
 /// <c>BaselineTimeoutIsNamedTests</c>) and the degrade-to-<c>BaselineBucket.Empty</c> posture. The base
-/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/> is the seam.
+/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/> and <see cref="PgBaselineProvider.ReadServerClockAsync"/>
+/// are the seams.
+///
+/// <para><b>The clock the buckets key on (#3749 Q6, then #3691).</b> Since #3749 the base binds six parameters, not
+/// three: <c>$1</c> server_id, <c>$2</c> window start and <c>$3</c> analysis time as before, then <c>$4..$6</c> —
+/// the one offset transition inside the window and the offset minutes before/after it — and the shared
+/// <see cref="PgBaselineProvider.RobustTierScaffold"/> keys hour, day-of-week and the distinct-day date on
+/// <c>BaselineLocalClock.LocalCollectionTimeSql</c> rather than bare <c>collection_time</c>, so every arm below
+/// inherits the target-local key without naming it (the census in <c>LocalClockBucketKeyTests</c> is what forbids
+/// an arm from keying on anything else). PostgreSQL targets resolve their clock from the <c>TimeZone</c> setting in
+/// the latest <c>pg_server_config</c> snapshot at or before the window end; UTC only when no snapshot carries a
+/// server-scoped one. Before #3691 UTC was the RULE for this engine — the base read the clock from
+/// <c>server_properties</c>, a table no PostgreSQL collector writes, so every PostgreSQL bucket was UTC hour-of-week
+/// while the SQL Server side was local; it is now the FALLBACK, and a target that keeps <c>UTC</c> keys exactly as it
+/// did.</para>
 ///
 /// <para>Each metric's SQL is one <c>WITH clean AS (SELECT collection_time, &lt;value&gt; AS v FROM &lt;raw
 /// table&gt; WHERE server_id = $1 AND collection_time &gt;= $2 AND collection_time &lt; $3 …)</c> CTE followed
@@ -103,7 +118,10 @@ per_collection AS (
     /// so every PostgreSQL bucket carries the eight robust columns and the sentinel tiers. Window bounds are
     /// <c>&gt;= $2 AND &lt; $3</c>, the SQL Server arms' half-open shape, and every bound is a parameter — the base
     /// class binds <c>analysisTime.AddDays(-BaselineWindowDays)</c> and <c>analysisTime</c> naive-UTC, never a bare
-    /// <c>now()</c>, so an anchored pass (#2506) baselines the 30 days before ITS window.
+    /// <c>now()</c>, so an anchored pass (#2506) baselines the 30 days before ITS window — and, since #3749, the
+    /// three clock parameters <c>$4..$6</c> the scaffold's key consumes (class summary), which an arm never names.
+    /// An arm's own text references only <c>$1..$3</c>; neither PostgreSQL nor Npgsql objects to the three it does
+    /// not use (measured in #3749), and the scaffold appended to it is where they are read.
     /// </summary>
     internal static string? GetPgTargetBaselineQuery(string metricName) => metricName switch
     {

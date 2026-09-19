@@ -52,8 +52,10 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// transition inside the window (naive UTC; the window end when there is none), <c>$5</c>/<c>$6</c> the offset
 /// minutes before/after it, resolved ONCE per compute by <see cref="BaselineLocalClock"/> from the newest
 /// <c>server_properties</c> row's <c>time_zone_id</c> (preferred — it knows WHEN the offset changed) or
-/// <c>utc_offset_minutes</c> (a fixed shift), and 0/0 — today's UTC keying — when the server has no row (a
-/// PostgreSQL target). <see cref="RobustTierScaffold"/> and the two event-family arms extract from
+/// <c>utc_offset_minutes</c> (a fixed shift), and 0/0 — today's UTC keying — when the server has no row. A
+/// PostgreSQL target has no <c>server_properties</c> row at all, so <see cref="PgTargetBaselineProvider"/> overrides
+/// the clock READ (<see cref="ReadServerClockAsync"/>, #3691) to hand the same resolver the target's own
+/// <c>TimeZone</c> setting. <see cref="RobustTierScaffold"/> and the two event-family arms extract from
 /// <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, and <see cref="GetBaselineAsync"/> looks the analysis
 /// time up through the SAME three numbers (<see cref="LocalClockWindow.LocalKey"/>), cached beside the buckets.
 /// Nothing keyed is stored, so the re-bucketing the ruling asks for is the next compute after the cache
@@ -197,8 +199,9 @@ public class PgBaselineProvider
     /// with <c>time_zone_id</c> (V134) riding along: skipping NULL offsets rather than taking the newest row blindly,
     /// because the column is nullable and a store migrated from before it holds snapshots that predate it. One row,
     /// on the compute's own connection, once per metric per cache period — an indexed <c>LIMIT 1</c> beside a
-    /// 30-day aggregate scan. A PostgreSQL target has no <c>server_properties</c> row and reads (NULL, NULL), which
-    /// <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what every bucket was before Q6.
+    /// 30-day aggregate scan. A PostgreSQL target has no <c>server_properties</c> row and would read (NULL, NULL) here,
+    /// which <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — so <see cref="PgTargetBaselineProvider"/>
+    /// overrides <see cref="ReadServerClockAsync"/> to read the target's own <c>TimeZone</c> setting instead (#3691).
     /// </summary>
     internal const string ServerClockSql = @"
 SELECT utc_offset_minutes, time_zone_id
@@ -208,8 +211,22 @@ AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC
 LIMIT 1";
 
-    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
-        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    /// <summary>
+    /// The second seam a derived provider overrides (#3691, after <see cref="ResolveBaselineQuery"/>): WHERE the
+    /// target's clock comes from. The base reads <see cref="ServerClockSql"/> — the SQL Server collector's
+    /// <c>server_properties</c> row — and its body is unchanged from #3749; <see cref="PgTargetBaselineProvider"/>
+    /// answers from the PostgreSQL collector's <c>pg_server_config</c> <c>TimeZone</c> row instead, and everything
+    /// downstream (<see cref="BaselineLocalClock.Resolve"/>, the <c>$4..$6</c> bind, the cached
+    /// <see cref="LocalClockWindow"/> the lookup keys through) is inherited, so the two engines cannot disagree on
+    /// how a clock becomes a bucket key — only on where the clock is read. The contract is the tuple
+    /// <see cref="BaselineLocalClock.Resolve"/> takes: a zone id (preferred — it knows WHEN the offset changes), a
+    /// fixed offset in minutes, or (null, null) for UTC keying. <paramref name="windowEndUtc"/> is the analysis
+    /// time, naive UTC, so an override can anchor its read at or before the window an anchored pass (#2506) asked
+    /// for; the base's newest-row read does not need it and ignores it — the SQL Server clock is a property of
+    /// the host, not of the window.
+    /// </summary>
+    protected virtual async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+        NpgsqlConnection connection, int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
     {
         using var cmd = new NpgsqlCommand(ServerClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(serverId);
@@ -388,7 +405,7 @@ LIMIT 1";
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
                aggregate scan either, and one classified catch (AnalysisShutdownResidueTests pins exactly one) is
                the right number of places for "this metric has no baseline this pass" to be said. */
-            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, cancellationToken);
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, AsNaive(analysisTime), cancellationToken);
             clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, AsNaive(windowStart), AsNaive(analysisTime));
 
             using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
