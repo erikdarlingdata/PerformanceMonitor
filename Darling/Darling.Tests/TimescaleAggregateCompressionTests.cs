@@ -415,7 +415,7 @@ public sealed class TimescaleAggregateCompressionTests
             State(TimescaleSupport.QueryStoreStatsIntervalDailyView, 33 * gib, 0),
             /* Empty on this store (no writable Query Store primary): night zero. */
             State(TimescaleSupport.QueryStoreStatsDailyView, 0, 0),
-            State(TimescaleSupport.PerfmonBaselineView, 0, 0),
+            State(TimescaleSupport.PerfmonIntervalBaselineView, 0, 0),
         });
 
         Assert.Equal(
@@ -429,7 +429,7 @@ public sealed class TimescaleAggregateCompressionTests
                    ahead of the interval daily (11) ahead of the baseline (13). */
                 (TimescaleSupport.QueryStoreStatsDailyView, 0),
                 (TimescaleSupport.QueryStoreStatsIntervalDailyView, 0),
-                (TimescaleSupport.PerfmonBaselineView, 0),
+                (TimescaleSupport.PerfmonIntervalBaselineView, 0),
             },
             staged.ToArray());
 

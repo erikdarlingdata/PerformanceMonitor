@@ -204,12 +204,46 @@ public static class DailySummarySql
     /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
     /// gives the identical answer raw would. The time column becomes <c>bucket</c>; parameter positions are
     /// unchanged, so the caller binds the same three values either way.
+    ///
+    /// <para><b>The days the rollup has not reached yet come from raw (#3653 A6, the <c>unique_queries = 0</c>
+    /// clause).</b> Both query rollups are materialized-only continuous aggregates (no
+    /// <c>materialized_only = false</c> on their CREATE, and TimescaleDB 2.13+ defaults real-time OFF), and
+    /// their refresh policies run behind the clock — the hourly's <c>end_offset</c> is an hour, the daily's a
+    /// day with a daily cadence, so the daily's newest complete bucket is one to two days old. A calendar whose
+    /// window starts past the hourly route's ceiling is routed to the DAILY rollup for the WHOLE window,
+    /// yesterday and today included, and there the LEFT JOIN found no row for those days: the outer
+    /// <c>COALESCE(q.c, 0)</c> then printed <c>unique_queries = 0</c> beside that same day's fresh wait, CPU
+    /// and deadlock numbers, which read the 30-day raw tables. Zero is not what was measured; "not
+    /// materialized yet" is. The CTE now takes the rollup for every day up to and including the rollup's last
+    /// materialized DAY for this server and raw <c>query_stats</c> for the days after it — raw keeps four days
+    /// and the lag is at most two, so those days are answered exactly, from the rows the rollup will
+    /// materialize tomorrow. The two halves are partitioned on the ceiling DAY, never on the hour, so no day
+    /// has two rows in <c>queries</c> (a <c>COUNT(DISTINCT)</c> cannot be summed across halves) and the
+    /// hourly tier's ceiling day reads its own partial rollup rather than a mix. Bounded by shape: the ceiling
+    /// is one indexed <c>max(bucket)</c> per server and the raw half is at most two days of one server.</para>
+    ///
+    /// <para><b>What this does NOT do.</b> A day the rollup skipped BELOW its ceiling (the un-materialized
+    /// tail a &gt;24 h outage leaves, see <c>RetentionTierRouter</c>) still has no row and still prints 0; the
+    /// honest answer there is NULL ("not carried at this tier", contract rule 5), and that is a payload-shape
+    /// change — the reader, the model, the MCP tool and both calendars — which belongs to the census lane's
+    /// vocabulary rather than to a Storage-only edit. Lite's twin has no rollup tier and is untouched.</para>
     /// </summary>
     private static string QueriesCteForCagg(string relation) => $"""
+        queries_ceiling AS (
+            SELECT date_trunc('day', max(bucket)) AS last_day
+            FROM collect.{relation}
+            WHERE server_id = $1
+        ),
         queries AS (
             SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c
             FROM collect.{relation}
             WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+            GROUP BY 1
+            UNION ALL
+            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
+            FROM v_query_stats
+            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+              AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
             GROUP BY 1
         ),
         """;

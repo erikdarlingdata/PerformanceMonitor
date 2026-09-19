@@ -166,6 +166,24 @@ public static class RetentionTierRouter
     /// <c>min(bucket)</c> goes on reporting the original deep floor. The window then routes to the tier and is
     /// served as complete with the gap silently inside it.</para>
     ///
+    /// <para><i>How big that hole is, read against TimescaleDB 2.28.1's mechanics (#3653 A6, the honest
+    /// read).</i> It is NOT the outage's length. The outage itself has no raw rows, so the rollup is correctly
+    /// empty there. What goes missing is the raw collected BETWEEN the last pre-outage refresh's window end
+    /// (<c>end_offset</c> behind the clock) and the moment collection stopped — at the hourly cadence at most
+    /// <c>end_offset</c> plus one <see cref="TimescaleSupport.HourlyRefreshScheduleInterval"/> of collections,
+    /// about two hours — because the first refresh after resume opens at <c>now - start_offset</c>, the
+    /// watermark jumps past that tail, and a real-time aggregate serves nothing below its watermark that was
+    /// never materialized (the hard partition <see cref="TimescaleSupport.BackfillBaselineAggregatesAsync"/>
+    /// documents). Any outage longer than <c>start_offset</c> less that tail does it. Nothing in the product
+    /// repairs it: the startup backfill and <c>--backfill-rollups</c> both measure the FLOOR, and a floor cannot
+    /// see a hole above itself; once raw retention passes the tail (four days on the rollup tier) the hole is
+    /// permanent. The repair that fits without a rung is a startup pass that finds raw-time gaps longer than
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/> and runs <c>refresh_continuous_aggregate</c>
+    /// (forced) over <c>[gap start - the tail, gap end + start_offset]</c> for every hourly aggregate; it is
+    /// its own lane, because the gap scan has to be bounded by shape on the largest raw tables and the store
+    /// carries no collection-run ledger to read it from cheaply. Recorded here so the next reader does not
+    /// re-derive "a day of history" from the constant's name.</para>
+    ///
     /// <para><i>A window STRADDLING the floor is served partially, with no signal to the caller.</i> When the
     /// window starts below the floor but no lower tier reaches further back, this returns the tier — which is
     /// the correct CHOICE (raw would return less on a healthy store), but the part of the window below the

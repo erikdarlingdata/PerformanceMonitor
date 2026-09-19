@@ -202,10 +202,24 @@ public sealed class RetentionTierRouterTests
         Assert.Contains($"FROM collect.{expectedRelation}", sql, StringComparison.Ordinal);
         Assert.Contains("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", sql, StringComparison.Ordinal);
 
-        /* The routed CTE no longer reads the raw passthrough view... */
-        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        /* The routed CTE reads the raw passthrough view ONLY for the days past the rollup's last materialized
+           DAY (#3653: the daily rollup lags a day or two behind the clock, and those days used to print
+           unique_queries = 0 beside fresh raw numbers). Exactly one raw read, inside the UNION ALL tail, gated
+           on the ceiling; the rollup half stays the routed read for everything the rollup has. */
+        var rawReads = sql.Split("FROM v_query_stats").Length - 1;
+        Assert.Equal(1, rawReads);
+        var ceilingAt = sql.IndexOf("SELECT date_trunc('day', max(bucket)) AS last_day", StringComparison.Ordinal);
+        var rollupReadAt = sql.IndexOf("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", StringComparison.Ordinal);
+        var unionAt = sql.IndexOf("UNION ALL", StringComparison.Ordinal);
+        var rawReadAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var tailGateAt = sql.IndexOf("AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
+        Assert.True(ceilingAt >= 0, "the rollup's last materialized day must be read per server");
+        Assert.Contains($"FROM collect.{expectedRelation}", sql[ceilingAt..rollupReadAt], StringComparison.Ordinal);
+        Assert.True(rollupReadAt > ceilingAt, "the rollup half follows the ceiling CTE");
+        Assert.True(unionAt > rollupReadAt && rawReadAt > unionAt, "the raw half is the UNION ALL tail, after the rollup half");
+        Assert.True(tailGateAt > rawReadAt, "the raw half must be gated to the days past the ceiling, or a day gets two rows");
 
-        /* ...but the untouched sources still do. */
+        /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })
         {
             Assert.Contains(untouched, sql, StringComparison.Ordinal);

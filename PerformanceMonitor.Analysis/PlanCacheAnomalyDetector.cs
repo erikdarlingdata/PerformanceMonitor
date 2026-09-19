@@ -66,6 +66,18 @@ public static class PlanCacheAnomalyDetector
     /// (sql_handle, offsets, plan_handle) whose collection_time is &lt; this row's AND
     /// &gt; this row's server_start_time. This single predicate drops BOTH contamination
     /// arms by row, without using sample_interval_seconds.
+    ///
+    /// <para><b>Where this predicate belongs, and where it does not (#3653 A10).</b> It is the restart test
+    /// for rows held IN MEMORY with their <c>server_start_time</c> beside them, which is what this detector
+    /// has, and it stays the reference statement of the rule here. The SQL baseline tiers (Lite's
+    /// <c>BaselineProvider</c>, Darling's <c>PgBaselineProvider</c> over the interval-honest aggregates) do
+    /// NOT restate it in SQL: the collector already answered the same question at write time — a counter that
+    /// went backwards is stored as delta 0 with <c>sample_interval_seconds = 0</c>
+    /// (<c>CollectorDeltaCalculator</c>: interval 0 &lt;=&gt; no delta knowable) — and that stored verdict is
+    /// the stronger witness, since the collector SAW the reset where a prior-row test can only infer it and
+    /// needs <c>server_start_time</c> joined in to do so. Those tiers read the column and keep their
+    /// <c>LAG &gt; N</c> magnitude heuristic only for pre-column rows whose interval was never recorded. Two
+    /// statements of one rule, each in the tier that has the inputs for it; neither is an orphan.</para>
     /// </summary>
     public static bool IsRealDeltaRow(StatRow row, IReadOnlyList<StatRow> all) =>
         all.Any(prior =>

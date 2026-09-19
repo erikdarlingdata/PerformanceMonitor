@@ -233,28 +233,93 @@ public sealed class DarlingAnomalyBaselineTests
 
         var lagAt = sql.IndexOf("COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) AS prior_delta", StringComparison.Ordinal);
         var fromCteAt = sql.IndexOf("FROM windowed", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)", StringComparison.Ordinal);
+        var exclusionAt = sql.IndexOf("WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000 AND sample_interval_seconds IS NULL)", StringComparison.Ordinal);
 
         Assert.True(lagAt >= 0, "the restart LAG must be computed in the windowed CTE");
         Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the windowed CTE");
         Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the CTE — after the window is computed");
 
-        /* The pre-window row filter is unchanged from Lite. */
-        Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
+        /* The pre-window row filter is unchanged from Lite — and since #3653 carries Lite's knowability
+           filter too, so the restart's interval-0 row never reaches the heuristic. */
+        Assert.Contains("FROM perfmon_interval_baseline", sql, StringComparison.Ordinal);
+        Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
 
-        /* #3527: v is the PER-SECOND rate. The perfmon_baseline supply materializes only
-           (collection_time, delta_cntr_value) — no stored interval, and a continuous aggregate cannot
-           grow a column without forfeiting the history the 4-day raw tier can't refill — so the divisor
-           is derived from LAG(collection_time) over the collapsed series (the WaitMsPerSec idiom),
-           computed in the SAME windowed CTE (window-before-filter holds for it too), with the
-           interval-less first row filtered alongside the restart exclusion. The DOUBLE PRECISION cast
-           is the io-arm rule: STDDEV_SAMP over numeric can overflow System.Decimal. */
-        var intervalAt = sql.IndexOf("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec", StringComparison.Ordinal);
-        Assert.True(intervalAt >= 0 && intervalAt < fromCteAt, "interval_sec must be derived inside the windowed CTE");
+        /* #3527 re-taken by #3653: v is the PER-SECOND rate over the collection's STORED interval, which the
+           perfmon_interval_baseline supply now carries; the LAG(collection_time) gap is only the fallback for a
+           pre-column (NULL-interval) collection. Both live in the SAME windowed CTE (window-before-filter
+           holds for the fallback too), and the interval filter sits OUTSIDE with the exclusion. The DOUBLE
+           PRECISION cast is the io-arm rule: STDDEV_SAMP over numeric can overflow System.Decimal. */
+        var intervalAt = sql.IndexOf("COALESCE(sample_interval_seconds::DOUBLE PRECISION,", StringComparison.Ordinal);
+        var lagFallbackAt = sql.IndexOf("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))) AS interval_sec", StringComparison.Ordinal);
+        Assert.True(intervalAt >= 0 && intervalAt < fromCteAt, "interval_sec must read the stored interval inside the windowed CTE");
+        Assert.True(lagFallbackAt > intervalAt && lagFallbackAt < fromCteAt, "the LAG-derived gap must be the COALESCE fallback, inside the same CTE");
         Assert.Contains("delta_cntr_value::DOUBLE PRECISION / interval_sec AS v", sql, StringComparison.Ordinal);
         var intervalFilterAt = sql.IndexOf("interval_sec > 0", StringComparison.Ordinal);
         Assert.True(intervalFilterAt > fromCteAt, "the interval filter must sit OUTSIDE the windowed CTE, with the exclusion");
+    }
+
+    /// <summary>
+    /// #3653 (A10, the mechanical half): the three arms whose supply became interval-honest apply the
+    /// three-state rule — the <c>LAG &gt; N</c> magnitude heuristic is GATED on <c>sample_interval_seconds IS
+    /// NULL</c> (pre-column collections, where it is still the only restart guard) and is not consulted for a
+    /// collection with a measured interval, whose zero is a real idle sample. The pin is on the gate's presence
+    /// in the successor text AND its absence from the legacy text, so neither can be "simplified" into the other.
+    /// </summary>
+    [Fact]
+    public void SuccessorArms_GateTheMagnitudeHeuristicOnANullInterval_LegacyArmsDoNot()
+    {
+        var gated = new (string Metric, string Predicate)[]
+        {
+            (MetricNames.BatchRequests, "WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000 AND sample_interval_seconds IS NULL)"),
+            (MetricNames.WaitStats, "WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000 AND sample_interval_seconds IS NULL)"),
+            (MetricNames.WaitMsPerSec, "WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)"),
+        };
+        /* The ungated form closes its parenthesis right after the bar; the gated form continues with AND. */
+        var ungated = new (string Metric, string Predicate)[]
+        {
+            (MetricNames.BatchRequests, "WHERE NOT (delta_cntr_value = 0 AND prior_delta > 1000)"),
+            (MetricNames.WaitStats, "WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)"),
+            (MetricNames.WaitMsPerSec, "WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)"),
+        };
+
+        for (var i = 0; i < gated.Length; i++)
+        {
+            var successor = PgBaselineProvider.GetBaselineQuery(gated[i].Metric)!;
+            var legacy = PgBaselineProvider.GetLegacyBaselineQuery(gated[i].Metric)!;
+
+            Assert.Contains(gated[i].Predicate, successor, StringComparison.Ordinal);
+            Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
+            Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            Assert.DoesNotContain(ungated[i].Predicate, successor, StringComparison.Ordinal);
+
+            /* The successor reads the successor relation and never the legacy one; the legacy text the reverse.
+               The legacy name is a PREFIX of the successor's source line only in the other direction
+               (wait_stats_baseline vs wait_stats_interval_baseline), so "FROM <legacy>" followed by a line
+               break is what distinguishes a real legacy read from the successor's longer name. */
+            var (legacyView, successorView) = PgBaselineProvider.SupersededSupplyFor(gated[i].Metric)!.Value;
+            Assert.Contains("FROM " + successorView, successor, StringComparison.Ordinal);
+            Assert.False(
+                System.Text.RegularExpressions.Regex.IsMatch(successor, "FROM " + System.Text.RegularExpressions.Regex.Escape(legacyView) + @"\s"),
+                $"the successor text for {gated[i].Metric} still reads the legacy relation {legacyView}");
+            Assert.Contains("FROM " + legacyView, legacy, StringComparison.Ordinal);
+            Assert.DoesNotContain("FROM " + successorView, legacy, StringComparison.Ordinal);
+
+            /* Both texts are Postgres: bound window, no QUALIFY, no bare clock, same robust scaffold. */
+            foreach (var text in new[] { successor, legacy })
+            {
+                Assert.DoesNotContain("QUALIFY", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("now(", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("$1", text, StringComparison.Ordinal);
+                Assert.EndsWith(PgBaselineProvider.RobustTierScaffold, text, StringComparison.Ordinal);
+            }
+        }
+
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -286,9 +351,12 @@ public sealed class DarlingAnomalyBaselineTests
     /// requests/sec unit and the absolute bars judge honest rates.
     ///
     /// <para>History (one Monday-10:00 bucket, 12 collections at 300s spacing, delta 30000 each —
-    /// 100 req/sec): c1 has no prior (interval NULL → dropped), c6 is a restart zero (prior 30000 &gt;
-    /// 1000 → excluded), c7 is a genuine idle zero (prior 0 → kept at 0/sec). 10 samples, mean
-    /// (9x100 + 0)/10 = 90 — in requests/sec, where the raw-delta unit would read 27000.</para>
+    /// 100 req/sec, every row carrying its measured interval): c1 is rated off its STORED interval
+    /// (#3653 — the legacy arm had to drop it for lacking a LAG prior), c6 is the restart row as the
+    /// collector actually writes one (delta 0 WITH interval 0 → dropped by the supply's knowability filter
+    /// before it can be a sample), c7 is a genuine idle zero over a measured interval (kept at 0/sec — the
+    /// magnitude heuristic is gated off for a measured row). 11 samples, mean (10x100 + 0)/11 = 90.909 —
+    /// in requests/sec, where the raw-delta unit would read ~27273.</para>
     ///
     /// <para>Window (the following Monday): three rows at stored interval 60, delta 600000 — 10000
     /// req/sec — plus one interval-0 row with a wild delta that must be SKIPPED, not rated. The one
@@ -330,10 +398,13 @@ public sealed class DarlingAnomalyBaselineTests
             for (var i = 0; i < 12; i++)
             {
                 var delta = (i == 5 || i == 6) ? 0L : 30000L;
+                /* c6 is the restart as the collector writes it: interval 0 beside the zero delta. c7 is a
+                   measured idle zero. The difference between them is the whole of #3653's A10 half. */
+                var interval = i == 5 ? 0 : 300;
                 await InsertAsync(connection,
                     "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                     (long)(200 + i), historyStart.AddMinutes(5 * i), batchServerId, batchServerName,
-                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", delta * 2, delta, 300);
+                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", delta * 2, delta, interval);
             }
 
             /* The baseline supply must exist (see the wait test's note) — plain fallback views. */
@@ -343,8 +414,8 @@ public sealed class DarlingAnomalyBaselineTests
             var analysisTime = historyStart.AddDays(7);
 
             var baseline = await provider.GetBaselineAsync(batchServerId, MetricNames.BatchRequests, analysisTime);
-            Assert.Equal(10L, baseline.SampleCount);
-            Assert.Equal(90.0, baseline.Mean, 0.001);
+            Assert.Equal(11L, baseline.SampleCount);
+            Assert.Equal(1000.0 / 11.0, baseline.Mean, 0.001);
             Assert.Equal(BaselineTier.Full, baseline.Tier);
             Assert.Equal(10, baseline.HourOfDay);
             Assert.Equal((int)DayOfWeek.Monday, baseline.DayOfWeek);
@@ -387,7 +458,7 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal(10000.0, fact.Metadata["peak_batch_requests"], 0.001);
             Assert.Equal(10000.0, fact.Metadata["avg_batch_requests"], 0.001);
             Assert.Equal(3.0, fact.Metadata["window_samples"]);                    // the interval-0 row is NOT a sample
-            Assert.Equal(90.0, fact.Metadata["baseline_mean"], 0.001);             // same unit as the window
+            Assert.Equal(1000.0 / 11.0, fact.Metadata["baseline_mean"], 0.001);    // same unit as the window
             Assert.Equal(1.0, fact.Metadata["baseline_low_quality"]);              // one distinct day → absolute bar
             Assert.Equal(2.0, fact.Metadata["fallback_exceedance"], 0.001);        // 10000 / the 5000 req/sec bar
 
@@ -423,19 +494,28 @@ public sealed class DarlingAnomalyBaselineTests
            #1757 moved the per-collection collapse into the baseline aggregate, so the grouping no longer
            appears in this query -- the totals arrive already one row per collection_time. The INVARIANT is
            unchanged and is what is pinned: LAG runs over the per-collection series, and the exclusion is
-           applied OUTSIDE the windowed CTE so a dropped row still serves as its successor's LAG value. */
-        var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!;
+           applied OUTSIDE the windowed CTE so a dropped row still serves as its successor's LAG value.
 
-        Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
+           #3653: the supply is the interval-honest aggregate and the exclusion is gated on a NULL stored
+           interval (SuccessorArms_GateTheMagnitudeHeuristicOnANullInterval_LegacyArmsDoNot pins the gate
+           itself); the shape pinned here holds for both the successor and the legacy text. */
+        foreach (var (sql, supply) in new[]
+        {
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
+            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_baseline"),
+        })
+        {
+            Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        var supplyAt = sql.IndexOf("FROM wait_stats_baseline", StringComparison.Ordinal);
-        var lagAt = sql.IndexOf("COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms", StringComparison.Ordinal);
-        var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)", StringComparison.Ordinal);
+            var supplyAt = sql.IndexOf(supply, StringComparison.Ordinal);
+            var lagAt = sql.IndexOf("COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms", StringComparison.Ordinal);
+            var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
+            var exclusionAt = sql.IndexOf("WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000", StringComparison.Ordinal);
 
-        Assert.True(supplyAt >= 0 && lagAt > supplyAt, "LAG must run over the per-collection totals supplied by the baseline aggregate");
-        Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
-        Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+            Assert.True(supplyAt >= 0 && lagAt > supplyAt, "LAG must run over the per-collection totals supplied by the baseline aggregate");
+            Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
+            Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+        }
     }
 
     [Fact]
@@ -480,21 +560,28 @@ public sealed class DarlingAnomalyBaselineTests
            an idle zero after a zero survives. The per_collection interval computation
            (LAG(collection_time) over the GROUPED rows) is standard SQL in both engines and
            carries over verbatim — it never had a QUALIFY. */
-        var sql = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!;
+        /* #3653: the same orderings hold for the successor text (stored interval first, LAG only where it is
+           NULL, heuristic gated on NULL) and for the legacy text it falls back to. */
+        foreach (var sql in new[]
+        {
+            PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!,
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!,
+        })
+        {
+            Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
 
-        Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
+            /* The Lite-verbatim interval spine survives. */
+            Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
 
-        /* The Lite-verbatim interval spine survives. */
-        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+            var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL", StringComparison.Ordinal);
+            var lagAt = sql.IndexOf("COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec", StringComparison.Ordinal);
+            var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
+            var exclusionAt = sql.IndexOf("WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100", StringComparison.Ordinal);
 
-        var rateFilterAt = sql.IndexOf("WHERE interval_sec IS NOT NULL", StringComparison.Ordinal);
-        var lagAt = sql.IndexOf("COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec", StringComparison.Ordinal);
-        var fromCteAt = sql.IndexOf("FROM with_lag", StringComparison.Ordinal);
-        var exclusionAt = sql.IndexOf("WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)", StringComparison.Ordinal);
-
-        Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
-        Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
-        Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+            Assert.True(rateFilterAt >= 0 && lagAt > rateFilterAt, "the IS NOT NULL filter must precede the restart LAG (DuckDB's WHERE-before-QUALIFY order)");
+            Assert.True(fromCteAt > lagAt, "the aggregate must select FROM the with_lag CTE");
+            Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
+        }
     }
 
     /* ---------------- gated: live restart-exclusion + detector proof ---------------- */
