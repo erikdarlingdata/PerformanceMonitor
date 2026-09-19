@@ -347,13 +347,20 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            statement and there is no position to resume from. pg_wait_sampling joined in #3604: the arm it
            ran (its instrument token) and, on the service-sampler arm, the cumulative tally the next cycle
            adds to -- which the table holds only as its last written value per key, so a MAX() cannot
-           recover it. Ordered by name so this reads as a set rather than as an accident of catalog order. */
+           recover it. Ordered by name so this reads as a set rather than as an accident of catalog order.
+
+           FOUR since #3653 A5, the twin of Darling.Tests' CollectorStateContractTests roster: cpu_utilization
+           persists the SQL Server instance identity it already reads (sqlserver_start_time, @@SERVERNAME) and
+           pg_statement_stats persists pg_stat_statements_info.stats_reset -- the pair each compares its next
+           observation against to detect an identity epoch (ServerEpoch). A MAX() over their tables cannot
+           recover either: neither value is a stored column, and the case that matters most is a target that
+           restarted while the HOST was down, which only a prior that outlived the host's restart can catch. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "default_trace_events", "pg_wait_sampling" }, declaring);
+        Assert.Equal(new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling" }, declaring);
     }
 
     [Fact]
