@@ -105,10 +105,10 @@ public static partial class PgTargetAdvice
             "leading wait will fire and the standard advice applies.");
 
     /// <summary>The composed block for an <c>ANOMALY_PG_*</c> root, or the family's static block when the fact
-    /// set does not carry the key (the <see cref="Static"/> path). Null for a key outside the seven — the five v1
-    /// anomalies here and, since #3691 lanes 11 and 12, <c>ANOMALY_PG_IO_LATENCY</c> / <c>ANOMALY_PG_REPLICATION_LAG</c>,
-    /// whose composers live beside their families in <c>PgTargetAdvice.Io.cs</c> / <c>.Replication.cs</c> (one delegating arm each; the shared prefix routing sends every
-    /// <c>ANOMALY_PG_</c> key here, so the arm is the only way a v2 anomaly reaches its own prose).</summary>
+    /// set does not carry the key (the <see cref="Static"/> path). Null for a key no lane has composed. The v2
+    /// anomalies each add ONE delegating arm here to a composer beside their family (<c>PgTargetAdvice.Io.cs</c> for
+    /// lane 11, <c>.Replication.cs</c> for lane 12, <c>.Write.cs</c> for lane 15): the shared prefix routing sends every
+    /// <c>ANOMALY_PG_</c> key here, so the arm is the only way a v2 anomaly reaches its own prose.</summary>
     private static partial AdviceBlock? ComposeAnomaly(string key, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         switch (key)
@@ -145,6 +145,9 @@ public static partial class PgTargetAdvice
             /* v2 (#3691) lane 12: the replication family's anomaly composes in its family file, the same way. */
             case PgTargetFactKeys.AnomalyReplicationLag:
                 return ComposeReplicationLagAnomaly(factsByKey);
+            /* v2 (#3691) lane 15: the WAL-volume anomaly's composer lives with its family (PgTargetAdvice.Write.cs). */
+            case PgTargetFactKeys.AnomalyWalVolume:
+                return ComposeWalVolumeAnomaly(factsByKey);
 
             default:
                 return null;

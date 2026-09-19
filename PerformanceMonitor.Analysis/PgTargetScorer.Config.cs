@@ -98,8 +98,13 @@ public static partial class PgTargetScorer
             case PgTargetFactKeys.ConfigSharedBuffers:
                 return fact.Value <= SharedBuffersInitdbDefaultMb ? ConfigAdvisoryBase : 0.0;
 
-            /* engine-defined: the shipped default, MaxWalSizeDefaultMb. Value is megabytes. */
+            /* engine-defined: the shipped default, MaxWalSizeDefaultMb. Value is megabytes. Lane 15 (#3691 §A4):
+               0 when the collector stamped not_applicable — on aurora-postgres the engine does not consult
+               max_wal_size (Aurora storage owns checkpointing), so a knob at the default is not "nobody sized
+               this"; it is a value nothing reads. Base 0 means no advisory roots and the co-fire amplifier
+               never runs (FactScorer skips amplifiers at base 0) — the suppression is one flag read, here. */
             case PgTargetFactKeys.ConfigMaxWalSize:
+                if (fact.Metadata.GetValueOrDefault("not_applicable") > 0) return 0.0;
                 return fact.Value <= MaxWalSizeDefaultMb ? ConfigAdvisoryBase : 0.0;
 
             /* engine-defined: the compiled boot_val, EffectiveCacheSizeDefaultMb. Exactly AT the default —

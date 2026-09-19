@@ -395,12 +395,16 @@ public sealed class PgTargetKnobsTests
         Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.CheckpointPressure, atDefault)).Destination);
         Assert.Equal(PgTargetFactKeys.ConfigSharedBuffers, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.BufferCachePressure, atDefault)).Destination);
 
-        /* The v2 leading edge is declared and inert until the shift fact exists. Lane 12 (#3691) declared a second
-           destination for the shift — PG_SLOT_RETENTION, the slot retaining the WAL the shift produced — so the
-           checkpoint edge is pinned by membership, not as the only one. */
+        /* Lane 15 (#3691): the WAL-volume leading edge into CHECKPOINT pressure is an AMPLIFIER and a reconciler FOLD,
+           not an edge — PG_WAL_VOLUME_SHIFT is a base-0 context fact (no absolute bar; graded only through its anomaly),
+           so lane 2's inert shift → pressure edge was dead by construction and is gone; the anomaly is not re-keyed onto
+           it either (PgTargetRelationshipGraph.Write.cs says why). PgTargetWriteTests pins the amplifier and the fold.
+           Lane 12 (#3691) declared the shift → PG_SLOT_RETENTION edge from its side; it is pinned by membership here and
+           carries the same base-0 caveat (reported on #3691). */
         var shiftEdges = graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift);
-        Assert.Contains(shiftEdges, e => e.Destination == PgTargetFactKeys.CheckpointPressure);
+        Assert.DoesNotContain(shiftEdges, e => e.Destination == PgTargetFactKeys.CheckpointPressure);
         Assert.Contains(shiftEdges, e => e.Destination == PgTargetFactKeys.SlotRetention);
+        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.AnomalyWalVolume));
         Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.CheckpointPressure, atDefault)).Destination);
     }
 
@@ -764,12 +768,22 @@ public sealed class PgTargetKnobsTests
                 Assert.Contains(story.GetProperty("next_tools").EnumerateArray(), t => t.GetProperty("tool").GetString() == "get_pg_write_stats");
             }
 
-            /* ── the facts read: the pressure fact carries its unmeasured-lineage stamp and both amplifiers. */
+            /* ── the facts read: the pressure fact carries its unmeasured-lineage stamp and both amplifiers, and beside it
+               (lane 15, #3691) the WAL-volume CONTEXT fact states the planted rate — 64 MiB a minute ≈ 1.12 MB/s mean
+               and peak alike, base 0, threshold_lineage 1 (no bar was chosen). */
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ChurnServerName, 4, PgTargetSources.WriteSource, as_of: asOf);
             using (var doc = JsonDocument.Parse(factsJson))
             {
-                var fact = Assert.Single(doc.RootElement.GetProperty("facts").EnumerateArray());
-                Assert.Equal(PgTargetFactKeys.CheckpointPressure, fact.GetProperty("key").GetString());
+                var writeFacts = doc.RootElement.GetProperty("facts").EnumerateArray().ToList();
+                Assert.Equal(2, writeFacts.Count);
+                var shift = writeFacts.Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.WalVolumeShift);
+                Assert.Equal(0, shift.GetProperty("base_severity").GetDouble());
+                Assert.Equal(64.0 * 1024 * 1024 / 60, shift.GetProperty("value").GetDouble(), precision: 0);
+                Assert.Equal(1, shift.GetProperty("metadata").GetProperty("wal_tracked").GetDouble());
+                Assert.Equal(1, shift.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(240, shift.GetProperty("metadata").GetProperty("rated_samples").GetDouble());
+
+                var fact = writeFacts.Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.CheckpointPressure);
                 var metadata = fact.GetProperty("metadata");
                 Assert.Equal(0, metadata.GetProperty("threshold_lineage").GetDouble());
                 Assert.Equal(240, metadata.GetProperty("checkpoints_requested").GetDouble());

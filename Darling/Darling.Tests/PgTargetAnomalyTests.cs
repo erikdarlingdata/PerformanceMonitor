@@ -59,11 +59,14 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class PgTargetAnomalyTests
 {
+    /* The five v1 metrics (lane 9) plus the WAL-volume arm lane 15 filled (#3691) — each served by exactly one
+       PgTargetBaselineProvider arm ending in the one scaffold. Lane 11's I/O arm beside it; lane 12's replay-lag arm is pinned by its own tests. */
     private static readonly string[] s_pgMetricNames =
     [
         MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu,
         /* v2 (#3691) lane 11: the I/O read-latency arm, filled. */
         MetricNames.PgIoReadLatency,
+        MetricNames.PgWalBytesPerSec,
     ];
 
     private static readonly (string Metric, string Table)[] s_metricTables =
@@ -76,14 +79,15 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgIoReadLatency, "pg_io_stats"),
         /* v2 (#3691): lane 12's replay-lag point series — its scaffold / dialect pins live in PgTargetReplicationTests. */
         (MetricNames.PgReplayLagBytes, "pg_replication_stats"),
+        (MetricNames.PgWalBytesPerSec, "pg_write_stats"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
 
     [Fact]
-    public void TheSixPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
+    public void TheServedPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
     {
-        Assert.Equal(6, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(7, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
         foreach (var metric in s_pgMetricNames)
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
@@ -115,15 +119,16 @@ public sealed class PgTargetAnomalyTests
     /// answers null (the same answer as "no arm", so the shared reader reports no baseline rather than a bucket built
     /// from nothing), the root detector awaits each stub after the five v1 detectors, and every stub file carries
     /// the exact marker the content briefs quote (a filled family keeps it, as v1's did). The wave-2 name has no arm
-    /// at all. Lane 11 (I/O read latency) has landed: its metric moved to <see cref="s_pgMetricNames"/> and out of
-    /// the inert loop; <c>PgTargetIoTests</c> pins the filled arm's shape.
+    /// at all. Lanes 11 (I/O read latency), 12 (replay lag) and 15 (WAL volume) have landed: their metrics moved out
+    /// of the inert loop (11 and 15 into <see cref="s_pgMetricNames"/>); <c>PgTargetIoTests</c>, <c>PgTargetReplicationTests</c>
+    /// and <c>PgTargetWriteTests</c> pin the filled arms' shapes.
     /// </summary>
     [Fact]
     public void TheV2BaselinesAndDetectors_AreReachableInertStubs_EachNamingItsLane()
     {
-        /* Lanes 11 and 12 filled pg_io_read_latency and pg_replay_lag_bytes (each arm pinned in its own family's tests);
-           the WAL stub and the wave-2 name still answer null. */
-        foreach (var metric in new[] { MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
+        /* Lanes 11, 12 and 15 filled pg_io_read_latency, pg_replay_lag_bytes and pg_wal_bytes_per_sec (each arm pinned in
+           its own family's tests; the served ones also in s_pgMetricNames above); the wave-2 name still answers null. */
+        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
@@ -131,6 +136,7 @@ public sealed class PgTargetAnomalyTests
             Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
         }
         Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgReplayLagBytes));
+        Assert.Contains(MetricNames.PgWalBytesPerSec, s_pgMetricNames);
 
         var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.cs");
         Assert.Contains("MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),", provider, StringComparison.Ordinal);
@@ -250,6 +256,8 @@ public sealed class PgTargetAnomalyTests
         /* v2 (#3691) lane 11 */
         PgTargetAnomalyDetector.IoLatencyWindowSql,
         PgTargetAnomalyDetector.ReplayLagWindowSql,   /* lane 12 (#3691) */
+        /* v2 (#3691) lane 15 */
+        PgTargetAnomalyDetector.WalVolumeWindowSql,
     ];
 
     [Fact]
@@ -283,6 +291,9 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitContribWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_io_stats", PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_replication_stats", PgTargetAnomalyDetector.ReplayLagWindowSql, StringComparison.Ordinal);
+        /* Lane 15: the WAL window read IS the collector's read, by alias — one differencing for fact, detector and bucket. */
+        Assert.Contains("FROM pg_write_stats", PgTargetAnomalyDetector.WalVolumeWindowSql, StringComparison.Ordinal);
+        Assert.Equal(PgTargetFactCollector.PgTargetWalVolumeSql, PgTargetAnomalyDetector.WalVolumeWindowSql);
 
         /* The window reads share the fact reads' shapes. */
         Assert.Contains("stats_reset", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgTps)!, StringComparison.Ordinal);
@@ -586,7 +597,7 @@ public sealed class PgTargetAnomalyTests
             .Select(f => f.Name)
             .ToList();
         Assert.Equal(
-            new[] { "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec" },
+            new[] { "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
             pgConstants.Order(StringComparer.Ordinal).ToArray());
 
         var lines = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
@@ -611,6 +622,10 @@ public sealed class PgTargetAnomalyTests
         Assert.True(AnomalyThresholds.PgSessionCountFallback > AnomalyThresholds.PgSessionCountFloor);
         Assert.True(AnomalyThresholds.PgDeadlockRateFallbackPerHour > AnomalyThresholds.PgDeadlockRateFloorPerHour);
         Assert.True(AnomalyThresholds.PgIoLatencyFallbackMs > AnomalyThresholds.PgIoLatencyFloorMs);
+        /* Lane 15: 1 MiB/s and 16 MiB/s, in BYTES per second (the unit the fact, the window read and the bucket share). */
+        Assert.Equal(1024.0 * 1024.0, AnomalyThresholds.PgWalBytesFloorPerSec);
+        Assert.Equal(16.0 * 1024.0 * 1024.0, AnomalyThresholds.PgWalBytesFallbackPerSec);
+        Assert.True(AnomalyThresholds.PgWalBytesFallbackPerSec > AnomalyThresholds.PgWalBytesFloorPerSec);
     }
 
     /* ───────────────────────── the advice ───────────────────────── */

@@ -164,6 +164,22 @@ AND   c.name IN (
                     fact.Metadata["checkpoint_timeout_s"] = checkpointTimeoutMs / 1000.0;
                 if (TryNumber(settings, "checkpoint_completion_target", out var completionTarget))
                     fact.Metadata["checkpoint_completion_target"] = completionTarget;
+
+                /* Lane 15 (#3691 calibration §A4): on aurora-postgres max_wal_size governs nothing — Aurora storage
+                   owns checkpointing and the checkpointer counters are synthetic (sixty timed an hour, requested
+                   share 0, on all fifty measured clusters) — so "at the shipped default" is not a convention
+                   finding there; it is the parameter group's value for a knob the engine does not consult. The
+                   fact is still emitted (the write partial reads checkpoint_timeout_s and bytes off it, and the
+                   value is true) but stamped not_applicable, and PgTargetScorer.Config.cs scores it 0 off the flag
+                   so no advisory card roots and no co-fire can lift it. Engine off the registry fact emitted just
+                   before this method (emission order: Metadata before Config), through MonitoredEngineKind — never
+                   a column's presence (#2530). */
+                var registry = facts.Find(f => f.Key == PgTargetFactKeys.ServerMajorVersion);
+                if (registry is not null && registry.Metadata.GetValueOrDefault("is_aurora") > 0)
+                {
+                    fact.Metadata["not_applicable"] = 1;
+                    fact.Metadata["not_applicable_on_aurora"] = 1;
+                }
                 facts.Add(fact);
             }
 
