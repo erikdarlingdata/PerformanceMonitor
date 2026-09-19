@@ -413,7 +413,7 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// Runs the collect + score pipeline without graph traversal.
+    /// Runs the collect + detect + score pipeline without graph traversal.
     /// Returns raw scored facts with amplifier details for direct inspection, together with the
     /// window's observed coverage (#3538 A2) — returned rather than parked on a property because this
     /// path has no <see cref="IsAnalyzing"/> guard and two on-demand callers can overlap; a shared
@@ -422,6 +422,18 @@ public class AnalysisService
     /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
     /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
     /// write-side question — this is a read that happens to score what it read.</para>
+    ///
+    /// <para>#3691: the anomaly detector runs here too, over the same context, between collection and
+    /// scoring — the order the full pass uses. Until then this read was collector + scorer only, so the
+    /// fact set <c>get_analysis_facts</c> sold as "every observation the engine sees" never held an
+    /// <c>ANOMALY_*</c> fact, and the gate metadata the detector stamps (deviation_sigma, fire_threshold,
+    /// sample_count, baseline_confidence, threshold_lineage) was reachable only through a finding that
+    /// had already survived the severity floor; an anomaly that fired and scored under 0.5 was invisible
+    /// everywhere. The cost is the detector's baseline reads (one per baselined metric) on top of the
+    /// collector's, which is what the full pass already pays for the same answer. The detector is gated
+    /// the way the pass gates it: it does not run over a window the collector never observed, because a
+    /// deviation is measured against the window's own rate, and an unobserved window has none — the
+    /// callers' unobserved envelope keeps describing exactly the point-in-time facts it names.</para>
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage)> CollectAndScoreFactsAsync(
         int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
@@ -441,13 +453,21 @@ public class AnalysisService
         try
         {
             var facts = await _collector.CollectFactsAsync(context);
+            if (context.ObservedDurationMs > 0)
+            {
+                /* Same detector, same context, same position as the pass (#3691). A collector that
+                   observed the window but emitted no fact does not short-circuit this: the detector reads
+                   the store on its own and its facts are part of what this read shows. */
+                var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
+                facts.AddRange(anomalies);
+            }
             if (facts.Count == 0) return (facts, context.Coverage);
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisService", $"Fact collection failed for {serverName}: {ex.Message}");
+            AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null);
         }
     }

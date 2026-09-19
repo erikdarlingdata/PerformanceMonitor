@@ -901,13 +901,33 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
                 Assert.True(deadlockCard.GetProperty("severity").GetDouble() < 1.49);
             }
 
-            /* get_analysis_facts does NOT run the anomaly detector on either engine (CollectAndScoreFactsAsync is
-               collector + scorer only), so the gate's metadata and the lineage flag are asserted on the detector's
-               own facts above rather than through that read; the anomaly facts the tool never shows are the same
-               objects the pass scored. Stated so a reader does not look for them there. */
+            /* #3691: get_analysis_facts runs the RESOLVED engine's detector too (CollectAndScoreFactsAsync is
+               collector + detector + scorer since then; before it, this read returned no anomaly fact on either
+               engine and the gate metadata was reachable only through a finding). So the same planted spike is an
+               ANOMALY_PG_TPS fact on the facts read, scored, with the detector's z and sample count and the
+               lineage flag, and with `confidence` projected as baseline_confidence the way the tool does for
+               every anomaly-source fact. Filtered to the anomaly source, so the set is the detector's alone. */
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, PgTargetAnomalyDetector.AnomalySource);
             using (var doc = JsonDocument.Parse(factsJson))
-                Assert.Empty(doc.RootElement.GetProperty("facts").EnumerateArray());
+            {
+                var shown = doc.RootElement.GetProperty("facts").EnumerateArray().ToList();
+                Assert.NotEmpty(shown);
+                Assert.All(shown, f => Assert.StartsWith(PgTargetFactKeys.AnomalyPrefix, f.GetProperty("key").GetString(), StringComparison.Ordinal));
+                Assert.Equal(
+                    keys.OrderBy(k => k, StringComparer.Ordinal),
+                    shown.Select(f => f.GetProperty("key").GetString()!).OrderBy(k => k, StringComparer.Ordinal));
+
+                var tpsFact = Assert.Single(shown, f => f.GetProperty("key").GetString() == PgTargetFactKeys.AnomalyTps);
+                Assert.Equal(60.0, tpsFact.GetProperty("value").GetDouble(), precision: 6);
+                Assert.True(tpsFact.GetProperty("severity").GetDouble() > 0, "the TPS anomaly reached the facts read unscored");
+                var tpsMetadata = tpsFact.GetProperty("metadata");
+                Assert.Equal(AnomalyThresholds.SigmaDisplayCap, tpsMetadata.GetProperty("deviation_sigma").GetDouble());
+                Assert.Equal(AnomalyThresholds.ModifiedZThreshold, tpsMetadata.GetProperty("fire_threshold").GetDouble());
+                Assert.True(tpsMetadata.GetProperty("baseline_samples").GetDouble() > 0);
+                Assert.Equal(0, tpsMetadata.GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1.0, tpsMetadata.GetProperty("baseline_confidence").GetDouble());
+                Assert.False(tpsMetadata.TryGetProperty("confidence", out _), "the tool projects an anomaly fact's confidence as baseline_confidence");
+            }
             foreach (var anomaly in anomalies)
             {
                 Assert.Equal(0, anomaly.Metadata["threshold_lineage"]);

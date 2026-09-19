@@ -403,6 +403,82 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         }
     }
 
+    // ── The facts read runs the detector (#3691) ──
+
+    /// <summary>
+    /// #3691: <c>get_analysis_facts</c> reads through <see cref="AnalysisService.CollectAndScoreFactsAsync"/>,
+    /// which until this change was collector + scorer only — the very fixture the spike test above fires
+    /// through the detector produced NO <c>ANOMALY_*</c> fact on that read, so an operator asking "what did
+    /// the detector see" got a fact set without the detector's. Same seeds as
+    /// <see cref="DetectBatchRequestAnomalies_Spike_DetectsAnomaly"/> plus a wait_stats series over the
+    /// window (the coverage witness — the read gates the detector on an observed window the way the pass
+    /// does), driven through the real service. The anomaly arrives SCORED (the scorer's anomaly arm, off
+    /// deviation_sigma) with the detector's own metadata intact, and its <c>confidence</c> key is still the
+    /// baseline's — the tool renames it at read time, the fact does not.
+    ///
+    /// <para>The window is anchored on the class's own <c>_analysisEnd</c> (by name) rather than left on the
+    /// clock, so the detector's baseline bucket is the hour the seeds were floored to even when the test
+    /// straddles an hour boundary.</para>
+    /// </summary>
+    [Fact]
+    public async Task CollectAndScoreFacts_RunsTheDetector_SoTheSpikeIsAScoredFactOnTheFactsRead()
+    {
+        await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
+        for (int i = 0; i < 16; i++)
+            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 15000);
+        await SeedBaselineCpu(10, variance: 2);
+
+        /* The coverage witness: one wait_stats reading per 15 minutes across the whole window, so the
+           collector stamps it observed and the read reaches the detector at all. */
+        for (int i = 0; i <= 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "SOS_SCHEDULER_YIELD", 100);
+
+        var service = new AnalysisService(_duckDb);
+        var (facts, coverage) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
+
+        Assert.NotNull(coverage);
+        Assert.True(coverage!.IsObserved, "the seeded wait_stats series did not register as observed coverage");
+
+        var anomaly = Assert.Single(facts, f => f.Key == "ANOMALY_BATCH_REQUESTS");
+        Assert.Equal("anomaly", anomaly.Source);
+        Assert.True(anomaly.Severity > 0, $"the anomaly reached the read unscored: {anomaly.Severity}");
+        Assert.True(anomaly.BaseSeverity > 0);
+
+        /* The detector's metadata rides through scoring untouched. */
+        Assert.True(anomaly.Metadata["deviation_sigma"] >= 2.0);
+        Assert.True(anomaly.Metadata.ContainsKey("fire_threshold"));
+        Assert.True(anomaly.Metadata.ContainsKey("baseline_samples"));
+        Assert.True(anomaly.Metadata.ContainsKey("baseline_tier"));
+        Assert.True(anomaly.Metadata.ContainsKey("baseline_low_quality"));
+        Assert.True(anomaly.Metadata.ContainsKey("confidence"));
+
+        /* And the collector's own facts are still there beside it — the detector was ADDED, not swapped in. */
+        Assert.Contains(facts, f => f.Key == "SOS_SCHEDULER_YIELD");
+    }
+
+    /// <summary>
+    /// The gate the read shares with the pass: over a window the collector never observed, the detector
+    /// does not run, because a deviation is measured against the window's own rate and an unobserved
+    /// window has none. The same spike seeds WITHOUT the wait_stats witness — the perfmon rows are
+    /// there, the baseline is there, and the read still returns no anomaly, so the tool's unobserved
+    /// envelope keeps describing exactly the point-in-time facts it names.
+    /// </summary>
+    [Fact]
+    public async Task CollectAndScoreFacts_DoesNotRunTheDetector_OverAnUnobservedWindow()
+    {
+        await SeedBaselinePerfmon("Batch Requests/sec", 5000, variance: 200);
+        for (int i = 0; i < 16; i++)
+            await SeedPerfmonAsync(_analysisStart.AddMinutes(i * 15), "Batch Requests/sec", 15000);
+        await SeedBaselineCpu(10, variance: 2);
+
+        var service = new AnalysisService(_duckDb);
+        var (facts, coverage) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
+
+        Assert.NotNull(coverage);
+        Assert.False(coverage!.IsObserved);
+        Assert.DoesNotContain(facts, f => f.Key.StartsWith("ANOMALY_", StringComparison.Ordinal));
+    }
+
     // ── Baseline quality gate + interaction trap (change 2) ──
 
     [Fact]

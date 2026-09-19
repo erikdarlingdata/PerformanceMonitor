@@ -176,6 +176,12 @@ public sealed class McpMissMessageParityPinTests
         "Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them.",
         "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated.",
         "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
+
+        /* #3691: the facts read runs the anomaly detector on both SKUs, and the sentence teaching a caller
+           that ANOMALY_* facts are on this read — with which metadata and at what cost — lives twice in the
+           get_analysis_facts description. A SKU whose description dropped it would send its callers back to
+           analyze_server for gate metadata the facts read now carries. */
+        "The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's.",
         "Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
         "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
 
