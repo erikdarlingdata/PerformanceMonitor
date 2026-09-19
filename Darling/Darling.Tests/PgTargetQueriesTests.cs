@@ -322,9 +322,11 @@ public sealed class PgTargetQueriesTests
     [Fact]
     public void TheNextReads_ForABadActor_AreTheStatementAndPlanTools()
     {
+        /* The duration trend leads since the between-waves pass: the advice's "first question" (mean stepped vs
+           calls changed) is the read that answers it. */
         var recommendations = PgTargetToolRecommendations.GetForKey(PgTargetFactKeys.BadActorKey(HeavyQueryId));
         Assert.NotNull(recommendations);
-        Assert.Equal(new[] { "get_pg_top_queries", "get_pg_plans" }, recommendations!.Select(r => r.Tool).ToArray());
+        Assert.Equal(new[] { "get_pg_query_duration_trend", "get_pg_top_queries", "get_pg_plans" }, recommendations!.Select(r => r.Tool).ToArray());
     }
 
     /* ── gated: the exit criterion ── */

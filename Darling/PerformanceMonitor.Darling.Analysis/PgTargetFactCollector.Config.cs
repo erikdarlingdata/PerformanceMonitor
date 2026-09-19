@@ -25,9 +25,10 @@ public sealed partial class PgTargetFactCollector
     /// context (<c>checkpoint_timeout</c>, <c>checkpoint_completion_target</c>, <c>min_wal_size</c>,
     /// <c>wal_compression</c>), the bgwriter knobs the buffer composite reads beside <c>shared_buffers</c>
     /// (<c>bgwriter_delay</c>, <c>bgwriter_lru_maxpages</c>), and the keys other lanes score from a fact this
-    /// read emits (<c>max_connections</c> / <c>superuser_reserved_connections</c> for lane 3's ceiling,
-    /// <c>work_mem</c> for lane 6, <c>maintenance_work_mem</c> and <c>autovacuum</c> for lane 4). <c>$1</c>
-    /// server_id, <c>$2</c> window end.
+    /// read emits (<c>max_connections</c> / <c>superuser_reserved_connections</c> / <c>reserved_connections</c>
+    /// for lane 3's ceiling — the last a PostgreSQL 16+ name, absent from the snapshot before 16 and then simply
+    /// not emitted, so the ceiling subtracts 0; <c>work_mem</c> for lane 6, <c>maintenance_work_mem</c> and
+    /// <c>autovacuum</c> for lane 4). <c>$1</c> server_id, <c>$2</c> window end.
     ///
     /// <para><b>The shape is <c>DarlingPgServerConfigReader.CurrentConfigSql</c>'s</b>, with two deliberate
     /// differences. The snapshot is anchored on <c>MAX(collection_time)</c> AT OR BEFORE <c>$2</c> rather than
@@ -67,7 +68,7 @@ AND   c.name IN (
           'shared_buffers', 'max_wal_size', 'min_wal_size', 'effective_cache_size', 'random_page_cost',
           'track_io_timing', 'checkpoint_timeout', 'checkpoint_completion_target', 'wal_compression',
           'bgwriter_delay', 'bgwriter_lru_maxpages',
-          'max_connections', 'superuser_reserved_connections',
+          'max_connections', 'superuser_reserved_connections', 'reserved_connections',
           'work_mem', 'maintenance_work_mem', 'autovacuum')";
 
     /// <summary>One <c>pg_settings</c> row as the snapshot stores it: raw text plus its unit.</summary>
@@ -84,10 +85,11 @@ AND   c.name IN (
     ///
     /// <para><b>What scores and what is context.</b> The two knobs and the three convention checks score
     /// 0.4-when-bad in <c>PgTargetScorer.Config.cs</c> and root advisory cards (D5). <c>checkpoint_timeout</c>,
-    /// <c>wal_compression</c>, <c>max_connections</c> and <c>superuser_reserved_connections</c> are CONTEXT
-    /// (base 0): the write chain's advice reads the first two from the full fact set to say "checkpoint_timeout
-    /// is 5 min, the default" beside a checkpoint-pressure finding — the design's "defaults noted alongside
-    /// checkpoint-pressure findings only" — and lane 3's saturation fact reads the last two at score time.
+    /// <c>wal_compression</c>, <c>max_connections</c>, <c>superuser_reserved_connections</c> and
+    /// <c>reserved_connections</c> are CONTEXT (base 0): the write chain's advice reads the first two from the
+    /// full fact set to say "checkpoint_timeout is 5 min, the default" beside a checkpoint-pressure finding — the
+    /// design's "defaults noted alongside checkpoint-pressure findings only" — and lane 3's ceiling reads the
+    /// last three at collect time.
     /// <c>work_mem</c>, <c>maintenance_work_mem</c> and <c>autovacuum</c> are emitted here and scored by lanes
     /// 6 and 4; until those land they score 0 through the stub and are context.</para>
     ///
@@ -198,6 +200,11 @@ AND   c.name IN (
 
             if (TryNumber(settings, "superuser_reserved_connections", out var reserved, out var srRow))
                 facts.Add(ConfigFact(context, PgTargetFactKeys.ConfigSuperuserReserved, reserved, srRow, snapshotAgeSeconds));
+
+            /* PostgreSQL 16+ only (pg_use_reserved_connections); a pre-16 snapshot has no such row and the fact is
+               simply not emitted — the ceiling treats absence as 0, which is also the 16+ default. */
+            if (TryNumber(settings, "reserved_connections", out var reservedForRole, out var rcRow))
+                facts.Add(ConfigFact(context, PgTargetFactKeys.ConfigReservedConnections, reservedForRole, rcRow, snapshotAgeSeconds));
 
             /* ── Lanes 6 and 4 score these; emitted here because the read already has them. ── */
             if (TryBytes(settings, "work_mem", out var workMem, out var wmRow))

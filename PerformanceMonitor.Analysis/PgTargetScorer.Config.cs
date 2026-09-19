@@ -11,8 +11,13 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
-/// <c>pg_config</c> — the <c>CONFIG_PG_*</c> setting checks (lane 2 fills the two knobs and the convention /
-/// meta checks; lanes 3, 4 and 6 fill the keys their families own). Pattern: <c>FactScorer.ScoreConfigFact</c>
+/// <c>pg_config</c> — the <c>CONFIG_PG_*</c> setting checks. One SOURCE, four owning families, because the
+/// config snapshot read emits every key and the base-severity seam receives one fact at a time: owner: knobs
+/// (lane 2) — the two knobs and the convention / meta checks; owner: sessions (lane 3) — the connection-ceiling
+/// context keys; owner: vacuum (lane 4) — <c>autovacuum</c> and <c>maintenance_work_mem</c>; owner: temp
+/// (lane 6) — <c>work_mem</c>. Each family's arm is labelled with its owner below, and an arm whose grading is
+/// more than a line delegates to the owner's partial (<c>ScoreConfigWorkMem</c> in <c>PgTargetScorer.Temp.cs</c>)
+/// so the bar and its lineage live beside the evidence it reads. Pattern: <c>FactScorer.ScoreConfigFact</c>
 /// — 0.4 ONLY when the setting is bad, so a convention check roots an advisory card and never an incident
 /// (D5). <see cref="PgTargetFactKeys.ServerMajorVersion"/> is context and stays 0. Every bar carries its
 /// lineage marker (see the class summary in <c>PgTargetScorer.cs</c>).
@@ -52,20 +57,43 @@ public static partial class PgTargetScorer
        read is not four times a sequential one. */
     public const double RandomPageCostDefault = 4.0;
 
+    /* engine-defined / posture (owner: vacuum): autovacuum = off is the one server-wide setting whose value alone
+       is a fault, not a convention — with the launcher stopped nothing reclaims dead tuples and nothing advances
+       relfrozenxid, so the wraparound wall is reached by arithmetic. Design §3.1 places it in the 0.9 band: above
+       the 0.5 incident line on its own evidence (the setting IS the evidence, the way pg_posture's fsync = off
+       is), below 1.0 because the backlog co-fire (VacuumConfigCoFireAmplifiers, +0.5) is what says the damage is
+       measured rather than pending. The fact's Value is 0/1 as the collector writes it. */
+    public const double AutovacuumOffPostureSeverity = 0.9;
+
+    /// <summary>
+    /// The evidence stamp the vacuum collector writes onto the <c>CONFIG_PG_MAINT_WORK_MEM</c> fact when a
+    /// backlog fact exists: the worst table's dead-or-insert tuples as a multiple of its OWN autovacuum trigger
+    /// line (the backlog fact's <see cref="BacklogRatioKey"/>). The knob's base is graded from this, one fact at
+    /// a time — the D5 shape <c>work_mem</c> uses with <see cref="WorkMemSpillBytesPerSecKey"/>. Absent when no
+    /// backlog fact was emitted, and then the knob scores 0 and is context.
+    /// </summary>
+    public const string MaintWorkMemBacklogRatioKey = "autovacuum_backlog_ratio";
+
     /// <summary>
     /// 0.4 when the setting is at (or below) its shipped default and 0 otherwise — a convention check (D5).
     /// Context keys (<c>checkpoint_timeout</c>, <c>wal_compression</c>, <c>max_connections</c>,
-    /// <c>superuser_reserved_connections</c>, the registry major) score 0 here and are read by the advice
-    /// and by lane 3's saturation arm. <c>work_mem</c> is lane 6's arm — evidence-gated (D5), delegated to
-    /// <c>ScoreConfigWorkMem</c> in <c>PgTargetScorer.Temp.cs</c>, which grades the spill evidence the collector
-    /// stamped onto the fact and is 0 without it. <c>maintenance_work_mem</c> / <c>autovacuum</c> are lane 4's
-    /// arms (evidence-gated and the 0.9-band posture respectively) and fall to the default 0 until that lane
-    /// fills them, so the fact exists as context and roots nothing.
+    /// <c>superuser_reserved_connections</c>, <c>reserved_connections</c>, the registry major) score 0 here and
+    /// are read by the advice and by the sessions family's saturation arm. <c>work_mem</c> is the temp family's
+    /// arm — evidence-gated (D5), delegated to <c>ScoreConfigWorkMem</c> in <c>PgTargetScorer.Temp.cs</c>, which
+    /// grades the spill evidence the collector stamped onto the fact and is 0 without it.
+    /// <c>maintenance_work_mem</c> is the vacuum family's evidence-gated twin of it (<see cref="ScoreConfigMaintWorkMem"/>:
+    /// 0 without the backlog stamp, the advisory base with it, lifted past the incident line only by the backlog
+    /// co-fire); <c>autovacuum</c> is the vacuum family's posture arm (<see cref="AutovacuumOffPostureSeverity"/>).
+    /// Both were inert until the between-waves pass: their source is <c>pg_config</c>, so this is the only
+    /// switch that can give them a base, and <c>FactScorer.ScoreAll</c> skips amplifiers on a base of 0 — no
+    /// co-fire could ever have lifted them.
     /// </summary>
     private static partial double ScoreConfigFact(Fact fact)
     {
         switch (fact.Key)
         {
+            /* ── owner: knobs (lane 2) ── */
+
             /* engine-defined: the initdb line, SharedBuffersInitdbDefaultMb. Value is megabytes. */
             case PgTargetFactKeys.ConfigSharedBuffers:
                 return fact.Value <= SharedBuffersInitdbDefaultMb ? ConfigAdvisoryBase : 0.0;
@@ -89,14 +117,49 @@ public static partial class PgTargetScorer
             case PgTargetFactKeys.ConfigTrackIoTiming:
                 return fact.Value == 0 ? ConfigAdvisoryBase : 0.0;
 
-            /* D5, evidence-gated (lane 6): the value is not graded; the stamped spill evidence is. The arm lives
-               in PgTargetScorer.Temp.cs beside the floor it shares with PG_TEMP_SPILL. */
+            /* ── owner: temp (lane 6) ── */
+
+            /* D5, evidence-gated: the value is not graded; the stamped spill evidence is. The arm lives in
+               PgTargetScorer.Temp.cs beside the floor it shares with PG_TEMP_SPILL. */
             case PgTargetFactKeys.ConfigWorkMem:
                 return ScoreConfigWorkMem(fact);
+
+            /* ── owner: vacuum (lane 4) ── */
+
+            /* engine-defined / posture: AutovacuumOffPostureSeverity when autovacuum = off (Value 1), 0 when on. */
+            case PgTargetFactKeys.ConfigAutovacuumOff:
+                return fact.Value > 0 ? AutovacuumOffPostureSeverity : 0.0;
+
+            /* D5, evidence-gated: the value is not graded; the stamped backlog evidence is. */
+            case PgTargetFactKeys.ConfigMaintWorkMem:
+                return ScoreConfigMaintWorkMem(fact);
+
+            /* ── owner: sessions (lane 3): max_connections / superuser_reserved_connections / reserved_connections
+               are context (base 0) and fall through; the ceiling they compose is graded on the saturation fact. ── */
 
             default:
                 return 0.0;
         }
+    }
+
+    /// <summary>
+    /// The D5 arm for <c>CONFIG_PG_MAINT_WORK_MEM</c>, the vacuum family's twin of <c>ScoreConfigWorkMem</c>: 0
+    /// when the collector stamped no backlog evidence (no <c>PG_AUTOVACUUM_BACKLOG</c> fact this pass — the knob
+    /// is context), the advisory base when the stamped backlog is AT OR PAST the table's own trigger line. That
+    /// base is below the incident line and the key is not an advisory root, so alone it still roots nothing;
+    /// <c>VacuumConfigCoFireAmplifiers</c>' +0.5 on the backlog having FIRED is what carries it to 0.6, and the
+    /// vacuum chain's <c>PG_AUTOVACUUM_BACKLOG → CONFIG_PG_MAINT_WORK_MEM</c> edge then has a destination that
+    /// fired. No <c>threshold_lineage = 0</c> stamp: the bar below is the engine's, not a chosen number.
+    /// </summary>
+    private static double ScoreConfigMaintWorkMem(Fact fact)
+    {
+        if (!fact.Metadata.TryGetValue(MaintWorkMemBacklogRatioKey, out var backlogRatio))
+            return 0.0;
+
+        /* engine-defined: 1.0 is the table's own autovacuum trigger line (autovacuum_vacuum_threshold +
+           autovacuum_vacuum_scale_factor × reltuples, reloptions honoured), the same line the backlog fact's
+           concerning bar sits on — the knob has evidence exactly when autovacuum itself would have acted. */
+        return backlogRatio >= 1.0 ? ConfigAdvisoryBase : 0.0;
     }
 
     /// <summary>

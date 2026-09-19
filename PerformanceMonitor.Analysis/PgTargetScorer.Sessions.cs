@@ -174,14 +174,16 @@ public static partial class PgTargetScorer
                 facts.TryGetValue(PgTargetFactKeys.CpuPercent, out var cpu) && cpu.BaseSeverity > 0,
         },
         /* v2 — offered vs delivered (design §3.6, D7 verbatim): sessions climbing while PG_TPS is flat or falling.
-           Needs a trend on the PG_TPS fact (first-half vs second-half rate) from lane 2's database family:
+           Reads the trend the database family stamps on the PG_TPS fact (second half − first half of the window's
+           rate, PgTargetScorer.TpsTrendKey — shipped by lane 6 in PgTargetScorer.Database.cs); parked until the
+           co-fire is wired and pinned, and the key is named by its constant so the uncomment cannot drift:
         new()
         {
             Description = "Sessions climbed across the window while transactions per second did not — queueing at the cliff",
             Boost = ConnectionSaturationCoFireBoost,
             Predicate = facts =>
                 facts.TryGetValue(key, out var self) && self.Metadata.GetValueOrDefault("peak_is_late") > 0
-                && facts.TryGetValue(PgTargetFactKeys.Tps, out var tps) && tps.Metadata.GetValueOrDefault("trend") <= 0,
+                && facts.TryGetValue(PgTargetFactKeys.Tps, out var tps) && tps.Metadata.GetValueOrDefault(TpsTrendKey) <= 0,
         },
            v2 — PG_IDLE_IN_TRANSACTION fired: parked connections with a measured duration and horizon claim,
            replacing the self-metadata share arm above:

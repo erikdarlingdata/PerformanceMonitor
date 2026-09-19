@@ -111,6 +111,9 @@ public static partial class PgTargetAdvice
         var other = fact.Metadata.GetValueOrDefault("peak_other_sessions");
         var maxConnections = fact.Metadata.GetValueOrDefault("max_connections");
         var reserved = fact.Metadata.GetValueOrDefault("superuser_reserved_connections");
+        /* PostgreSQL 16+'s second carve-out (pg_use_reserved_connections); 0 or absent on every earlier major and on
+           the 16+ default, in which case the arithmetic reads exactly as it did before the ceiling learned it. */
+        var reservedForRole = fact.Metadata.GetValueOrDefault("reserved_connections");
         var usable = fact.Metadata.GetValueOrDefault("usable_connections");
         var captures = fact.Metadata.GetValueOrDefault("captures_with_rows");
         var latest = fact.Metadata.GetValueOrDefault("latest_total_sessions");
@@ -120,7 +123,7 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"At the window's peak capture{(hasPeakAge ? $", {FormatAge(peakAgeSeconds)} before the window's end" : string.Empty)}, {peak:0} sessions were connected against {usable:0} usable connections — max_connections {maxConnections:0} minus superuser_reserved_connections {reserved:0} — that is {peak:0} / ({maxConnections:0} − {reserved:0}) = {ratio * 100:0}%.");
+            $"At the window's peak capture{(hasPeakAge ? $", {FormatAge(peakAgeSeconds)} before the window's end" : string.Empty)}, {peak:0} sessions were connected against {usable:0} usable connections — max_connections {maxConnections:0} minus superuser_reserved_connections {reserved:0}{(reservedForRole > 0 ? $" minus reserved_connections {reservedForRole:0}" : string.Empty)} — that is {peak:0} / ({maxConnections:0} − {reserved:0}{(reservedForRole > 0 ? $" − {reservedForRole:0}" : string.Empty)}) = {ratio * 100:0}%.");
         inv.Append(" PostgreSQL refuses the connection that would take a reserved slot unless the role is a superuser (FATAL: too many clients already / remaining connection slots are reserved), and it does not queue: for the application that asked, a refusal is an outage, not a slowdown.");
         inv.Append(CultureInfo.InvariantCulture,
             $" State breakdown at the peak: {active:0} active, {idleInTransaction:0} idle in transaction, {other:0} other (idle client sessions and PostgreSQL's own background processes — checkpointer, walwriter, autovacuum — which this series cannot tell apart and which hold no connection slot, so the ratio reads a few points high, the safe direction for a cliff).");

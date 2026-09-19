@@ -35,7 +35,11 @@ namespace PerformanceMonitor.Analysis;
 /// are dynamic (<see cref="PgTargetFactKeys.BadActorKey"/>, one per <c>queryid</c>), so a static edge cannot
 /// name one. The lane that writes the first edge INTO a bad actor either resolves the destination at
 /// build-story time (the top-share bad actor present in the fact set) or declares a stable alias key the
-/// collector also stamps — a shared-vocabulary decision, recorded here so it is made once.</para>
+/// collector also stamps — a shared-vocabulary decision, recorded here so it is made once. <b>Decided between
+/// waves:</b> both halves of the first option — an edge names <see cref="PgTargetFactKeys.BadActorFamily"/>
+/// (<c>PG_BAD_ACTOR</c>, never a fact's key) and the root graph's <c>GetActiveEdges</c> override resolves it
+/// to the highest-severity bad actor present, or drops the edge. Lanes 6 and 9 write
+/// <c>AddEdge(PG_TEMP_SPILL, PgTargetFactKeys.BadActorFamily, …)</c> and nothing else changes.</para>
 /// </summary>
 public sealed partial class PgTargetRelationshipGraph
 {

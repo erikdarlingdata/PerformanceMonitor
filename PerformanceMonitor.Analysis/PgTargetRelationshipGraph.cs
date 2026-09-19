@@ -6,6 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
@@ -24,6 +28,19 @@ namespace PerformanceMonitor.Analysis;
 /// <para>The one engine-level rule every edge inherits: an edge's PREDICATE reads the fact set, never a
 /// bar of its own. Thresholds live in <see cref="PgTargetScorer"/> with their lineage; the graph asks
 /// only whether the destination fact fired.</para>
+///
+/// <para><b>The one resolution this graph performs itself: the bad-actor alias.</b> <see cref="RelationshipGraph.AddEdge"/>
+/// takes an exact destination string and <c>InferenceEngine.Traverse</c> looks it up in the fact set by that
+/// string, while the queries family's keys are dynamic (<see cref="PgTargetFactKeys.BadActorKey"/>, one per
+/// <c>queryid</c>) — so no static edge can name the statement a spill or a CPU spike leads to (lane 7's
+/// note in <c>PgTargetRelationshipGraph.Query.cs</c>). The lanes that own an edge INTO a bad actor declare it
+/// against <see cref="PgTargetFactKeys.BadActorFamily"/>, and <see cref="GetActiveEdges"/> rewrites that
+/// destination, per call, to the highest-severity <c>PG_BAD_ACTOR_*</c> fact the pass emitted. Two candidates
+/// → the higher <see cref="Fact.Severity"/> (ties by ordinal key, so a pass is deterministic); none → the
+/// edge is dropped from the active set, never thrown, and the story ends where it did before. The rewrite
+/// returns a COPY of the edge — the stored edge keeps the alias, because the graph is a process-wide
+/// singleton walked for many servers and a mutated destination would leak one pass's statement into the
+/// next. The base body is unchanged for every non-alias edge, which is every edge the SQL Server graph has.</para>
 /// </summary>
 public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
 {
@@ -42,4 +59,74 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
     private partial void BuildWriteEdges();
     private partial void BuildMemoryEdges();
     private partial void BuildQueryEdges();
+
+    /// <summary>
+    /// The shared active-edge read, with the bad-actor alias resolved — see the class summary. Every edge
+    /// whose destination is not <see cref="PgTargetFactKeys.BadActorFamily"/> passes through untouched (the
+    /// same <see cref="Edge"/> instances the base returns); an alias edge is replaced by a copy pointing at
+    /// <see cref="ResolveBadActor"/>'s answer, or omitted when there is none.
+    /// </summary>
+    public override List<Edge> GetActiveEdges(string sourceKey, IReadOnlyDictionary<string, Fact> factsByKey)
+    {
+        var active = base.GetActiveEdges(sourceKey, factsByKey);
+        if (active.Count == 0 || !active.Any(e => IsBadActorAlias(e.Destination)))
+            return active;
+
+        var resolved = ResolveBadActor(factsByKey);
+        var result = new List<Edge>(active.Count);
+        foreach (var edge in active)
+        {
+            if (!IsBadActorAlias(edge.Destination))
+            {
+                result.Add(edge);
+                continue;
+            }
+
+            if (resolved is null)
+                continue;
+
+            result.Add(new Edge
+            {
+                Source = edge.Source,
+                Destination = resolved,
+                Category = edge.Category,
+                PredicateDescription = edge.PredicateDescription,
+                Predicate = edge.Predicate,
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>Whether <paramref name="destination"/> is the alias, exactly — ordinal, because the alias is
+    /// declared upper-case and edges are written against the constant.</summary>
+    public static bool IsBadActorAlias(string? destination) =>
+        string.Equals(destination, PgTargetFactKeys.BadActorFamily, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The key of the highest-severity <c>PG_BAD_ACTOR_*</c> fact in <paramref name="factsByKey"/>, or null when
+    /// the pass emitted none. Severity, not base severity: the traversal orders candidates by
+    /// <see cref="Fact.Severity"/> and the alias should land where the walk would have gone had every statement
+    /// been nameable. Ties break on the ordinal key so the same fact set always resolves the same way.
+    /// </summary>
+    public static string? ResolveBadActor(IReadOnlyDictionary<string, Fact> factsByKey)
+    {
+        string? bestKey = null;
+        Fact? best = null;
+        foreach (var (key, fact) in factsByKey)
+        {
+            if (!key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
+                continue;
+
+            if (best is null
+                || fact.Severity > best.Severity
+                || (fact.Severity == best.Severity && string.CompareOrdinal(key, bestKey) < 0))
+            {
+                best = fact;
+                bestKey = key;
+            }
+        }
+
+        return bestKey;
+    }
 }
