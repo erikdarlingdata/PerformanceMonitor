@@ -88,12 +88,6 @@ public sealed class DarlingMcpToolsTests
     }
 
     /// <summary>
-    /// #3541 A14: the mute verb's description promises the disclosure the payload now carries — on Darling in
-    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>), and the instruction
-    /// table row agrees. The live round-trip below is what proves the numbers; this is what a caller reads
-    /// before deciding to trust them.
-    /// </summary>
-    /// <summary>
     /// #3653 A15/A16: <c>audit_config</c> claimed to account for edition with zero edition branches (the MAXDOP
     /// rule is topology-based, the rest resource-based; the edition is REPORTED in the payload, never consulted),
     /// and its description said nothing about the PostgreSQL refusal the body has carried since #3542. The
@@ -125,6 +119,12 @@ public sealed class DarlingMcpToolsTests
         Assert.DoesNotContain("edition-aware", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3541 A14: the mute verb's description promises the disclosure the payload now carries — on Darling in
+    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>), and the instruction
+    /// table row agrees. The live round-trip below is what proves the numbers; this is what a caller reads
+    /// before deciding to trust them.
+    /// </summary>
     [Fact]
     public void MuteAnalysisFinding_Description_NamesRegistered_MatchedNow_AndTheUnmatchedStatus()
     {
