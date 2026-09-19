@@ -151,6 +151,11 @@ public sealed class RepoFileAdoptionTests
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
+        /* #3754: its reconcile and worker pins anchor multi-statement arms across their line breaks - the
+           `if (enabled) { attempted++; }` and `if (enabled) { failed++; … }` blocks in DarlingXeSessions,
+           and the pre-dispatch `if (…LongQueryTraceFault is { } traceFault) { throw … }` in RunOneAsync - so
+           the CODE shape is told apart from the same words inside the comments beside it. */
+        "SwallowedItemFailureTests.cs",
         "ViewTemplatesTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
     };
