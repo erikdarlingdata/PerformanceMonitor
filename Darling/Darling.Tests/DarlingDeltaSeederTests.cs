@@ -488,10 +488,20 @@ public sealed class DarlingDeltaSeederTests
         {
             await DeleteFamilyRowsAsync(connection, TestContext.Current.CancellationToken);
 
-            var now = DateTime.UtcNow;
-            var stale = Naive(now - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5));
-            var older = Naive(now.AddMinutes(-4));
-            var latest = Naive(now.AddMinutes(-2));
+            /* ONE clock read, floored to the second; the rows and the pass below are all derived from it, so
+               every interval this test asserts is exact rather than a range. This test already read the clock
+               once — the Lite twin did not, and read it again after the seed, which is why its 118..122 windows
+               failed on CI at 123 and 243 in one day and passed on re-run — so the ranges here were only ever
+               allowing for the sub-second round trip: the store keeps microseconds against DateTime's 100 ns
+               ticks, and the calculator's (int)TotalSeconds truncates. A fractional anchor reads 120 today
+               because Npgsql truncates toward the past, but that is a fact about the driver a reader would
+               have to know; flooring the anchor makes the value stored the value subtracted, by construction.
+               The Lite twin anchors the same way; the reasoning is spelled out in full at its
+               Seed_LatchAndSpinlock_LatestPassBecomesTheBaseline. */
+            var now = WholeSecond(DateTime.UtcNow);
+            var stale = now - CollectorDeltaCalculator.SeedLookback - TimeSpan.FromMinutes(5);
+            var older = now.AddMinutes(-4);
+            var latest = now.AddMinutes(-2);
 
             /* latch_stats / spinlock_stats: every key every pass; the stale server's only pass is outside. */
             await LatchAsync(connection, TestServerId, stale, 1, 1, 1);
@@ -547,7 +557,7 @@ public sealed class DarlingDeltaSeederTests
 
             /* latch: baseline is the LATEST pass (1500), not the older (1000) or the stale (1). */
             Assert.Equal(100, deltas.CalculateDeltaWithInterval(TestServerId, "latch_stats_wait_time", "BUFFER", 1600, out var latchInterval, pass, Gap));
-            Assert.InRange(latchInterval, 118, 122);
+            Assert.Equal(120, latchInterval);
             Assert.Equal(10, deltas.CalculateDelta(TestServerId, "latch_stats_waiting_requests", "BUFFER", 150, pass, Gap));
             Assert.Equal(0, deltas.CalculateDelta(TestServerId, "latch_stats_max_wait", "BUFFER", 60, pass, Gap));
 
@@ -562,7 +572,7 @@ public sealed class DarlingDeltaSeederTests
             Assert.Equal(3, deltas.CalculateDelta(TestServerId, "proc_stats_exec", "0x01", 18, pass, Gap));
             Assert.Equal(30, deltas.CalculateDelta(TestServerId, "proc_stats_worker", "0x01", 180, pass, Gap));
             Assert.Equal(2, deltas.CalculateDeltaWithInterval(TestServerId, "proc_stats_exec", "0x02", 9, out var procInterval, pass, Gap));
-            Assert.InRange(procInterval, 238, 242);
+            Assert.Equal(240, procInterval);
             Assert.Equal(2, deltas.CalculateDelta(TestServerId, "proc_stats_exec", "db.dbo.proc3", 5, pass, Gap));
 
             /* pg_wait_stats: the idle-at-latest event is seeded from its older row. */
@@ -578,25 +588,25 @@ public sealed class DarlingDeltaSeederTests
 
             /* query_stats KEYS (#3540, V128): the latest pass is the baseline for the key both passes wrote,
                spelled with the raw -1 as the collector spells it; the statement that fell out of the TOP (n)
-               is restored from its OLDER row over ~240 s; a null handle formats as empty on both sides; and
+               is restored from its OLDER row over exactly 240 s; a null handle formats as empty on both sides; and
                the pre-V128 rows seeded NOTHING — not even under a normalizing guess (gap policy off, so only a
                first sighting reads 0; a seeded baseline of 1 would return 4). */
             Assert.Equal(3, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 18, out var keyedInterval, pass, Gap));
-            Assert.InRange(keyedInterval, 118, 122);
+            Assert.Equal(120, keyedInterval);
             Assert.Equal(210, deltas.CalculateDelta(TestServerId, "query_stats_spills", "0xSH1:0:-1:0xPH1", 1260, pass, Gap));
             Assert.Equal(2, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:100:240:0xPH1", 9, out var fellOutInterval, pass, Gap));
-            Assert.InRange(fellOutInterval, 238, 242);
+            Assert.Equal(240, fellOutInterval);
             Assert.Equal(2, deltas.CalculateDelta(TestServerId, "query_stats_exec", ":0:-1:", 5, pass, Gap));
             Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "sh:0:0:ph", 5, pass, 0));
             Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "sh:0:-1:ph", 5, pass, 0));
 
             /* The series-age rescue on the FIRST post-restart pass: the pass window is seeded from EVERY
-               query_stats row, the pre-V128 ones included, so a plan compiled 30 s ago (inside the ~120 s
-               since the last pre-restart pass) is credited in full with a real interval, while a plan older
+               query_stats row, the pre-V128 ones included, so a plan compiled 30 s ago (inside the exactly
+               120 s since the last pre-restart pass) is credited in full over that whole gap, while a plan older
                than that gap baselines honestly. Unseeded, both are (0, 0) — the defect #3614 closed and V128
                must not reopen on the first restart after the upgrade, when the window holds only such rows. */
             Assert.Equal(900, deltas.CalculateDeltaWithSeriesAge(TestServerId, "query_stats_worker", "sh:0:99:newplan", 900, 30, out var rescueInterval, pass, Gap));
-            Assert.InRange(rescueInterval, 118, 122);
+            Assert.Equal(120, rescueInterval);
             Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(TestServerId, "query_stats_exec", "sh:0:99:oldplan", 900, 3_000, out var oldInterval, pass, Gap));
             Assert.Equal(0, oldInterval);
 
@@ -677,6 +687,16 @@ public sealed class DarlingDeltaSeederTests
 
     /* Naive-UTC storage by convention across the product; Npgsql 6+ rejects Kind=Utc against `timestamp`. */
     private static DateTime Naive(DateTime t) => DateTime.SpecifyKind(t, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// Naive UTC floored to the second: the anchor the end-to-end test derives every row time and the pass
+    /// from, so the intervals it asserts are exact by construction. Seconds is the collectors' own
+    /// resolution, and it is a resolution at which a value written to a <c>timestamp</c> column reads back
+    /// as itself regardless of how the driver rounds the ticks it cannot store. The Lite twin's insert
+    /// helpers floor the same way (its <c>Truncate</c>).
+    /// </summary>
+    private static DateTime WholeSecond(DateTime t) =>
+        new(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
 
     /// <summary>A second server whose only rows predate the lookback window.</summary>
     private const int StaleServerId = -545454;
