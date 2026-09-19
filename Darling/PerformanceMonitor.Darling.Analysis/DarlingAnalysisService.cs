@@ -188,6 +188,33 @@ public sealed class DarlingAnalysisService
     public WindowCoverage? LastWindowCoverage { get; private set; }
 
     /// <summary>
+    /// The fact families whose read FAILED in the last pass (#3691), carried out the way
+    /// <see cref="LastWindowCoverage"/> is and for the same reason: the findings list cannot say it. A pass
+    /// in which every family failed returns the same empty list as a quiet server, and until now the tools
+    /// rendered it as the <c>empty</c> all-clear. Empty on a clean pass and on a pass that never reached
+    /// collection; <see cref="LastCollectionFamilyCount"/> is the total the count is stated against.
+    /// </summary>
+    public IReadOnlyList<CollectionFailure> LastCollectionFailures { get; private set; } = [];
+
+    /// <summary>How many family reads the collector ran in the last pass — the caveat's denominator, stamped
+    /// by the collector from its own type (#3691). 0 when the pass never reached collection.</summary>
+    public int LastCollectionFamilyCount { get; private set; }
+
+    /// <summary>
+    /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
+    /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
+    /// reached scoring (the data-span gate, the unobserved window, a fault). They exist so an <c>empty</c>
+    /// envelope can say which kind of nothing it is: "facts were scored and none fired" (both &gt; 0),
+    /// "facts were read and none graded above zero" (count &gt; 0, scored 0), or "no fact was emitted"
+    /// (count 0) — which, beside <see cref="LastCollectionFailures"/>, is the difference between a quiet
+    /// server and a blind pass.
+    /// </summary>
+    public int? LastFactCount { get; private set; }
+
+    /// <summary>See <see cref="LastFactCount"/>: of those facts, how many scored above zero.</summary>
+    public int? LastFactsScored { get; private set; }
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -288,6 +315,10 @@ public sealed class DarlingAnalysisService
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
         LastWindowCoverage = null;
+        LastCollectionFailures = [];
+        LastCollectionFamilyCount = 0;
+        LastFactCount = null;
+        LastFactsScored = null;
         EndedEarlyAs = null;
 
         try
@@ -348,6 +379,18 @@ public sealed class DarlingAnalysisService
             // 1. Collect facts from the Postgres store
             var facts = await engine.Collector.CollectFactsAsync(context);
             LastWindowCoverage = context.Coverage;
+            LastCollectionFailures = context.CollectionFailures;
+            LastCollectionFamilyCount = context.CollectionFamilyCount;
+
+            if (context.CollectionFailures.Count > 0)
+            {
+                /* #3691: the per-site log lines above say each failure as it happened; this one line says
+                   what the PASS is missing, so a scheduled pass — which has no payload to carry
+                   collection_caveats — still leaves the summary beside the findings it persists. Every
+                   envelope the tools render off this pass carries the same sentence. */
+                _logger?.LogWarning("[DarlingAnalysisService] Collection caveat for {ServerName}: {Caveat}",
+                    context.ServerName, CollectionCaveats.Describe(context.CollectionFailures, context.CollectionFamilyCount));
+            }
 
             if (context.ObservedDurationMs <= 0)
             {
@@ -446,6 +489,12 @@ public sealed class DarlingAnalysisService
 
             // 2. Score facts (base severity + amplifiers)
             _scorer.ScoreAll(facts);
+
+            /* #3691: what the scorer saw and what it graded, for the `empty` envelope's two counts. Read
+               here, after scoring and before attribution adds its own cards, so "facts_scored" means the
+               collector's and detector's facts and nothing composed later. */
+            LastFactCount = facts.Count;
+            LastFactsScored = facts.Count(f => f.Severity > 0);
 
             // 2.5. Config → outcome attribution (#3653 A10, Q2). AFTER scoring, never before: the fact
             // is appended with its Information severity preset (ConfigChangeAttribution.InformationSeverity),
@@ -611,6 +660,9 @@ public sealed class DarlingAnalysisService
     /// window's observed coverage (#3538 A2) — returned rather than parked on a property because this
     /// path has no <see cref="IsAnalyzing"/> guard and two on-demand callers can overlap; a shared
     /// property would let one read the other's window. Coverage is null only when collection threw.
+    /// The third element (#3691) is the same context's collection failures and family total, for the
+    /// callers' <c>collection_caveats</c> — returned for the same overlap reason, and populated even when
+    /// collection threw, so a read that recorded failures before the throw still reports them.
     ///
     /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
     /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
@@ -631,7 +683,7 @@ public sealed class DarlingAnalysisService
     /// gets <see cref="PgTargetAnomalyDetector"/>'s <c>ANOMALY_PG_*</c> facts and a SQL Server target
     /// gets <see cref="PgAnomalyDetector"/>'s, off the one resolution this read already performs.</para>
     /// </summary>
-    public async Task<(List<Fact> Facts, WindowCoverage? Coverage)> CollectAndScoreFactsAsync(
+    public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
         int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
@@ -658,15 +710,15 @@ public sealed class DarlingAnalysisService
                 var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
                 facts.AddRange(anomalies);
             }
-            if (facts.Count == 0) return (facts, context.Coverage);
+            if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
-            return (facts, context.Coverage);
+            return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
         catch (Exception ex)
         {
             _logger?.LogError("[DarlingAnalysisService] Fact collection or anomaly detection failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return ([], null);
+            return ([], null, CollectionCaveatState.From(context));
         }
     }
 

@@ -47,7 +47,7 @@ public sealed class DarlingMcpTools
         + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_io, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits. "
         + "Omit for all. The pg_ sources are emitted only for a PostgreSQL target.";
 
-    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
+    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note. When one or more fact families could not be read this pass (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the status prose says so; the field is absent on a clean pass, and an empty result over unread families is not an all-clear. The empty envelope also states fact_count (facts the scorer saw) and facts_scored (those graded above zero), so scored-but-nothing-fired is told apart from no-fact-emitted.")]
     public static async Task<string> AnalyzeServer(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -102,16 +102,22 @@ public sealed class DarlingMcpTools
                    Same miss vocabulary as get_analysis_facts' zero-facts case; same hints block as
                    the all-clear, because an anchored empty-window run still owes the caller the
                    persistence disclosure. */
+                /* #3691: the collector ran before this envelope, so its failed families are reported here
+                   too — a dead window AND a family that could not be read are two different holes. Clean
+                   pass: same message, same object, same bytes. */
+                var unobservedCollection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
+                var unobservedCaveat = unobservedCollection.Describe();
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when collectors last succeeded and why they stopped.",
-                    new
+                    " Check get_collection_health to see when collectors last succeeded and why they stopped." +
+                    (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
+                    unobservedCollection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote
-                    });
+                    }, McpHelpers.JsonOptions));
             }
 
             /* #3538 A2: how much of the window the collector actually observed. Every rate in this pass
@@ -124,6 +130,14 @@ public sealed class DarlingMcpTools
                 ? $"PARTIAL COVERAGE: {coverage.Describe()}. Rates and fractions below are per observed time, so they are not deflated by the gap — but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped."
                 : null;
 
+            /* #3691: which fact families the collector could NOT read this pass. Null on a clean pass, and
+               then NOTHING below changes — the caveat stays whatever coverage made it and the payload object
+               is serialized exactly as before, so a clean pass's bytes are unchanged. When a family failed,
+               the sentence joins the caveat and the structured block is appended to the payload, because
+               "no finding from the write family" and "the write family was not read" must not look alike. */
+            var collection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
+            var collectionCaveat = collection.Describe();
+
             if (findings.Count == 0)
             {
                 /* A successful analysis that found nothing wrong: a true negative ("all clear"),
@@ -133,19 +147,27 @@ public sealed class DarlingMcpTools
                    collector emitted no fact at all over an observed window (#3653); the coverage block
                    says how much of the window either rests on. With partial coverage the all-clear is scoped
                    to the time that was seen (#3538 A2): the same status, because facts were scored and
-                   nothing fired, but prose that no longer claims the whole window. */
+                   nothing fired, but prose that no longer claims the whole window.
+
+                   #3691: fact_count / facts_scored say WHICH kind of nothing this is — facts scored and none
+                   fired, facts read and none graded above zero, or no fact emitted at all — and a pass with
+                   failed families says so in the message and in collection_caveats, because an all-clear
+                   over families that were never read is not an all-clear. */
+                var allClear = coverageCaveat is null
+                    ? "No significant findings. All metrics are within normal ranges."
+                    : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed — a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.";
                 return McpHelpers.Status(
                     "empty",
-                    coverageCaveat is null
-                        ? "No significant findings. All metrics are within normal ranges."
-                        : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed — a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
-                    new
+                    collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}",
+                    collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote,
-                        coverage = coverage?.ToPayload()
-                    });
+                        coverage = coverage?.ToPayload(),
+                        fact_count = analysisService.LastFactCount,
+                        facts_scored = analysisService.LastFactsScored
+                    }, McpHelpers.JsonOptions));
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -161,7 +183,9 @@ public sealed class DarlingMcpTools
             var (forcePlanStates, forcePlanStateNote) =
                 await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings);
 
-            return JsonSerializer.Serialize(new
+            /* #3691: collection.Attach returns this very object on a clean pass — same object, same
+               serializer call, same bytes — and a JsonObject with collection_caveats appended last otherwise. */
+            return JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.ServerName,
                 status = "findings",
@@ -171,8 +195,9 @@ public sealed class DarlingMcpTools
                 /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
                    one every caller already assumed. */
                 persistence_note = persistenceNote,
-                /* Null at full coverage (#3538 A2) — same rule. */
-                caveat = coverageCaveat,
+                /* Null at full coverage (#3538 A2) — same rule; the collection caveat (#3691) joins it
+                   only when a family failed, so a clean full-coverage pass keeps its null. */
+                caveat = CollectionCaveats.Compose(coverageCaveat, collectionCaveat),
                 coverage = coverage?.ToPayload(),
                 time_range = new
                 {
@@ -236,7 +261,7 @@ public sealed class DarlingMcpTools
                         }
                     };
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -244,7 +269,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_facts"), Description("Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings.")]
+    [McpServerTool(Name = "get_analysis_facts"), Description("Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet.")]
     public static async Task<string> GetAnalysisFacts(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -271,16 +296,26 @@ public sealed class DarlingMcpTools
 
         try
         {
-            var (facts, coverage) = await analysisService.CollectAndScoreFactsAsync(
+            var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
+
+            /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
+               a family failed, the sentence is appended to the message and collection_caveats to the payload. */
+            var collectionCaveat = collection.Describe();
 
             if (facts.Count == 0)
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
-                   not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case). */
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No facts collected. The collector may not have run yet, or no data exists in the requested time range.");
+                   not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case).
+                   #3691: a pass in which every family FAILED lands here too, and used to be told apart from
+                   "no data" only by the service log; the caveat now says which families were not read. */
+                const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
+                return collectionCaveat is null
+                    ? McpHelpers.Status("unavailable", noFacts)
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"{noFacts} COLLECTION CAVEAT: {collectionCaveat}",
+                        collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -295,8 +330,9 @@ public sealed class DarlingMcpTools
                     "unavailable",
                     $"The collector observed none of the requested window for {resolved.ServerName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when collectors last succeeded and why they stopped.",
-                    new { coverage = coverage?.ToPayload() });
+                    "Check get_collection_health to see when collectors last succeeded and why they stopped." +
+                    (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
+                    collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             var filtered = facts.AsEnumerable();
@@ -337,7 +373,7 @@ public sealed class DarlingMcpTools
                 })
                 .ToList();
 
-            return JsonSerializer.Serialize(new
+            return JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.ServerName,
                 total_facts = facts.Count,
@@ -345,13 +381,16 @@ public sealed class DarlingMcpTools
                 filters = new { source, min_severity },
                 /* #3538 A2: null at full coverage; below the partial bar it says what share of the window
                    the fractions and rates were divided over, because a 25%-of-observed-time wait on a
-                   quarter-collected window is a different claim from 25% of four hours. */
-                caveat = coverage.IsPartial
-                    ? $"PARTIAL COVERAGE: {coverage.Describe()}. Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole."
-                    : null,
+                   quarter-collected window is a different claim from 25% of four hours. #3691: the
+                   collection caveat joins it only when a family failed; a clean pass keeps its null. */
+                caveat = CollectionCaveats.Compose(
+                    coverage.IsPartial
+                        ? $"PARTIAL COVERAGE: {coverage.Describe()}. Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole."
+                        : null,
+                    collectionCaveat),
                 coverage = coverage.ToPayload(),
                 facts = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -566,7 +605,7 @@ public sealed class DarlingMcpTools
             /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
                configuration facts, which are the latest row regardless of window, and a one-hour window
                the collector missed changes nothing about what the server is configured to. */
-            var (facts, _) = await analysisService.CollectAndScoreFactsAsync(
+            var (facts, _, _) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, 1);
 
             var factsByKey = facts.ToFactLookup();

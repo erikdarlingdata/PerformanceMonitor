@@ -434,7 +434,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
             await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "SOS_SCHEDULER_YIELD", 100);
 
         var service = new AnalysisService(_duckDb);
-        var (facts, coverage) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
+        var (facts, coverage, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
 
         Assert.NotNull(coverage);
         Assert.True(coverage!.IsObserved, "the seeded wait_stats series did not register as observed coverage");
@@ -472,7 +472,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await SeedBaselineCpu(10, variance: 2);
 
         var service = new AnalysisService(_duckDb);
-        var (facts, coverage) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
+        var (facts, coverage, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, asOfUtc: _analysisEnd);
 
         Assert.NotNull(coverage);
         Assert.False(coverage!.IsObserved);

@@ -1,5 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 
 namespace PerformanceMonitor.Analysis;
@@ -116,6 +122,252 @@ public class AnalysisContext
     /// read as "idle", which is the calm-sounding wrong answer the whole change exists to stop.
     /// </summary>
     public double ObservedDurationMs => Coverage?.ObservedMs ?? 0;
+
+    /// <summary>
+    /// The fact families whose read FAILED this pass and contributed nothing (#3691) — one entry per
+    /// degrade site that fired, recorded by <see cref="RecordCollectionFailure"/> beside the log line every
+    /// collector's <c>ReportCollectionFailure</c> already writes. Empty on a clean pass, and empty on a
+    /// context that has not been through a collector.
+    ///
+    /// <para><b>Why the context and not only the log.</b> Every family read in all three collectors
+    /// degrades to "no facts" on failure, which is right — one unavailable table must not cost a server
+    /// its other thirty facts — and since #2826 the catch LOGS. But the pass learned nothing from it: a pass
+    /// in which every family failed returned the same empty fact list as a quiet server, scored nothing,
+    /// and both <c>analyze_server</c> tools rendered it as the <c>empty</c> all-clear. An operator (or the
+    /// agent reading for them) trusted a clean card that was blind. The log line is written for whoever
+    /// reads the service log; this list is for the pass itself, so the payload the caller actually sees can
+    /// say which families were not read.</para>
+    /// </summary>
+    public List<CollectionFailure> CollectionFailures { get; } = [];
+
+    /// <summary>
+    /// How many fact families the collector RUNS in a pass — the <c>families_total</c> a caveat is stated
+    /// against, stamped by the collector at the start of <c>CollectFactsAsync</c> from
+    /// <see cref="CollectionCaveats.CountFamilies"/> over its own type, never hard-coded. 0 until a
+    /// collector stamps it, which the caveat prose treats as "unknown" rather than as a denominator.
+    /// </summary>
+    public int CollectionFamilyCount { get; set; }
+
+    /// <summary>
+    /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
+    /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
+    /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose
+    /// families split their reads across helper methods); <paramref name="read"/> is the reporting method's
+    /// own name (the reporter's <see cref="CallerMemberNameAttribute"/> value),
+    /// kept beside it so the entry says WHICH read of the family failed.
+    /// </summary>
+    public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, string message) =>
+        CollectionFailures.Add(new CollectionFailure(family, read, outcome, message));
+}
+
+/// <summary>
+/// How a family read failed (#3691) — the three-outcome degrade the collectors already classify for their log
+/// level, plus the cancellation the Lite filter lets through, named so a payload reader can tell a growth
+/// signal (<see cref="Timeout"/>) from a deploy-window skew (<see cref="MissingSchema"/>) from a fault
+/// (<see cref="Error"/>) without reading the message text.
+/// </summary>
+public enum CollectionFailureOutcome
+{
+    /// <summary>The read outgrew its command deadline (57014 or a wrapped <see cref="TimeoutException"/>,
+    /// classified structurally by <c>PgBaselineProvider.IsCommandTimeout</c>). A growth signal.</summary>
+    Timeout,
+
+    /// <summary>An <see cref="OperationCanceledException"/> that was NOT the pass's own abandonment (the
+    /// abandon filter on every catch excludes that): a cancellation from somewhere else.</summary>
+    Cancelled,
+
+    /// <summary>The store does not have a table or column the read asked for (42P01 / 42703) — the
+    /// pre-migration / rolling-deploy skew the collectors log at Debug. Still a family that was not read.</summary>
+    MissingSchema,
+
+    /// <summary>Anything else. A fault until someone says otherwise.</summary>
+    Error
+}
+
+/// <summary>One failed read: which family, which read of it, how it failed, and the exception's own message.</summary>
+public sealed record CollectionFailure(string Family, string Read, CollectionFailureOutcome Outcome, string Message)
+{
+    /// <summary>
+    /// The family label for a collector partial file: the dotted segment before <c>.cs</c>, lower-cased —
+    /// <c>PgTargetFactCollector.Vacuum.cs</c> → <c>vacuum</c>, <c>PgTargetFactCollector.Write.cs</c> → <c>write</c>.
+    /// For the collector whose families read through helper methods (the PostgreSQL target's vacuum family is
+    /// three reads in three methods), the FILE is the family and the method is the read; the reporter takes the
+    /// path from <see cref="CallerFilePathAttribute"/>, which is a compile-time
+    /// constant on the call site in the partial file. Either directory separator is honoured, because the
+    /// path is the build machine's.
+    /// </summary>
+    public static string FamilyOfFile(string callerFilePath)
+    {
+        var path = callerFilePath ?? string.Empty;
+        var cut = Math.Max(path.LastIndexOf('/'), path.LastIndexOf('\\'));
+        var file = cut >= 0 ? path[(cut + 1)..] : path;
+        if (file.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) file = file[..^3];
+        var dot = file.LastIndexOf('.');
+        var segment = dot >= 0 ? file[(dot + 1)..] : file;
+        return segment.Length == 0 ? "unknown" : segment.ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// The family label for a collect method name, derived rather than tabled: <c>CollectWriteFactsAsync</c>
+    /// → <c>write</c>, <c>CollectPlanRegressionFactsAsync</c> → <c>plan_regression</c>,
+    /// <c>CollectDatabaseSizeFactAsync</c> → <c>database_size</c>, <c>CollectObservedCoverageAsync</c> →
+    /// <c>observed_coverage</c>. The prefix and the <c>Fact(s)Async</c> suffix are the collectors' naming
+    /// convention (every family method in all three matches <c>Collect*Async(AnalysisContext, List&lt;Fact&gt;)</c>,
+    /// which <see cref="CollectionCaveats.CountFamilies"/> also rests on); a name outside it is returned
+    /// snake-cased whole rather than rejected, so a renamed method still reports under SOME name.
+    /// </summary>
+    public static string FamilyOf(string collectMethod)
+    {
+        var name = collectMethod ?? string.Empty;
+        if (name.StartsWith("Collect", StringComparison.Ordinal)) name = name["Collect".Length..];
+        foreach (var suffix in new[] { "FactsAsync", "FactAsync", "Async" })
+        {
+            if (name.EndsWith(suffix, StringComparison.Ordinal) && name.Length > suffix.Length)
+            {
+                name = name[..^suffix.Length];
+                break;
+            }
+        }
+
+        var sb = new StringBuilder(name.Length + 4);
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (char.IsUpper(c) && i > 0 && !char.IsUpper(name[i - 1])) sb.Append('_');
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.Length == 0 ? "unknown" : sb.ToString();
+    }
+
+    /// <summary>The payload spelling of the outcome: <c>timeout</c>, <c>cancelled</c>, <c>missing_schema</c>, <c>error</c>.</summary>
+    public static string Label(CollectionFailureOutcome outcome) => outcome switch
+    {
+        CollectionFailureOutcome.Timeout => "timeout",
+        CollectionFailureOutcome.Cancelled => "cancelled",
+        CollectionFailureOutcome.MissingSchema => "missing_schema",
+        _ => "error"
+    };
+}
+
+/// <summary>
+/// What a facts read hands its caller about collection (#3691): the failures and the family total off the
+/// context the read ran on, as ONE value so the read's tuple grows by one element rather than two. Returned
+/// rather than parked on a service property for the reason <c>CollectAndScoreFactsAsync</c>'s coverage is:
+/// that path has no <c>IsAnalyzing</c> guard, two on-demand callers can overlap, and a shared property would
+/// let one read the other's failures.
+/// </summary>
+public sealed record CollectionCaveatState(IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal)
+{
+    /// <summary>The state the context carries after its collector ran (or threw before recording anything).</summary>
+    public static CollectionCaveatState From(AnalysisContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return new(context.CollectionFailures, context.CollectionFamilyCount);
+    }
+
+    /// <summary>True when at least one family failed — the only case in which anything is emitted.</summary>
+    public bool Any => Failures.Count > 0;
+
+    /// <summary>The caveat sentence, or null on a clean read (<see cref="CollectionCaveats.Describe"/>).</summary>
+    public string? Describe() => CollectionCaveats.Describe(Failures, FamiliesTotal);
+
+    /// <summary>Adds <c>collection_caveats</c> only when owed (<see cref="CollectionCaveats.Attach"/>).</summary>
+    public object Attach(object payload, JsonSerializerOptions options) => CollectionCaveats.Attach(payload, Failures, FamiliesTotal, options);
+}
+
+/// <summary>
+/// The <c>collection_caveats</c> block and its sentence (#3691), built once here so <c>analyze_server</c> and
+/// <c>get_analysis_facts</c> say the same thing on both SKUs — the <see cref="WindowCoverage"/> pattern.
+///
+/// <para><b>Emitted only when a family failed.</b> The SQL Server exit checks pin a clean pass's payload
+/// byte-for-byte, and the serializer the tools use writes nulls, so a <c>collection_caveats = null</c>
+/// property would be a byte change on every clean pass for a caveat that was not owed. <see cref="Attach"/>
+/// therefore returns the caller's payload object UNTOUCHED when there is nothing to say — the same object
+/// through the same serializer call — and only a failing pass takes the path that adds the block.</para>
+/// </summary>
+public static class CollectionCaveats
+{
+    /// <summary>
+    /// How many family reads a collector type runs: its non-public instance methods of the shape
+    /// <c>Collect*Async(AnalysisContext, List&lt;Fact&gt;)</c>, which is every family method in all three
+    /// collectors and nothing else (the public <c>CollectFactsAsync</c> entry point is excluded by
+    /// visibility; a local function compiles to a mangled name that does not start with <c>Collect</c>).
+    /// Derived from the type so a new family cannot leave the denominator stale.
+    /// </summary>
+    public static int CountFamilies(Type collectorType)
+    {
+        ArgumentNullException.ThrowIfNull(collectorType);
+        return collectorType
+            .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Count(m =>
+                m.Name.StartsWith("Collect", StringComparison.Ordinal)
+                && m.Name.EndsWith("Async", StringComparison.Ordinal)
+                && m.GetParameters() is { Length: 2 } p
+                && p[0].ParameterType == typeof(AnalysisContext)
+                && p[1].ParameterType == typeof(List<Fact>));
+    }
+
+    /// <summary>
+    /// The caveat sentence, or null when no family failed. Names the count of DISTINCT families against the
+    /// total, each family with its outcome(s), and says what the reader must not infer.
+    /// </summary>
+    public static string? Describe(IReadOnlyList<CollectionFailure> failures, int familiesTotal)
+    {
+        if (failures is null || failures.Count == 0) return null;
+        var byFamily = failures
+            .GroupBy(f => f.Family, StringComparer.Ordinal)
+            .Select(g => $"{g.Key} ({string.Join("/", g.Select(f => CollectionFailure.Label(f.Outcome)).Distinct())})")
+            .ToList();
+        var list = string.Join(", ", byFamily);
+        var total = familiesTotal > 0 ? familiesTotal.ToString(System.Globalization.CultureInfo.InvariantCulture) : "an unknown number of";
+        return $"{byFamily.Count} of {total} fact families could not be read ({list}) — the absence of findings is not evidence: nothing from those families was scored this pass, and a finding they would have rooted or corroborated is simply missing. The service log carries each failure; check get_collection_health for the store.";
+    }
+
+    /// <summary>The structured block: <c>families_failed</c> (DISTINCT families — a family whose two reads both
+    /// failed is one family missing), <c>families_total</c>, <c>entries[{family, read, outcome, message}]</c>, one
+    /// entry per failed read. Null when no family failed.</summary>
+    public static object? ToPayload(IReadOnlyList<CollectionFailure> failures, int familiesTotal)
+    {
+        if (failures is null || failures.Count == 0) return null;
+        return new
+        {
+            families_failed = failures.Select(f => f.Family).Distinct(StringComparer.Ordinal).Count(),
+            families_total = familiesTotal,
+            entries = failures.Select(f => new
+            {
+                family = f.Family,
+                read = f.Read,
+                outcome = CollectionFailure.Label(f.Outcome),
+                message = f.Message
+            }).ToList()
+        };
+    }
+
+    /// <summary>
+    /// Adds <c>collection_caveats</c> to a payload object ONLY when a family failed. With no failures the
+    /// very same <paramref name="payload"/> reference is returned, so the caller's serializer call is the
+    /// one it always made and a clean pass's bytes cannot move. With failures the payload is serialized to
+    /// a <see cref="JsonObject"/> with the caller's options, the block is appended as the LAST property,
+    /// and the node is returned for the caller to serialize in place of the object.
+    /// </summary>
+    public static object Attach(object payload, IReadOnlyList<CollectionFailure> failures, int familiesTotal, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        var block = ToPayload(failures, familiesTotal);
+        if (block is null) return payload;
+
+        var node = JsonSerializer.SerializeToNode(payload, options)?.AsObject()
+            ?? throw new InvalidOperationException("the payload did not serialize to a JSON object");
+        node["collection_caveats"] = JsonSerializer.SerializeToNode(block, options);
+        return node;
+    }
+
+    /// <summary>Joins an existing caveat (the coverage one, null at full coverage) with the collection one
+    /// (null on a clean pass); null when both are, so a clean full-coverage pass keeps its null.</summary>
+    public static string? Compose(string? existingCaveat, string? collectionCaveat) =>
+        existingCaveat is null ? collectionCaveat
+        : collectionCaveat is null ? existingCaveat
+        : existingCaveat + " " + collectionCaveat;
 }
 
 /// <summary>

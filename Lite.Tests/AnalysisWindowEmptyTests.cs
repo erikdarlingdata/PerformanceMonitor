@@ -166,7 +166,7 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
         var service = new AnalysisService(_duckDb);
 
         /* The precondition this arm exists for: observed time, zero facts. */
-        var (facts, coverage) = await service.CollectAndScoreFactsAsync(_serverId, "TestServer");
+        var (facts, coverage, _) = await service.CollectAndScoreFactsAsync(_serverId, "TestServer");
         Assert.Empty(facts);
         Assert.NotNull(coverage);
         Assert.True(coverage!.IsObserved);
