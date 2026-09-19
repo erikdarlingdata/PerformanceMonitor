@@ -179,11 +179,15 @@ public sealed class AlertEngine
        beside it would be a second source of truth for the same fact. One record cache per gated metric,
        each a row under its own metric name in the same (server, metric) persistence table, all driven
        through ObservePersistenceAsync — one mechanism, as AlertPersistenceGate's header asks; a third
-       consumer is a third dictionary, a third seed line and a third pair of constants, nothing else. */
+       consumer is a third dictionary, a third seed line and a third pair of constants, nothing else.
+
+       #3653 (A5, Q4): Blocking Wait Time is that third consumer. Its _activeBlockingWaitAlert flag left for
+       the same reason the other two did — the persisted Firing bit is the one "incident open" fact — and its
+       row sits under the alert's own metric name in the same table. */
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _cpuPersistence = new();
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbPersistence = new();
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _blockingWaitPersistence = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
-    private readonly ConcurrentDictionary<string, bool> _activeBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activePoisonWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeLongRunningQueryAlert = new();
@@ -497,6 +501,19 @@ public sealed class AlertEngine
                     _lastTempDbSpaceAlert[key] = _utcNow();
                 }
             }
+
+            /* #3653 (A5, Q4): the Blocking Wait Time gate's record — the third row under the third metric name,
+               same seed, same cooldown stamp on an already-open incident, same reasons. */
+            readClock.Restart();
+            var blockingWaitPersistence = await _stateStore.LoadAlertPersistenceAsync(key, BlockingWaitPersistenceMetric);
+            if (blockingWaitPersistence.HasValue)
+            {
+                _blockingWaitPersistence[key] = blockingWaitPersistence.Value;
+                if (blockingWaitPersistence.Value.State.Firing)
+                {
+                    _lastBlockingWaitAlert[key] = _utcNow();
+                }
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -608,6 +625,96 @@ public sealed class AlertEngine
     public const string TempDbSpacePersistenceMetric = "tempdb Space";
 
     /// <summary>
+    /// Consecutive breaching blocking SNAPSHOTS required before a total blocked wait at or above
+    /// <see cref="IAlertEngineSettings.BlockingWaitSecondsThreshold"/> is an incident — unless one snapshot
+    /// alone clears <see cref="BlockingWaitSingleSnapshotMultiplier"/> times the bar, which fires at once
+    /// (#3653 A5, ruling Q4). Three collected snapshots at the shipped one-minute <c>dmv_blocking_snapshot</c>
+    /// cadence is about three minutes of blocking; the count is per COLLECTION (the snapshot's
+    /// <c>collection_time</c> is the observation identity), never per 30 s alert sweep.
+    ///
+    /// <para><b>Why a disjunction and not the tempdb gate's plain K.</b> Measured on one production store
+    /// class — 43 servers: 102 Blocking Wait Time episodes, and 97 of them were a SINGLE snapshot at the
+    /// collector's ~72 s cadence, including the p99 event: 1,509 s of summed blocked wait across 145
+    /// sessions, gone by the next collection. A pure consecutive gate keeps only whichever of the remaining
+    /// five ran three collections or more and drops exactly the episodes an operator most needs to hear
+    /// about — the short, severe pile-ups. The
+    /// twin fleet's hour-quantised arcs DO run consecutive, so K = 3 is right for them and wrong for the
+    /// severe singles; the single-snapshot arm at 3× the bar is what admits those. Erik ruled N = 3× and
+    /// K = 3 on #3653; neither is a knob, for the reason <see cref="CpuBreachSamples"/> gives.</para>
+    ///
+    /// <para><b>Consecutive means adjacent collections, and the collector makes that harder here than for
+    /// tempdb.</b> <c>dmv_blocking_snapshot</c> writes rows only while something is blocked, so a quiet
+    /// cycle writes nothing and the store's "latest snapshot" simply stops advancing. Two breaching snapshots
+    /// with a quiet cycle between them are two episodes, and counting them as consecutive would re-create
+    /// the single-snapshot flap three episodes at a time. The arm therefore restarts a partial streak when a
+    /// breaching snapshot lands more than <see cref="BlockingWaitEpisodeGapFactor"/> cadences after the last
+    /// one it counted (<see cref="CurrentBlockingWaitResult.CadenceMinutes"/>); an OPEN incident is not
+    /// restarted by a short gap — it holds, as the level-triggered arm always held, until a fresh snapshot
+    /// under the bar or a stale one resolves it.</para>
+    /// </summary>
+    public const int BlockingWaitBreachSamples = 3;
+
+    /// <summary>
+    /// Consecutive clearing blocking observations required to resolve an open Blocking Wait Time incident
+    /// (#3653 A5). ONE, the pre-gate behaviour kept on purpose and for the same reason
+    /// <see cref="TempDbSpaceClearSamples"/> gives: the #3653 read counted breach episodes and said nothing
+    /// about mid-incident dips, so a larger number here would be a constant without a measurement. A clear
+    /// is EITHER a fresh snapshot under the bar OR a stale snapshot — the #1812 rule this arm has always
+    /// had (see <see cref="CurrentBlockingWaitResult"/>): rows exist only while blocking exists, so a
+    /// snapshot that has aged past three cycles is the collector saying the blocking ended, not an absence
+    /// of evidence. A stale clear has no collection time of its own to be keyed on (the stale row's is the
+    /// one already counted), so it is observed per sweep — which with a clear count of one is the same
+    /// instant the arm resolved at before the gate.
+    /// </summary>
+    public const int BlockingWaitClearSamples = 1;
+
+    /// <summary>
+    /// The single-snapshot arm's multiplier (#3653 A5, ruling Q4): ONE fresh snapshot whose total blocked
+    /// wait is at or above this many times <see cref="IAlertEngineSettings.BlockingWaitSecondsThreshold"/>
+    /// fires immediately, without waiting for <see cref="BlockingWaitBreachSamples"/>. It still goes
+    /// THROUGH the gate — as an observation whose bar is one sample — so the record opens the incident the
+    /// same way the consecutive arm would, and the subsequent clear is honest: the operator gets one
+    /// Cleared for one page, whichever arm produced it.
+    /// </summary>
+    public const int BlockingWaitSingleSnapshotMultiplier = 3;
+
+    /// <summary>
+    /// How many collector cadences may separate two breaching snapshots before the second is a NEW episode
+    /// rather than the next consecutive collection (#3653 A5) — see <see cref="BlockingWaitBreachSamples"/>
+    /// for why this arm needs the rule at all. 1.5: a skipped quiet cycle puts the next snapshot at least two
+    /// cadences out (2.0 ×), and the measured collector ran at ~72 s against a 60 s schedule (1.2 ×), so the
+    /// bar sits between the two shapes it has to separate. A collector that overruns past 1.5 × restarts a
+    /// streak that was in fact consecutive, which UNDER-fires — the direction every gate in this class
+    /// chooses when it must choose, and the single-snapshot arm still covers the severe case regardless.
+    /// </summary>
+    public const double BlockingWaitEpisodeGapFactor = 1.5;
+
+    /// <summary>
+    /// The (server, metric) key the Blocking Wait Time gate's state is persisted under — the alert's own
+    /// metric name, the spelling its mute context, history row and resolve already use, for the reason
+    /// <see cref="CpuPersistenceMetric"/> gives. A third metric name is a third row in the existing
+    /// persistence table (V118 keyed it <c>(server_id, metric_name)</c>), so the rollout needed no rung.
+    /// </summary>
+    public const string BlockingWaitPersistenceMetric = "Blocking Wait Time";
+
+    /// <summary>
+    /// The <c>Fired By</c> detail value when the delivered snapshot alone is at or above
+    /// <see cref="BlockingWaitSingleSnapshotMultiplier"/> × the bar (#3653 A5). Built from the constant so the
+    /// token cannot say <c>3x</c> after the multiplier moves; pinned to the literal Erik ruled on in the tests.
+    /// </summary>
+    public static readonly string BlockingWaitFiredBySingleSnapshot = $"single_snapshot_{BlockingWaitSingleSnapshotMultiplier}x";
+
+    /// <summary>
+    /// The <c>Fired By</c> detail value when the delivered snapshot is over the bar but under the single-snapshot
+    /// multiple, so the incident is open through the K-consecutive arm (#3653 A5). On the opening edge this is
+    /// exact — the bar the gate was handed was <see cref="BlockingWaitBreachSamples"/>. On a cooldown reminder it
+    /// describes the snapshot being delivered: an incident that opened at 3× and is now continuing at 1.5× is
+    /// being HELD by the gate on a breaching sample, which is the consecutive arm's rule, so the token names
+    /// the rule that admitted this delivery rather than a history the record does not keep.
+    /// </summary>
+    public static readonly string BlockingWaitFiredByConsecutive = $"consecutive_k{BlockingWaitBreachSamples}";
+
+    /// <summary>
     /// Row budget for the #3495 fire-time active-session probe. The read orders by elapsed DESC and the
     /// maintenance shapes are long-running by nature — a backup or rebuild burning enough CPU to matter
     /// has been at it for minutes while an OLTP session's elapsed is milliseconds — so the sessions this
@@ -689,7 +796,10 @@ public sealed class AlertEngine
                    excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
                    backup of an excluded database still burns this server's CPU. Threshold 0 = every session
                    in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
-                   dead collector cannot dress an old backup up as a live one.
+                   dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
+                   passed as None for the same reason the five filters are off: an operator excludes their
+                   permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
+                   service login is still the thing burning this server's CPU.
 
                    Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
                    else — the alert already fired above this read in every sense that matters, and the empty
@@ -710,8 +820,9 @@ public sealed class AlertEngine
                         excludeMiscWaits: false,
                         excludeCdc: false,
                         Array.Empty<string>(),
+                        LongRunningQueryExclusions.None,
                         ct);
-                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions);
+                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -770,8 +881,11 @@ public sealed class AlertEngine
     /// <summary>
     /// Advances one gated metric's persistence record by one observation and returns the edge it produced
     /// plus whether an incident is open afterwards. The ONE consumer-side mechanism over
-    /// <see cref="AlertPersistenceGate"/> for every built-in arm this engine gates — High CPU (#3282) and
-    /// tempdb Space (#3653 A5) today — so the rules below are stated once and cannot drift between arms.
+    /// <see cref="AlertPersistenceGate"/> for every built-in arm this engine gates — High CPU (#3282), tempdb
+    /// Space (#3653 A5) and Blocking Wait Time (#3653 A5, Q4) today — so the rules below are stated once and
+    /// cannot drift between arms. The bar is a PARAMETER per observation, not per arm: the blocking arm hands
+    /// in a bar of one sample for a snapshot that clears its single-snapshot multiple and its K otherwise, which
+    /// is how a disjunction rides one gate without the gate learning a second rule.
     ///
     /// <para><b>An observation counts only when it is a sample this subject has not counted yet.</b> The
     /// gate counts consecutive breaching SAMPLES, the sweep runs on <c>s_alertSweepInterval</c> (30 s), and
@@ -1124,7 +1238,7 @@ public sealed class AlertEngine
 
     /// <summary>
     /// The total-blocked-wait gate: LEVEL-triggered on the sum of <c>wait_time_ms</c> in the latest
-    /// blocking snapshot, mirroring the High CPU mechanism above (active flag → cooldown re-fire while
+    /// blocking snapshot, mirroring the High CPU mechanism above (incident open → cooldown re-fire while
     /// still above → resolve on the way down) rather than the count gate's rolling-window edge trigger.
     /// The two answer different questions — a count cannot distinguish one session blocked for an hour
     /// from one blocked for a second — so this reports under its OWN metric name, keeping mute rules,
@@ -1134,6 +1248,16 @@ public sealed class AlertEngine
     /// off must silence both, exactly as a user reading one toggle would expect. With the threshold at
     /// its shipped 0 the adapter read never happens at all.
     /// </para>
+    /// <para>
+    /// Since #3653 (A5, ruling Q4) the FIRE decision sits behind the shared <see cref="AlertPersistenceGate"/>
+    /// as a DISJUNCTION: one fresh snapshot at or above <see cref="BlockingWaitSingleSnapshotMultiplier"/> × the
+    /// bar fires at once; anything between the bar and that multiple must hold for
+    /// <see cref="BlockingWaitBreachSamples"/> consecutive collections. The pre-gate arm fired on the first
+    /// snapshot over the bar and resolved on the first under it, which on the measured store class was 102
+    /// episodes, 97 of them one snapshot long — a page and a Cleared per collector cycle. The fire names the
+    /// arm that admitted it (<c>Fired By</c>) so a reader of the card, the history row or
+    /// <c>get_alert_history</c> can tell a severe pile-up from a sustained one.
+    /// </para>
     /// </summary>
     private async Task CheckBlockingWaitAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
@@ -1142,38 +1266,124 @@ public sealed class AlertEngine
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
         bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
 
-        CurrentBlockingWaitResult? current = null;
-        if (enabled)
+        if (!enabled)
         {
-            var readClock = Stopwatch.StartNew();
-            try
-            {
-                current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                /* Log and skip for the sweep — state untouched, so a transient store error neither
-                   fires nor resolves (the same adaptation (2) shape as the count gate). */
-                _logger?.LogError("Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
-                return;
-            }
+            /* Not an observation (the CPU arm's rule): switching blocking alerts off, or zeroing this
+               threshold, is not the blocking clearing. The gate is left exactly as it stands — an open
+               incident stays open and un-announced, a partial streak keeps its count — and re-enabling
+               resumes from there. The pre-gate arm reached the same silence through its `!suppressed &&
+               enabled` guard on the resolve, but forgot the incident while doing so; the persisted record
+               does not. */
+            return;
         }
 
-        /* A stale snapshot is NOT evidence (#1812's rule): it neither fires nor holds the alert
-           active — see CurrentBlockingWaitResult for why staleness resolves here but not for jobs. */
-        long thresholdMs = (long)thresholdSeconds * 1000L;
-        bool exceeded = enabled
-            && current is { SnapshotIsFresh: true }
-            && current.TotalWaitMs >= thresholdMs;
-
-        if (exceeded)
+        CurrentBlockingWaitResult? current;
+        var readClock = Stopwatch.StartNew();
+        try
         {
-            _activeBlockingWaitAlert[key] = true;
+            current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Log and skip for the sweep — state untouched, so a transient store error neither
+               fires nor resolves (the same adaptation (2) shape as the count gate). */
+            _logger?.LogError("Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        if (current is null)
+        {
+            /* NO-DATA FREEZES THE GATE — never a breach, never a clear (#3653 A5, the tempdb arm's rule). A
+               store with no blocking snapshot for this server at all is the shipped state of a server that
+               has never blocked, and for one with an open incident it means the rows went away (a retention
+               pass, a reset store) — an absence of evidence either way. The pre-gate arm read null as "not
+               above" and would have announced a Cleared off it; resolving on absent evidence fabricates a
+               recovery exactly as firing on it would fabricate an alert. Distinct from a STALE snapshot,
+               which is evidence and is handled below. */
+            return;
+        }
+
+        long thresholdMs = (long)thresholdSeconds * 1000L;
+
+        /* THE TWO KINDS OF CLEAR, and why a stale snapshot is one of them here when a missing tempdb row is
+           not (#1812's rule, kept through the gate). dmv_blocking_snapshot writes rows only while something
+           is blocked, so "the latest snapshot" after the blocking ends never advances again — it just ages.
+           A snapshot older than three cycles is therefore the collector's only way of saying the blocking is
+           over, and holding a level-triggered incident open on it would re-page every cooldown about
+           blocking that ended an hour ago (the failure CurrentBlockingWaitResult names). A stale clear has no
+           collection instant of its own — the stale row's is the breach already counted — so it is observed
+           with a null instant, i.e. per sweep, and with BlockingWaitClearSamples = 1 the first stale sweep
+           resolves: the same instant the arm resolved at before the gate. The resolve message keeps the
+           threshold rather than quoting the stale total, which is not a current number. Observed only for a
+           subject the gate has actually counted (a partial streak or an open incident): a server whose only
+           snapshot is a week-old one it never breached on has nothing to clear, and observing it anyway
+           would write one "0 breaches, 1 clear" row per such server for no reader. */
+        if (!current.SnapshotIsFresh)
+        {
+            if (!_blockingWaitPersistence.TryGetValue(key, out var stalePrior)
+                || (!stalePrior.State.Firing && stalePrior.State.ConsecutiveBreaches == 0))
+            {
+                return;
+            }
+
+            var (staleOutcome, _) = await ObservePersistenceAsync(
+                _blockingWaitPersistence, BlockingWaitPersistenceMetric, key, sampleUtc: null, breaching: false,
+                BlockingWaitBreachSamples, BlockingWaitClearSamples);
+
+            if (staleOutcome == PersistenceOutcome.Resolve && !suppressed)
+            {
+                await NotifyResolutionAsync(new AlertResolution(
+                    key, serverName, "Blocking Wait Time",
+                    "Blocking Wait Cleared",
+                    $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
+            }
+
+            return;
+        }
+
+        bool breaching = current.TotalWaitMs >= thresholdMs;
+        bool singleSnapshot = breaching && current.TotalWaitMs >= thresholdMs * BlockingWaitSingleSnapshotMultiplier;
+
+        /* CONSECUTIVE MEANS ADJACENT. A breaching snapshot that lands more than BlockingWaitEpisodeGapFactor
+           cadences after the last one this gate counted had at least one quiet collection between them — a
+           cycle in which the collector found nothing to write — so it starts a NEW episode and the partial
+           streak restarts at this sample. Only a streak that has not fired is restarted: an OPEN incident
+           holds across a short gap exactly as the level-triggered arm always held it (its clears are a fresh
+           sub-bar snapshot or a stale one, above), so a sustained event with one quiet minute inside it is
+           still one incident. Reset in place rather than through the gate because the gate has no "start
+           over" primitive and adding one for a rule only this collector's row shape needs would be the
+           general mechanism bending to one arm. The record's LastObservedSampleUtc is kept so the freshness
+           rule below still sees THIS snapshot as new. A host that supplies no cadence never restarts, and
+           the streak degrades to "breaching snapshots inside the freshness window" — stated, not silent. */
+        if (breaching
+            && current.CadenceMinutes is int cadenceMinutes && cadenceMinutes > 0
+            && _blockingWaitPersistence.TryGetValue(key, out var priorRecord)
+            && !priorRecord.State.Firing
+            && priorRecord.State.ConsecutiveBreaches > 0
+            && priorRecord.LastObservedSampleUtc is DateTime lastCounted
+            && current.SnapshotTime - lastCounted > TimeSpan.FromMinutes(cadenceMinutes * BlockingWaitEpisodeGapFactor))
+        {
+            _blockingWaitPersistence[key] = new AlertPersistenceRecord(PersistenceState.Initial, priorRecord.LastObservedSampleUtc);
+        }
+
+        /* THE DISJUNCTION, through one gate: the bar handed to the gate is ONE sample when this snapshot alone
+           is at or above the single-snapshot multiple and BlockingWaitBreachSamples otherwise. A one-sample bar
+           fires on the first fresh breaching observation and opens the incident on the same record the
+           consecutive arm would have opened it on, so the clear that follows is the same clear — the
+           "still RECORDS the observation" half of the ruling. The gate caps the running breach count at the
+           bar it was handed, so a 3× fire leaves ConsecutiveBreaches at 1 in the persisted row; the count is
+           the gate's working memory and nothing renders it, and the Firing bit is what a restart reads. */
+        var (outcome, incidentOpen) = await ObservePersistenceAsync(
+            _blockingWaitPersistence, BlockingWaitPersistenceMetric, key, current.SnapshotTime, breaching,
+            singleSnapshot ? 1 : BlockingWaitBreachSamples, BlockingWaitClearSamples);
+
+        if (incidentOpen && breaching)
+        {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
                 var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Wait Time" };
@@ -1181,30 +1391,37 @@ public sealed class AlertEngine
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
                 /* Same incident content the count gate ships, built from the rows this sweep already
-                   fetched — an operator who gets this alert gets today's Blocking Detected detail. */
-                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases);
+                   fetched — an operator who gets this alert gets today's Blocking Detected detail. The gate
+                   item is PREPENDED so the first thing a reader of the card or of get_alert_history's
+                   context_json sees is which arm admitted this delivery and the numbers it was judged on;
+                   the blocked-process rows may be absent (a DMV-only episode has no report), and the item
+                   exists regardless, so the context is never null on a fire from this arm. */
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases)
+                    ?? new AlertContext();
+                blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
+                    current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
                 var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
                 /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
                    which no history-store parser could turn back into a number — the value has to travel
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
-                double totalWaitSeconds = current!.TotalWaitSeconds;
+                double totalWaitSeconds = current.TotalWaitSeconds;
                 await FireAsync(new AlertOutcome(
                     key, serverName, "Blocking Wait Time",
                     $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
                     $"{thresholdSeconds}s",
                     blockingContext, detailText,
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
-                    Muted: isMuted, Severity: blockingContext?.SeverityOverride,
+                    Muted: isMuted, Severity: blockingContext.SeverityOverride,
                     ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} session(s) (threshold: {thresholdSeconds}s)"), ct);
             }
         }
-        else if (_activeBlockingWaitAlert.TryGetValue(key, out var wasActive) && wasActive)
+        else if (outcome == PersistenceOutcome.Resolve)
         {
-            _activeBlockingWaitAlert[key] = false;
-            /* Announced only while the gate is still on — disabling it, or zeroing the threshold, flips
-               `exceeded` false without blocking having actually cleared (the CPU check's rule). */
-            if (!suppressed && enabled)
+            /* The falling edge, from the gate: produced exactly once, on the first fresh snapshot under the
+               bar while an incident is open (BlockingWaitClearSamples). Still gated on !suppressed, exactly
+               as before; `enabled` is true here by construction (the disabled arm returned above). */
+            if (!suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "Blocking Wait Time",
@@ -1487,7 +1704,16 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var longRunning = await _readAdapter.GetLongRunningQueriesAsync(       /* :346 */
+            /* #3653 (A5, Q5): the opt-out knob rides INTO the read, ahead of the row cap — see
+               LongRunningQueryExclusions for why a post-read filter would blind the alert. Normalised here
+               from the two raw settings lists on every sweep (trim, blanks dropped, case-insensitive dedupe)
+               so a Settings-window string and an MCP array mean the same thing to both stores. The lists
+               arrive SEEDED from each host (the job-step program prefix and the two NT AUTHORITY logins the
+               production read found) unless an operator cleared them; the engine does not re-seed an empty
+               list, because present-and-empty is the operator's decision. */
+            var exclusions = LongRunningQueryExclusions.From(
+                _settings.LongRunningQueryExcludedProgramNamePrefixes, _settings.LongRunningQueryExcludedLogins);
+            var read = await _readAdapter.GetLongRunningQueriesAsync(              /* :346 */
                 key,
                 _settings.LongRunningQueryThresholdMinutes,
                 _settings.LongRunningQueryMaxResults,
@@ -1497,7 +1723,9 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeMiscWaits,
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
+                exclusions,
                 ct);
+            var longRunning = read.Sessions;
             readClock.Restart();
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -1594,6 +1822,21 @@ public sealed class AlertEngine
                     readClock.Restart();
 
                     var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
+
+                    /* #3653 (A5, Q5): the knob's own evidence on the card — how many sessions it removed this
+                       evaluation, split by the arm that removed them — so an operator can see it working and
+                       see which default did the work; a setting whose only effect is a page NOT arriving is
+                       one nobody can verify. Only when the knob is SET (it is, by default, on both SKUs — the
+                       seeds are set): an operator who cleared BOTH lists has said "evaluate everything", and an
+                       "Excluded: 0" line on their every card would be noise about nothing. Appended, never
+                       prepended — the sessions are the alert; this is a footnote about the ones that are not.
+                       ANNOTATION, NEVER SUPPRESSION, like #3497's job names: the fire is decided above and
+                       this can only add a line. */
+                    if (!exclusions.IsEmpty && lrqContext is not null)
+                    {
+                        lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin));
+                    }
+
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */

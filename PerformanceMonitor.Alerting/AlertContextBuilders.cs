@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Notifications;
@@ -704,6 +705,70 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>The <c>Excluded Count</c> label on the Long-Running Query card's knob item (#3653 A5, Q5) — the
+    /// one field a reader of the card or of <c>get_alert_history</c>'s <c>context_json</c> looks up to see the
+    /// opt-out knob working. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string LongRunningQueryExcludedCountLabel = "Excluded Count";
+
+    /// <summary>The knob item's per-arm split (#3653 A5, Q5 addendum): sessions the <c>program_name</c> PREFIX arm
+    /// removed. A session matching both arms is counted here and not under the login arm, so the two labels sum
+    /// to <see cref="LongRunningQueryExcludedCountLabel"/>.</summary>
+    public const string LongRunningQueryExcludedByProgramPrefixLabel = "Excluded By Program Prefix";
+
+    /// <summary>The knob item's per-arm split: sessions the exact <c>login_name</c> arm removed and the program
+    /// arm did not.</summary>
+    public const string LongRunningQueryExcludedByLoginLabel = "Excluded By Login";
+
+    /// <summary>
+    /// The Long-Running Query card's OPT-OUT KNOB item (#3653 A5, ruling Q5): how many over-threshold sessions
+    /// the <see cref="LongRunningQueryExclusions"/> knob removed from this evaluation, split by the arm that
+    /// removed them, and the entries that did it. Appended by the engine after the session items, and only when
+    /// the knob is set — it is set by default (the seeded job-step prefix and the two NT AUTHORITY logins), so
+    /// the item is absent only for an operator who cleared both lists, to whom "Excluded Count: 0" on every
+    /// card would be a line about nothing.
+    ///
+    /// <para>Why the count is on the card at all: the knob's only effect is a page NOT arriving, and a setting
+    /// whose effect is an absence is one an operator cannot verify from the outside. The count is the knob's
+    /// receipt — "I removed 4 sessions before deciding this" — which is also how an entry that is too broad
+    /// shows itself (a count that equals the whole snapshot). The SPLIT says which default did the work: a
+    /// fleet whose login arm removes seventy sessions and whose prefix arm removes none has learned something
+    /// about its background. The counts are SESSIONS, not snapshot rows, and a session matching both arms is
+    /// counted once, under the program prefix. The entries are listed so the card is self-describing to
+    /// whoever reads it in six months without the Settings window open.</para>
+    /// </summary>
+    /// <param name="exclusions">The knob as the engine applied it (normalised).</param>
+    /// <param name="excludedByProgramPrefix">The read's count of sessions the program-prefix arm removed (including any that also matched a login).</param>
+    /// <param name="excludedByLogin">The read's count of sessions the login arm removed and the program arm did not.</param>
+    public static AlertDetailItem BuildLongRunningQueryExclusionItem(LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin)
+    {
+        if (exclusions is null) throw new ArgumentNullException(nameof(exclusions));
+
+        var excludedCount = excludedByProgramPrefix + excludedByLogin;
+        var fields = new List<(string Label, string Value)>
+        {
+            (LongRunningQueryExcludedCountLabel, excludedCount.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByProgramPrefixLabel, excludedByProgramPrefix.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByLoginLabel, excludedByLogin.ToString(CultureInfo.InvariantCulture))
+        };
+        if (exclusions.ProgramNamePrefixes.Count > 0)
+        {
+            fields.Add(("Excluded Program Prefixes", string.Join(", ", exclusions.ProgramNamePrefixes)));
+        }
+
+        if (exclusions.Logins.Count > 0)
+        {
+            fields.Add(("Excluded Logins", string.Join(", ", exclusions.Logins)));
+        }
+
+        return new AlertDetailItem
+        {
+            Heading = excludedCount == 1
+                ? "1 session over the threshold was excluded by the opt-out knob"
+                : $"{excludedCount} sessions over the threshold were excluded by the opt-out knob",
+            Fields = fields
+        };
+    }
+
     /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */
 
     /// <summary>
@@ -943,6 +1008,48 @@ public static class AlertContextBuilders
             }
         });
         return context;
+    }
+
+    /// <summary>The <c>Fired By</c> label on the Blocking Wait Time gate item (#3653 A5) — the one field a
+    /// renderer or an MCP reader of <c>get_alert_history</c>'s <c>context_json</c> looks up to learn which arm
+    /// admitted the delivery. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string BlockingWaitFiredByLabel = "Fired By";
+
+    /// <summary>
+    /// The Blocking Wait Time fire's GATE item (#3653 A5, ruling Q4): the arm that admitted this delivery and
+    /// the numbers it was judged on, prepended by the engine ahead of the blocked-process detail. The
+    /// blocked-process rows are the count gate's evidence and may be absent altogether for a DMV-only
+    /// episode; this item is the wait gate's own evidence and is present on every fire from that arm.
+    ///
+    /// <para><c>Fired By</c> carries the machine token (<c>AlertEngine.BlockingWaitFiredBySingleSnapshot</c>
+    /// / <c>BlockingWaitFiredByConsecutive</c>) rather than prose, because its reader is as likely to be a
+    /// tool as a person: a Slack card renders it as-is and still reads, and <c>get_alert_history</c> hands it
+    /// through <c>context_json</c> untouched. The single-snapshot bar is stated beside the configured one so a
+    /// reader can see WHY a one-snapshot page was admitted without knowing the multiplier — the same reason
+    /// the tempdb item states its denominator.</para>
+    /// </summary>
+    /// <param name="current">The fresh snapshot the fire was judged on.</param>
+    /// <param name="thresholdSeconds">The configured <c>BlockingWaitSecondsThreshold</c>.</param>
+    /// <param name="firedBy">The arm token — see the engine's two <c>BlockingWaitFiredBy*</c> members.</param>
+    public static AlertDetailItem BuildBlockingWaitGateItem(CurrentBlockingWaitResult current, int thresholdSeconds, string firedBy)
+    {
+        if (current is null) throw new ArgumentNullException(nameof(current));
+
+        return new AlertDetailItem
+        {
+            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+            Fields = new()
+            {
+                (BlockingWaitFiredByLabel, firedBy),
+                ("Total Blocked Wait", $"{current.TotalWaitSeconds:F0}s"),
+                ("Threshold", $"{thresholdSeconds}s"),
+                ("Single-Snapshot Bar", $"{thresholdSeconds * AlertEngine.BlockingWaitSingleSnapshotMultiplier}s ({AlertEngine.BlockingWaitSingleSnapshotMultiplier}× threshold; below it, {AlertEngine.BlockingWaitBreachSamples} consecutive collections)"),
+                /* The snapshot's collection_time is stored naive-UTC (both adapters compare it against
+                   DateTime.UtcNow for freshness), so it renders through the UTC marker — #3422's rule that
+                   every timestamp an alert body carries declares its clock. */
+                ("Snapshot", AlertTimestamp.Utc(current.SnapshotTime))
+            }
+        };
     }
 
     public static AlertContext? BuildAnomalousJobContext(

@@ -259,6 +259,20 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LongRunningQueryExcludeBackups => _config.Alerts.LongRunningQueryExcludeBackups;
     public bool LongRunningQueryExcludeMiscWaits => _config.Alerts.LongRunningQueryExcludeMiscWaits;
     public bool LongRunningQueryExcludeCdc => _config.Alerts.LongRunningQueryExcludeCdc;
+    /* #3653 (A5, Q5): the Long-Running Query opt-out knob is NOT YET an operator-editable Darling setting — it
+       is the SEEDED DEFAULTS, and nothing else, until its store home lands. The store row is authoritative for
+       every alert knob (StoreConfigProvider.ApplyToConfig replaces config.Alerts wholesale on every load, so a
+       darling.json-only member would be reset on the first store read and the knob would be dead while looking
+       configured — the #3314 by-halves shape). Two text[] columns on config_alert_settings are the honest home,
+       and that is a migration rung: V135, the next rung after the one in flight, with the seed/read plumbing,
+       the Viewer's Settings boxes and both SKUs' get_alert_settings / update_alert_settings twins riding it
+       (McpAlertSettingsKeyTests pins the two MCP payloads to one shape, so neither SKU publishes the knob until
+       both can). Until then Darling evaluates with the same defaults Lite ships — the SQL Agent job-step
+       program prefix and the two NT AUTHORITY service logins the 7-day production read found to be the
+       permanent background — rather than with an empty knob, because the read is what the defaults are FOR:
+       the two SKUs see the same population from day one, and the rung only adds the ability to change it. */
+    public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExclusions.DefaultProgramNamePrefixes;
+    public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExclusions.DefaultLogins;
 
     /* ---------------- IAlertSettings (delivery) ---------------- */
 

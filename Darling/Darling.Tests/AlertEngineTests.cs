@@ -65,6 +65,13 @@ public sealed class AlertEngineTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
+        /* #3653 (A5, Q5): the opt-out knob, empty unless a test sets it — every session evaluated. The SEEDING is
+           the hosts' (App / DarlingAlertSettings), not the engine's, so the engine fakes start empty and the pins
+           that want the seeds pass LongRunningQueryExclusions.Defaults explicitly. */
+        public List<string> LongRunningQueryExcludedProgramNamePrefixesList { get; } = new();
+        public List<string> LongRunningQueryExcludedLoginsList { get; } = new();
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExcludedProgramNamePrefixesList;
+        public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExcludedLoginsList;
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
@@ -106,6 +113,11 @@ public sealed class AlertEngineTests
         public TempDbSpaceInfo? TempDb { get; set; }
         public List<AnomalousJobInfo> AnomalousJobs { get; } = new();
 
+        /* #3653 (A5, Q5): the knob the engine handed the last LRQ read, so a pin can assert it travelled. The
+           fake applies it the way both real reads do — IN the read, ahead of the cap, counting what it removed
+           — through the shared C# rule, which is the same rule the SQL predicate spells. */
+        public LongRunningQueryExclusions? LastLrqExclusions { get; private set; }
+
         public int BlockingFetches { get; private set; }
         public int DeadlockFetches { get; private set; }
         public int BlockingWaitFetches { get; private set; }
@@ -143,10 +155,10 @@ public sealed class AlertEngineTests
            pin that a failed probe costs the annotation and never the alert needs a read that faults. */
         public bool ThrowOnLongRunningRead { get; set; }
 
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default)
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default)
         {
             if (ThrowOnLongRunningRead)
             {
@@ -154,7 +166,13 @@ public sealed class AlertEngineTests
             }
 
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
-            return Task.FromResult(new List<LongRunningQueryInfo>(LongRunning));
+            LastLrqExclusions = exclusions;
+            var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
+            /* Counts in SESSIONS (distinct session_id), split by arm through the shared Classify — a session matching
+               both arms lands under ProgramPrefix, exactly as the two SQL scalars count it. */
+            var byProgram = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.ProgramPrefix).Select(q => q.SessionId).Distinct().Count();
+            var byLogin = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.Login).Select(q => q.SessionId).Distinct().Count();
+            return Task.FromResult(new LongRunningQueryReadResult(kept, byProgram, byLogin));
         }
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
@@ -1008,11 +1026,45 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
-    /* ---------------- blocking wait time (#1839) ---------------- */
+    /* ---------------- blocking wait time (#1839; gated by #3653 A5, ruling Q4) ---------------- */
 
-    /// <summary>A fresh snapshot totalling <paramref name="totalWaitMs"/> across <paramref name="sessions"/> SPIDs.</summary>
-    private static CurrentBlockingWaitResult WaitSnapshot(long totalWaitMs, int sessions = 3, bool fresh = true) =>
-        new(new DateTime(2026, 7, 1, 11, 59, 0), totalWaitMs, sessions, fresh);
+    /// <summary>A snapshot totalling <paramref name="totalWaitMs"/> across <paramref name="sessions"/> SPIDs, collected
+    /// at <paramref name="at"/> (a fixed instant when the test does not care) on a <paramref name="cadenceMinutes"/>
+    /// schedule. Fresh unless the test says otherwise.</summary>
+    private static CurrentBlockingWaitResult WaitSnapshot(
+        long totalWaitMs, int sessions = 3, bool fresh = true, DateTime? at = null, int? cadenceMinutes = 1) =>
+        new(at ?? new DateTime(2026, 7, 1, 11, 59, 0), totalWaitMs, sessions, fresh, cadenceMinutes);
+
+    /// <summary>
+    /// Drives <paramref name="samples"/> DISTINCT blocking snapshots through the engine, one collector cycle
+    /// (<paramref name="stepMinutes"/>) apart starting after <paramref name="from"/>, each totalling
+    /// <paramref name="totalWaitMs"/>. Returns the last collection instant so a test can thread it into the next
+    /// call — the gate keys on it, and a re-used instant is a sample already counted. The blocking-wait twin of
+    /// <c>DriveTempDbAsync</c>.
+    /// </summary>
+    private static async Task<DateTime> DriveBlockingWaitAsync(
+        AlertEngine engine, Harness h, long totalWaitMs, int samples, DateTime from,
+        int stepMinutes = 1, int? cadenceMinutes = 1, int sessions = 3, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(stepMinutes);
+            h.Adapter.BlockingWait = WaitSnapshot(totalWaitMs, sessions, at: at, cadenceMinutes: cadenceMinutes);
+            await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: suppressed));
+        }
+
+        return at;
+    }
+
+    /// <summary>The <c>Fired By</c> token on a Blocking Wait Time outcome's gate item, which the engine prepends.</summary>
+    private static string FiredBy(AlertOutcome fired)
+    {
+        Assert.NotNull(fired.Context);
+        var gateItem = fired.Context!.Details[0];
+        Assert.StartsWith("Blocking Wait Time — ", gateItem.Heading, StringComparison.Ordinal);
+        return Assert.Single(gateItem.Fields, f => f.Label == AlertContextBuilders.BlockingWaitFiredByLabel).Value;
+    }
 
     [Fact]
     public async Task BlockingWait_OffByDefault_NeverReadsOrFires()
@@ -1032,14 +1084,17 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task BlockingWait_FiresAtThresholdInclusive_WithRealNumericsAndContent()
     {
-        /* At/above, not strictly above — the same inclusive comparison every other threshold uses. */
+        /* At/above, not strictly above — the same inclusive comparison every other threshold uses. Since
+           #3653 (A5) a snapshot exactly AT the bar is under the single-snapshot multiple, so it takes
+           BlockingWaitBreachSamples consecutive collections to become an incident; the delivered shape is
+           what it always was, plus the gate item in front naming the arm. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 600;
-        h.Adapter.BlockingWait = WaitSnapshot(600_000, sessions: 3);
         h.Adapter.Blocking.Add(BlockingRow(55));
+        var engine = h.Build();
 
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 600_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
         Assert.Equal("600s across 3 blocked session(s)", fired.CurrentValue);
@@ -1047,9 +1102,13 @@ public sealed class AlertEngineTests
         /* #1830: the numerics must carry the real values — the display text is prose no parser recovers. */
         Assert.Equal(600d, fired.NumericCurrentValue);
         Assert.Equal(600d, fired.NumericThresholdValue);
-        /* The reporter asked for today's Blocking Detected content, built from this sweep's rows. */
+        /* The reporter asked for today's Blocking Detected content, built from this sweep's rows — it is still
+           there, BEHIND the gate item. */
         Assert.NotNull(fired.Context);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(fired));
+        Assert.Contains(fired.Context!.Details, d => d.Heading.StartsWith("Blocking chain", StringComparison.Ordinal));
         Assert.False(string.IsNullOrWhiteSpace(fired.DetailText));
+        Assert.Contains($"{AlertContextBuilders.BlockingWaitFiredByLabel}: {AlertEngine.BlockingWaitFiredByConsecutive}", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1067,28 +1126,244 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
-    public async Task BlockingWait_IsLevelTriggered_CooldownSuppressesThenRefiresWhileStillAbove()
+    public async Task BlockingWait_ASingleSnapshotAtThreeTimesTheBar_FiresAtOnce_AndSaysSo()
     {
-        /* The distinguishing behavior vs the count gate's edge trigger: blocking that STAYS above the
-           threshold keeps announcing itself every cooldown instead of going quiet after one alert. */
+        /* THE Q4 RULING's first arm, and the pin the whole disjunction exists for: on the measured store class 97
+           of 102 episodes were ONE snapshot long — including the p99, 1,509 s across 145 sessions, gone by the next
+           collection — and a plain K = 3 gate drops every one of them. One fresh snapshot at N = 3× the bar is an
+           incident on its own, the card says which arm admitted it, and the record opens exactly as the
+           consecutive arm would have opened it. No blocked-process rows are planted: a DMV-only episode has no
+           report, and the fire must carry its gate evidence regardless. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase, sessions: 145);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Blocking Wait Time", fired.MetricName);
+        Assert.Equal("180s across 145 blocked session(s)", fired.CurrentValue);
+        Assert.Equal(AlertEngine.BlockingWaitFiredBySingleSnapshot, FiredBy(fired));
+        var gateItem = fired.Context!.Details[0];
+        Assert.Equal("180s", Assert.Single(gateItem.Fields, f => f.Label == "Total Blocked Wait").Value);
+        Assert.Equal("60s", Assert.Single(gateItem.Fields, f => f.Label == "Threshold").Value);
+        Assert.StartsWith("180s (3× threshold", Assert.Single(gateItem.Fields, f => f.Label == "Single-Snapshot Bar").Value, StringComparison.Ordinal);
+        /* #3422: the snapshot instant declares its clock. */
+        Assert.EndsWith("Z", Assert.Single(gateItem.Fields, f => f.Label == "Snapshot").Value, StringComparison.Ordinal);
+
+        /* "Still RECORDS the observation": the incident is open on the persisted record, under the arm's metric. */
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(AlertEngine.BlockingWaitPersistenceMetric, persisted.Key.Metric);
+        Assert.True(persisted.Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_JustUnderThreeTimesTheBar_IsSilentForTwoCollections_AndFiresOnTheThird()
+    {
+        /* The ruling's second arm: 1.5× the bar is over the threshold but under the single-snapshot multiple, so it
+           is the K = 3 consecutive-collections gate that decides — and exactly one fire on the third, named as such.
+           This is the assertion that reddens if either arm's number moves: a multiplier of 1 fires on the first
+           sample here, a K of 2 on the second. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Blocking Wait Time", fired.MetricName);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(fired));
+        Assert.False(fired.Muted);
+    }
+
+    [Fact]
+    public async Task BlockingWait_JustUnderThreeTimesTheBar_ThenExactlyThreeTimes_FiresOnThatSnapshot()
+    {
+        /* The two arms compose: a streak that is one short of K and then WORSENS past the multiple fires on the
+           worsening snapshot, as the single-snapshot arm — the operator is not made to wait for a third collection
+           of a pile-up that just tripled. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: at);
+        Assert.Equal(AlertEngine.BlockingWaitFiredBySingleSnapshot, FiredBy(Assert.Single(h.Deliverer.Outcomes)));
+    }
+
+    [Fact]
+    public async Task BlockingWait_RepeatedSnapshotTime_DoesNotAdvanceTheStreak()
+    {
+        /* The reason the gate counts COLLECTIONS and not sweeps, and the pin that matters most on this arm: the
+           sweep is 30 s and the collector lands a snapshot about once a minute (~72 s measured), so the sweep
+           re-reads the same snapshot roughly every other pass. The SAME collection_time offered
+           BlockingWaitBreachSamples × 3 times is one observation: no fire. Without the freshness rule this fires,
+           and the measured one-snapshot flap comes straight back, one row re-counted three times in 90 seconds. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var stuck = Harness.SampleBase.AddMinutes(1);
+        for (var i = 0; i < AlertEngine.BlockingWaitBreachSamples * 3; i++)
+        {
+            h.Adapter.BlockingWait = WaitSnapshot(90_000, at: stuck);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Two genuinely new collections on top of that one observation reach the bar. */
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStreakBrokenByAClearSnapshot_Restarts()
+    {
+        /* Breach, clear, breach, breach: three breaching snapshots in all and never three in a ROW, so nothing
+           fires — the reset is what makes "sustained" mean sustained rather than "often". */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: Harness.SampleBase);
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 2, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AQuietCollectionBetweenTwoBreachingSnapshots_StartsANewEpisode()
+    {
+        /* WHAT MAKES THIS ARM UNLIKE TEMPDB'S: dmv_blocking_snapshot writes rows only while something is blocked,
+           so a quiet cycle leaves no row for the engine to see as a clear — the "latest snapshot" simply stops
+           advancing. Two breaching snapshots on a 1-minute cadence, then the next one three minutes later: at
+           least one collection in between found nothing to write, so the third is a NEW episode and restarts
+           the streak rather than completing it. Without the gap rule this fires here as "consecutive", which is
+           the measured one-snapshot flap re-created three episodes at a time. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at, stepMinutes: 3);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, Assert.Single(h.StateStore.Persistence).Value.State.ConsecutiveBreaches);
+
+        /* The restarted streak completes on its own two adjacent collections. */
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: at);
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(Assert.Single(h.Deliverer.Outcomes)));
+    }
+
+    [Fact]
+    public async Task BlockingWait_AnAdjacentCollectionAtTheMeasuredOverrun_IsStillConsecutive()
+    {
+        /* The bar the gap rule sits at: the measured collector ran at ~72 s against a 60 s schedule, and adjacent
+           snapshots at that spacing must still count as consecutive — 1.2 cadences is under the 1.5 factor. A
+           skipped cycle is at least 2.0. Pinned from both sides so the factor cannot drift into treating the
+           real collector's jitter as a gap (every episode restarting, never firing) or a skipped cycle as
+           adjacency. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = Harness.SampleBase;
+        for (var i = 0; i < AlertEngine.BlockingWaitBreachSamples; i++)
+        {
+            at = at.AddSeconds(72);
+            h.Adapter.BlockingWait = WaitSnapshot(90_000, at: at);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.InRange(AlertEngine.BlockingWaitEpisodeGapFactor, 1.21, 1.99);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AShortGapDoesNotRestartAnOpenIncident()
+    {
+        /* Only a streak that has not fired restarts on a gap. An OPEN incident holds across a quiet minute exactly
+           as the level-triggered arm always held it: one sustained event with a lull inside it is one incident,
+           reminded on cooldown, resolved by a fresh snapshot under the bar — not resolved and re-paged. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
         h.Settings.CooldownMinutes = 5;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at, stepMinutes: 4);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+        /* The reminder names the rule that admitted THIS snapshot — held on a breaching sample under the multiple. */
+        Assert.Equal(AlertEngine.BlockingWaitFiredByConsecutive, FiredBy(h.Deliverer.Outcomes[1]));
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task BlockingWait_NoCadence_CountsBreachingSnapshotsInsideTheFreshnessWindow()
+    {
+        /* The documented DEGRADATION for a host that supplies no cadence (CurrentBlockingWaitResult.CadenceMinutes):
+           the gap rule cannot run, so three breaching snapshots inside the freshness window are consecutive
+           whatever lies between them — weaker persistence, never silence, the same direction the CPU and tempdb
+           gates take on a missing instant. Pinned so the fallback is a decision rather than an accident. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase, stepMinutes: 4, cadenceMinutes: null);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_IsLevelTriggered_CooldownSuppressesThenRefiresWhileStillAbove()
+    {
+        /* The distinguishing behavior vs the count gate's edge trigger: blocking that STAYS above the
+           threshold keeps announcing itself every cooldown instead of going quiet after one alert. The gate
+           changed what counts as an incident, deliberately not how often a standing one repeats — the same
+           line the CPU and tempdb gates drew. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
         /* Inside the cooldown, still above: no second alert. */
         h.Now = h.Now.AddMinutes(4);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
         /* Cooldown elapsed, still above: it re-fires — no edge required. */
         h.Now = h.Now.AddMinutes(2);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 120_000, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Wait Time"));
         Assert.Empty(h.Resolutions);
     }
@@ -1099,44 +1374,112 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 120_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
-        h.Adapter.BlockingWait = WaitSnapshot(1_000);
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: AlertEngine.BlockingWaitClearSamples, from: at);
 
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("Blocking Wait Cleared", resolution.Title);
         Assert.Equal("Blocking Wait Time", resolution.MetricName);
+        Assert.Equal("SRV-A: Total blocked wait back under 60s", resolution.Message);
         /* A resolution is not a history row — nothing new was delivered. */
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_ThreeTimesFire_ThenOneClearSnapshot_ResolvesExactlyOnce()
+    {
+        /* The "still RECORDS the observation" half of the ruling, measured at the operator: one page from the
+           single-snapshot arm, one Cleared on the first fresh snapshot under the bar, and a second clear snapshot
+           produces nothing — the incident the 3× arm opened is the same incident the gate closes. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
     public async Task BlockingWait_StaleSnapshot_NeitherFiresNorHoldsTheAlertActive()
     {
-        /* #1812's rule: a stopped collector leaves a "latest" snapshot that reads as NOW. A level-
-           triggered gate on frozen rows would re-fire every cooldown forever, so staleness is no
-           evidence — and it RESOLVES rather than latching (see CurrentBlockingWaitResult). */
+        /* #1812's rule, KEPT through the gate and the reason a stale snapshot is a clear here when a missing
+           tempdb row is not: the collector writes rows only while blocking exists, so a snapshot that has aged
+           past three cycles is the collector saying the blocking ended. A level-triggered gate latched on it
+           would re-fire every cooldown forever; it RESOLVES instead, on the first stale sweep (one clear), and a
+           stale snapshot from cold never fires however large its total. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
 
-        /* Same over-threshold numbers, now stale: no re-fire even once the cooldown has elapsed. */
-        h.Adapter.BlockingWait = WaitSnapshot(120_000, fresh: false);
+        /* Same over-threshold numbers, same collection_time, now stale: no re-fire even once the cooldown has
+           elapsed, and a Cleared. */
+        h.Adapter.BlockingWait = WaitSnapshot(180_000, fresh: false, at: at);
         h.Now = h.Now.AddMinutes(30);
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time");
         Assert.Equal("Blocking Wait Cleared", Assert.Single(h.Resolutions).Title);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        /* Still stale on the next sweep: nothing more to say, and nothing more written. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStaleSnapshotFromCold_NeverFires_AndWritesNothing()
+    {
+        /* A server whose only snapshot is an old one it was never counted on has nothing to clear: no fire, no
+           Cleared, and no persistence row — the stale arm observes only subjects the gate has counted. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        h.Adapter.BlockingWait = WaitSnapshot(180_000, fresh: false);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+        Assert.Empty(h.StateStore.Persistence);
+    }
+
+    [Fact]
+    public async Task BlockingWait_AStaleSnapshot_ResetsAPartialStreak()
+    {
+        /* Two breaching collections, then ten quiet minutes: the streak is over, and the next breaching snapshot
+           starts from one — the stale clear resets the count the same way a fresh sub-bar snapshot does. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        h.Adapter.BlockingWait = WaitSnapshot(90_000, fresh: false, at: at);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Resolutions);
+        Assert.Equal(0, Assert.Single(h.StateStore.Persistence).Value.State.ConsecutiveBreaches);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at.AddMinutes(10));
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -1156,6 +1499,35 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task BlockingWait_NoSnapshotAtAll_FreezesAnOpenIncident_RatherThanClearingIt()
+    {
+        /* NO-DATA FREEZES THE GATE (#3653 A5): the rows of an open incident going away — a retention pass, a reset
+           store — is an absence of evidence, not a recovery. The pre-gate arm read null as "not above" and
+           announced a Cleared off it. The incident holds, un-announced, until a real snapshot decides it. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.BlockingWait = null;
+        h.Now = h.Now.AddMinutes(30);
+        for (var i = 0; i < 5; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Resolutions);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
     public async Task BlockingWait_FollowsTheBlockingEnabledToggle()
     {
         /* Turning blocking alerts off silences BOTH gates — one toggle, as a user reading it expects. */
@@ -1171,16 +1543,42 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task BlockingWait_DisablingTheGate_IsNotAClear_AndReEnablingResumes()
+    {
+        /* The CPU arm's rule, now this arm's: switching the gate off is not the blocking clearing, so no Cleared
+           is announced and the record is left as it stands. The pre-gate arm reached the same silence but FORGOT
+           the incident; re-enabling here resumes it — a fresh snapshot under the bar resolves it, a breaching one
+           reminds. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Settings.BlockingWaitSecondsThreshold = 0;
+        at = await DriveBlockingWaitAsync(engine, h, 1_000, samples: 2, from: at);
+        Assert.Empty(h.Resolutions);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        await DriveBlockingWaitAsync(engine, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
     public async Task BlockingWait_IsADistinctMetricFromTheCountGate()
     {
         /* Both gates can be over threshold in the same sweep and must produce two separate alerts, so
-           muting or acknowledging one never silences the other. */
+           muting or acknowledging one never silences the other. The wait total is at the single-snapshot
+           multiple so both fire on the one sweep. */
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingCountThreshold = 1;
         h.Settings.BlockingWaitSecondsThreshold = 60;
         h.Adapter.Blocking.Add(BlockingRow(55));
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        h.Adapter.BlockingWait = WaitSnapshot(180_000);
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
@@ -1196,12 +1594,133 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.BlockingEnabled = true;
         h.Settings.BlockingWaitSecondsThreshold = 60;
-        h.Adapter.BlockingWait = WaitSnapshot(120_000);
+        h.Adapter.BlockingWait = WaitSnapshot(180_000);
         h.Muted = true;
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         Assert.True(Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Wait Time").Muted);
+    }
+
+    [Fact]
+    public async Task BlockingWait_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, for the GATE and not just the send: a suppressed streak
+           counts, so un-acknowledging a server reports the condition it is in rather than starting a fresh
+           K-sample wait — the CPU and tempdb twins' rule. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+        var engine = h.Build();
+
+        var at = await DriveBlockingWaitAsync(engine, h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveBlockingWaitAsync(engine, h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task BlockingWait_PersistsTheStreakUnderItsOwnMetric_AndResumesAcrossARestart()
+    {
+        /* The persisted record lives under the alert's own metric name in the SAME (server, metric) table the CPU
+           and tempdb gates use — which is why no migration rung was needed — and a partly-built streak survives a
+           restart, so a real event spanning a service restart is not delayed by K samples. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+
+        var at = await DriveBlockingWaitAsync(h.Build(), h, 90_000, samples: AlertEngine.BlockingWaitBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(Key, persisted.Key.Key);
+        Assert.Equal(AlertEngine.BlockingWaitPersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.BlockingWaitBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.Equal(at, persisted.Value.LastObservedSampleUtc);
+
+        /* A brand-new engine over the same state store IS the restart; the very next collection completes the
+           streak. */
+        await DriveBlockingWaitAsync(h.Build(), h, 90_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public async Task BlockingWait_ARestartDoesNotReAnnounceAnAlreadyOpenIncident()
+    {
+        /* The reason the in-memory _activeBlockingWaitAlert flag had to go: it forgot the open incident on every
+           restart, so the first post-restart sweep over standing blocking delivered the same page again. The
+           persisted Firing bit tells the restarted engine the incident is open, and the seed stamps the cooldown
+           clock so the reminder waits its full cooldown — the two-part guard the CPU and tempdb seeds carry. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingWaitSecondsThreshold = 60;
+
+        var at = await DriveBlockingWaitAsync(h.Build(), h, 180_000, samples: 1, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var restarted = h.Build();
+        at = await DriveBlockingWaitAsync(restarted, h, 180_000, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The stamped clock is a COOLDOWN, not a silence: once it elapses the reminder is delivered as usual. */
+        h.Now = h.Now.AddMinutes(6);
+        at = await DriveBlockingWaitAsync(restarted, h, 180_000, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        await DriveBlockingWaitAsync(restarted, h, 1_000, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+        Assert.False(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+    }
+
+    [Fact]
+    public void BlockingWaitGateConstants_AreTheNumbersErikRuled()
+    {
+        /* Q4 on #3653, verbatim: "fire on a single snapshot at N = 3× the configured Blocking Wait Time threshold;
+           otherwise K = 3 consecutive collections through the shared AlertPersistenceGate." The numbers are a
+           ruling over a measurement (102 episodes, 97 single-snapshot, p99 1,509 s / 145 sessions on one production
+           store class), so they are pinned rather than left to drift. ONE clear keeps the pre-gate resolve, for
+           the tempdb arm's reason. */
+        Assert.Equal(3, AlertEngine.BlockingWaitSingleSnapshotMultiplier);
+        Assert.Equal(3, AlertEngine.BlockingWaitBreachSamples);
+        Assert.Equal(1, AlertEngine.BlockingWaitClearSamples);
+        Assert.Equal(1.5, AlertEngine.BlockingWaitEpisodeGapFactor);
+
+        /* The tokens the fire payload carries are the ones the brief named, derived from the constants so they
+           cannot lie after a change — and pinned to the literals so a change is a visible decision. */
+        Assert.Equal("single_snapshot_3x", AlertEngine.BlockingWaitFiredBySingleSnapshot);
+        Assert.Equal("consecutive_k3", AlertEngine.BlockingWaitFiredByConsecutive);
+        Assert.Equal("Fired By", AlertContextBuilders.BlockingWaitFiredByLabel);
+
+        /* The persisted subject is the metric an operator already knows — the mute context's, the history row's
+           and the resolve's spelling — and distinct from the other two gated metrics' rows. */
+        Assert.Equal("Blocking Wait Time", AlertEngine.BlockingWaitPersistenceMetric);
+        Assert.NotEqual(AlertEngine.CpuPersistenceMetric, AlertEngine.BlockingWaitPersistenceMetric);
+        Assert.NotEqual(AlertEngine.TempDbSpacePersistenceMetric, AlertEngine.BlockingWaitPersistenceMetric);
+    }
+
+    /// <summary>
+    /// The Darling README's knob table describes this arm's firing rule, so the numbers there are pinned to the
+    /// constants rather than left as a prose copy — the same pin the High CPU and tempdb rows carry, for the same
+    /// reason: a doc count that cannot be compared to the thing it describes is a count nobody can check.
+    /// </summary>
+    [Fact]
+    public void TheDarlingReadmeStatesTheBlockingWaitGateItActuallyUses()
+    {
+        var readme = ReadRepoFile("Darling", "README.md");
+
+        var row = readme
+            .Split('\n')
+            .Single(l => l.StartsWith("| `blockingWaitSecondsThreshold`", StringComparison.Ordinal));
+
+        Assert.Contains($"{AlertEngine.BlockingWaitSingleSnapshotMultiplier}× the threshold", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.BlockingWaitBreachSamples} consecutive collected snapshots", row, StringComparison.Ordinal);
+
+        /* And it must not still describe the pre-gate rule as the whole story, which is the sentence a reader
+           would act on. */
+        Assert.DoesNotContain("it re-fires every cooldown while the wait stays above the threshold and clears when it drops below |", row, StringComparison.Ordinal);
     }
 
     /* ---------------- deadlocks ---------------- */
@@ -1845,6 +2364,247 @@ public sealed class AlertEngineTests
         Assert.Equal(5, args.MaxResults);
         Assert.True(args.Diag && args.WaitFor && args.Backups && args.Misc && args.Cdc);
         Assert.Contains("StageDb", args.Excluded);
+    }
+
+    /* ---------------- long-running queries: the opt-out knob (#3653 A5, ruling Q5) ---------------- */
+
+    private static LongRunningQueryInfo PermanentSession(int sessionId, string programName, string loginName, long elapsedSeconds = 100_000) => new()
+    {
+        SessionId = sessionId,
+        DatabaseName = "StackOverflow",
+        QueryText = "WAITFOR (RECEIVE TOP (1) * FROM dbo.WorkQueue), TIMEOUT 60000",
+        ProgramName = programName,
+        LoginName = loginName,
+        ElapsedSeconds = elapsedSeconds,
+        QueryHash = "0x" + sessionId.ToString("X16")
+    };
+
+    /// <summary>A named human's ad-hoc query — class 4 of the production read, the population the page is for.</summary>
+    private static LongRunningQueryInfo HumanSession(int sessionId = 73, long elapsedSeconds = 2159) => new()
+    {
+        SessionId = sessionId, DatabaseName = "StackOverflow", QueryText = "SELECT COUNT(*) FROM Users",
+        ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "erik",
+        ElapsedSeconds = elapsedSeconds, QueryHash = "0x9AAF0129E4E9AD07"
+    };
+
+    [Fact]
+    public async Task LongRunningQuery_TheOptOutKnobTravelsIntoTheRead_Normalised()
+    {
+        /* THE Q5 RULING's mechanism: the two settings lists reach the READ, not a post-read filter, because the
+           sessions they name are the longest-running on the server by construction and would fill the row cap
+           (LongRunningQueryExclusions says why). Normalised on the way — trimmed, blanks dropped, case-insensitive
+           dedupe — so a Settings-window string and an MCP array mean the same thing. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(new[] { " HammerDB ", "hammerdb", "", "SQLAgent - TSQL JobStep" });
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(new[] { "svc_etl", " ", @"NT AUTHORITY\SYSTEM" });
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var exclusions = h.Adapter.LastLrqExclusions;
+        Assert.NotNull(exclusions);
+        Assert.Equal(new[] { "HammerDB", "SQLAgent - TSQL JobStep" }, exclusions!.ProgramNamePrefixes);
+        Assert.Equal(new[] { "svc_etl", @"NT AUTHORITY\SYSTEM" }, exclusions.Logins);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_TheSeededDefaults_RemoveTheProductionReadsBackground_AndKeepTheHuman()
+    {
+        /* THE ADDENDUM's finding, as the engine sees it. The 7-day read of one large production store split the
+           long-running population into four classes: SQL Agent job steps (program prefix), the two NT AUTHORITY
+           service logins (multi-day CDC-shaped background), the application's admin login (NOT excluded — it carries
+           the job wave but also real ad-hoc long-runners), and named humans (never excluded). With the SEEDED
+           defaults and nothing else, the job step and the two service sessions are gone before the decision, the
+           admin login's ad-hoc query and the human's are evaluated, and the card's split says which default did
+           what — in SESSIONS, with the job step that ALSO runs as SYSTEM counted once, under the prefix. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(LongRunningQueryExclusions.DefaultLogins);
+
+        /* Class 1: a job step under the admin login (the usual shape) and one under SYSTEM (matches both arms). */
+        h.Adapter.LongRunning.Add(PermanentSession(61, "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 3)", "app_admin", elapsedSeconds: 3_600));
+        h.Adapter.LongRunning.Add(PermanentSession(62, "sqlagent - tsql jobstep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", @"NT AUTHORITY\SYSTEM", elapsedSeconds: 2_400));
+        /* Class 2: the multi-day background under the two service principals, generic driver program names. */
+        h.Adapter.LongRunning.Add(PermanentSession(63, ".Net SqlClient Data Provider", @"nt authority\system", elapsedSeconds: 500_000));
+        h.Adapter.LongRunning.Add(PermanentSession(64, "Replication Log Reader", @"NT AUTHORITY\NETWORK SERVICE", elapsedSeconds: 700_000));
+        /* Class 3: the admin login's OWN ad-hoc query — evaluated, because blinding the login would hide this. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 65, DatabaseName = "StackOverflow", QueryText = "UPDATE Posts SET Score = Score + 1",
+            ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "app_admin",
+            ElapsedSeconds = 4_000, QueryHash = "0x1111111111111111"
+        });
+        /* Class 4: the human. */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Equal("2 query(s), longest 66m", fired.CurrentValue);
+        Assert.StartsWith("Session #65 running 66m", fired.ShortMessage, StringComparison.Ordinal);
+        /* The excluded sessions are not on the card as SESSIONS (the knob item lists the prefix itself, by design). */
+        Assert.DoesNotContain("Job 0x", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Replication Log Reader", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #61", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #63", fired.DetailText, StringComparison.Ordinal);
+
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("4 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("4", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        /* 61 and 62 by prefix (62 also matched SYSTEM — counted here, once); 63 and 64 by login. */
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal(@"NT AUTHORITY\SYSTEM, NT AUTHORITY\NETWORK SERVICE", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnExcludedSessionIsNotEvaluated_AndTheCardCountsIt()
+    {
+        /* Measured on one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90
+           seen in 6,192 snapshots — permanent background requests no gate can separate from a runaway query. With
+           the knob set, the permanent session is not read into the decision at all (not counted in "N query(s)",
+           not the longest, not fingerprinted), and the card's knob item says how many the knob removed, by arm, so
+           the operator can see it working. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("QueueWorker");
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc_replication");
+
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker v2.1 (pool 7)", "app_user", elapsedSeconds: 500_000));   /* prefix */
+        h.Adapter.LongRunning.Add(PermanentSession(72, "Replication Reader", "SVC_Replication", elapsedSeconds: 400_000));  /* exact login, any case */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        /* One query, and the longest is the 35-minute one — the two permanent sessions never entered the count. */
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.Equal(35d, fired.NumericCurrentValue);
+        Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* The knob's receipt: appended after the session items, never in front of them. */
+        Assert.NotNull(fired.Context);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("2 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("QueueWorker", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal("svc_replication", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedCountLabel}: 2", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel}: 1", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByLoginLabel}: 1", fired.DetailText, StringComparison.Ordinal);
+
+        /* NOT a mute: the excluded sessions were never fingerprinted, so no incident exists for them to hold open. */
+        Assert.NotNull(fired.Context.Incidents);
+        Assert.Single(fired.Context.Incidents!);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_ALoginIsExactAndAProgramIsAPrefix_NeverTheOtherWayRound()
+    {
+        /* The two arms have two rules and the card must not blur them: a login entry does not match a longer
+           login (svc must not swallow svc_owner), and a program entry matches anything that starts with it.
+           A "*" typed by an operator who expects the retired wildcard grammar is a literal character that
+           matches nothing real — the entry is listed on the card so the misspelling is visible. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("SQLAgent - TSQL JobStep*");   /* literal *, matches nothing below */
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc");
+
+        h.Adapter.LongRunning.Add(PermanentSession(81, "SQLAgent - TSQL JobStep (Job 0x01 : Step 1)", "svc_owner", elapsedSeconds: 9_000));
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 query(s), longest 150m", fired.CurrentValue);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep*", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_WhenEveryCandidateIsExcluded_NothingFires_AndAnOpenIncidentResolves()
+    {
+        /* The knob applied to a standing alert: the operator excludes the program that was paging them, the
+           next evaluation sees no sessions, and the incident RESOLVES — an excluded session is not a silenced
+           one, it is gone from the alert's world, and a resolve is the honest edge for that. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("queue");
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Queries Cleared", Assert.Single(h.Resolutions).Title);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnEmptyKnob_LeavesTheCardWithoutTheKnobItem()
+    {
+        /* An operator who cleared BOTH seeded lists has said "evaluate everything"; an "Excluded Count: 0" line
+           on their every card would be a line about nothing, so the item exists only when the knob is set — the
+           pre-#3653 card, byte for byte. (The engine does not re-seed an emptied list: present-and-empty is a
+           decision, and the seeding is the hosts' job on an ABSENT key.) */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
+        Assert.DoesNotContain(fired.Context!.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel));
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AKnobThatRemovedNothing_StillSaysSo()
+    {
+        /* A set knob that matched no session this evaluation reports 0 on every line — the receipt is the point,
+           and "0" is a receipt too (it is also how an operator learns an entry is misspelled). */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("NotRunningToday");
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("0 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.DoesNotContain(knobItem.Fields, f => f.Label == "Excluded Logins");
+    }
+
+    [Fact]
+    public async Task Cpu_TheMaintenanceProbe_IgnoresTheLongRunningQueryOptOutKnob()
+    {
+        /* The knob is the LONG-RUNNING alert's: a backup run by an excluded service login is still the thing
+           burning this server's CPU, so the High CPU card's maintenance probe reads with the knob OFF — the same
+           reasoning that has it read with every noise filter off. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("RdsAdminService");
+        h.Adapter.LongRunning.Add(BackupSession());
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
+        Assert.Contains("BACKUP DATABASE", Assert.Single(h.Deliverer.Outcomes).DetailText, StringComparison.Ordinal);
     }
 
     /* ---------------- the sibling card annotations: #3495 (High CPU names active maintenance)
@@ -3424,7 +4184,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default) =>
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

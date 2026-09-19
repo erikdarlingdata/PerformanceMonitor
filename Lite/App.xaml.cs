@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
@@ -171,6 +172,17 @@ public partial class App : Application
     public static bool AlertLongRunningQueryExcludeBackups { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeMiscWaits { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeCdc { get; set; } = true;
+    /* #3653 (A5, Q5): the Long-Running Query opt-out knob — program_name PREFIXES and exact login_names whose
+       sessions the alert does not evaluate (case-insensitive; LongRunningQueryExclusions is the rule and names
+       the four classes the production read found). SEEDED: these initial values are the defaults an install
+       that has never written the key evaluates with — the SQL Agent job-step program prefix and the two
+       NT AUTHORITY service logins. The settings.json reader below REPLACES a list when its key is PRESENT,
+       even with an empty array, so an operator who clears a list in the Settings window (which always writes
+       both keys) has cleared it for good; a key that is ABSENT leaves the seed standing. Persisted as two JSON
+       arrays beside alert_excluded_databases, edited on the Settings window's Alerts tab as comma-separated
+       text. */
+    public static List<string> AlertLongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();
+    public static List<string> AlertLongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();
     public static List<string> AlertExcludedDatabases { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
@@ -1168,6 +1180,21 @@ public partial class App : Application
                     var db = elem.ValueKind == JsonValueKind.String ? elem.GetString() : null;
                     if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
                 }
+            }
+            /* #3653 (A5, Q5): the two opt-out lists, read with the same element-kind filter as the database list
+               above and normalised through the shared rule so a hand-edited file and the Settings window agree.
+               PRESENT replaces (an empty array is the operator clearing the default — honoured); ABSENT leaves
+               the seeded default in the static initialiser standing. That is the same absent/present rule the
+               database list follows; the only difference is that its default is empty and this one's is not. */
+            if (read.TryGetProperty("alert_long_running_query_excluded_program_name_prefixes", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
+            }
+            if (read.TryGetProperty("alert_long_running_query_excluded_logins", out v) && v.IsArray())
+            {
+                AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(
+                    v.Element.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)).ToList();
             }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);

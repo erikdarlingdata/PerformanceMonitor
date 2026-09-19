@@ -714,7 +714,9 @@ public class AlertContextBuildersTests
         Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
             typeof(LocalDataService).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
         Assert.Equal("PerformanceMonitor.Alerting", typeof(PoisonWaitDelta).Namespace);
-        Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
+        /* #3653 (A5, Q5): the read returns the shared result record (sessions + the opt-out knob's excluded
+           count) — still the Alerting namespace's type, which is what this pin is about. */
+        Assert.Equal(typeof(Task<LongRunningQueryReadResult>),
             typeof(LocalDataService).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
             typeof(LocalDataService).GetMethod("GetVolumeFreeSpaceAsync")!.ReturnType);

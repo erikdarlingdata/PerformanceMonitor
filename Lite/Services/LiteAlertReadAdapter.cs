@@ -83,8 +83,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
 
         var cadence = ResolveCadence(_blockingSnapshotCadenceMinutes, serverId, "dmv_blocking_snapshot");
         bool isFresh = DateTime.UtcNow - snapshot.Value.SnapshotTime <= CurrentBlockingWaitResult.MaxSnapshotAge(cadence);
+        /* #3653 (A5): the cadence rides along so the engine's persistence gate can tell a skipped quiet
+           collection from an adjacent one — the same resolved number the freshness bound was taken at. */
         return new CurrentBlockingWaitResult(
-            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh);
+            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh, cadence);
     }
 
     public async Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(
@@ -104,7 +106,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetPoisonWaitAccumulationAsync(serverId, windowMinutes), cancellationToken);
     }
 
-    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
+    public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -114,13 +116,18 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         bool excludeMiscWaits,
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var longRunning = await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
+        /* #3653 (A5, Q5): the opt-out knob goes INTO the DuckDB read, ahead of its LIMIT — see
+           LongRunningQueryExclusions for why a client-side drop here (the excludedDatabases shape below)
+           would let the excluded sessions fill the cap. */
+        var read = await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
             serverId, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor,
-            excludeBackups, excludeMiscWaits, excludeCdc), cancellationToken);
+            excludeBackups, excludeMiscWaits, excludeCdc, exclusions), cancellationToken);
 
+        var longRunning = read.Sessions;
         if (excludedDatabases is { Count: > 0 })
         {
             longRunning = longRunning
@@ -130,7 +137,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
                 .ToList();
         }
 
-        return longRunning;
+        return new LongRunningQueryReadResult(longRunning, read.ExcludedByProgramPrefix, read.ExcludedByLogin);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(

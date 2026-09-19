@@ -171,6 +171,45 @@ public interface IAlertEngineSettings
     /// <summary>Exclude CDC capture sessions (default true).</summary>
     bool LongRunningQueryExcludeCdc { get; }
 
+    /// <summary>
+    /// <c>program_name</c> PREFIXES whose sessions the Long-Running Query alert does NOT EVALUATE (#3653 A5,
+    /// ruling Q5) — the opt-out knob for permanent background requests, which no duration threshold and no
+    /// persistence gate can separate from a runaway query because they are over any bar forever (measured on
+    /// one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90 of them seen
+    /// in 6,192 snapshots). Case-insensitive prefix match, no wildcard grammar; see
+    /// <see cref="LongRunningQueryExclusions"/> for the rule and for why it is applied in the read ahead of
+    /// the row cap rather than after it. Distinct from a mute rule, which silences a fire already decided: an
+    /// excluded session never reaches the decision, is not fingerprinted and does not hold an incident open.
+    ///
+    /// <para><b>Seeded default</b> (<see cref="LongRunningQueryExclusions.DefaultProgramNamePrefixes"/>):
+    /// <c>SQLAgent - TSQL JobStep</c>. Measured over 7 days on one large production store, the long-running
+    /// population fell into four classes: (1) SQL Agent job-step programs — ~460 sessions a week across 11
+    /// single-server jobs, medians 35–62 minutes — excluded here by prefix, because the rest of the value is the
+    /// job id; (2) the <c>NT AUTHORITY\SYSTEM</c> / <c>NT AUTHORITY\NETWORK SERVICE</c> logins — the permanent
+    /// multi-day background, excluded by <see cref="LongRunningQueryExcludedLogins"/>; (3) the application's
+    /// admin login — NOT excluded, because it carries the job wave AND real ad-hoc long-runners, and blinding it
+    /// would hide the second to silence the first (the job-step prefix already removes its share); (4) named
+    /// humans — 3 sessions a week, never excluded: they are what the page is for. The seed is a DEFAULT an
+    /// operator may clear: an empty list excludes nothing on this arm; a host whose settings store lacks the key
+    /// altogether reads the seed.</para>
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; }
+
+    /// <summary>
+    /// Exact <c>login_name</c> values whose sessions the Long-Running Query alert does not evaluate (#3653 A5,
+    /// Q5) — the second handle a background request reliably carries, for the service principals whose
+    /// <c>program_name</c> is a generic driver string. Case-insensitive, whole value (a prefix here would let
+    /// <c>svc</c> swallow <c>svc_owner</c>); a session is excluded when EITHER arm matches, and counted once.
+    ///
+    /// <para><b>Seeded default</b> (<see cref="LongRunningQueryExclusions.DefaultLogins"/>):
+    /// <c>NT AUTHORITY\SYSTEM</c> and <c>NT AUTHORITY\NETWORK SERVICE</c> — class (2) of the production read,
+    /// ~70 sessions across 42 servers with medians of 4.8–8.6 DAYS over 300K+ snapshots, CDC-capture shaped.
+    /// The application's admin login is deliberately absent (class 3 — see
+    /// <see cref="LongRunningQueryExcludedProgramNamePrefixes"/>). A DEFAULT, not a constant: an operator
+    /// clearing the list excludes nothing by login.</para>
+    /// </summary>
+    IReadOnlyList<string> LongRunningQueryExcludedLogins { get; }
+
     /// <summary>Fire when tempdb reserved space is at/above this % of total.</summary>
     int TempDbSpaceThresholdPercent { get; }
 

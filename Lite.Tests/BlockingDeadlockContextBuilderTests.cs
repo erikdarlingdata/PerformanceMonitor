@@ -608,7 +608,8 @@ public class BlockingDeadlockContextBuilderTests
         /* #3539 A4: the poison feed is a window ACCUMULATION per wait type now, not the newest deltas. */
         Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
+        /* #3653 (A5, Q5): sessions plus the opt-out knob's excluded count, in one shared record. */
+        Assert.Equal(typeof(Task<LongRunningQueryReadResult>),
             typeof(LiteAlertReadAdapter).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetVolumeFreeSpaceAsync")!.ReturnType);
