@@ -287,13 +287,25 @@ export function applyFormat(name, value) {
 
 /* ─────────────────────────── band / severity classes ─────────────────────────── */
 
+/* The band vocabulary on the wire is ONE spelling — the PascalCase enum token (HealthSeverity / FleetHealthBand /
+   DailyHealthBand: Healthy, Warning, Critical, Unknown, Offline, NoData) — and the CSS classes below are keyed on it.
+   #3653 (one vocabulary) made every MCP band spell it that way; this map is the belt to that brace: a class
+   builder that compares strings case-insensitively, so a band that arrives as "warning" or "WARNING" from a
+   surface the census does not sweep still colours, instead of silently producing a class no rule matches.
+   Anything outside the vocabulary passes through unchanged (a caller that maps "No Data" itself keeps working). */
+const CANONICAL_BANDS = ["Healthy", "Warning", "Critical", "Unknown", "Offline", "NoData"];
+export function canonicalBand(band) {
+  if (band == null || band === "") return "Unknown";
+  const wanted = String(band).toLowerCase();
+  return CANONICAL_BANDS.find((b) => b.toLowerCase() === wanted) || String(band);
+}
 /** CSS class for a fleet band ("Healthy"/"Warning"/"Critical"/"Offline") — colors live in CSS. */
 export function bandClass(band) {
-  return "band-" + (band || "Unknown");
+  return "band-" + canonicalBand(band);
 }
 /** CSS class for a per-metric severity ("Unknown"/"Healthy"/"Warning"/"Critical"). */
 export function sevClass(sev) {
-  return "sev-" + (sev || "Unknown");
+  return "sev-" + canonicalBand(sev);
 }
 
 /* ─────────────────────────── object access ─────────────────────────── */

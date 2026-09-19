@@ -802,8 +802,15 @@ public sealed class DarlingMcpTools
                from "analyze that window now" (that is analyze_server with the same anchor). Both are
                worth having: this one is the historical record and cannot change, the other recomputes
                from whatever rows the store still holds. */
-            var findings = await analysisService.GetRecentFindingsAsync(
-                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit, asOfUtc: anchor);
+            /* #3653 (one vocabulary): the read-cap cut is OBSERVED, not inferred. The store is asked for one row
+               past WindowCoveringLimit and McpHelpers.BoundPage binds the page to the cap — `truncated` is true
+               exactly when the window held an occurrence the newest-first LIMIT dropped. This replaced
+               `findings.Count >= WindowCoveringLimit`, the same `>= cap` inference #3594 named on the page tools,
+               against the store-read constant rather than a caller's limit: a window of exactly 10,000
+               occurrences read as cut. The page is the same newest 10,000 the store returned before. */
+            var fetched = await analysisService.GetRecentFindingsAsync(
+                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor);
+            var (findings, truncated) = McpHelpers.BoundPage(fetched, FindingOccurrences.WindowCoveringLimit);
 
             if (findings.Count == 0)
             {
@@ -844,11 +851,13 @@ public sealed class DarlingMcpTools
                 server = resolved.ServerName,
                 finding_count = groups.Count,
                 total_occurrences = findings.Count,
-                // No silent caps: a read that fills the window-covering limit has had its OLDEST
-                // rows dropped by the store's newest-first LIMIT, so occurrence stats may
-                // under-report — say so instead of letting first_seen quietly lie.
-                truncation_note = findings.Count >= FindingOccurrences.WindowCoveringLimit
-                    ? $"Read hit the {FindingOccurrences.WindowCoveringLimit}-row cap; the oldest occurrences in the window were dropped, so occurrences/first_seen may under-report. Use a smaller hours_back for exact stats."
+                // No silent caps: a read the window-covering limit CUT has had its OLDEST rows dropped by
+                // the store's newest-first LIMIT, so occurrence stats may under-report — say so instead of
+                // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note
+                // says what was cut and what to do about it.
+                truncated,
+                truncation_note = truncated
+                    ? $"TRUNCATED: the window held more than the {FindingOccurrences.WindowCoveringLimit}-row read cap; the oldest occurrences in the window were dropped, so total_occurrences, occurrences and first_seen may under-report. Use a smaller hours_back for exact stats."
                     : null,
                 findings = groups.Select(g =>
                 {

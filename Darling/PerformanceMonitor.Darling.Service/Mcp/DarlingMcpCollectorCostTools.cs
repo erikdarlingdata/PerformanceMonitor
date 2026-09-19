@@ -56,9 +56,12 @@ public sealed class DarlingMcpCollectorCostTools
         [Description("Days of history to summarize. Default 7; max 90 (the series' own retention).")] int days_back = 7,
         [Description("Optional: a collector name (e.g. query_store) to return its daily trend instead of the ranked fleet list.")] string? collector_name = null)
     {
-        if (days_back <= 0 || days_back > MaxDaysBack)
+        /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
+           tool's (the series' own retention). */
+        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        if (daysError != null)
         {
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{MaxDaysBack}).";
+            return daysError;
         }
 
         var since = DateTime.UtcNow.AddDays(-days_back);

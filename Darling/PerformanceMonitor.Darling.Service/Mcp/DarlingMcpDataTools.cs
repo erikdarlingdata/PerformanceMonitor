@@ -866,7 +866,10 @@ public sealed class DarlingMcpDataTools
             }
             catch (Exception ex)
             {
-                return $"Could not read the servers registry from the Postgres store: {ex.Message}";
+                /* #3653 (errors one shape): through the shared sentence helper like every other SQL Server-family
+                   tool on this SKU, rather than an interpolated sentence of this tool's own. The operation names
+                   what was being read so the message loses nothing the ad-hoc one said. */
+                return McpHelpers.FormatError("list_servers (reading the servers registry from the store)", ex);
             }
 
             /* #2339: the empty-registry answer is prose, not the JSON envelope, so it carries the peer

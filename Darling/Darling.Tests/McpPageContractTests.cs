@@ -799,10 +799,12 @@ public sealed class McpPageContractTests
     /// the way <see cref="NoTool_ReadsAParameterAsItsAbsoluteValue_OnEitherSku"/> sweeps <c>Math.Abs</c>, with
     /// the same population floor so a marker that stops matching cannot pass for free.
     ///
-    /// <para>What this does NOT sweep: <c>limit_reached = x.Count &gt;= limit</c>. That key says the page is as
-    /// long as the cap — true by construction — and its prose says "more MAY exist"; it is a weaker dialect,
-    /// not an inference, and whether it collapses into an observed <c>truncated</c> is the vocabulary lane's
-    /// call. <c>McpPayloadContractCensusTests</c> holds it in the truncation-key inventory.</para>
+    /// <para>What this does NOT sweep: <c>limit_reached = x.Count &gt;= limit</c>. That key said the page was as
+    /// long as the cap — true by construction — and its prose said "more MAY exist"; a weaker dialect, not an
+    /// inference, and the discriminator witness below keeps the non-match on record. The vocabulary lane
+    /// (#3653) then collapsed it: the four tools that spelled it moved onto <c>BoundPage</c> (they are in
+    /// <see cref="PgPagedToolsThroughTheHelper"/>) and <c>McpPayloadContractCensusTests.RetiredCutSpellings</c>
+    /// fails its return by name.</para>
     /// </summary>
     [Fact]
     public void NoTool_InfersTruncationFromItsCap_OnEitherSku()
@@ -848,6 +850,12 @@ public sealed class McpPageContractTests
     /// receive the <c>limit + 1</c> fetch and trim it; <c>DarlingMcpPgPlanToolsTests</c> executes both
     /// boundaries against the builders, and <see cref="McpPageContractLivePostgresTests.PgPagedTools_FlipTruncatedExactlyAtTheBoundary_AgainstDevPostgres"/>
     /// executes the deadlock and index reads against live Postgres.
+    ///
+    /// <para>#3653 (the vocabulary lane) added the four tools that had spelled the cut <c>limit_reached =
+    /// x.Count &gt;= limit</c> — the inference this file's sweep deliberately did not flag because the key said
+    /// "as long as the cap", not "more exist" — now on the same helper with <c>truncated</c> and a
+    /// <c>*_returned</c> page count. <c>McpPayloadContractCensusTests</c> holds the vocabulary half (the
+    /// retired spelling cannot return); this roster holds the page contract.</para>
     /// </summary>
     public static readonly (Type Tools, string ToolName, string? Builder, string ReadName, string Sql)[] PgPagedToolsThroughTheHelper =
     [
@@ -855,6 +863,10 @@ public sealed class McpPageContractTests
         (typeof(DarlingMcpPgPlanTools), "get_pg_plans", "BuildPlansJson", nameof(DarlingPgPlanCaptureReader.PgPlanCaptureSql), DarlingPgPlanCaptureReader.PgPlanCaptureSql),
         (typeof(DarlingMcpPgPlanTools), "get_pg_plan_capture_readiness", "BuildReadinessJson", nameof(DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessSql), DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessSql),
         (typeof(DarlingMcpPgIndexTools), "get_pg_index_bloat", null, nameof(DarlingPgIndexBloatReader.PgIndexBloatSql), DarlingPgIndexBloatReader.PgIndexBloatSql),
+        (typeof(DarlingMcpPgAutovacuumTools), "get_pg_autovacuum_health", null, nameof(DarlingPgAutovacuumReader.PgAutovacuumSql), DarlingPgAutovacuumReader.PgAutovacuumSql),
+        (typeof(DarlingMcpPgSessionStatesTools), "get_pg_session_states", null, nameof(DarlingPgSessionStatesReader.PgSessionStatesSql), DarlingPgSessionStatesReader.PgSessionStatesSql),
+        (typeof(DarlingMcpPgIndexUsageTools), "get_pg_index_usage", null, nameof(DarlingPgIndexUsageReader.PgIndexUsageSql), DarlingPgIndexUsageReader.PgIndexUsageSql),
+        (typeof(DarlingMcpPgTableBloatTools), "get_pg_table_bloat", null, nameof(DarlingPgTableBloatReader.PgTableBloatSql), DarlingPgTableBloatReader.PgTableBloatSql),
     ];
 
     [Fact]

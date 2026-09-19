@@ -223,7 +223,7 @@ public sealed class DarlingMcpPgTableBloatTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days), which shows whether the waste is growing or being reclaimed.")] int hours_back = 168,
-        [Description("Maximum tables to return, biggest estimated waste first. Default 25.")] int limit = 25,
+        [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -238,8 +238,13 @@ public sealed class DarlingMcpPgTableBloatTools
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
-            var rows = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
-                postgres, resolved.ServerId, start, end, limit);
+            /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
+               (the #3594 dialect), replacing `limit_reached = tables.Count >= limit` — which read a server with
+               exactly `limit` measured tables as a cut page. Bound BEFORE the aggregates below, so every count and
+               every estimate sum is over the page. */
+            var fetched = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
+                postgres, resolved.ServerId, start, end, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -357,7 +362,8 @@ public sealed class DarlingMcpPgTableBloatTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "table_bloat",
-                table_count = tables.Count,
+                /* The page's count under the page's name (#3594). */
+                tables_returned = tables.Count,
                 /* Named for what it is: a sum of ESTIMATES over the tables whose estimates were fit to
                    publish. Not "reclaimable bytes", which is a promise the arithmetic cannot make. */
                 estimated_bloat_bytes_over_trusted_rows = trustedBloatBytes,
@@ -365,7 +371,7 @@ public sealed class DarlingMcpPgTableBloatTools
                 trusted_estimate_count = trusted.Count,
                 suppressed_estimate_count = suppressedCount,
                 pgstattuple_available_anywhere = anyPgstattuple,
-                limit_reached = tables.Count >= limit,
+                truncated,
                 /* Named at the top so it is read before any number below it. */
                 figures_are_estimates_not_measurements = true,
                 note = "Every bloat figure here is an ESTIMATE computed from PostgreSQL's column-width "
@@ -383,9 +389,9 @@ public sealed class DarlingMcpPgTableBloatTools
                          + "whole instance; on PostgreSQL 13 that role does not exist and explicit GRANT "
                          + "SELECT is the only route."
                          : string.Empty)
-                     + (tables.Count >= limit
-                         ? $" The row limit of {limit} was REACHED, so the totals cover only the tables "
-                         + "returned. Raise limit for the full picture."
+                     + (truncated
+                         ? $" TRUNCATED: the server held more measured tables than the {limit} returned, so the "
+                         + "totals cover only the tables returned. Raise limit for the full picture."
                          : string.Empty),
                 tables,
             }, McpHelpers.JsonOptions);
