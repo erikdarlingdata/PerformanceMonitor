@@ -214,7 +214,7 @@ public sealed class DarlingMcpPgPercentDenominatorTests
     {
         var cut = Parse(DarlingMcpPgIoTools.BuildIoJson(
             "srv", 24, new DarlingPgIoReader.PgIoPage([Io(0, true), Io(1, true)], WindowTotal, WindowTotal / 10.0), limit: 1, timingSetting: true));
-        AssertEnvelope(cut, "combinations", "combination_count", returned: 1, truncated: true,
+        AssertEnvelope(cut, "combinations", "combinations_returned", returned: 1, truncated: true,
             "total_reads", WindowTotal, "returned_reads", 600, "returned_pct_of_total_reads");
         Assert.Equal(100.0, cut.GetProperty("total_read_time_ms").GetDouble());
         Assert.Equal(60.0, cut.GetProperty("returned_read_time_ms").GetDouble());
@@ -225,7 +225,7 @@ public sealed class DarlingMcpPgPercentDenominatorTests
 
         var whole = Parse(DarlingMcpPgIoTools.BuildIoJson(
             "srv", 24, new DarlingPgIoReader.PgIoPage([Io(0, true), Io(1, true), Io(2, true)], WindowTotal, WindowTotal / 10.0), limit: 3, timingSetting: true));
-        AssertEnvelope(whole, "combinations", "combination_count", returned: 3, truncated: false,
+        AssertEnvelope(whole, "combinations", "combinations_returned", returned: 3, truncated: false,
             "total_reads", WindowTotal, "returned_reads", 1_000, "returned_pct_of_total_reads");
         AssertShares(whole.GetProperty("combinations"), "pct_of_total_reads", 60, 30, 10);
         AssertShares(whole.GetProperty("combinations"), "pct_of_total_read_time", 60, 30, 10);
@@ -265,6 +265,95 @@ public sealed class DarlingMcpPgPercentDenominatorTests
 
         Assert.True(root.GetProperty("truncated").GetBoolean());
         Assert.False(root.GetProperty("io_timing_tracked").GetBoolean());
+    }
+
+    /* ───────────────────────── get_pg_database_stats (#3653) ───────────────────────── */
+
+    /* Three databases spilling 600 / 300 / 100 temp files, each with ten times that in bytes and one deadlock;
+       block counters chosen so the window ratio and the page ratio DIFFER: the top row hits 900 of 1,000
+       blocks (90%), the two below hit 100 of 1,000 each (10%), so the window is 1,100 / 3,000 = 36.67% and a
+       one-row page reads 90%. A projection that computed the ratio off its rows would report 90 as the
+       cluster's figure. */
+    private static DarlingPgDatabaseReader.PgDatabaseRow Database(int i) => new(
+        DatabaseName: "db" + i, XactCommit: 100, XactRollback: 1, BlksRead: i == 0 ? 100 : 900, BlksHit: i == 0 ? 900 : 100,
+        TempFiles: Series[i], TempBytes: Series[i] * 10, Deadlocks: 1, StatsResetCount: 0, CounterRewindCount: 0,
+        StatsReset: null, SampleCount: 2, FirstSampleAt: null, LastSampleAt: null);
+
+    private static DarlingPgDatabaseReader.PgDatabasePage DatabasePage(params DarlingPgDatabaseReader.PgDatabaseRow[] rows) =>
+        new([.. rows], WindowDatabaseCount: 3, WindowTotalTempFiles: WindowTotal, WindowTotalTempBytes: WindowTotal * 10,
+            WindowTotalDeadlocks: 3, WindowTotalBlksHit: 1_100, WindowTotalBlksRead: 1_900, WindowResetCount: 0);
+
+    /// <summary>
+    /// The A7 census's one allowance, retired: the three <c>total_*</c> keys are the WINDOW's off the page
+    /// record, the page's own sums travel as <c>returned_*</c>, <c>database_count</c> is the window's beside
+    /// <c>databases_returned</c>, the cluster ratio is <c>cache_hit_pct</c> beside the page's
+    /// <c>_of_returned</c>, and truncation is observed off the sentinel. The same pair as every case above:
+    /// the cut page is where old and new arithmetic disagree, the whole page is where they agree.
+    /// </summary>
+    [Fact]
+    public void DatabaseStats_TotalsAreOfTheWindow_NotOfThePage()
+    {
+        var cut = Parse(DarlingMcpPgDatabaseTools.BuildDatabaseStatsJson("srv", 24, DatabasePage(Database(0), Database(1)), limit: 1));
+        Assert.Equal(1, cut.GetProperty("databases").GetArrayLength());
+        Assert.Equal(1, cut.GetProperty("databases_returned").GetInt32());
+        Assert.Equal(3, cut.GetProperty("database_count").GetInt32());
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(WindowTotal, cut.GetProperty("total_temp_files").GetInt64());
+        Assert.Equal(WindowTotal * 10, cut.GetProperty("total_temp_bytes").GetInt64());
+        Assert.Equal(3, cut.GetProperty("total_deadlocks").GetInt64());
+        Assert.Equal(600, cut.GetProperty("returned_temp_files").GetInt64());
+        Assert.Equal(6_000, cut.GetProperty("returned_temp_bytes").GetInt64());
+        Assert.Equal(1, cut.GetProperty("returned_deadlocks").GetInt64());
+        Assert.Equal(Math.Round(1_100d / 3_000 * 100, 2), cut.GetProperty("cache_hit_pct").GetDouble());
+        Assert.Equal(90.0, cut.GetProperty("cache_hit_pct_of_returned").GetDouble());
+        Assert.Equal("db0", cut.GetProperty("top_spiller").GetString());
+        Assert.Equal("temp_bytes_desc_then_blks_read_desc", cut.GetProperty("order").GetString());
+        Assert.False(cut.TryGetProperty("limit_reached", out _));
+        Assert.Contains("TOTALS ARE OF THE WINDOW, NOT OF THE PAGE", cut.GetProperty("note").GetString(), StringComparison.Ordinal);
+        Assert.Contains("row limit of 1 was REACHED", cut.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+        var whole = Parse(DarlingMcpPgDatabaseTools.BuildDatabaseStatsJson("srv", 24, DatabasePage(Database(0), Database(1), Database(2)), limit: 3));
+        Assert.Equal(3, whole.GetProperty("databases_returned").GetInt32());
+        Assert.Equal(3, whole.GetProperty("database_count").GetInt32());
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+        Assert.Equal(WindowTotal, whole.GetProperty("total_temp_files").GetInt64());
+        Assert.Equal(WindowTotal, whole.GetProperty("returned_temp_files").GetInt64());
+        Assert.Equal(3, whole.GetProperty("returned_deadlocks").GetInt64());
+        Assert.Equal(cut.GetProperty("cache_hit_pct").GetDouble(), whole.GetProperty("cache_hit_pct_of_returned").GetDouble());
+        Assert.DoesNotContain("was REACHED", whole.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>The window figures are NOT recomputed from the rows: a page handed window totals that disagree
+    /// with its rows reports what it was handed. A projection that summed the rows would fail this.</summary>
+    [Fact]
+    public void DatabaseStats_PublishesThePagesWindowFigures_NeverASumOfTheRows()
+    {
+        var page = new DarlingPgDatabaseReader.PgDatabasePage([Database(0)], WindowDatabaseCount: 7, WindowTotalTempFiles: 2_400,
+            WindowTotalTempBytes: 24_000, WindowTotalDeadlocks: 9, WindowTotalBlksHit: 1, WindowTotalBlksRead: 3, WindowResetCount: 2);
+        var root = Parse(DarlingMcpPgDatabaseTools.BuildDatabaseStatsJson("srv", 24, page, limit: 5));
+
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(7, root.GetProperty("database_count").GetInt32());
+        Assert.Equal(2_400, root.GetProperty("total_temp_files").GetInt64());
+        Assert.Equal(9, root.GetProperty("total_deadlocks").GetInt64());
+        Assert.Equal(25.0, root.GetProperty("cache_hit_pct").GetDouble());
+        Assert.Equal(600, root.GetProperty("returned_temp_files").GetInt64());
+        Assert.Equal(90.0, root.GetProperty("cache_hit_pct_of_returned").GetDouble());
+
+        /* The reset flag is the WINDOW's too: the one row on this page was never reset, and the flag is still
+           true because two reset signals sit on databases the page does not show - which is exactly when the
+           window totals above are lower bounds and a page-scoped flag would have said they were exact. */
+        Assert.Equal(0, root.GetProperty("databases")[0].GetProperty("stats_reset_count").GetInt32());
+        Assert.True(root.GetProperty("statistics_were_reset_in_window").GetBoolean());
+        Assert.Contains("WERE reset in this window", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+        /* And a window with no block access reports no ratio - null, not 0 (#3642) - while the page's own
+           ratio still stands on its own rows. */
+        var noBlocks = Parse(DarlingMcpPgDatabaseTools.BuildDatabaseStatsJson("srv", 24,
+            new DarlingPgDatabaseReader.PgDatabasePage([Database(0)], 1, 600, 6_000, 1, 0, 0, 0), limit: 5));
+        Assert.Equal(JsonValueKind.Null, noBlocks.GetProperty("cache_hit_pct").ValueKind);
+        Assert.Equal(90.0, noBlocks.GetProperty("cache_hit_pct_of_returned").GetDouble());
+        Assert.False(noBlocks.GetProperty("statistics_were_reset_in_window").GetBoolean());
     }
 
     /* ───────────────────────── the boundary, once for the dialect ───────────────────────── */

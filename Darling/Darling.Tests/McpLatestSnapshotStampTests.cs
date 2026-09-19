@@ -85,19 +85,17 @@ public sealed class McpLatestSnapshotStampTests
         (typeof(DarlingMcpPlanCacheSchedulerTools), "get_cpu_scheduler_pressure", "Lite/Mcp/McpPlanCacheSchedulerTools.cs", Shape.SearchBound),
         (typeof(DarlingMcpMemoryGrantTools), "get_resource_semaphore", "Lite/Mcp/McpMemoryTools.cs", Shape.Windowed),
         (typeof(DarlingMcpMemoryGrantTools), "get_memory_grants", "Lite/Mcp/McpMemoryTools.cs", Shape.Windowed),
-    ];
-
-    /// <summary>
-    /// Latest reads that stamped themselves BEFORE this lane, under the top-level key <c>collection_time</c>
-    /// rather than <c>captured_at</c>. The stamp is true; only the spelling predates the vocabulary, and the
-    /// Darling web surface reads one of them (<c>get_session_stats</c>, <c>server-tabs.js</c>' SESSION_STATS)
-    /// by that key, which sits outside this lane's boundary. Carried as a stated allowance with the control
-    /// below rather than silently: the day one of them is renamed, the allowance must shrink (#3541 A15/A16 is
-    /// the vocabulary lane).
-    /// </summary>
-    public static readonly string[] StampedUnderCollectionTime =
-    [
-        "get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats",
+        /* #3653: the four latest reads that stamped themselves BEFORE #3637's vocabulary, under the top-level
+           key `collection_time`. The stamp was always true; only the spelling predated the census, and this
+           file carried them as a named allowance (`StampedUnderCollectionTime`) because the Darling web surface
+           read one of them (get_session_stats, server-tabs.js' SESSION_STATS "Collected" tile) by the old key
+           and that file sat outside #3637's boundary. The tile moved with the rename, all four publish
+           `captured_at` on both SKUs, and the allowance is gone - a roster row each, held to the Stamped
+           dialect like every other latest read. */
+        (typeof(DarlingMcpObjectStatsTools), "get_database_sizes", "Lite/Mcp/McpServerInfoTools.cs", Shape.Stamped),
+        (typeof(DarlingMcpJobTools), "get_running_jobs", "Lite/Mcp/McpJobTools.cs", Shape.Stamped),
+        (typeof(DarlingMcpDataTools), "get_server_properties", "Lite/Mcp/McpServerInfoTools.cs", Shape.Stamped),
+        (typeof(DarlingMcpSessionTools), "get_session_stats", "Lite/Mcp/McpSessionTools.cs", Shape.Stamped),
     ];
 
     /// <summary>
@@ -171,9 +169,21 @@ public sealed class McpLatestSnapshotStampTests
     /// <summary>The window half of a Windowed tool.</summary>
     private static readonly Regex WindowKey = new(@"\bwindow\s*=\s*window\.Select\(", RegexOptions.Compiled);
 
-    /// <summary>A pre-lane stamp under the old spelling, as a TOP-LEVEL key (a per-row <c>collection_time</c>
-    /// inside a <c>Select(r =&gt; new { ... })</c> is a series column, not the snapshot's stamp).</summary>
-    private static readonly Regex TopLevelCollectionTimeKey = new(@"\n\s{16}collection_time\s*=", RegexOptions.Compiled);
+    /// <summary>
+    /// The retired spelling, as a TOP-LEVEL key of the object the tool serializes. Until #3653 an
+    /// indentation-keyed form of this (<c>\n</c> + sixteen spaces + <c>collection_time =</c>) was the
+    /// discriminator behind a <c>StampedUnderCollectionTime</c> allowance, applied only to the four tools it
+    /// named; it stays as a NEGATIVE sweep over every latest-reading Darling body, so a new latest read cannot
+    /// revive the old key and a renamed one cannot keep both. Anchored on <c>JsonSerializer.Serialize(new {</c>
+    /// rather than on indentation because a per-row <c>collection_time</c> inside a
+    /// <c>rows.Select(r =&gt; new { ... })</c> is a series column, not the snapshot's stamp, and
+    /// <c>get_memory_grants</c>' rows sit at the same sixteen-space indent the old form keyed on. One level
+    /// of nested object (<c>summary = new { ... }</c>, a row projection) is stepped over as a unit; a
+    /// top-level key BELOW a doubly-nested object is out of the regex's reach, which is a silent miss and not
+    /// a false alarm — the roster's positive <c>captured_at</c> assertion is the contract, this is the fence.
+    /// </summary>
+    private static readonly Regex TopLevelCollectionTimeKey = new(
+        @"JsonSerializer\.Serialize\(new\s*\{(?:[^{}]|\{[^{}]*\})*?\bcollection_time\s*=", RegexOptions.Compiled);
 
     /// <summary>The words a SearchBound tool must use for <c>hours_back</c>.</summary>
     private const string SearchBoundWords = "search for the latest snapshot";
@@ -390,15 +400,16 @@ public sealed class McpLatestSnapshotStampTests
 
     /// <summary>
     /// Every Darling tool whose body calls a <c>*Latest*Async</c> / <c>*Snapshot*Async</c> / <c>Current</c>-family
-    /// reader, or whose reader const is a latest-snapshot read, is in the roster, the pre-lane allowance, or the
-    /// named residual — and every allowance entry is still needed. A new latest read must pick a shape here
-    /// rather than ship unstamped.
+    /// reader, or whose reader const is a latest-snapshot read, is in the roster or a named residual — and
+    /// every allowance entry is still needed. A new latest read must pick a shape here rather than ship
+    /// unstamped. Since #3653 no tool body anywhere publishes the retired top-level <c>collection_time</c>
+    /// stamp: the <c>StampedUnderCollectionTime</c> allowance that held four pre-vocabulary reads is gone,
+    /// and the discriminator that used to admit them now refuses everyone.
     /// </summary>
     [Fact]
     public void EveryLatestReadTool_IsInTheRoster_OrANamedAllowance_AndEveryAllowanceIsStillNeeded()
     {
         var rostered = LatestTools.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal);
-        var allowancesUsed = new HashSet<string>(StringComparer.Ordinal);
         var residualsSeen = new HashSet<string>(StringComparer.Ordinal);
         var lookupsSeen = new HashSet<string>(StringComparer.Ordinal);
         var threeClocksSeen = new HashSet<string>(StringComparer.Ordinal);
@@ -420,18 +431,14 @@ public sealed class McpLatestSnapshotStampTests
                 }
 
                 examined++;
+                /* The retired spelling is refused on EVERY latest-reading body, rostered or not: a rostered
+                   tool that kept collection_time beside captured_at would be publishing one instant under
+                   two names, which is the vocabulary drift #3637 closed. */
+                Assert.False(TopLevelCollectionTimeKey.IsMatch(body),
+                    $"{file} {toolName}: publishes a top-level collection_time stamp — the census's spelling is captured_at (#3637; the last four holdouts moved in #3653)");
+
                 if (rostered.Contains(toolName))
                 {
-                    continue;
-                }
-
-                if (StampedUnderCollectionTime.Contains(toolName, StringComparer.Ordinal))
-                {
-                    Assert.True(TopLevelCollectionTimeKey.IsMatch(body),
-                        $"{file} {toolName}: listed as stamped under collection_time but publishes no top-level collection_time");
-                    Assert.False(CapturedAtKey.IsMatch(body),
-                        $"{file} {toolName}: now publishes captured_at — move it into the roster and out of StampedUnderCollectionTime");
-                    allowancesUsed.Add(toolName);
                     continue;
                 }
 
@@ -478,8 +485,6 @@ public sealed class McpLatestSnapshotStampTests
             "LatestLookupInsideAnotherRead no longer matches what the sweep finds: " + string.Join(", ", LatestLookupInsideAnotherRead.Except(lookupsSeen)));
         Assert.True(ThreeClockTools.ToHashSet(StringComparer.Ordinal).SetEquals(threeClocksSeen),
             "ThreeClockTools no longer matches what the sweep finds: " + string.Join(", ", ThreeClockTools.Except(threeClocksSeen)));
-        Assert.True(StampedUnderCollectionTime.ToHashSet(StringComparer.Ordinal).SetEquals(allowancesUsed),
-            "StampedUnderCollectionTime no longer matches what the sweep finds: " + string.Join(", ", StampedUnderCollectionTime.Except(allowancesUsed)));
         Assert.True(DarlingOnlyStamped.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal).SetEquals(darlingOnlySeen),
             "DarlingOnlyStamped no longer matches what the sweep finds: " + string.Join(", ", DarlingOnlyStamped.Select(t => t.ToolName).Except(darlingOnlySeen)));
         Assert.True(UnstampedLatestReadsPendingA10.ToHashSet(StringComparer.Ordinal).SetEquals(residualsSeen),
@@ -513,11 +518,21 @@ public sealed class McpLatestSnapshotStampTests
     [InlineData(nameof(DarlingConfigHistoryReader.QueryStoreHealthSql), "capture_time")]
     [InlineData(nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql), "collection_time")]
     [InlineData(nameof(DarlingPgServerConfigReader.CurrentConfigSql), "collection_time")]
+    /* #3653: the four reads behind the retired StampedUnderCollectionTime allowance, now roster rows. */
+    [InlineData(nameof(DarlingObjectStatsReader.DatabaseSizeLatestSql), "collection_time")]
+    [InlineData(nameof(DarlingJobReader.RunningJobsSql), "collection_time")]
+    [InlineData(nameof(DarlingDataReader.LatestServerPropertiesSql), "collection_time")]
+    [InlineData(nameof(DarlingSessionReader.LatestSessionStatsSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
-        var select = sql[..sql.IndexOf("FROM", StringComparison.Ordinal)];
-        Assert.Contains(column, select, StringComparison.Ordinal);
+        /* The MAIN statement's select list: from its SELECT to its FROM, both at column zero once the raw
+           string is dedented. `RunningJobsSql` opens with a CTE whose own FROM is indented, and a slice to
+           the first FROM anywhere would stop inside the CTE and read the row statement's stamp as missing. */
+        var from = sql.IndexOf("\nFROM ", StringComparison.Ordinal);
+        Assert.True(from > 0, $"{sqlName}: no column-zero FROM — the main statement's shape has changed; re-anchor this pin");
+        var select = sql.LastIndexOf("\nSELECT", from, StringComparison.Ordinal);
+        Assert.Contains(column, sql[(select < 0 ? 0 : select)..from], StringComparison.Ordinal);
     }
 
     /// <summary>The scheduler read is bounded the way Lite's is — the newest row IN THE WINDOW, so a week-old
@@ -608,8 +623,16 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Matches(WindowKey, "                window = window.Select(WindowShape)");
         Assert.DoesNotMatch(WindowKey, "                window_start = windowStart.ToString(\"o\"),");
 
-        Assert.Matches(TopLevelCollectionTimeKey, "\n                collection_time = rows[0].CollectionTime.ToString(\"o\"),");
-        Assert.DoesNotMatch(TopLevelCollectionTimeKey, "\n                    collection_time = r.CollectionTime.ToString(\"o\"),");
+        /* The retired stamp as it shipped on get_session_stats, and the fixed shape: captured_at at the top, a
+           per-row collection_time inside the applications projection that must NOT read as the stamp. */
+        Assert.Matches(TopLevelCollectionTimeKey,
+            "            return JsonSerializer.Serialize(new\n            {\n                server = resolved.ServerName,\n                collection_time = rows[0].CollectionTime.ToString(\"o\"),\n                summary = new\n                {\n                    total_connections = totalConnections,\n                },\n            }, McpHelpers.JsonOptions);");
+        Assert.DoesNotMatch(TopLevelCollectionTimeKey,
+            "            return JsonSerializer.Serialize(new\n            {\n                server = resolved.ServerName,\n                captured_at = rows[0].CollectionTime.ToString(\"o\"),\n                grants = rows.Select(r => new\n                {\n                    collection_time = r.CollectionTime.ToString(\"o\"),\n                }),\n            }, McpHelpers.JsonOptions);");
+        /* And the memory-grant shape verbatim in its indentation: the rows are a pre-built local whose
+           projection carries collection_time at the SAME sixteen-space indent the old discriminator keyed on. */
+        Assert.DoesNotMatch(TopLevelCollectionTimeKey,
+            "            var grants = rows.Select(r => new\n            {\n                collection_time = r.CollectionTime.ToString(\"o\"),\n            });\n\n            return JsonSerializer.Serialize(new\n            {\n                server = resolved.ServerName,\n                captured_at = rows[0].CollectionTime.ToString(\"o\"),\n                grants,\n            }, McpHelpers.JsonOptions);");
 
         Assert.Matches(LatestReaderCall, "            var snapshot = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);");
         Assert.Matches(LatestReaderCall, "            var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(");
@@ -655,6 +678,10 @@ public sealed class McpLatestSnapshotStampTests
         nameof(DarlingMemoryGrantReader.MemoryGrantsWindowSql) => DarlingMemoryGrantReader.MemoryGrantsWindowSql,
         nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql) => DarlingPgLoggingAuditReader.NewestSnapshotSql,
         nameof(DarlingPgServerConfigReader.CurrentConfigSql) => DarlingPgServerConfigReader.CurrentConfigSql,
+        nameof(DarlingObjectStatsReader.DatabaseSizeLatestSql) => DarlingObjectStatsReader.DatabaseSizeLatestSql,
+        nameof(DarlingJobReader.RunningJobsSql) => DarlingJobReader.RunningJobsSql,
+        nameof(DarlingDataReader.LatestServerPropertiesSql) => DarlingDataReader.LatestServerPropertiesSql,
+        nameof(DarlingSessionReader.LatestSessionStatsSql) => DarlingSessionReader.LatestSessionStatsSql,
         _ => throw new ArgumentOutOfRangeException(nameof(sqlName), sqlName, "not a read this census names"),
     };
 
@@ -756,6 +783,8 @@ public sealed class McpLatestSnapshotStampLivePostgresTests
     [
         "memory_grant_stats", "cpu_scheduler_stats", "server_config", "trace_flags", "memory_clerks", "latch_stats",
         "memory_stats", "cpu_utilization_stats", "collection_log",
+        /* #3653: the four reads that moved from the retired collection_time spelling. */
+        "database_size_stats", "running_jobs", "server_properties", "session_stats",
     ];
 
     [Fact]
@@ -879,6 +908,45 @@ VALUES ($1,$2,$3,$4,$5,120,'SUCCESS',7)", CollectionIdGenerator.Next(), ServerId
             Assert.Equal(Stamp(@base), summary.GetProperty("memory_captured_at").GetString());
             Assert.Equal(Stamp(@base.AddMinutes(1)), summary.GetProperty("last_collection").GetString());
             Assert.Equal(DarlingHealthReader.ServerSummaryCountsWindowHours, summary.GetProperty("counts_window_hours").GetInt32());
+
+            /* ── #3653: the four reads that stamped themselves as collection_time before the vocabulary ──
+
+               Each seeded with an OLDER snapshot beside the newest, so the stamp asserted is the newest row's
+               and not merely "some row's"; and asserted by the NEW key only — a payload that still carried
+               the old spelling would pass a TryGetProperty on either, so the retired key is asserted absent. */
+            foreach (var t in new[] { @base.AddMinutes(-15), @base })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type_desc, total_size_mb, used_size_mb, volume_mount_point, volume_total_mb, volume_free_mb)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, "Sales", "Sales", "ROWS", 10240m, 8192m, "D:\\", 512000m, 204800m);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                    t, ServerId, ServerName, "Nightly ETL", "22222222-2222-2222-2222-222222222222", true, t.AddMinutes(-30), 1800L, 600L, 900L, 42L, true, 300.0m);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, cpu_count, physical_memory_mb)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, "Enterprise Edition (64-bit)", "16.0.4135.4", 16, 131072L);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count, total_cpu_time_ms, total_logical_reads)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, "App", 12, 2, 10, 0, 5000L, 90000L);
+            }
+
+            foreach (var (name, json) in new[]
+                     {
+                         ("get_database_sizes", await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, ServerName)),
+                         ("get_running_jobs", await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName)),
+                         ("get_server_properties", await DarlingMcpDataTools.GetServerProperties(postgres, ServerName)),
+                         ("get_session_stats", await DarlingMcpSessionTools.GetSessionStats(postgres, ServerName)),
+                     })
+            {
+                var payload = Parse(json);
+                Assert.True(payload.TryGetProperty("captured_at", out var capturedAt), $"{name}: no captured_at on the payload");
+                Assert.Equal(Stamp(@base), capturedAt.GetString());
+                Assert.False(payload.TryGetProperty("collection_time", out _), $"{name}: still publishes the retired top-level collection_time beside captured_at");
+            }
 
             bodySucceeded = true;
         }

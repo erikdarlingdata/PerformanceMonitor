@@ -37,7 +37,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpSessionTools
 {
-    [McpServerTool(Name = "get_session_stats"), Description("Gets connection and session statistics grouped by application. Shows connection counts, running/sleeping/dormant breakdown, and aggregate resource usage per application.")]
+    [McpServerTool(Name = "get_session_stats"), Description("Gets connection and session statistics grouped by application. Shows connection counts, running/sleeping/dormant breakdown, and aggregate resource usage per application. LATEST IS A TIME: this reads the newest session snapshot, not a window, and captured_at is the instant it was collected - the connection counts are what was connected AT that stamp, not a peak or an average over anything.")]
     public static async Task<string> GetSessionStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -60,7 +60,12 @@ public sealed class DarlingMcpSessionTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
+                /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp. This was the
+                   one of the four pre-vocabulary stamps the web surface READ by the old key (server-tabs.js'
+                   SESSION_STATS "Collected" tile), which is what held all four out of the roster; the tile
+                   moves with it in the same PR, so it is a cut-over and not an alias - see
+                   DarlingMcpDataTools.GetServerProperties. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 summary = new
                 {
                     total_connections = totalConnections,

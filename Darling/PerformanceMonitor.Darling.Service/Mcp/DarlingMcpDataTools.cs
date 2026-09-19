@@ -1293,7 +1293,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, and clustering. Use for capacity planning and edition-aware recommendations.")]
+    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, and clustering. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is.")]
     public static async Task<string> GetServerProperties(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -1311,7 +1311,12 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = row.CollectionTime.ToString("o"),
+                /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp. This tool
+                   stamped itself as collection_time before that vocabulary existed and was carried as a
+                   named allowance; the web surface read none of its keys by that name, so the cut-over is
+                   clean - no alias, because the census is the contract and a second key for one instant is
+                   the drift it exists to refuse. */
+                captured_at = row.CollectionTime.ToString("o"),
                 edition = row.Edition,
                 engine_edition = row.EngineEdition,
                 product_version = row.ProductVersion,

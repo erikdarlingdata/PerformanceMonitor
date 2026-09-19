@@ -136,12 +136,12 @@ public sealed class DarlingMcpPgDatabaseTools
              + "violations and statement timeouts, not only explicit ROLLBACK statements.";
     }
 
-    [McpServerTool(Name = "get_pg_database_stats"), Description("Gets the per-database PostgreSQL counters from pg_stat_database, differenced across the requested window - four separate questions one cheap cluster-wide view answers. (1) TEMP FILE SPILLS: temp_files / temp_bytes are work that did not fit in work_mem and went to disk, which is the most common reason a PostgreSQL query is slow for a reason its plan shape does not show; on stock PostgreSQL this is the only temp-file evidence available anywhere, and on Aurora get_pg_top_queries carries the per-statement attribution. (2) CACHE HIT RATIO: blks_hit versus blks_read, conventionally targeted above 99% - reported as an upper bound rather than a disk measurement, because a miss here may still be served by the OS page cache or by Aurora's storage layer. (3) DEADLOCKS: a server-recorded count, so a zero really is an all-clear for the window rather than 'none was sampled'. (4) COMMIT vs ROLLBACK: the ratio a rollback storm shows up in. Every figure is a windowed difference clamped per interval, and a statistics RESET is reported explicitly (stats_reset_count, counter_rewind_count) rather than being allowed to surface as a negative rate or a spike. Per-database rows, plus PostgreSQL's own shared-relations row. Works on every PostgreSQL major and on a standby, where sorts spill exactly the way they do on a writer.")]
+    [McpServerTool(Name = "get_pg_database_stats"), Description("Gets the per-database PostgreSQL counters from pg_stat_database, differenced across the requested window - four separate questions one cheap cluster-wide view answers. (1) TEMP FILE SPILLS: temp_files / temp_bytes are work that did not fit in work_mem and went to disk, which is the most common reason a PostgreSQL query is slow for a reason its plan shape does not show; on stock PostgreSQL this is the only temp-file evidence available anywhere, and on Aurora get_pg_top_queries carries the per-statement attribution. (2) CACHE HIT RATIO: blks_hit versus blks_read, conventionally targeted above 99% - reported as an upper bound rather than a disk measurement, because a miss here may still be served by the OS page cache or by Aurora's storage layer. (3) DEADLOCKS: a server-recorded count, so a zero really is an all-clear for the window rather than 'none was sampled'. (4) COMMIT vs ROLLBACK: the ratio a rollback storm shows up in. Every figure is a windowed difference clamped per interval, and a statistics RESET is reported explicitly (stats_reset_count, counter_rewind_count) rather than being allowed to surface as a negative rate or a spike. Per-database rows, plus PostgreSQL's own shared-relations row. Works on every PostgreSQL major and on a standby, where sorts spill exactly the way they do on a writer. THE PAGE IS BOUNDED BY limit AND THE TOTALS ARE NOT: databases[] holds the databases_returned biggest spillers, truncated says the window held more, and total_temp_files / total_temp_bytes / total_deadlocks and cache_hit_pct are the WHOLE window's figures across every database that moved (database_count of them), computed in the same statement as the rows - so raising limit changes the rows and never the totals. The page's own sums travel as returned_temp_files / returned_temp_bytes / returned_deadlocks and cache_hit_pct_of_returned; the gap between them and the totals is what the cap left out.")]
     public static async Task<string> GetPgDatabaseStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum databases to return, most temp bytes first. Default 20.")] int limit = 20,
+        [Description("Maximum databases to return, most temp bytes first. Default 20. This bounds databases[] only - read truncated to know whether the window held more; every total_* and cache_hit_pct stays the whole window's whatever this is set to.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -156,115 +156,175 @@ public sealed class DarlingMcpPgDatabaseTools
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
-            var rows = await DarlingPgDatabaseReader.GetPgDatabaseStatsAsync(
-                postgres, resolved.ServerId, start, end, limit);
+            /* #3653 (after #3541 A7): the caller's limit + 1 as the fetch, the extra row as the observed
+               truncation signal - and the window's totals ride on the same statement, so the figures below
+               have a scope the cap cannot shrink. */
+            var page = await DarlingPgDatabaseReader.GetPgDatabaseStatsPageAsync(
+                postgres, resolved.ServerId, start, end, limit + 1);
 
-            if (rows.Count == 0)
+            if (page.Rows.Count == 0)
             {
                 return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end);
             }
 
-            var totalTempFiles = rows.Sum(r => r.TempFiles);
-            var totalTempBytes = rows.Sum(r => r.TempBytes);
-            var totalDeadlocks = rows.Sum(r => r.Deadlocks);
-            var totalHits = rows.Sum(r => r.BlksHit);
-            var totalReads = rows.Sum(r => r.BlksRead);
-            var totalAccesses = totalHits + totalReads;
-            var resetsSeen = rows.Sum(r => r.StatsResetCount) + rows.Sum(r => r.CounterRewindCount);
-
-            var databases = rows.Select(r =>
-            {
-                var accesses = r.BlksHit + r.BlksRead;
-                double? hitPct = accesses > 0 ? Math.Round((double)r.BlksHit / accesses * 100, 2) : null;
-                var transactions = r.XactCommit + r.XactRollback;
-
-                return new
-                {
-                    /* PostgreSQL's NULL name is a real value, not missing data, so it is LABELLED rather
-                       than passed through as null - a null here reads as "the read could not tell", which
-                       is the one thing it does not mean. */
-                    database = r.DatabaseName ?? SharedRelationsLabel,
-                    is_shared_relations = r.DatabaseName is null,
-                    temp_files = r.TempFiles,
-                    temp_bytes = r.TempBytes,
-                    avg_temp_file_bytes = r.TempFiles > 0 ? r.TempBytes / r.TempFiles : (long?)null,
-                    spill_finding = SpillFinding(r.TempFiles, r.TempBytes),
-                    blks_hit = r.BlksHit,
-                    blks_read = r.BlksRead,
-                    cache_hit_pct = hitPct,
-                    cache_finding = CacheHitFinding(hitPct),
-                    deadlocks = r.Deadlocks,
-                    xact_commit = r.XactCommit,
-                    xact_rollback = r.XactRollback,
-                    transactions,
-                    rollback_pct = transactions > 0
-                        ? Math.Round((double)r.XactRollback / transactions * 100, 2)
-                        : (double?)null,
-                    rollback_finding = RollbackFinding(r.XactCommit, r.XactRollback),
-                    /* The reset evidence, per database, because stats_reset is per database. Both counts
-                       travel even when zero: their absence from the payload would be indistinguishable from
-                       a reader that never looked. */
-                    stats_reset = r.StatsReset,
-                    stats_reset_count = r.StatsResetCount,
-                    counter_rewind_count = r.CounterRewindCount,
-                    counters_were_reset = r.StatsResetCount > 0 || r.CounterRewindCount > 0,
-                    reset_note = r.StatsResetCount > 0 || r.CounterRewindCount > 0
-                        ? "This database's statistics were RESET during the window (pg_stat_reset, or a "
-                        + "crash restart discarding them). The interval spanning the reset contributes zero "
-                        + "rather than a negative figure, so every total above is a LOWER BOUND on the real "
-                        + "activity - work done between the reset and the next collection is not counted."
-                        : null,
-                    sample_count = r.SampleCount,
-                    first_sample_at = r.FirstSampleAt?.ToString("o"),
-                    last_sample_at = r.LastSampleAt?.ToString("o"),
-                };
-            })
-            .ToList();
-
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                status = "database_activity",
-                database_count = databases.Count,
-                total_temp_files = totalTempFiles,
-                total_temp_bytes = totalTempBytes,
-                total_deadlocks = totalDeadlocks,
-                /* OF_RETURNED, not cluster_. Every total here is summed over the rows the read's LIMIT let
-                   through, so on a cluster with more active databases than `limit` this is a ratio over the
-                   top-N and NOT the instance's. The name says which, because a `cluster_` prefix would be a
-                   number that silently changes when a caller raises the limit - a field claiming more
-                   comprehensiveness than it structurally has. Computing the true instance ratio would cost a
-                   second unfiltered aggregate on every call for a figure the per-database rows already
-                   support, so the honest name is the fix rather than the extra query. */
-                cache_hit_pct_of_returned = totalAccesses > 0
-                    ? Math.Round((double)totalHits / totalAccesses * 100, 2)
-                    : (double?)null,
-                /* And the discriminator that makes the caveat actionable rather than fine print: when the
-                   limit bit, the caller knows the totals are a top-N and can raise it. */
-                limit_reached = databases.Count >= limit,
-                /* Named at the top so a reader sees it before drawing a conclusion from any total below. */
-                statistics_were_reset_in_window = resetsSeen > 0,
-                top_spiller = totalTempBytes > 0 ? databases[0].database : null,
-                note = (resetsSeen > 0
-                    ? "All figures are windowed differences, clamped per interval so a statistics reset "
-                    + "cannot produce a negative rate or a spike. At least one database's statistics WERE "
-                    + "reset in this window - see stats_reset_count / counter_rewind_count per database - "
-                    + "so its totals are lower bounds rather than exact counts."
-                    : "All figures are windowed differences, clamped per interval so a statistics reset "
-                    + "cannot produce a negative rate or a spike. No reset was detected in this window, so "
-                    + "the totals are complete for the samples collected.")
-                    + (databases.Count >= limit
-                        ? $" The row limit of {limit} was REACHED, so every total above covers only the "
-                        + "databases returned - more may have had activity. Raise limit for the full picture."
-                        : string.Empty),
-                databases,
-            }, McpHelpers.JsonOptions);
+            return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_pg_database_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the reason the
+    /// I/O tool's <c>BuildIoJson</c> is separate.
+    ///
+    /// <para><b>The totals are the window's, not the page's</b> (#3653; the #3541 A7 rule). Until this lane
+    /// the tool summed the rows it had fetched and published the sums as <c>total_*</c>, honestly caveated —
+    /// <c>limit_reached</c>, a note, a tile labelled "Databases returned", a ratio spelled
+    /// <c>_of_returned</c> — and carried by the A7 census as its one stated allowance. <paramref name="page"/>
+    /// now brings the window's figures off the same statement as its rows, so <c>total_temp_files</c> /
+    /// <c>total_temp_bytes</c> / <c>total_deadlocks</c> and <c>database_count</c> are the WINDOW's, the page's
+    /// own sums travel as <c>returned_*</c>, and the cluster-wide hit ratio the old comment declined to
+    /// compute ("a second unfiltered aggregate on every call") is <c>cache_hit_pct</c> for free.
+    /// <c>cache_hit_pct_of_returned</c> stays: it was the one honest spelling before, its name is still true,
+    /// and the pair beside each other is what shows a reader how much the cap hid.</para>
+    ///
+    /// <para><c>limit_reached</c> is gone and <c>truncated</c> is in its place, OBSERVED off the
+    /// <c>limit + 1</c> fetch rather than inferred from <c>Count &gt;= limit</c> — the #3594 class the
+    /// sibling PostgreSQL pages left in #3679. The only reader of the old key was the web tile, which moves
+    /// with it in the same PR. <paramref name="page"/> holds up to <c>limit + 1</c> rows; the extra one is
+    /// the truncation signal and is cut before the projection, so nothing the page reports is computed from
+    /// it.</para>
+    /// </summary>
+    internal static string BuildDatabaseStatsJson(
+        string serverName, int hoursBack, DarlingPgDatabaseReader.PgDatabasePage page, int limit)
+    {
+        var truncated = page.Rows.Count > limit;
+        var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
+
+        var windowAccesses = page.WindowTotalBlksHit + page.WindowTotalBlksRead;
+        var returnedTempFiles = rows.Sum(r => r.TempFiles);
+        var returnedTempBytes = rows.Sum(r => r.TempBytes);
+        var returnedDeadlocks = rows.Sum(r => r.Deadlocks);
+        var returnedHits = rows.Sum(r => r.BlksHit);
+        var returnedReads = rows.Sum(r => r.BlksRead);
+        var returnedAccesses = returnedHits + returnedReads;
+        /* Off the WINDOW, not the page (#3653): a database reset off the page makes every total above a lower
+           bound, and a flag summed over the rows returned would say no reset happened. */
+        var resetsSeen = page.WindowResetCount;
+
+        var databases = rows.Select(r =>
+        {
+            var accesses = r.BlksHit + r.BlksRead;
+            double? hitPct = accesses > 0 ? Math.Round((double)r.BlksHit / accesses * 100, 2) : null;
+            var transactions = r.XactCommit + r.XactRollback;
+
+            return new
+            {
+                /* PostgreSQL's NULL name is a real value, not missing data, so it is LABELLED rather
+                   than passed through as null - a null here reads as "the read could not tell", which
+                   is the one thing it does not mean. */
+                database = r.DatabaseName ?? SharedRelationsLabel,
+                is_shared_relations = r.DatabaseName is null,
+                temp_files = r.TempFiles,
+                temp_bytes = r.TempBytes,
+                avg_temp_file_bytes = r.TempFiles > 0 ? r.TempBytes / r.TempFiles : (long?)null,
+                spill_finding = SpillFinding(r.TempFiles, r.TempBytes),
+                blks_hit = r.BlksHit,
+                blks_read = r.BlksRead,
+                cache_hit_pct = hitPct,
+                cache_finding = CacheHitFinding(hitPct),
+                deadlocks = r.Deadlocks,
+                xact_commit = r.XactCommit,
+                xact_rollback = r.XactRollback,
+                transactions,
+                rollback_pct = transactions > 0
+                    ? Math.Round((double)r.XactRollback / transactions * 100, 2)
+                    : (double?)null,
+                rollback_finding = RollbackFinding(r.XactCommit, r.XactRollback),
+                /* The reset evidence, per database, because stats_reset is per database. Both counts
+                   travel even when zero: their absence from the payload would be indistinguishable from
+                   a reader that never looked. */
+                stats_reset = r.StatsReset,
+                stats_reset_count = r.StatsResetCount,
+                counter_rewind_count = r.CounterRewindCount,
+                counters_were_reset = r.StatsResetCount > 0 || r.CounterRewindCount > 0,
+                reset_note = r.StatsResetCount > 0 || r.CounterRewindCount > 0
+                    ? "This database's statistics were RESET during the window (pg_stat_reset, or a "
+                    + "crash restart discarding them). The interval spanning the reset contributes zero "
+                    + "rather than a negative figure, so every total above is a LOWER BOUND on the real "
+                    + "activity - work done between the reset and the next collection is not counted."
+                    : null,
+                sample_count = r.SampleCount,
+                first_sample_at = r.FirstSampleAt?.ToString("o"),
+                last_sample_at = r.LastSampleAt?.ToString("o"),
+            };
+        })
+        .ToList();
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            status = "database_activity",
+            /* #3541 A3 dialect: the page described as a page. database_count is the WINDOW's - how many
+               databases moved or were reset in it, COUNT(*) OVER () on the row statement - which is what
+               a count beside window totals has to mean; databases_returned is the page's; truncated is
+               observed off the limit + 1 fetch, never inferred from the cap. No time bounds: each row is
+               one database differenced across the whole window, so there is no page reach to report. */
+            database_count = page.WindowDatabaseCount,
+            databases_returned = databases.Count,
+            truncated,
+            order = "temp_bytes_desc_then_blks_read_desc",
+            /* The WINDOW's totals, across every database that moved - off the same statement as the
+               rows, so raising limit changes databases[] and never these. NOT the sums of the rows; those
+               are returned_* below. */
+            total_temp_files = page.WindowTotalTempFiles,
+            total_temp_bytes = page.WindowTotalTempBytes,
+            total_deadlocks = page.WindowTotalDeadlocks,
+            returned_temp_files = returnedTempFiles,
+            returned_temp_bytes = returnedTempBytes,
+            returned_deadlocks = returnedDeadlocks,
+            /* The cluster-wide hit ratio, over the window's blocks. Null when nothing was accessed - a
+               ratio of nothing is not a ratio of zero (#3642). */
+            cache_hit_pct = windowAccesses > 0
+                ? Math.Round((double)page.WindowTotalBlksHit / windowAccesses * 100, 2)
+                : (double?)null,
+            /* OF_RETURNED, and still spelled that way: this is the ratio over the rows the cap let through,
+               which was the one honest figure this payload could offer before the window's blocks rode on
+               the statement (#3613 named it as the house rule's other arm). Kept beside cache_hit_pct so
+               the gap between the two is visible - a hot top-N under a cold long tail, or the reverse. */
+            cache_hit_pct_of_returned = returnedAccesses > 0
+                ? Math.Round((double)returnedHits / returnedAccesses * 100, 2)
+                : (double?)null,
+            /* Named at the top so a reader sees it before drawing a conclusion from any total below - and
+               true of the window the totals cover, whether or not the reset database made the page. */
+            statistics_were_reset_in_window = resetsSeen > 0,
+            /* The page is ordered by spilled bytes, so its first row IS the window's biggest spiller
+               whenever anything in the window spilled - which is the window total's question, not the
+               page's. */
+            top_spiller = page.WindowTotalTempBytes > 0 ? databases[0].database : null,
+            note = (resetsSeen > 0
+                ? "All figures are windowed differences, clamped per interval so a statistics reset "
+                + "cannot produce a negative rate or a spike. At least one database's statistics WERE "
+                + "reset in this window - see stats_reset_count / counter_rewind_count per database, and "
+                + "raise limit if none of the databases returned shows one - so its totals, and every "
+                + "total_* above, are lower bounds rather than exact counts."
+                : "All figures are windowed differences, clamped per interval so a statistics reset "
+                + "cannot produce a negative rate or a spike. No reset was detected in this window, so "
+                + "the totals are complete for the samples collected.")
+                + " TOTALS ARE OF THE WINDOW, NOT OF THE PAGE: total_temp_files / total_temp_bytes / "
+                + "total_deadlocks and cache_hit_pct cover every database that moved in the window "
+                + $"({page.WindowDatabaseCount}), computed in the same statement as the rows; returned_* "
+                + "and cache_hit_pct_of_returned are the page's own figures."
+                + (truncated
+                    ? $" The row limit of {limit} was REACHED: databases[] holds the {limit} biggest "
+                    + "spillers and the totals above still cover every database - raise limit to see the "
+                    + "rest of the rows."
+                    : string.Empty),
+            databases,
+        }, McpHelpers.JsonOptions);
     }
 
     /// <summary>

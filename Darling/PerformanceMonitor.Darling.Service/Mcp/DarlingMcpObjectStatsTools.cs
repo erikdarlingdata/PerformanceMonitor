@@ -276,7 +276,7 @@ public sealed class DarlingMcpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure.")]
+    [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure. LATEST IS A TIME: this reads the newest size snapshot, not a window, and captured_at is the instant it was collected - a volume's free space here is what it was AT that stamp, and a file that grew since is not reflected until the next collection.")]
     public static async Task<string> GetDatabaseSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -294,7 +294,9 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
+                /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
+                   DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
                 databases = rows
                     .GroupBy(r => r.DatabaseName)

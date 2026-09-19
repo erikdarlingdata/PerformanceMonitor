@@ -684,24 +684,6 @@ export const SERVER_TABS = [
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
         1
       ),
-      line(
-        "Memory Grants",
-        "get_memory_grants",
-        { server, hours: ctx.hours },
-        "grants",
-        "collection_time",
-        GRANT_SERIES,
-        { subtitle: ctx.label, format: "mb", emptyText: "No memory grant samples in this window." }
-      ),
-      table(
-        "Resource Semaphore",
-        "get_resource_semaphore",
-        { server, hours: ctx.hours },
-        "grants",
-        SEMAPHORE_COLUMNS,
-        ctx.label,
-        "No resource-semaphore samples in this window."
-      ),
       table(
         "Memory Pressure Events",
         "get_memory_pressure_events",
@@ -712,6 +694,56 @@ export const SERVER_TABS = [
         "No memory pressure events in this window — the healthy state for this read.",
         1
       ),
+      /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
+         pair answers with `grants[]` - the NEWEST snapshot in the window, one row per pool (per semaphore and
+         pool on the semaphore lens), every row stamped with the same instant - and `window[]` - one row per
+         pool aggregating EVERY snapshot in the window: the most sessions ever seen waiting and when, the peak
+         granted, the floor of available, timeouts and forced grants summed across the window's intervals.
+
+         Until #3653 the Memory Grants panel drew `grants[]` as a LINE chart under the page's range label.
+         Every row carried the same collection_time, so the "series" was one x-position with a dot per pool,
+         captioned as if it spanned the window - one instant drawn as a trend. The Resource Semaphore table
+         beside it told the same lie more quietly: `grants[]` rows under a window subtitle. `window[]` is not a
+         series either - it is the window's aggregates per pool, which is what the read chose to store the
+         deltas for - so the honest rendering is two TABLES per read, window first: "was there pressure",
+         then "is there pressure now", the reading order the read's own description gives. A per-collection
+         trend would need a read this service does not serve; drawing one instant as one is not it. */
+      ...fanout("get_memory_grants", { server, hours: ctx.hours }, [
+        {
+          title: "Memory Grant Pressure",
+          subtitle: ctx.label + ", every snapshot in the window, per resource pool",
+          viz: "table",
+          rowsKey: "window",
+          columns: GRANT_WINDOW_COLUMNS,
+          emptyText: "No memory grant snapshots in this window.",
+        },
+        {
+          title: "Memory Grants",
+          subtitle: "newest snapshot in " + ctx.label + ", per resource pool - a moment, not the window",
+          viz: "table",
+          rowsKey: "grants",
+          columns: GRANT_COLUMNS,
+          emptyText: "No memory grant snapshot in this window.",
+        },
+      ]),
+      ...fanout("get_resource_semaphore", { server, hours: ctx.hours }, [
+        {
+          title: "Resource Semaphore Pressure",
+          subtitle: ctx.label + ", every snapshot in the window, per semaphore and pool",
+          viz: "table",
+          rowsKey: "window",
+          columns: SEMAPHORE_WINDOW_COLUMNS,
+          emptyText: "No resource-semaphore snapshots in this window.",
+        },
+        {
+          title: "Resource Semaphore",
+          subtitle: "newest snapshot in " + ctx.label + ", per semaphore and pool - a moment, not the window",
+          viz: "table",
+          rowsKey: "grants",
+          columns: SEMAPHORE_COLUMNS,
+          emptyText: "No resource-semaphore snapshot in this window.",
+        },
+      ]),
       ...fanout("get_plan_cache_bloat", { server, hours: ctx.hours }, [
         { title: "Plan Cache", subtitle: ctx.label, viz: "stat", stats: PLAN_CACHE_STATS },
         {
@@ -1636,7 +1668,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Database Activity",
-          subtitle: ctx.label + ", totals over the databases returned",
+          subtitle: ctx.label + ", totals over every database that moved",
           viz: "stat",
           stats: PG_DATABASE_STATS,
           span: 2,
@@ -2304,7 +2336,10 @@ const SESSION_STATS = [
   { key: "summary.total_sleeping", label: "Sleeping", format: "int" },
   { key: "summary.total_dormant", label: "Dormant", format: "int" },
   { key: "summary.distinct_applications", label: "Applications", format: "int" },
-  { key: "collection_time", label: "Collected", format: "reltime", small: true },
+  /* #3653: the snapshot's stamp under the census's one spelling. get_session_stats stamped itself as
+     `collection_time` before #3637 fixed the vocabulary, and this tile reading the old key was the only
+     thing that kept the read (and its three siblings) out of the captured_at roster. */
+  { key: "captured_at", label: "Collected", format: "reltime", small: true },
 ];
 
 /* #3013: the alerting subsystem's own swallowed store reads. Its own panel object (not just a stats array)
@@ -2415,12 +2450,6 @@ const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
    running under one execution a second, which would draw a flat line along the axis for a server that is
    simply quiet rather than idle. */
 const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
-
-const GRANT_SERIES = [
-  { key: "granted_memory_mb", label: "Granted" },
-  { key: "used_memory_mb", label: "Used" },
-  { key: "available_memory_mb", label: "Available" },
-];
 
 const TEMPDB_SERIES = [
   { key: "total_reserved_mb", label: "Reserved" },
@@ -2714,6 +2743,43 @@ const PVS_COLUMNS = [
 const CLERK_COLUMNS = [
   { key: "clerk_type", label: "Clerk" },
   { key: "memory_mb", label: "Memory", format: "mb" },
+];
+
+/* #3653: the `window[]` half of the two memory-grant reads (#3637) - one row per pool aggregating EVERY
+   snapshot in the window. Peak waiters and its instant lead because "how many sessions ever queued for a
+   grant, and when" is the question the window exists to answer; the sums come last because they are the
+   per-interval deltas added up across the window, not a counter read at one instant. `snapshots_in_window`
+   is the denominator that says how much of the window the peaks were taken over. */
+const GRANT_WINDOW_COLUMNS = [
+  { key: "pool_id", label: "Pool", format: "int" },
+  { key: "snapshots_in_window", label: "Snapshots", format: "int" },
+  { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
+  { key: "peak_waiters_at", label: "Peak at", format: "time" },
+  { key: "peak_granted_memory_mb", label: "Peak granted", format: "mb" },
+  { key: "min_available_memory_mb", label: "Min available", format: "mb" },
+  { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
+  { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
+  { key: "first_snapshot_at", label: "First", format: "time", small: true },
+  { key: "last_snapshot_at", label: "Last", format: "time", small: true },
+];
+
+/* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
+   semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
+const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "int" }, ...GRANT_WINDOW_COLUMNS];
+
+/* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
+   Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
+   instant itself. */
+const GRANT_COLUMNS = [
+  { key: "collection_time", label: "Time", format: "time" },
+  { key: "pool_id", label: "Pool", format: "int" },
+  { key: "granted_memory_mb", label: "Granted", format: "mb" },
+  { key: "used_memory_mb", label: "Used", format: "mb" },
+  { key: "available_memory_mb", label: "Available", format: "mb" },
+  { key: "grantee_count", label: "Grantees", format: "int" },
+  { key: "waiter_count", label: "Waiters", format: "int" },
+  { key: "timeout_error_count_delta", label: "Timeouts", format: "int" },
+  { key: "forced_grant_count_delta", label: "Forced grants", format: "int" },
 ];
 
 const SEMAPHORE_COLUMNS = [
@@ -3138,17 +3204,21 @@ const PG_BLOCKING_STATS = [
   { key: "cycles_sampled", label: "Cycles", format: "int" },
 ];
 
-/* Every total here is summed over the rows the read's LIMIT let through, and the read names that in the
-   field itself (`cache_hit_pct_of_returned`), so the labels do too rather than promising a cluster figure the
-   number structurally is not. `limit_reached` is what turns that caveat into something a reader can act on. */
+/* Every total here is the WINDOW's (#3653): the read computes them in the same statement as the rows, above
+   its LIMIT, so "Temp files" is every database that moved and not the twenty the grid below shows. Until
+   #3653 these were sums over the returned rows and the labels said so ("Databases returned", "Cache hit %
+   (of returned)") - the A7 census carried that as its one stated allowance, and relabelling here is half of
+   what retired it. `database_count` is the window's count and `databases_returned` the page's; `truncated`
+   is OBSERVED by the read (a limit + 1 fetch), not inferred from the cap. */
 const PG_DATABASE_STATS = [
-  { key: "database_count", label: "Databases returned", format: "int" },
+  { key: "database_count", label: "Databases active", format: "int" },
+  { key: "databases_returned", label: "Databases returned", format: "int" },
   { key: "total_temp_files", label: "Temp files", format: "int" },
   { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
   { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
   { key: "total_deadlocks", label: "Deadlocks", format: "int" },
-  { key: "cache_hit_pct_of_returned", label: "Cache hit % (of returned)", format: "num2" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "cache_hit_pct", label: "Cache hit %", format: "num2" },
+  { key: "truncated", label: "Window held more", format: "bool" },
   /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
      and a reader has to see that before drawing a conclusion from any of them. */
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
@@ -3199,8 +3269,12 @@ const PG_INDEX_USAGE_STATS = [
   { key: "limit_reached", label: "Limit reached", format: "bool" },
 ];
 
+/* `total_reads` / `total_read_time_ms` are the WINDOW's (#3613); the combination count is the PAGE's and is
+   labelled as such - the read spells it `combinations_returned` since #3653, the same `<noun>s_returned` key
+   every other paged tool uses, so a bare "Combinations" tile beside two window totals cannot be read as the
+   window's third. */
 const PG_IO_SUMMARY_STATS = [
-  { key: "combination_count", label: "Combinations", format: "int" },
+  { key: "combinations_returned", label: "Combinations returned", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "total_read_time_ms", label: "Read time", format: "ms" },
   { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true },

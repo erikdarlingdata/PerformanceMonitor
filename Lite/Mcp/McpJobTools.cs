@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpJobTools
 {
-    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the collection_time on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree.")]
+    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the captured_at on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree. LATEST IS A TIME: this reads the newest running-jobs snapshot, not a window, and captured_at is the instant it was collected - a job listed here was running AT that stamp, and current_duration_seconds is how long it had been running AT that stamp, not now.")]
     public static async Task<string> GetRunningJobs(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -73,7 +73,9 @@ public sealed class McpJobTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = rows[0].CollectionTime.ToString("o"),
+                /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
+                   McpServerInfoTools.GetServerProperties for why it is a cut-over and not an alias. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 running_job_count = rows.Count,
                 long_running_count = rows.Count(r => r.IsRunningLong),
                 jobs = result

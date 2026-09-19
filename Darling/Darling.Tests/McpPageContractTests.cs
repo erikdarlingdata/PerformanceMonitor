@@ -462,23 +462,22 @@ public sealed class McpPageContractTests
     /// <c>get_plan_cache_stats</c>) and a census that flagged those would be asserting a rule the finding did
     /// not state.
     ///
-    /// <para><b>One stated allowance.</b> <c>get_pg_database_stats</c> publishes <c>total_temp_files</c> /
-    /// <c>total_temp_bytes</c> / <c>total_deadlocks</c> summed over its top-N page — beside <c>limit_reached</c>,
-    /// a note that says the totals cover only the databases returned, a <c>database_count</c> the web tile
-    /// labels "Databases returned", and a share it already spells <c>_of_returned</c>. Honest by disclosure
-    /// rather than by name; moving it to the window idiom means relabelling the web tile's figures, which
-    /// sits outside the lane that added this census. Named here so it fails loudly the day the allowance is
-    /// no longer needed, rather than being carried silently.</para>
+    /// <para><b>No allowances.</b> When this census landed (#3613) it carried ONE: <c>get_pg_database_stats</c>
+    /// published <c>total_temp_files</c> / <c>total_temp_bytes</c> / <c>total_deadlocks</c> summed over its
+    /// top-N page — honest by disclosure (<c>limit_reached</c>, a note, a web tile labelled "Databases
+    /// returned", a share spelled <c>_of_returned</c>) rather than by name, because moving it to the window
+    /// idiom meant relabelling the web tile, outside that lane's boundary. #3653 moved it: the reader carries
+    /// the window's totals on the same statement (<see cref="TheDatabaseStatsRead_CarriesItsWindowTotalsOnTheSameStatement_AboveTheCap"/>),
+    /// the tool publishes them as <c>total_*</c> and the page's sums as <c>returned_*</c>
+    /// (<see cref="TheDatabaseStatsTool_PublishesTheWindowAsTotal_AndThePageAsReturned"/>), and the tile
+    /// says so. The set below is therefore EMPTY and kept as a set rather than deleted: the day a tool needs
+    /// an allowance again, its entry and its reason go here, and the control that every entry is still used
+    /// goes on refusing a stale one.</para>
     /// </summary>
     [Fact]
     public void NoPagedTool_DividesByOrPublishesAPageSumAsATotal_OnEitherSku()
     {
-        var allowedPageSummedTotals = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "get_pg_database_stats:total_temp_files",
-            "get_pg_database_stats:total_temp_bytes",
-            "get_pg_database_stats:total_deadlocks",
-        };
+        var allowedPageSummedTotals = new HashSet<string>(StringComparer.Ordinal);
         var allowancesUsed = new HashSet<string>(StringComparer.Ordinal);
         var examined = 0;
 
@@ -567,6 +566,97 @@ public sealed class McpPageContractTests
         Assert.Matches(WindowTotalColumn, "SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms");
         Assert.Matches(WindowTotalColumn, "SUM(user_ms + system_ms) OVER () AS window_total_cpu_ms");
         Assert.DoesNotMatch(WindowTotalColumn, "GREATEST(reads - LAG(reads) OVER series, 0) AS d_reads");
+    }
+
+    /* ───────────────────────── #3653: get_pg_database_stats joins the window idiom ───────────────────────── */
+
+    /// <summary>
+    /// The A7 census's one allowance, retired. <c>get_pg_database_stats</c> publishes TOTALS rather than
+    /// per-row shares of one (its per-database <c>cache_hit_pct</c> is that database's own ratio), so it is
+    /// not a <see cref="PercentTools"/> row; the rule for a total is the same as for a denominator, and this
+    /// pins it in the same three places. The reader: every <c>total_*</c> the tool publishes has a
+    /// <c>... OVER () AS window_total_*</c> column on the row statement, the window's database count rides
+    /// beside them, and the cap is a parameter below the window aggregates.
+    /// </summary>
+    [Fact]
+    public void TheDatabaseStatsRead_CarriesItsWindowTotalsOnTheSameStatement_AboveTheCap()
+    {
+        var sql = DarlingPgDatabaseReader.PgDatabaseSql;
+        /* Column-aligned and line-wrapped in the source; compared with whitespace runs collapsed so neither
+           the alignment nor the wrap is the pin. */
+        var flat = Regex.Replace(sql, @"\s+", " ");
+
+        foreach (var total in new[] { "temp_files", "temp_bytes", "deadlocks", "blks_hit", "blks_read" })
+        {
+            /* The window aggregate is over the SAME grouped sum the row reports - not a second expression
+               that could drift from it. */
+            Assert.Contains($"CAST(SUM(coalesce(SUM(d_{total}), 0)) OVER () AS bigint) AS window_total_{total}", flat, StringComparison.Ordinal);
+        }
+        Assert.Contains("CAST(COUNT(*) OVER () AS integer) AS window_database_count", flat, StringComparison.Ordinal);
+        /* The reset flag's window half: both signals, summed across every database in the window. */
+        Assert.Contains("CAST(SUM(count(*) FILTER (WHERE reset_here) + count(*) FILTER (WHERE rewound_here)) OVER () AS integer) AS window_reset_count", flat, StringComparison.Ordinal);
+        Assert.Matches(WindowTotalColumn, sql);
+
+        Assert.False(LiteralLimit.IsMatch(sql), $"PgDatabaseSql caps with a literal: {LiteralLimit.Match(sql).Value}");
+        Assert.True(ParameterLimit.IsMatch(sql.TrimEnd()), "PgDatabaseSql does not end in a parameterised LIMIT");
+        Assert.True(sql.IndexOf("OVER ()", StringComparison.Ordinal) < sql.LastIndexOf("LIMIT", StringComparison.Ordinal),
+            "the window aggregates sit below the LIMIT, so they would be the page's");
+        /* And below the HAVING: the totals are over the databases that MOVED, which is the same population the
+           rows are drawn from - a window aggregate above the HAVING would count idle databases into the total
+           that no row could ever show. */
+        Assert.True(sql.IndexOf("OVER ()", StringComparison.Ordinal) < sql.IndexOf("HAVING", StringComparison.Ordinal),
+            "the OVER () columns must be in the final select list, which PostgreSQL evaluates after HAVING");
+    }
+
+    /// <summary>
+    /// The tool body: <c>total_*</c> comes off the page record's window figures and never off a sum of the
+    /// rows; the page's sums reach only <c>returned_*</c>; <c>database_count</c> is the window's and
+    /// <c>databases_returned</c> the page's; truncation is OBSERVED off a <c>limit + 1</c> fetch and the
+    /// inferred <c>limit_reached</c> is gone; the cluster ratio is <c>cache_hit_pct</c> and the page's stays
+    /// spelled <c>_of_returned</c>; and the description says which is which in the A7 sentence's shape.
+    /// </summary>
+    [Fact]
+    public void TheDatabaseStatsTool_PublishesTheWindowAsTotal_AndThePageAsReturned()
+    {
+        var body = Strip(ToolBody(ReadRepoFileLf(DarlingFileOf(typeof(DarlingMcpPgDatabaseTools)).Split('/')), "get_pg_database_stats"));
+
+        Assert.Matches(PageTruncationObserved, body);
+        Assert.Contains("limit + 1", body, StringComparison.Ordinal);
+        Assert.DoesNotMatch(TruncationInferred, body);
+        Assert.DoesNotContain("limit_reached", body, StringComparison.Ordinal);
+
+        Assert.Contains("database_count = page.WindowDatabaseCount", body, StringComparison.Ordinal);
+        Assert.Contains("databases_returned =", body, StringComparison.Ordinal);
+        Assert.Contains("total_temp_files = page.WindowTotalTempFiles", body, StringComparison.Ordinal);
+        Assert.Contains("total_temp_bytes = page.WindowTotalTempBytes", body, StringComparison.Ordinal);
+        Assert.Contains("total_deadlocks = page.WindowTotalDeadlocks", body, StringComparison.Ordinal);
+        Assert.Contains("returned_temp_files =", body, StringComparison.Ordinal);
+        Assert.Contains("returned_temp_bytes =", body, StringComparison.Ordinal);
+        Assert.Contains("returned_deadlocks =", body, StringComparison.Ordinal);
+        Assert.Contains("cache_hit_pct = windowAccesses", body, StringComparison.Ordinal);
+        Assert.Contains("page.WindowTotalBlksHit", body, StringComparison.Ordinal);
+        Assert.Contains("cache_hit_pct_of_returned =", body, StringComparison.Ordinal);
+        Assert.Contains("var resetsSeen = page.WindowResetCount;", body, StringComparison.Ordinal);
+
+        /* The A7 matchers on this body: no sum of the fetched rows reaches a total_* key or a share. */
+        var pageSums = PageSumLocal.Matches(body).Select(m => m.Groups[1].Value).ToArray();
+        Assert.NotEmpty(pageSums);
+        foreach (var sum in pageSums)
+        {
+            Assert.False(TotalFromLocal(sum).IsMatch(body), $"get_pg_database_stats: a total_* key is `{sum}`, a sum of the rows fetched");
+            Assert.False(ShareOverLocal(sum).IsMatch(body), $"get_pg_database_stats: a share divides by `{sum}`, a sum of the rows fetched");
+        }
+
+        var method = ToolMethod(typeof(DarlingMcpPgDatabaseTools), "get_pg_database_stats");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("THE PAGE IS BOUNDED BY limit AND THE TOTALS ARE NOT", description, StringComparison.Ordinal);
+        foreach (var key in new[] { "truncated", "databases_returned", "database_count", "total_temp_files", "total_temp_bytes", "total_deadlocks", "cache_hit_pct", "returned_temp_files", "cache_hit_pct_of_returned" })
+        {
+            Assert.Contains(key, description, StringComparison.Ordinal);
+        }
+        var limit = method.GetParameters().Single(p => p.Name == "limit").GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("truncated", limit, StringComparison.Ordinal);
+        Assert.Contains("whole window", limit, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── #3653: the Darling-only PostgreSQL state pages ───────────────────────── */
@@ -1286,7 +1376,7 @@ VALUES ($1, $2, $3, $4, 'client backend', 'relation', $5, $6, $7, 5, 1, 0, 0, 1,
             AssertPercentPair(
                 await DarlingMcpPgIoTools.GetPgIoStats(postgres, ServerName, 4, 1),
                 await DarlingMcpPgIoTools.GetPgIoStats(postgres, ServerName, 4, 3),
-                "combination_count", "total_reads", "returned_reads", "returned_pct_of_total_reads", "combinations", "pct_of_total_reads", hotQueryId: null);
+                "combinations_returned", "total_reads", "returned_reads", "returned_pct_of_total_reads", "combinations", "pct_of_total_reads", hotQueryId: null);
 
             /* The second I/O denominator: read time, inferred as tracked because non-zero times are seeded
                and no configuration row says otherwise. 100 ms across the window, 60 on the one-row page. */
