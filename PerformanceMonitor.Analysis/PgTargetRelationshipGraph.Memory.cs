@@ -15,8 +15,16 @@ namespace PerformanceMonitor.Analysis;
 /// </summary>
 public sealed partial class PgTargetRelationshipGraph
 {
-    /* filled by lane 2 */
+    /// <summary>
+    /// The memory / I-O chain, filled by lane 2: <c>PG_BUFFER_CACHE_PRESSURE → CONFIG_PG_SHARED_BUFFERS</c> —
+    /// the composite's measured shortage leads to the knob, when the knob is at the initdb default. The
+    /// predicate reads the knob's verdict (<c>BaseSeverity &gt; 0</c>), never a size of its own; the bar is
+    /// <c>PgTargetScorer.Config.cs</c>'s with its lineage. Lane 5 adds <c>IO:DataFileRead</c> → the composite.
+    /// </summary>
     private partial void BuildMemoryEdges()
     {
+        AddEdge(PgTargetFactKeys.BufferCachePressure, PgTargetFactKeys.ConfigSharedBuffers, "buffer_cache_pressure",
+            "shared_buffers at the initdb default — the cache under pressure was never sized for this host",
+            facts => facts.TryGetValue(PgTargetFactKeys.ConfigSharedBuffers, out var knob) && knob.BaseSeverity > 0);
     }
 }
