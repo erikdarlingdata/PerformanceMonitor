@@ -7,14 +7,17 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
 using WebHost = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService;
@@ -327,6 +330,8 @@ public sealed class DarlingStartupArgsTests
     [InlineData("--backfill-rollups", true)]
     [InlineData("--collapse-legacy-slices", true)]
     [InlineData("--recompress-plan-dim", true)]
+    [InlineData("--enable-collector", true)]
+    [InlineData("--disable-collector", true)]
     [InlineData("--version", false)]   // its own classification, not a "known verb"
     [InlineData("--help", false)]
     [InlineData("--nonsense", false)]
@@ -1691,5 +1696,508 @@ public sealed class DarlingMissingCredentialMessageTests
         }
 
         return count;
+    }
+}
+
+/// <summary>
+/// The <c>--enable-collector</c> / <c>--disable-collector</c> verbs (#3752): the pure half — verb recognition, the
+/// strict argument grammar, the canonical-name rule, the plan IDENTITY with the executor, the no-store refusals
+/// and their stream discipline, the read-back rendering, the read-back SQL dialect, and the README entry.
+///
+/// <para><b>The load-bearing pin is the plan identity.</b> The issue's table found <c>config_collector_schedules</c>
+/// written by the service's <c>DarlingCommandExecutor</c> and by nothing headless; the fix's whole claim is that
+/// the verb adds a CALLER, not a second writer. So the verb's plan is asserted EQUAL to the executor's plan for the
+/// same command — SQL, parameters, success status — rather than merely "contains ON CONFLICT", and the unknown-name
+/// refusal is asserted to be the executor's own sentence. A copy of the SQL would pass a shape test; it cannot pass
+/// this one without being kept byte-identical forever, which is the point.</para>
+///
+/// <para>The store half — the write landing, the override columns surviving, the rows reading back — is
+/// <see cref="DarlingCollectorToggleVerbLivePostgresTests"/>.</para>
+/// </summary>
+public sealed class DarlingCollectorToggleVerbTests
+{
+    [Theory]
+    [InlineData("--enable-collector", true)]
+    [InlineData("--ENABLE-COLLECTOR", true)]
+    [InlineData("--disable-collector", false)]
+    [InlineData("--DISABLE-collector", false)]
+    public void BothVerbsAreRecognized_CaseInsensitively_AndDispatchedRatherThanStartingTheHost(string arg, bool enable)
+    {
+        Assert.Equal(enable, DarlingCliCommands.IsEnableCollectorVerb(arg));
+        Assert.Equal(!enable, DarlingCliCommands.IsDisableCollectorVerb(arg));
+
+        /* The #1581 contract: a recognized verb dispatches; it never falls through to a real service startup. The
+           #1912 drift (a verb with a dispatch block IsKnownVerb never learned) is what the second line catches. */
+        Assert.True(DarlingCliCommands.IsKnownVerb(arg));
+        Assert.Equal(StartupAction.RunKnownVerb, DarlingCliCommands.ClassifyStartupArgs(new[] { arg, "wait_stats" }));
+    }
+
+    [Fact]
+    public void TheVerbsAreDiscoverable_FromHelp_WithTheirGrammar()
+    {
+        var usage = DarlingCliCommands.UsageText();
+        Assert.Contains("--enable-collector <name> [--server <server>] [--config <path>]", usage, StringComparison.Ordinal);
+        Assert.Contains("--disable-collector <name> [--server <server>] [--config <path>]", usage, StringComparison.Ordinal);
+        /* The default scope is stated where the verb is discovered, not only in the README. */
+        Assert.Contains("fleet-wide by default", usage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Program.cs dispatches both verbs to <c>ToggleCollectorAsync</c> — pinned structurally, as the sibling verbs
+    /// are, because the classifier-to-dispatch seam is where #1912's drift lived and no test calling
+    /// <c>DarlingCliCommands</c> directly can see it. And pinned that the dispatch carries NO Windows guard: the
+    /// --add-server posture (Windows is needed only for a MANAGED store credential, which the verb checks itself),
+    /// so a Linux host on bring-your-own Postgres keeps the verb.
+    /// </summary>
+    [Fact]
+    public void ProgramDispatchesBothVerbs_WithoutAWindowsGuard_TheAddServerPosture()
+    {
+        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
+
+        var at = program.IndexOf("DarlingCliCommands.IsEnableCollectorVerb(args[0])", StringComparison.Ordinal);
+        Assert.True(at >= 0, "Program.cs no longer dispatches --enable-collector (#3752)");
+        Assert.Contains("DarlingCliCommands.IsDisableCollectorVerb(args[0])", program, StringComparison.Ordinal);
+
+        var block = program[at..Math.Min(program.Length, at + 400)];
+        Assert.Contains("DarlingCliCommands.ToggleCollectorAsync(", block, StringComparison.Ordinal);
+        Assert.Contains("args[1..]", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("OperatingSystem.IsWindows()", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("requires Windows", block, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the strict argument grammar ---------------- */
+
+    [Fact]
+    public void Parse_NameOnly_IsFleetWide_NoConfig()
+    {
+        Assert.True(DarlingCliCommands.TryParseCollectorToggleArgs(
+            "--enable-collector", new[] { "long_query_completions" }, out var name, out var server, out var config, out var error));
+        Assert.Equal("long_query_completions", name);
+        Assert.Null(server);
+        Assert.Null(config);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void Parse_ServerAndConfig_InEitherOrder()
+    {
+        Assert.True(DarlingCliCommands.TryParseCollectorToggleArgs(
+            "--enable-collector", new[] { "wait_stats", "--server", "sql01", "--config", @"C:\x\darling.json" },
+            out var name, out var server, out var config, out _));
+        Assert.Equal("wait_stats", name);
+        Assert.Equal("sql01", server);
+        Assert.Equal(@"C:\x\darling.json", config);
+
+        Assert.True(DarlingCliCommands.TryParseCollectorToggleArgs(
+            "--disable-collector", new[] { "--SERVER", "sql01", "--Config", "d.json", "wait_stats" },
+            out name, out server, out config, out _));
+        Assert.Equal("wait_stats", name);
+        Assert.Equal("sql01", server);
+        Assert.Equal("d.json", config);
+    }
+
+    /// <summary>
+    /// Every refusal: no name; two names; an unknown flag (NOT taken as a name — the later "unknown collector
+    /// '--sever'" would be the worse message); <c>--server</c> / <c>--config</c> with no value or with the next
+    /// flag where the value should be. Each names the verb the operator typed.
+    /// </summary>
+    [Theory]
+    [InlineData(new string[0], "needs a collector name")]
+    [InlineData(new[] { "wait_stats", "query_stats" }, "ONE collector name")]
+    [InlineData(new[] { "--sever", "sql01" }, "Unknown option")]
+    [InlineData(new[] { "wait_stats", "--server" }, "--server needs a server name")]
+    [InlineData(new[] { "wait_stats", "--server", "--config", "x" }, "--server needs a server name")]
+    [InlineData(new[] { "wait_stats", "--config" }, "--config needs a path")]
+    public void Parse_Refuses_WithTheVerbNamed(string[] rest, string expectedFragment)
+    {
+        Assert.False(DarlingCliCommands.TryParseCollectorToggleArgs(
+            "--disable-collector", rest, out _, out _, out _, out var error));
+        Assert.NotNull(error);
+        Assert.Contains(expectedFragment, error, StringComparison.Ordinal);
+        Assert.Contains("--disable-collector", error, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the canonical spelling ---------------- */
+
+    /// <summary>
+    /// The dictionary matches case-insensitively and so does the runner's ResolveSchedule, but the store's
+    /// partial unique indexes compare <c>collector_name</c> exactly — so the verb must write the dictionary's
+    /// spelling or <c>Wait_Stats</c> and <c>wait_stats</c> become two fleet rows and first-match picks one.
+    /// </summary>
+    [Theory]
+    [InlineData("wait_stats", "wait_stats")]
+    [InlineData("Wait_Stats", "wait_stats")]
+    [InlineData("  LONG_QUERY_COMPLETIONS ", "long_query_completions")]
+    [InlineData("not_a_collector", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void CanonicalCollectorName_ReturnsTheDictionaryKey_OrNull(string? typed, string? expected) =>
+        Assert.Equal(expected, DarlingCliCommands.CanonicalCollectorName(typed));
+
+    /* ---------------- plan identity with the executor (the ONE-WRITE-PATH pin) ---------------- */
+
+    [Fact]
+    public void BuildCollectorToggleCommand_IsTheCommandPlanesRow_MinusTheQueue()
+    {
+        var enable = DarlingCliCommands.BuildCollectorToggleCommand(enable: true, "long_query_completions", serverId: null);
+        Assert.Equal("enable_collector", enable.CommandType);
+        Assert.Null(enable.TargetServerId);
+        Assert.Equal("cli", enable.RequestedBy);
+        using (var args = JsonDocument.Parse(enable.ArgsJson!))
+        {
+            /* The executor reads collector_name (or collectorName); the verb writes the snake_case the Viewer
+               and the executor's own tests use. */
+            Assert.Equal("long_query_completions", args.RootElement.GetProperty("collector_name").GetString());
+        }
+
+        var disable = DarlingCliCommands.BuildCollectorToggleCommand(enable: false, "wait_stats", serverId: 7);
+        Assert.Equal("disable_collector", disable.CommandType);
+        Assert.Equal(7, disable.TargetServerId);
+    }
+
+    [Fact]
+    public void PlanCollectorToggle_FleetWide_EqualsTheExecutorsPlan_ForTheSameCommand()
+    {
+        var verbPlan = DarlingCliCommands.PlanCollectorToggle(enable: true, "long_query_completions", serverId: null);
+        var executorPlan = DarlingCommandExecutor.ResolvePlan(
+            new ClaimedCommand(1, "enable_collector", null, "{\"collector_name\":\"long_query_completions\"}", "tester"));
+
+        Assert.Equal(CommandKind.StoreWrite, verbPlan.Kind);
+        Assert.Equal(executorPlan.Kind, verbPlan.Kind);
+        Assert.Equal(executorPlan.Sql, verbPlan.Sql);
+        Assert.Equal(executorPlan.Parameters, verbPlan.Parameters);
+        Assert.Equal(executorPlan.SuccessStatus, verbPlan.SuccessStatus);
+
+        /* And it IS the fleet arbiter the executor's own tests pin — said here too so a reader of this test
+           alone sees which row the default scope writes. */
+        Assert.Contains("ON CONFLICT (collector_name) WHERE server_id IS NULL", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.Contains("VALUES (NULL, $1, TRUE)", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.Equal("collector enabled (fleet-wide)", verbPlan.SuccessStatus);
+    }
+
+    [Fact]
+    public void PlanCollectorToggle_PerServer_EqualsTheExecutorsPlan_ForTheSameCommand()
+    {
+        var verbPlan = DarlingCliCommands.PlanCollectorToggle(enable: false, "wait_stats", serverId: 42);
+        var executorPlan = DarlingCommandExecutor.ResolvePlan(
+            new ClaimedCommand(1, "disable_collector", 42, "{\"collector_name\":\"wait_stats\"}", "tester"));
+
+        Assert.Equal(CommandKind.StoreWrite, verbPlan.Kind);
+        Assert.Equal(executorPlan.Sql, verbPlan.Sql);
+        Assert.Equal(executorPlan.Parameters, verbPlan.Parameters);
+        Assert.Equal(executorPlan.SuccessStatus, verbPlan.SuccessStatus);
+
+        Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.Contains("VALUES ($1, $2, FALSE)", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.Equal(new object?[] { 42, "wait_stats" }, verbPlan.Parameters);
+
+        /* Only the enabled column: a frequency/retention override already on the row must survive the toggle. */
+        Assert.Contains("DO UPDATE SET enabled = EXCLUDED.enabled", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("frequency_minutes", verbPlan.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention_days", verbPlan.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanCollectorToggle_UnknownName_IsTheExecutorsOwnRefusal()
+    {
+        var plan = DarlingCliCommands.PlanCollectorToggle(enable: true, "not_a_collector", serverId: null);
+        Assert.Equal(CommandKind.Fail, plan.Kind);
+        Assert.Null(plan.Sql);
+        Assert.Equal("enable_collector: unknown collector 'not_a_collector'", plan.FailReason);
+
+        var executorPlan = DarlingCommandExecutor.ResolvePlan(
+            new ClaimedCommand(1, "enable_collector", null, "{\"collector_name\":\"not_a_collector\"}", "tester"));
+        Assert.Equal(executorPlan.FailReason, plan.FailReason);
+    }
+
+    /* ---------------- refusals that never open the store, and where each stream carries what ---------------- */
+
+    /// <summary>No name: the one-line refusal on STDERR, the usage + collector list on STDOUT (the [#2097] split),
+    /// exit 1 — and it returned before loading any config (no path was given and none was needed).</summary>
+    [Fact]
+    public async Task Toggle_NoName_RefusesOnStderr_ExplainsOnStdout_ChangesNothing()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await DarlingCliCommands.ToggleCollectorAsync(
+            enable: true, Array.Empty<string>(), output, error, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("--enable-collector needs a collector name", error.ToString(), StringComparison.Ordinal);
+
+        var text = output.ToString();
+        Assert.Contains("--enable-collector <collector> [--server <server>]", text, StringComparison.Ordinal);
+        Assert.Contains("--disable-collector <collector> [--server <server>]", text, StringComparison.Ordinal);
+        Assert.Contains("FLEET-WIDE", text, StringComparison.Ordinal);
+        Assert.Contains("long_query_completions (ships OFF)", text, StringComparison.Ordinal);
+        Assert.Contains("wait_stats", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>An unknown collector is refused with the EXECUTOR's sentence (not a CLI paraphrase), exit 1, the
+    /// known list on STDOUT — and no config was loaded: the name is validated before anything else, so a typo
+    /// never opens a connection. Proven by passing a config path that does not exist and seeing no complaint about it.</summary>
+    [Fact]
+    public async Task Toggle_UnknownCollector_RefusesWithTheExecutorsText_BeforeTouchingConfig()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await DarlingCliCommands.ToggleCollectorAsync(
+            enable: false, new[] { "not_a_collector", "--config", Path.Combine(Path.GetTempPath(), "does-not-exist-3752.json") },
+            output, error, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("disable_collector: unknown collector 'not_a_collector'", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Could not load configuration", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Known collectors", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("wait_stats", output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A KNOWN name with a missing config: now the config IS loaded (the name passed), and the failure
+    /// is the sibling verbs' "Could not load configuration" on STDERR, exit 1, nothing on STDOUT.</summary>
+    [Fact]
+    public async Task Toggle_KnownCollector_MissingConfig_FailsAtConfigLoad_LikeTheSiblingVerbs()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await DarlingCliCommands.ToggleCollectorAsync(
+            enable: true, new[] { "Long_Query_Completions", "--config", Path.Combine(Path.GetTempPath(), "does-not-exist-3752.json") },
+            output, error, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("Could not load configuration", error.ToString(), StringComparison.Ordinal);
+        Assert.Equal(string.Empty, output.ToString());
+    }
+
+    /* ---------------- the read-back rendering ---------------- */
+
+    [Fact]
+    public void FormatRows_NoRows_SaysTheDefaultApplies_AndNamesTheDefault()
+    {
+        var lines = DarlingCliCommands.FormatCollectorScheduleRows("long_query_completions", Array.Empty<DarlingCliCommands.CollectorScheduleReadbackRow>());
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("long_query_completions", lines[0], StringComparison.Ordinal);
+        /* The opt-in collector's default is stated as OFF, so a printout with no rows reads as "not running". */
+        Assert.Contains("every 1 min, 30-day retention, ships OFF", lines[0], StringComparison.Ordinal);
+        Assert.Contains("none", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatRows_FleetAndServer_RendersScope_Enabled_Overrides_AndDatabases()
+    {
+        var rows = new[]
+        {
+            new DarlingCliCommands.CollectorScheduleReadbackRow(null, "wait_stats", null, null, true, null, null),
+            new DarlingCliCommands.CollectorScheduleReadbackRow(7, "wait_stats", 5, 14, false, new[] { "sales", "hr" }, "sql01"),
+            new DarlingCliCommands.CollectorScheduleReadbackRow(8, "wait_stats", 0, null, true, Array.Empty<string>(), null),
+        };
+
+        var lines = DarlingCliCommands.FormatCollectorScheduleRows("wait_stats", rows);
+
+        Assert.Contains("ships ON", lines[0], StringComparison.Ordinal);
+        Assert.Contains("  fleet-wide: enabled=true  frequency=(default)  retention=(default)", lines);
+        Assert.Contains("  sql01 (server_id 7): enabled=false  frequency=every 5 min  retention=14 days  databases=[sales, hr]", lines);
+        /* A server_id with no registry row (never connected) prints as its id, and frequency 0 is the on-load tier;
+           an EMPTY databases array is the explicit V125 "no scope at this level" and is shown as such, not hidden. */
+        Assert.Contains("  server_id 8 (not in the servers registry): enabled=true  frequency=on load only  retention=(default)  databases=[] (explicit: no scope at this level)", lines);
+        Assert.Contains(lines, l => l.Contains("server's own row wins", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void KnownCollectorsText_ListsEveryDefault_TagsTheOptInOnes()
+    {
+        var text = DarlingCliCommands.KnownCollectorsText();
+        foreach (var name in CollectorScheduleDefaults.All.Keys)
+        {
+            Assert.Contains(name, text, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("long_query_completions (ships OFF)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("wait_stats (ships OFF)", text, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the read-back SQL ---------------- */
+
+    [Fact]
+    public void ReadbackSql_IsSchemaQualified_Parameterized_MatchesLikeTheResolver_FleetFirst()
+    {
+        var sql = DarlingCliCommands.CollectorScheduleReadbackSql;
+        Assert.Contains("FROM config.config_collector_schedules", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.servers", sql, StringComparison.Ordinal);
+        Assert.Contains("lower(cs.collector_name) = lower($1)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY cs.server_id NULLS FIRST", sql, StringComparison.Ordinal);
+        /* A read, and only a read: the verb's ONE write is the executor's plan. */
+        Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("UPDATE", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* ---------------- the README ---------------- */
+
+    [Fact]
+    public void Readme_DocumentsBothVerbs_TheDefaultScope_AndTheXeSessionConsequence()
+    {
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("--enable-collector long_query_completions", readme, StringComparison.Ordinal);
+        Assert.Contains("--disable-collector long_query_completions", readme, StringComparison.Ordinal);
+        Assert.Contains("--enable-collector long_query_completions --server", readme, StringComparison.Ordinal);
+        Assert.Contains("fleet-wide**", readme, StringComparison.Ordinal);
+        Assert.Contains("creates the `PerformanceMonitor_LongQueryCompletions` Extended Events session", readme, StringComparison.Ordinal);
+        Assert.Contains("disabling it drops that session", readme, StringComparison.Ordinal);
+        Assert.Contains("no MCP tool", readme, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// The store half of the collector toggle verbs (#3752), against the shared <c>DARLING_TEST_PG</c> store: the
+/// verb run END TO END through <see cref="DarlingCliCommands.ToggleCollectorAsync"/> with a bring-your-own
+/// darling.json pointed at the test store — parse, plan, connect, write through the executor's static store-write,
+/// read back, print — for the fleet scope and for a sentinel server, asserting the row the service will resolve
+/// and that a frequency override already on the row survives the toggle (the plan touches only <c>enabled</c>).
+/// Serialized with the other live classes because it writes rows the shared store's other tests read.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DarlingCollectorToggleVerbLivePostgresTests
+{
+    /// <summary>Distinctive sentinel — a real server_id is a storage-name hash, never this; distinct from
+    /// <c>DarlingCommandExecutorTests</c>' sentinel so the two classes never clean each other's rows.</summary>
+    private const int SentinelServerId = -375200;
+    private const string SentinelServerName = "lane-3752-sentinel:xedb1";
+    private const string SentinelDisplayName = "lane-3752 sentinel";
+
+    [Fact]
+    public async Task Toggle_FleetAndServer_WritesTheExecutorsRow_ReadsItBack_PreservesOverrides_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the collector toggle verb end to end.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var directory = Path.Combine(Path.GetTempPath(), "darling-3752-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var configPath = Path.Combine(directory, "darling.json");
+        File.WriteAllText(configPath, $$"""
+            {
+              "postgres": {
+                "managed": false,
+                "connectionString": {{JsonSerializer.Serialize(connectionString)}}
+              },
+              "servers": []
+            }
+            """);
+
+        try
+        {
+            await CleanupAsync(connection, ct);
+
+            /* A registry row for the sentinel, so --server can resolve it by display name, and a PRE-EXISTING
+               per-server row carrying a frequency override with enabled = FALSE — the thing the toggle must not
+               erase. (The Viewer's editor writes every column; the executor's toggle writes one.) */
+            await ExecAsync(connection,
+                "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, created_date, modified_date) " +
+                $"VALUES ({SentinelServerId}, '{SentinelServerName}', '{SentinelDisplayName}', TRUE, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')", ct);
+            await ExecAsync(connection,
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) " +
+                $"VALUES ({SentinelServerId}, 'long_query_completions', 5, NULL, FALSE)", ct);
+
+            /* 1. Fleet-wide enable, typed in the wrong case: exit 0, the canonical name written, the row read back. */
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: true, new[] { "Long_Query_Completions", "--config", configPath }, output, error, ct);
+
+            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
+            Assert.Equal(string.Empty, error.ToString());
+            var text = output.ToString();
+            Assert.Contains("[ENABLED] long_query_completions — fleet-wide (collector enabled (fleet-wide)).", text, StringComparison.Ordinal);
+            Assert.Contains("  fleet-wide: enabled=true  frequency=(default)  retention=(default)", text, StringComparison.Ordinal);
+            /* The sentinel's own row is in the read-back too — still disabled, frequency override intact. */
+            Assert.Contains($"  {SentinelDisplayName} (server_id {SentinelServerId}): enabled=false  frequency=every 5 min  retention=(default)", text, StringComparison.Ordinal);
+            Assert.Contains("no restart is needed", text, StringComparison.OrdinalIgnoreCase);
+
+            Assert.Equal(true, await ScalarAsync(connection,
+                "SELECT enabled FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'long_query_completions'", ct));
+            /* The dictionary spelling, not the typed one — one fleet row, the same row the Viewer writes. */
+            Assert.Equal(1L, await ScalarAsync(connection,
+                "SELECT COUNT(*) FROM config.config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) = 'long_query_completions'", ct));
+
+            /* 2. Per-server enable by DISPLAY name: the pre-existing row's enabled flips, its frequency survives. */
+            output = new StringWriter();
+            error = new StringWriter();
+            exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: true, new[] { "long_query_completions", "--server", SentinelDisplayName, "--config", configPath }, output, error, ct);
+
+            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
+            Assert.Contains($"[ENABLED] long_query_completions — {SentinelDisplayName} ({SentinelServerName}) (collector enabled).", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"  {SentinelDisplayName} (server_id {SentinelServerId}): enabled=true  frequency=every 5 min  retention=(default)", output.ToString(), StringComparison.Ordinal);
+
+            await using (var read = new NpgsqlCommand(
+                $"SELECT enabled, frequency_minutes FROM config.config_collector_schedules WHERE server_id = {SentinelServerId} AND collector_name = 'long_query_completions'", connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.GetBoolean(0));
+                Assert.Equal(5, reader.GetInt32(1));
+                Assert.False(await reader.ReadAsync(ct), "exactly one per-server row");
+            }
+
+            /* 3. Disable fleet-wide: the fleet row flips back; the per-server row is untouched (it is its own scope). */
+            output = new StringWriter();
+            error = new StringWriter();
+            exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: false, new[] { "long_query_completions", "--config", configPath }, output, error, ct);
+
+            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
+            Assert.Contains("[DISABLED] long_query_completions — fleet-wide (collector disabled (fleet-wide)).", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(false, await ScalarAsync(connection,
+                "SELECT enabled FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'long_query_completions'", ct));
+            Assert.Equal(true, await ScalarAsync(connection,
+                $"SELECT enabled FROM config.config_collector_schedules WHERE server_id = {SentinelServerId} AND collector_name = 'long_query_completions'", ct));
+
+            /* 4. A server nobody has: refused with the resolver's listing, exit 1, nothing written. */
+            output = new StringWriter();
+            error = new StringWriter();
+            exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: true, new[] { "wait_stats", "--server", "no-such-server-3752", "--config", configPath }, output, error, ct);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("Could not resolve server", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Nothing was changed.", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(0L, await ScalarAsync(connection,
+                $"SELECT COUNT(*) FROM config.config_collector_schedules WHERE server_id = {SentinelServerId} AND collector_name = 'wait_stats'", ct));
+        }
+        finally
+        {
+            await CleanupAsync(connection, ct);
+            try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static async Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        /* The fleet row for long_query_completions is deleted too: this class is the only live test that writes it,
+           and leaving it would change what a later test's ResolveSchedule sees for the opt-in collector. */
+        await ExecAsync(connection,
+            $"DELETE FROM config.config_collector_schedules WHERE server_id = {SentinelServerId}; " +
+            "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) = 'long_query_completions'; " +
+            $"DELETE FROM collect.servers WHERE server_id = {SentinelServerId}", ct);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct);
     }
 }

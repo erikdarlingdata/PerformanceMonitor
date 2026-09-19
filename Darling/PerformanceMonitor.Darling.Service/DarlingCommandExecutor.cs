@@ -464,6 +464,12 @@ WHERE status = 'in_progress'
     /// absent). Touches ONLY the enabled column (ON CONFLICT DO UPDATE), so an existing frequency/retention
     /// override is preserved. The two ON CONFLICT arbiters match V17's partial unique indexes (a PK cannot
     /// span the nullable server_id).
+    ///
+    /// <para>#3752: this is also the plan the <c>--enable-collector</c> / <c>--disable-collector</c> CLI verbs
+    /// execute. They build the same <see cref="ClaimedCommand"/> a queued command row would have carried, ask
+    /// <see cref="ResolvePlan"/> for the plan, and run it through <see cref="ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>
+    /// — so the verbs own no SQL of their own and the validation ("unknown collector") is this method's, not a
+    /// second copy that could learn a different answer.</para>
     /// </summary>
     private static CommandPlan ResolveCollectorToggle(ClaimedCommand command, bool enabled)
     {
@@ -528,9 +534,25 @@ WHERE status = 'in_progress'
         return ("connection_failed", ErrorJson(probe.Error ?? "connection failed"));
     }
 
-    private async Task ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken)
+    private Task ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>
+        ExecuteStoreWriteAsync(_postgres, plan, cancellationToken);
+
+    /// <summary>
+    /// Runs one <see cref="CommandKind.StoreWrite"/> plan against the store: the plan's parameterized SQL with its
+    /// bound parameters, on the command plane's deadline. Static and internal (#3752) so the CLI's collector
+    /// toggle verbs execute the SAME plan object <see cref="ResolvePlan"/> hands the running service, against a
+    /// data source the verb opened itself — no executor instance, no <see cref="IDarlingCommandHost"/>, and no
+    /// second SQL statement anywhere that writes <c>config_collector_schedules</c>. The instance overload above
+    /// is unchanged in behavior; it only forwards its own data source here.
+    /// </summary>
+    internal static async Task ExecuteStoreWriteAsync(NpgsqlDataSource postgres, CommandPlan plan, CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        if (plan.Kind != CommandKind.StoreWrite || plan.Sql is null)
+        {
+            throw new ArgumentException($"Only a {nameof(CommandKind.StoreWrite)} plan can be executed against the store; got {plan.Kind}.", nameof(plan));
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(plan.Sql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         if (plan.Parameters is not null)

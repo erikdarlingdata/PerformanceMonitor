@@ -147,6 +147,19 @@ public static class DarlingCliCommands
         string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
+    /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
+    /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
+    /// <c>admin</c> role — and the one collector that ships OFF (<c>long_query_completions</c>) cannot run at all
+    /// without someone flipping it, so a headless install had no supported way to use it.</summary>
+    public static bool IsEnableCollectorVerb(string arg) =>
+        string.Equals(arg, "--enable-collector", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: false</c> — the twin of
+    /// <see cref="IsEnableCollectorVerb"/>: turn one collector OFF in the store's schedule overrides (#3752).</summary>
+    public static bool IsDisableCollectorVerb(string arg) =>
+        string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -181,7 +194,9 @@ public static class DarlingCliCommands
         || IsBackfillRollupsVerb(arg)
         || IsCollapseLegacySlicesVerb(arg)
         || IsRecompressPlanDimVerb(arg)
-        || IsAddServerVerb(arg);
+        || IsAddServerVerb(arg)
+        || IsEnableCollectorVerb(arg)
+        || IsDisableCollectorVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -258,6 +273,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -4878,6 +4895,497 @@ public static class DarlingCliCommands
         }
 
         return exitCode;
+    }
+
+    /* ───────────────────── --enable-collector / --disable-collector (#3752) ───────────────────── */
+
+    /// <summary>
+    /// What the collector toggle verbs print when their arguments do not parse or name no known collector — to
+    /// STDOUT, per the [#2097] lesson <see cref="AddServerUsageText"/> follows: a verb that explains itself only
+    /// on STDERR reads as hung in the ISE and some integrated terminals. The one-line refusal itself still goes
+    /// to STDERR, where a script's error stream expects it. Ends with the collector list, because the commonest
+    /// way to arrive here is a misspelled name and the fix is to see the real ones.
+    /// </summary>
+    public static string CollectorToggleUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --enable-collector <collector> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --disable-collector <collector> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        Environment.NewLine +
+        "<collector> is a collector name as collection health reports it (long_query_completions, wait_stats, ...)." + Environment.NewLine +
+        "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that" + Environment.NewLine +
+        "server's own row instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+        "Only the enabled flag is written; a frequency or retention override already on the row is kept." + Environment.NewLine +
+        Environment.NewLine +
+        "Known collectors (\"ships OFF\" = opt-in, like long_query_completions, whose enabling creates its Extended Events session on the monitored servers and whose disabling drops it):" + Environment.NewLine +
+        KnownCollectorsText();
+
+    /// <summary>
+    /// The collector names the verbs accept — <see cref="CollectorScheduleDefaults.All"/>'s keys, sorted, two
+    /// spaces in, wrapped so a 60-name list is a paragraph rather than a screen. The opt-in ones are tagged,
+    /// because they are the reason the verb exists. Pure, so the listing pins.
+    /// </summary>
+    internal static string KnownCollectorsText()
+    {
+        var names = CollectorScheduleDefaults.All
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => kv.Value.DefaultEnabled ? kv.Key : kv.Key + " (ships OFF)")
+            .ToList();
+
+        var lines = new List<string>();
+        var current = new System.Text.StringBuilder();
+        foreach (var name in names)
+        {
+            if (current.Length > 0 && current.Length + name.Length + 2 > 100)
+            {
+                lines.Add("  " + current.ToString().TrimEnd(',', ' '));
+                current.Clear();
+            }
+
+            current.Append(name).Append(", ");
+        }
+
+        if (current.Length > 0)
+        {
+            lines.Add("  " + current.ToString().TrimEnd(',', ' '));
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// The dictionary's OWN spelling of a collector name the operator typed, or null when no collector matches.
+    /// <see cref="CollectorScheduleDefaults.All"/> looks names up case-insensitively and so does the runner's
+    /// <c>StoreConfigProvider.ResolveSchedule</c> — but the store's two partial unique indexes on
+    /// <c>config_collector_schedules</c> compare <c>collector_name</c> exactly, so <c>Wait_Stats</c> and
+    /// <c>wait_stats</c> would be TWO fleet rows and the resolver's first-match would pick one by row order.
+    /// Writing the canonical key makes the CLI's row the same row the Viewer writes. Pure.
+    /// </summary>
+    internal static string? CanonicalCollectorName(string? typed)
+    {
+        if (string.IsNullOrWhiteSpace(typed))
+        {
+            return null;
+        }
+
+        var wanted = typed.Trim();
+        foreach (var key in CollectorScheduleDefaults.All.Keys)
+        {
+            if (string.Equals(key, wanted, StringComparison.OrdinalIgnoreCase))
+            {
+                return key;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Parses the toggle verbs' trailing arguments STRICTLY — the #1581 posture
+    /// <see cref="TryParseExportViewerConfigArgs"/> takes: never guess. Exactly one bare argument (the collector
+    /// name); <c>--server &lt;name&gt;</c> and <c>--config &lt;path&gt;</c> each take a value; anything else
+    /// starting with '-' is refused rather than taken as a name, because a typo'd flag that became a collector
+    /// name would be refused one step later with a LESS useful message, and a bare <c>--server</c> with no value
+    /// would otherwise swallow the next flag as a server name. Pure so the grammar pins. Returns false with a
+    /// ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="verb">The verb as typed (for the messages).</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseCollectorToggleArgs(
+        string verb, string[] rest, out string? collectorName, out string? serverName, out string? configPath, out string? errorMessage)
+    {
+        collectorName = null;
+        serverName = null;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--server", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--server needs a server name: {verb} <collector> --server <display name or storage name>";
+                    return false;
+                }
+
+                serverName = rest[++i];
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <collector> --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (collectorName is not null)
+            {
+                errorMessage = $"{verb} takes ONE collector name; got '{collectorName}' and '{arg}'.";
+                return false;
+            }
+
+            collectorName = arg;
+        }
+
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            errorMessage = $"{verb} needs a collector name.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The store command the verb stands in for: the <c>enable_collector</c> / <c>disable_collector</c> row the
+    /// command plane (<c>config.config_command</c>, #1262 Stage 2) carries for the same request, minus the queue.
+    /// <c>CommandId</c> 0 because no row exists; <c>RequestedBy</c> names the surface. Internal so a pin can hold
+    /// the verb's command to the shape the executor's own tests feed <see cref="DarlingCommandExecutor.ResolvePlan"/>.
+    /// </summary>
+    internal static ClaimedCommand BuildCollectorToggleCommand(bool enable, string collectorName, int? serverId) =>
+        new(
+            CommandId: 0,
+            CommandType: enable ? "enable_collector" : "disable_collector",
+            TargetServerId: serverId,
+            ArgsJson: JsonSerializer.Serialize(new { collector_name = collectorName }),
+            RequestedBy: "cli");
+
+    /// <summary>
+    /// The plan the verb executes — <see cref="DarlingCommandExecutor.ResolvePlan"/> over
+    /// <see cref="BuildCollectorToggleCommand"/>, nothing else. This is the whole of the ONE-WRITE-PATH claim:
+    /// the SQL, its parameters, the success status and the "unknown collector" refusal are the executor's, and a
+    /// test holds this equal to the executor's plan for the same inputs. Pure.
+    /// </summary>
+    internal static CommandPlan PlanCollectorToggle(bool enable, string collectorName, int? serverId) =>
+        DarlingCommandExecutor.ResolvePlan(BuildCollectorToggleCommand(enable, collectorName, serverId));
+
+    /// <summary>
+    /// The read-back after the write: every override row for the collector, both scopes, each per-server row
+    /// labelled from the registry (display name, else storage name; a server_id with no registry row — a server
+    /// that has never connected — prints as its id). Matched on <c>lower()</c> because that is how the runner's
+    /// <c>ResolveSchedule</c> matches, so what prints is what the service will resolve, including any mixed-case
+    /// row an older writer left. Schema-qualified like the executor's write, so it does not depend on the
+    /// connection's search_path. $1 collector_name. Internal const so Darling.Tests can pin the dialect.
+    /// </summary>
+    internal const string CollectorScheduleReadbackSql = @"
+SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
+       COALESCE(s.display_name, s.server_name) AS server_label
+FROM config.config_collector_schedules cs
+LEFT JOIN collect.servers s ON s.server_id = cs.server_id
+WHERE lower(cs.collector_name) = lower($1)
+ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
+
+    /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
+    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
+    internal sealed record CollectorScheduleReadbackRow(
+        int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled,
+        IReadOnlyList<string>? Databases, string? ServerLabel);
+
+    internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
+        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+    {
+        var rows = new List<CollectorScheduleReadbackRow>();
+        await using var command = postgres.CreateCommand(CollectorScheduleReadbackSql);
+        command.CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CollectorScheduleReadbackRow(
+                reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                reader.GetBoolean(4),
+                /* V125 (#3477): NULL and an empty array are different readings — keep both, as the service's
+                   ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Renders the read-back as operator lines: the code default first (so "(default)" in a row has a number
+    /// beside it), then one line per override row — scope, enabled, frequency, retention, and the database scope
+    /// when the row carries one. PURE, so the layout pins without a store (the <see cref="FormatProbeLine"/> split).
+    /// </summary>
+    internal static IReadOnlyList<string> FormatCollectorScheduleRows(string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    {
+        var lines = new List<string>();
+        var entry = CollectorScheduleDefaults.All.TryGetValue(collectorName, out var e) ? e : null;
+        var defaultText = entry is null
+            ? "no code default"
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "code default: {0}, {1}-day retention, ships {2}",
+                DescribeFrequency(entry.FrequencyMinutes),
+                entry.RetentionDays,
+                entry.DefaultEnabled ? "ON" : "OFF");
+        lines.Add($"Schedule override rows in the store for {collectorName} ({defaultText}):");
+
+        if (rows.Count == 0)
+        {
+            lines.Add("  (none — the code default applies everywhere)");
+            return lines;
+        }
+
+        foreach (var row in rows)
+        {
+            var scope = row.ServerId is null
+                ? "fleet-wide"
+                : string.IsNullOrEmpty(row.ServerLabel)
+                    ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", row.ServerId)
+                    : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", row.ServerLabel, row.ServerId);
+            var frequency = row.FrequencyMinutes is int f ? DescribeFrequency(f) : "(default)";
+            var retention = row.RetentionDays is int r ? string.Format(CultureInfo.InvariantCulture, "{0} days", r) : "(default)";
+            var line = string.Format(
+                CultureInfo.InvariantCulture,
+                "  {0}: enabled={1}  frequency={2}  retention={3}",
+                scope, row.Enabled ? "true" : "false", frequency, retention);
+            if (row.Databases is not null)
+            {
+                line += row.Databases.Count == 0
+                    ? "  databases=[] (explicit: no scope at this level)"
+                    : "  databases=[" + string.Join(", ", row.Databases) + "]";
+            }
+
+            lines.Add(line);
+        }
+
+        if (rows.Any(r => r.ServerId is not null) && rows.Any(r => r.ServerId is null))
+        {
+            lines.Add("  (a server's own row wins over the fleet-wide row for that server, column by column)");
+        }
+
+        return lines;
+    }
+
+    private static string DescribeFrequency(int minutes) =>
+        minutes == 0 ? "on load only" : string.Format(CultureInfo.InvariantCulture, "every {0} min", minutes);
+
+    /// <summary>
+    /// <c>--enable-collector</c> / <c>--disable-collector</c> (#3752): flips one collector's <c>enabled</c> flag
+    /// in <c>config.config_collector_schedules</c> — fleet-wide, or for one server with <c>--server</c> — and
+    /// prints the rows read back from the store.
+    ///
+    /// <para><b>Why this exists.</b> <c>long_query_completions</c> is the one collector that ships OFF
+    /// (<see cref="CollectorScheduleDefaults"/>, #1496 — a completion trace is not free), and enabling it is
+    /// what creates its Extended Events session on the monitored servers. The only writer of that flag was the
+    /// WPF Viewer's Collector Schedules window: an interactive desktop plus the <c>admin</c> role, on a product
+    /// whose design point is a headless service. The MCP surface has config writers but none for schedules, and
+    /// adding one there is a product decision this verb does not take.</para>
+    ///
+    /// <para><b>One write path.</b> The verb owns no SQL. It builds the same <see cref="ClaimedCommand"/> the
+    /// store's command plane carries for <c>enable_collector</c>, asks <see cref="DarlingCommandExecutor.ResolvePlan"/>
+    /// for the plan — which is where "unknown collector" is refused and where the two ON CONFLICT arbiters live —
+    /// and runs that plan through the executor's own <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>.
+    /// The plan touches ONLY <c>enabled</c>, so a frequency/retention override already on the row survives, and
+    /// the V17 <c>trg_bump_collector_schedules</c> trigger bumps <c>config_version</c> so the running service
+    /// re-resolves schedules within one sweep. Executed in-process rather than enqueued, because a queued command
+    /// needs the service RUNNING to be claimed, and an operator flipping a collector before the first start — or
+    /// while the service is stopped for exactly this — would wait forever on a row nothing reads.</para>
+    ///
+    /// <para><b>Scope.</b> No <c>--server</c> = the fleet-wide row (<c>server_id</c> NULL), the executor's own
+    /// default when a command carries no target. <c>--server</c> resolves a display name or storage name against
+    /// the enabled <c>servers</c> registry the MCP read tools resolve against, but by the WRITE rule
+    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> uses (#3541 A14): every exact match counts, a
+    /// partial match is honored only when unique, and anything ambiguous is refused with the candidates named —
+    /// the read resolver's first-wins partial is a coin an operator did not know was being flipped.</para>
+    ///
+    /// <para><b>Platform.</b> The <c>--add-server</c> posture: no Windows guard on the verb, because Windows is
+    /// needed only for a MANAGED store's DPAPI credential, which is checked here; a Linux host on bring-your-own
+    /// Postgres can toggle a collector. Exit 0 when the row was written and read back; 1 on an argument, config,
+    /// credential, resolution or store error — the same policy as the sibling verbs, so a script can gate on it.</para>
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static async Task<int> ToggleCollectorAsync(
+        bool enable, string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var verb = enable ? "--enable-collector" : "--disable-collector";
+
+        if (!TryParseCollectorToggleArgs(verb, rest, out var typedName, out var serverName, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(CollectorToggleUsageText());
+            return 1;
+        }
+
+        /* Validate the name BEFORE touching config or the store, through the executor itself: a fleet-scoped plan
+           for the typed name either resolves (StoreWrite) or fails with the executor's own reason, and a typo
+           never opens a connection. The canonical spelling is what gets written (see CanonicalCollectorName). */
+        var collectorName = CanonicalCollectorName(typedName) ?? typedName!;
+        var preflight = PlanCollectorToggle(enable, collectorName, serverId: null);
+        if (preflight.Kind != CommandKind.StoreWrite)
+        {
+            error.WriteLine(preflight.FailReason ?? $"{verb}: the executor refused the request.");
+            output.WriteLine(CollectorToggleUsageText());
+            return 1;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        string? connectionString;
+        if (postgres.Managed)
+        {
+            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
+               such guard, which is why this is scoped to the managed branch rather than the whole verb — the
+               --add-server shape, for the --add-server reason. */
+            if (!OperatingSystem.IsWindows())
+            {
+                error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
+                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
+                return 1;
+            }
+
+            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                /* Inside the branch the guard above proved is Windows, for the reason --add-server documents: a
+                   bool is not something the platform analyzer can correlate with an earlier OS guard. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
+                return 1;
+            }
+        }
+        else
+        {
+            connectionString = postgres.ConnectionString;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                error.WriteLine("postgres.connectionString is empty, so there is no store to write a schedule to.");
+                return 1;
+            }
+
+            /* The worker's own normalization: a bring-your-own string usually omits the collect/config search
+               path, and the registry read below (--server) names the servers table bare, as every MCP read does. */
+            connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+        }
+
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
+        output.WriteLine();
+
+        await using var dataSource = NpgsqlDataSource.Create(connectionString);
+
+        int? serverId = null;
+        var scopeLabel = "fleet-wide";
+        if (serverName is not null)
+        {
+            List<DarlingServerResolver.RegisteredServer> servers;
+            try
+            {
+                servers = await DarlingServerResolver.LoadEnabledAsync(dataSource);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
+                return 1;
+            }
+
+            var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+            if (target.Candidates.Count == 0)
+            {
+                /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
+                   #2339 peer disclosure when another store declares coverage of the name. */
+                var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
+                error.WriteLine(missMessage ?? $"Could not resolve server '{serverName}'.");
+                error.WriteLine("Nothing was changed.");
+                return 1;
+            }
+
+            if (target.Candidates.Count > 1)
+            {
+                error.WriteLine(
+                    $"'{serverName}' matches {target.Candidates.Count} servers " +
+                    $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); nothing was changed. " +
+                    "Re-run with ONE candidate's full storage name:");
+                foreach (var candidate in target.Candidates)
+                {
+                    error.WriteLine(string.IsNullOrEmpty(candidate.DisplayName) || candidate.DisplayName == candidate.ServerName
+                        ? $"  {candidate.ServerName}"
+                        : $"  {candidate.DisplayName} ({candidate.ServerName})");
+                }
+
+                return 1;
+            }
+
+            var resolved = target.Candidates[0];
+            serverId = resolved.ServerId;
+            scopeLabel = string.IsNullOrEmpty(resolved.DisplayName) || resolved.DisplayName == resolved.ServerName
+                ? resolved.ServerName
+                : $"{resolved.DisplayName} ({resolved.ServerName})";
+        }
+
+        /* The executor's plan for the FINAL scope — the same call the pre-flight made, now with the server
+           resolved — executed through the executor's own store-write path. */
+        var plan = PlanCollectorToggle(enable, collectorName, serverId);
+        try
+        {
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not update the control-plane store: {ex.Message}");
+            return 1;
+        }
+
+        output.WriteLine($"  [{(enable ? "ENABLED" : "DISABLED")}] {collectorName} — {scopeLabel} ({plan.SuccessStatus}).");
+        output.WriteLine();
+
+        /* Read back rather than echo: the rows are what the service will resolve, and printing the input would
+           say nothing about a frequency override the write preserved or a per-server row the fleet row does not
+           govern. A failure HERE is reported as what it is — the write is already committed. */
+        List<CollectorScheduleReadbackRow> rows;
+        try
+        {
+            rows = await ReadCollectorScheduleRowsAsync(dataSource, collectorName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"The schedule write succeeded, but reading the rows back failed: {ex.Message}");
+            return 1;
+        }
+
+        foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
+        {
+            output.WriteLine(line);
+        }
+
+        output.WriteLine();
+        /* The schedule write bumps config_version through trg_bump_collector_schedules, which the worker polls
+           every sweep — so say the restart is unnecessary rather than leaving them to wonder (the --add-server line). */
+        output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
+        return 0;
     }
 
     /// <summary>
