@@ -74,6 +74,8 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgWaitMsPerSec, "pg_wait_stats"),
         (MetricNames.PgCpu, "pg_cpu_utilization"),
         (MetricNames.PgIoReadLatency, "pg_io_stats"),
+        /* v2 (#3691): lane 12's replay-lag point series — its scaffold / dialect pins live in PgTargetReplicationTests. */
+        (MetricNames.PgReplayLagBytes, "pg_replication_stats"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
@@ -119,13 +121,16 @@ public sealed class PgTargetAnomalyTests
     [Fact]
     public void TheV2BaselinesAndDetectors_AreReachableInertStubs_EachNamingItsLane()
     {
-        foreach (var metric in new[] { MetricNames.PgReplayLagBytes, MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
+        /* Lanes 11 and 12 filled pg_io_read_latency and pg_replay_lag_bytes (each arm pinned in its own family's tests);
+           the WAL stub and the wave-2 name still answer null. */
+        foreach (var metric in new[] { MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
             Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
             Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
         }
+        Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgReplayLagBytes));
 
         var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.cs");
         Assert.Contains("MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),", provider, StringComparison.Ordinal);
@@ -244,6 +249,7 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.WaitContribWindowSql,
         /* v2 (#3691) lane 11 */
         PgTargetAnomalyDetector.IoLatencyWindowSql,
+        PgTargetAnomalyDetector.ReplayLagWindowSql,   /* lane 12 (#3691) */
     ];
 
     [Fact]
@@ -276,6 +282,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitContribWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_io_stats", PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_replication_stats", PgTargetAnomalyDetector.ReplayLagWindowSql, StringComparison.Ordinal);
 
         /* The window reads share the fact reads' shapes. */
         Assert.Contains("stats_reset", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgTps)!, StringComparison.Ordinal);

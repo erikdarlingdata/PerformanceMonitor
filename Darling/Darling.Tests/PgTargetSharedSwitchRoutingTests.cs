@@ -380,7 +380,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(pgIoAnomaly);
         Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyIoLatency), pgIoAnomaly);
         Assert.DoesNotContain("Anomalous spike", pgIoAnomaly!.Headline, StringComparison.Ordinal);
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ReplicationLag));         /* lane 12 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ReplicationLag));      /* lane 12 filled the replication family */
+        var pgLagAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyReplicationLag);   /* lane 12: the anomaly too, lane 11's shape */
+        Assert.NotNull(pgLagAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyReplicationLag), pgLagAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgLagAnomaly!.Headline, StringComparison.Ordinal);
         /* Lane 13 filled the bloat family: both keys compose their own block (the static shape when no fact is
            in the lookup), and the delegation equality above proves the shared entry points answer that block. */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));          /* lane 13 */

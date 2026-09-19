@@ -395,9 +395,12 @@ public sealed class PgTargetKnobsTests
         Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.CheckpointPressure, atDefault)).Destination);
         Assert.Equal(PgTargetFactKeys.ConfigSharedBuffers, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.BufferCachePressure, atDefault)).Destination);
 
-        /* The v2 leading edge is declared and inert until the shift fact exists. */
+        /* The v2 leading edge is declared and inert until the shift fact exists. Lane 12 (#3691) declared a second
+           destination for the shift — PG_SLOT_RETENTION, the slot retaining the WAL the shift produced — so the
+           checkpoint edge is pinned by membership, not as the only one. */
         var shiftEdges = graph.GetAllEdges(PgTargetFactKeys.WalVolumeShift);
-        Assert.Equal(PgTargetFactKeys.CheckpointPressure, Assert.Single(shiftEdges).Destination);
+        Assert.Contains(shiftEdges, e => e.Destination == PgTargetFactKeys.CheckpointPressure);
+        Assert.Contains(shiftEdges, e => e.Destination == PgTargetFactKeys.SlotRetention);
         Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, Assert.Single(graph.GetActiveEdges(PgTargetFactKeys.CheckpointPressure, atDefault)).Destination);
     }
 
