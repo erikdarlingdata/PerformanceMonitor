@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Analysis;
@@ -49,9 +50,92 @@ namespace PerformanceMonitor.Analysis;
 /// line). It is not a threshold finding but a measured blindness — the collector saw rows and most of them were
 /// blank — and it roots a WARNING-band card at the story line so it surfaces on the quietest server; it has no
 /// amplifiers and cannot climb.</para>
+///
+/// <para><b><c>PG_IDLE_IN_TRANSACTION</c></b> (v2 — #3691 lane 14, design §3.10) is the family's THIRD fact: the
+/// longest transaction any session held open while <c>idle in transaction</c> in the window, from the same
+/// <c>pg_session_states</c> captures, graded on its DURATION alone. A session in that state has finished a
+/// statement and not committed or rolled back: it holds its snapshot (so autovacuum cannot remove any tuple
+/// deleted since — the xmin horizon), its row and relation locks (so the next writer waits on nothing being
+/// done), and its connection slot (so the pool is that much shorter). None of that costs the application
+/// anything visible, which is why the shape is chronic — the leaf of three chains (blocking, xmin, saturation)
+/// and an application defect in every one of them. The horizon claim escalates the grade one band
+/// (<c>horizon_age &gt; 0</c> — the engine's own <c>backend_xmin</c>/<c>backend_xid</c> age; <c>-1</c> is the
+/// collector's "pins nothing" sentinel and must never escalate, V86); recurrence of one holder identity across
+/// captures is an amplifier, never a bar; a redacted-majority window emits no idle fact and stamps the
+/// permissions advisory <c>idle_in_transaction_unobservable = 1</c> in place of a false zero.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
+    /// <summary>Metadata key: the longest <c>xact_duration_ms</c> of any idle-in-transaction row in the window — the
+    /// number <see cref="IdleInTransactionWarningMs"/> grades (<see cref="Fact.Value"/> carries the same figure in
+    /// seconds for the reader).</summary>
+    public const string IdleInTransactionDurationMsKey = "max_xact_duration_ms";
+
+    /// <summary>Metadata key: the longest holder's <c>horizon_age</c> as the V86 collector stored it — the age of
+    /// the xid / xmin the session pins, or <c>-1</c> when it pins nothing (a READ COMMITTED reader, an UPDATE that
+    /// matched no rows). The escalation asks <c>&gt; 0</c>, so the sentinel never escalates.</summary>
+    public const string IdleInTransactionHolderHorizonAgeKey = "holder_horizon_age";
+
+    /// <summary>Metadata key: the most captures in the window any ONE holder identity (<c>application_name</c> +
+    /// <c>username</c> + <c>database_name</c>) was seen over the duration floor in — the chronic-holder witness the
+    /// recurrence amplifier reads.</summary>
+    public const string IdleInTransactionRecurringCapturesKey = "recurring_captures";
+
+    /// <summary>Metadata stamp (0 / 1) the scorer writes: whether the horizon claim lifted the grade one band.</summary>
+    public const string IdleInTransactionHorizonEscalatedKey = "horizon_escalated";
+
+    /// <summary>Metadata stamp on <see cref="PgTargetFactKeys.MonitoringPermissions"/>: the idle-in-transaction
+    /// read was NOT attempted because the window's stored rows were majority-redacted (state is a privileged
+    /// column) — the family's silence on parked transactions is the login's, not the server's.</summary>
+    public const string IdleInTransactionUnobservableKey = "idle_in_transaction_unobservable";
+
+    /// <summary>
+    /// The idle-in-transaction DURATION — the longest <c>xact_duration_ms</c> any <c>idle in transaction</c> session
+    /// in the window had held its transaction open, from <c>pg_session_states</c> — at which
+    /// <see cref="PgTargetFactKeys.IdleInTransaction"/> is CONCERNING (60 s → 0.5) and CRITICAL (10 min → 1.0).
+    /// Design §3.10's constant floor: one minute is past any statement-to-statement pause an OLTP application
+    /// makes on purpose and past the collector's own storage floors (ten seconds idle, thirty open); ten minutes
+    /// is a transaction nobody is coming back to. measured: inside the empty interval — zero idle-in-transaction
+    /// rows at or over 60 s over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19
+    /// (pg_session_states xact_duration_ms of idle-in-transaction rows: p50 24 ms, p99 50 ms, maximum 27.7 s on
+    /// one cluster) — the chronic-holder shape is absent on the measured population, which is exactly what the
+    /// bar is for, and an empty interval IS a measurement. Engine-neutral quantity (a duration, not a wait
+    /// fraction), so the stock-PostgreSQL population reads the same bar; the fact carries threshold_lineage = 1.
+    /// The collector passes the WARNING value as the read's floor (<c>$4</c>), so a fact exists only when a
+    /// row crossed it and the scorer never grades a fraction of the bar.
+    /// </summary>
+    public const double IdleInTransactionWarningMs = 60_000;
+    public const double IdleInTransactionCriticalMs = 600_000;
+
+    /// <summary>
+    /// One band of <see cref="FactScorer.ApplyThresholdFormula"/>'s own scale (CONCERNING 0.5 → CRITICAL 1.0),
+    /// added to the duration grade when the longest holder PINS THE HORIZON (<c>horizon_age &gt; 0</c>) and
+    /// clamped at 1.0. engine-defined gate, structural step: whether a session holds back the xmin horizon is
+    /// PostgreSQL's own <c>backend_xmin</c> / <c>backend_xid</c> (V86 stores the age; <c>-1</c> pins nothing and
+    /// never escalates), and the step is the formula's band width, not a bar anyone chose — so the fact's
+    /// threshold_lineage stays 1. Why a band and not an amplifier: a parked transaction that is holding vacuum
+    /// back is a worse FACT (dead tuples accumulating server-wide, freezing stalled), not a corroborated one;
+    /// amplifiers multiply and cap at 2.0 across the co-fires, while this makes 60 s of pinning read as a
+    /// CRITICAL finding on its own.
+    /// </summary>
+    public const double IdleInTransactionHorizonEscalation = 0.5;
+
+    /// <summary>
+    /// The number of captures in the window one holder identity must have been seen over the floor in for the
+    /// RECURRENCE amplifier to fire (<c>recurring_captures ≥ 3</c>): the same application, as the same role, in
+    /// the same database, parked past a minute in three separate five-minute captures is a code path, not an
+    /// incident. unmeasured: chosen, not measured — no holder identity recurred over the floor on the measured
+    /// fleet (zero rows at or over 60 s, 2026-09-19), so there was nothing to read a persistence shape from;
+    /// calibrate against pg_session_states once a fleet target shows the chronic shape. An amplifier GATE, not a
+    /// bar the base is graded on, so the fact's threshold_lineage (1, off the measured duration bars above) does
+    /// not move — the same rule <see cref="ConnectionSaturationCoFireBoost"/> rests on.
+    /// </summary>
+    public const double IdleInTransactionRecurrenceCaptures = 3;
+
+    /// <summary>The boost recurrence adds (×1.2). unmeasured: chosen, not measured — calibrate against
+    /// analysis_findings co-fire rates before the next release; not a bar, lineage unaffected.</summary>
+    public const double IdleInTransactionRecurrenceBoost = 0.2;
+
     /// <summary>
     /// The saturation ratio (peak sessions over usable connections) at which the pool is CONCERNING (0.5 — the
     /// story threshold) and at which it is CRITICAL (1.0). Eight tenths of the usable slots taken at the window's
@@ -107,11 +191,13 @@ public static partial class PgTargetScorer
 
     /// <summary>
     /// Layer-1 base severity for the <c>pg_sessions</c> source: the saturation ratio graded between the two bands
-    /// above and ZERO below the warning line; the permissions advisory at its fixed base. Anything else under the
-    /// source (a future session fact without an arm) scores 0. Stamps <c>threshold_lineage = 1</c> on every
-    /// saturation fact it sees, including the ones it grades to 0 — the number that decided is the engine's
-    /// ceiling and bands measured against it (2026-09-19) either way — and never on the permissions fact, whose
-    /// only line is definitional.
+    /// above and ZERO below the warning line; the idle-in-transaction duration graded between ITS two bands, ZERO
+    /// below the floor, lifted one band when the holder pins the horizon; the permissions advisory at its fixed
+    /// base. Anything else under the source (a future session fact without an arm) scores 0. Stamps
+    /// <c>threshold_lineage = 1</c> on every saturation and idle-in-transaction fact it sees, including the ones
+    /// it grades to 0 — the number that decided is the engine's ceiling and bands measured against it, or the
+    /// measured duration bars (2026-09-19) either way — and never on the permissions fact, whose only line is
+    /// definitional.
     /// </summary>
     private static partial double ScoreSessionsFact(Fact fact)
     {
@@ -130,6 +216,35 @@ public static partial class PgTargetScorer
                     return 0.0;
 
                 return FactScorer.ApplyThresholdFormula(ratio, ConnectionSaturationWarning, ConnectionSaturationCritical);
+            }
+
+            case PgTargetFactKeys.IdleInTransaction:
+            {
+                if (!fact.Metadata.TryGetValue(IdleInTransactionDurationMsKey, out var heldMs) || heldMs <= 0)
+                    return 0.0;
+
+                /* measured duration bars (2026-09-19, the empty interval — see the constants); the fact carries
+                   threshold_lineage = 1. Below the warning floor the fact is context (0), never a fraction of the
+                   bar — the collector's read floor makes this arm unreachable in practice, and the guard is what
+                   makes it true for a fact built elsewhere. */
+                fact.Metadata["threshold_lineage"] = 1;
+                if (heldMs < IdleInTransactionWarningMs)
+                    return 0.0;
+
+                var graded = FactScorer.ApplyThresholdFormula(heldMs, IdleInTransactionWarningMs, IdleInTransactionCriticalMs);
+
+                /* engine-defined gate: horizon_age > 0 is PostgreSQL's own statement that this backend's xmin / xid
+                   is holding the horizon back; -1 (pins nothing, V86) and an absent key never escalate. One band
+                   (IdleInTransactionHorizonEscalation), clamped at CRITICAL. */
+                var horizonAge = fact.Metadata.GetValueOrDefault(IdleInTransactionHolderHorizonAgeKey, -1);
+                if (horizonAge > 0)
+                {
+                    fact.Metadata[IdleInTransactionHorizonEscalatedKey] = 1;
+                    return Math.Min(1.0, graded + IdleInTransactionHorizonEscalation);
+                }
+
+                fact.Metadata[IdleInTransactionHorizonEscalatedKey] = 0;
+                return graded;
             }
 
             case PgTargetFactKeys.MonitoringPermissions:
@@ -158,13 +273,45 @@ public static partial class PgTargetScorer
     /// arrivals are stacking up on a saturated CPU, the D7 "queueing at the cliff" shape, and a pooler will not
     /// buy back the CPU.</description></item>
     /// </list>
+    /// <para><b>The one amplifier on <see cref="PgTargetFactKeys.IdleInTransaction"/></b> (v2, lane 14) is
+    /// RECURRENCE: one holder identity seen over the duration floor in <see cref="IdleInTransactionRecurrenceCaptures"/>
+    /// or more captures of the window (<see cref="IdleInTransactionRecurringCapturesKey"/>, the fact's own
+    /// metadata) — the chronic code path rather than one forgotten session, ×1.2. Persistence is an amplifier and
+    /// not a bar on purpose: the duration alone grades, so the fact's lineage is the measured bars' and the
+    /// unmeasured capture count can only lift a finding that already exists.</para>
+    ///
     /// <para><b>v2 hooks, deliberately commented rather than written against an inert predicate:</b> (a) the
     /// offered-vs-delivered co-fire the design names — sessions climbing across the window while <c>PG_TPS</c>
-    /// is flat or falling — needs lane 2's database family to carry a TPS trend, which it does not yet; (b) the
-    /// <c>PG_IDLE_IN_TRANSACTION</c> co-fire, once that fact exists, supersedes the self-metadata parked-connections
-    /// arm above with a duration-qualified one. Neither is a bar this lane may choose today.</para>
+    /// is flat or falling — reads the trend lane 6 stamps under <see cref="TpsTrendKey"/>, but the trend's
+    /// stability has not been judged (the 2026-09-19 calibration saw routine 50× TPS bursts on every cluster),
+    /// so it stays parked; (b) the <c>PG_IDLE_IN_TRANSACTION</c> co-fire is NOT enabled here even though the fact
+    /// now exists: the self-metadata parked-connections arm above already fires on the same evidence (the peak
+    /// capture's idle-in-transaction share), and a second +0.25 for the same sessions counted twice would be
+    /// double-counting, not corroboration. The idle fact reaches the saturation story through the graph edge
+    /// (<c>PgTargetRelationshipGraph.Saturation.cs</c>) instead, gated on the same share bar.</para>
     /// </summary>
-    private static partial List<AmplifierDefinition> SessionsAmplifiers(string key) =>
+    private static partial List<AmplifierDefinition> SessionsAmplifiers(string key)
+    {
+        if (key == PgTargetFactKeys.IdleInTransaction)
+        {
+            return
+            [
+                new()
+                {
+                    Description = "The same holder — application, role and database — was parked past the floor in three or more captures of the window: a code path, not one forgotten session",
+                    /* unmeasured: IdleInTransactionRecurrenceBoost and the capture gate, chosen, not measured — see the declarations. */
+                    Boost = IdleInTransactionRecurrenceBoost,
+                    Predicate = facts =>
+                        facts.TryGetValue(key, out var self)
+                        && self.Metadata.GetValueOrDefault(IdleInTransactionRecurringCapturesKey) >= IdleInTransactionRecurrenceCaptures,
+                },
+            ];
+        }
+
+        return SaturationAmplifiers(key);
+    }
+
+    private static List<AmplifierDefinition> SaturationAmplifiers(string key) =>
     [
         new()
         {
@@ -195,8 +342,10 @@ public static partial class PgTargetScorer
                 facts.TryGetValue(key, out var self) && self.Metadata.GetValueOrDefault("peak_is_late") > 0
                 && facts.TryGetValue(PgTargetFactKeys.Tps, out var tps) && tps.Metadata.GetValueOrDefault(TpsTrendKey) <= 0,
         },
-           v2 — PG_IDLE_IN_TRANSACTION fired: parked connections with a measured duration and horizon claim,
-           replacing the self-metadata share arm above:
+           PG_IDLE_IN_TRANSACTION fired (the fact exists since lane 14 of #3691): a duration-qualified parked
+           claim. Left parked because the self-metadata share arm above already counts the same sessions —
+           enabling this would be the same evidence boosted twice (see the summary); the story-level join is the
+           graph edge, gated on IdleInTransactionShareBar. If the share arm is ever retired, this replaces it:
         new()
         {
             Description = "Long idle-in-transaction sessions are holding the slots the pool is short of",

@@ -59,7 +59,7 @@ public static partial class PgTargetAdvice
                 => ComposeWrite(rootFactKey, factsByKey),
             PgTargetFactKeys.BufferCachePressure or PgTargetFactKeys.ConfigSharedBuffers
                 => ComposeBuffer(rootFactKey, factsByKey),
-            PgTargetFactKeys.ConnectionSaturation or PgTargetFactKeys.MonitoringPermissions
+            PgTargetFactKeys.ConnectionSaturation or PgTargetFactKeys.MonitoringPermissions or PgTargetFactKeys.IdleInTransaction
                 => ComposeSessions(rootFactKey, factsByKey),
             PgTargetFactKeys.AutovacuumBacklog or PgTargetFactKeys.WraparoundTrend or PgTargetFactKeys.XminHold
                 or PgTargetFactKeys.ConfigAutovacuumOff or PgTargetFactKeys.ConfigMaintWorkMem

@@ -34,6 +34,18 @@ namespace PerformanceMonitor.Analysis;
 /// ceiling multiplies it) and takes a restart (<c>pg_settings.context = postmaster</c>). Neither is chosen for
 /// the reader: the breakdown says which one the evidence points at — parked idle-in-transaction sessions are an
 /// application scoping fault a bigger pool would only defer. No DDL is written here (D8).</para>
+///
+/// <para><b><c>PG_IDLE_IN_TRANSACTION</c></b> (v2 — #3691 lane 14, design §3.10) names the longest holder — the
+/// application, the role, the database (<see cref="Fact.ObjectName"/> / <see cref="Fact.DatabaseName"/>, the two
+/// string seams), how long, in how many captures, how many were parked at once at the peak — and says what the
+/// parked transaction is costing in the engine's own terms: its snapshot (the xmin horizon, when <c>horizon_age
+/// &gt; 0</c>; explicitly NOTHING when the collector's <c>-1</c> says it pins no xid), its locks, its slot. The
+/// three chains it leafs are named ONLY when the sibling fact is in the set and fired: <c>PG_XMIN_HOLD</c> (a
+/// session is the winning holder), a fired <c>Lock</c> wait, a fired <c>PG_CONNECTION_SATURATION</c>. The lever is
+/// the APPLICATION — commit or roll back before the connection goes back to its pool — and both server-side
+/// backstops carry their counter-objective: <c>idle_in_transaction_session_timeout</c> terminates the session and
+/// rolls its work back, so a legitimately long client-side pause inside a transaction dies with the defect;
+/// <c>pg_terminate_backend</c> does the same to the one session now. Neither is a tuning win.</para>
 /// </summary>
 public static partial class PgTargetAdvice
 {
@@ -79,9 +91,34 @@ public static partial class PgTargetAdvice
             "granted, the saturation, idle-in-transaction and xmin-holder findings for this server are blind, and " +
             "get_pg_session_states shows the redacted rows as they are.");
 
+    private static readonly AdviceBlock s_idleInTransactionStatic = new(
+        Headline: "A transaction sat idle past the floor — the application finished a statement and never committed or rolled back",
+        Investigation:
+            "pg_session_states stored a session in the idle in transaction state whose transaction had been open past " +
+            "the duration floor. Such a session has finished its last statement and is waiting on the CLIENT, not the " +
+            "server: it holds its snapshot (autovacuum cannot remove any tuple deleted since the transaction began — " +
+            "the xmin horizon — when the session holds an xid or xmin; a transaction that only read under READ " +
+            "COMMITTED, or updated no rows, pins nothing), every row and relation lock it took (the next writer waits " +
+            "on work nobody is doing), and its connection slot. The bars are 60 s (WARNING) and 10 min (CRITICAL) of " +
+            "transaction duration, measured against the dogfood fleet: zero idle-in-transaction rows reached 60 s over " +
+            "7 days across 50 clusters (maximum 27.7 s), so a row over the floor is outside anything the measured " +
+            "population does (threshold_lineage = 1). A holder that pins the horizon is graded one band higher; a " +
+            "holder seen in three or more captures is a code path, not one forgotten session.",
+        Remediation:
+            "The lever is the application: commit or roll back before the connection is returned to its pool — an " +
+            "ORM session left open across a web request, a job that opens a transaction and then calls out to another " +
+            "service, a client that autocommits off and forgets. Two server-side backstops, each with its cost: " +
+            "idle_in_transaction_session_timeout terminates any session idle in a transaction past the interval and " +
+            "rolls its work back, so a legitimately long client-side pause inside a transaction dies with the " +
+            "defect; pg_terminate_backend(pid) does the same to one session now. Neither is a performance setting. " +
+            "get_pg_session_states shows the parked sessions by application, role and database; get_pg_xmin_horizon " +
+            "shows whether a session is what holds the horizon back; get_pg_blocking shows whether the locks it " +
+            "holds are what other sessions are waiting on.");
+
     /// <summary>
-    /// The composed block for a saturation or permissions root, or the family's static block when the fact set
-    /// does not carry the key (the <see cref="Static"/> path, and a story whose facts were not passed).
+    /// The composed block for a saturation, permissions or idle-in-transaction root, or the family's static block
+    /// when the fact set does not carry the key (the <see cref="Static"/> path, and a story whose facts were not
+    /// passed).
     /// </summary>
     private static partial AdviceBlock? ComposeSessions(string key, IReadOnlyDictionary<string, Fact> factsByKey)
     {
@@ -91,6 +128,11 @@ public static partial class PgTargetAdvice
                 return factsByKey.TryGetValue(key, out var saturation)
                     ? ComposeSaturation(saturation, factsByKey)
                     : s_saturationStatic;
+
+            case PgTargetFactKeys.IdleInTransaction:
+                return factsByKey.TryGetValue(key, out var parked)
+                    ? ComposeIdleInTransaction(parked, factsByKey)
+                    : s_idleInTransactionStatic;
 
             case PgTargetFactKeys.MonitoringPermissions:
                 return factsByKey.TryGetValue(key, out var permissions)
@@ -169,6 +211,113 @@ public static partial class PgTargetAdvice
         };
     }
 
+    private static AdviceBlock ComposeIdleInTransaction(Fact fact, IReadOnlyDictionary<string, Fact> factsByKey)
+    {
+        var heldMs = fact.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionDurationMsKey);
+        var horizonAge = fact.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionHolderHorizonAgeKey, -1);
+        var escalated = fact.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionHorizonEscalatedKey) > 0;
+        var holderCaptures = fact.Metadata.GetValueOrDefault("holder_captures_seen");
+        var recurring = fact.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionRecurringCapturesKey);
+        var identities = fact.Metadata.GetValueOrDefault("holder_identities");
+        var pinning = fact.Metadata.GetValueOrDefault("holder_identities_pinning_horizon");
+        var capturesWithHolders = fact.Metadata.GetValueOrDefault("captures_with_holders");
+        var capturesWithRows = fact.Metadata.GetValueOrDefault("captures_with_rows");
+        var peakConcurrent = fact.Metadata.GetValueOrDefault("peak_concurrent_holders");
+        var hasPeakAge = fact.Metadata.TryGetValue("peak_age_s", out var peakAgeSeconds);
+        var hasLastSeen = fact.Metadata.TryGetValue("holder_last_seen_age_s", out var lastSeenSeconds);
+        var holder = string.IsNullOrEmpty(fact.ObjectName) ? "an unnamed application" : fact.ObjectName;
+        var database = string.IsNullOrEmpty(fact.DatabaseName) ? string.Empty : $" in {fact.DatabaseName}";
+        var isRecurring = recurring >= PgTargetScorer.IdleInTransactionRecurrenceCaptures;
+
+        var inv = new StringBuilder();
+        inv.Append(CultureInfo.InvariantCulture,
+            $"The longest idle-in-transaction session in the window — {holder}{database} — had held its transaction open for {FormatDuration(heldMs)}{(hasLastSeen ? $", last seen {FormatAge(lastSeenSeconds)} before the window's end" : string.Empty)}, and was over the {FormatDuration(PgTargetScorer.IdleInTransactionWarningMs)} floor in {holderCaptures:0} of the {capturesWithRows:0} {(capturesWithRows == 1 ? "capture" : "captures")} that stored session rows.");
+        inv.Append(CultureInfo.InvariantCulture,
+            $" At the peak capture{(hasPeakAge ? $", {FormatAge(peakAgeSeconds)} before the window's end" : string.Empty)}, {peakConcurrent:0} {(peakConcurrent == 1 ? "session was" : "sessions were")} parked past the floor at once; {capturesWithHolders:0} of the captures had at least one, from {identities:0} distinct {(identities == 1 ? "holder" : "holders")} (application, role and database).");
+        if (horizonAge > 0)
+        {
+            inv.Append(CultureInfo.InvariantCulture,
+                $" This holder PINS THE XMIN HORIZON: PostgreSQL reports the xid / xmin it holds at an age of {horizonAge:N0} transactions, so no tuple deleted since it began can be removed by autovacuum on ANY table, and freezing cannot advance past it{(escalated ? " — the finding is graded one band higher for it" : string.Empty)}.");
+        }
+        else
+        {
+            inv.Append(" This holder pins NOTHING: the collector recorded no xid or xmin on it (a READ COMMITTED transaction that only read, or an UPDATE that matched no rows, holds no horizon), so vacuum is not waiting on it — its locks and its slot are the whole cost.");
+        }
+        if (pinning > (horizonAge > 0 ? 1 : 0))
+            inv.Append(CultureInfo.InvariantCulture, $" {pinning:0} of the holders pinned the horizon at some sighting.");
+        if (isRecurring)
+            inv.Append(CultureInfo.InvariantCulture,
+                $" One holder identity recurred in {recurring:0} captures — the same application, as the same role, in the same database, parked past the floor again and again is a code path, not one forgotten session (recurrence amplifies the finding; it is not what graded it).");
+
+        /* The three chains, named only on the evidence in the set. Each predicate reads the sibling's own verdict. */
+        if (factsByKey.TryGetValue(PgTargetFactKeys.XminHold, out var hold) && hold.BaseSeverity > 0
+            && (int)hold.Metadata.GetValueOrDefault(PgTargetScorer.XminHolderSourceKey) == HolderSourceCode("session"))
+            inv.Append(CultureInfo.InvariantCulture,
+                $" PG_XMIN_HOLD fired on this server with a SESSION as the winning holder (xmin age {hold.Metadata.GetValueOrDefault(PgTargetScorer.XminAgeKey):N0}): the parked transaction is the hold by name, and the vacuum family's backlog is its damage.");
+        var lockFired = (factsByKey.TryGetValue(PgTargetFactKeys.WaitKey("Lock", "relation"), out var relation) && relation.BaseSeverity > 0)
+            || (factsByKey.TryGetValue(PgTargetFactKeys.WaitKey("Lock", null), out var lockWait) && lockWait.BaseSeverity > 0);
+        if (lockFired)
+            inv.Append(" Lock waits fired in the same window: an idle transaction still holds every row and relation lock it took, so those waiters are queued behind work nobody is doing.");
+        if (factsByKey.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0)
+        {
+            var share = saturation.Metadata.GetValueOrDefault("peak_idle_in_transaction_share");
+            inv.Append(CultureInfo.InvariantCulture,
+                $" PG_CONNECTION_SATURATION fired: the pool peaked at {saturation.Metadata.GetValueOrDefault("saturation_ratio") * 100:0}% of its usable ceiling with {share * 100:0}% of the peak capture idle in transaction{(share >= PgTargetScorer.IdleInTransactionShareBar ? " — parked transactions are the population filling the slots, and a bigger pool would only defer the refusal" : string.Empty)}.");
+        }
+        inv.Append(CultureInfo.InvariantCulture,
+            $" The bars are {FormatDuration(PgTargetScorer.IdleInTransactionWarningMs)} and {FormatDuration(PgTargetScorer.IdleInTransactionCriticalMs)} of transaction duration, measured against the dogfood fleet: zero idle-in-transaction rows reached 60 s over 7 days across 50 clusters (maximum 27.7 s), so this is outside anything the measured population does (threshold_lineage = 1).");
+
+        var rem = new StringBuilder();
+        rem.Append(CultureInfo.InvariantCulture,
+            $"The lever is the application behind {holder}: commit or roll back before the connection is returned to its pool — an ORM session left open across a request, a job that opens a transaction and then waits on another service, a client with autocommit off. Find the code path with the application_name and role above");
+        if (isRecurring)
+            rem.Append(CultureInfo.InvariantCulture, $"; it recurred in {recurring:0} captures, so it is a path that runs, not a one-off");
+        rem.Append('.');
+        rem.Append(" Two server-side backstops, each with its cost: idle_in_transaction_session_timeout terminates any session idle in a transaction past the interval and ROLLS ITS WORK BACK, so a legitimately long client-side pause inside a transaction dies with the defect (set it above the longest pause the application makes on purpose); pg_terminate_backend(pid) does the same to one session now. Neither is a performance setting.");
+        if (horizonAge > 0)
+            rem.Append(" Because this holder pins the horizon, ending it is what lets autovacuum reclaim the dead tuples that have accumulated behind it — expect the next autovacuum pass on the affected tables to have more to do, not less.");
+        rem.Append(" get_pg_session_states shows the parked sessions by application, role and database");
+        if (horizonAge > 0 || hold is not null)
+            rem.Append("; get_pg_xmin_horizon shows whether a session is what holds the horizon back");
+        if (lockFired)
+            rem.Append("; get_pg_blocking shows the chains behind the locks it holds");
+        rem.Append('.');
+
+        return s_idleInTransactionStatic with
+        {
+            Headline = string.Format(CultureInfo.InvariantCulture,
+                "{0} idle in transaction for {1}{2} — the application never committed or rolled back{3}",
+                holder, FormatDuration(heldMs),
+                peakConcurrent > 1 ? string.Format(CultureInfo.InvariantCulture, " ({0:0} parked at once at the peak)", peakConcurrent) : string.Empty,
+                horizonAge > 0 ? ", and it is holding the xmin horizon back" : string.Empty),
+            Investigation = inv.ToString(),
+            Remediation = rem.ToString(),
+        };
+    }
+
+    /// <summary>Milliseconds rendered as an operator reads a duration — whole seconds under a minute, "4 min 12 s"
+    /// under an hour, hours and minutes above — so "held for 900 000 ms" never reaches a card.</summary>
+    private static string FormatDuration(double milliseconds)
+    {
+        var seconds = milliseconds / 1_000.0;
+        if (seconds < 60)
+            return string.Format(CultureInfo.InvariantCulture, "{0:0} s", seconds);
+        if (seconds < 3_600)
+        {
+            var minutes = (int)(seconds / 60);
+            var rest = (int)(seconds - minutes * 60);
+            return rest == 0
+                ? string.Format(CultureInfo.InvariantCulture, "{0} min", minutes)
+                : string.Format(CultureInfo.InvariantCulture, "{0} min {1} s", minutes, rest);
+        }
+
+        var hours = (int)(seconds / 3_600);
+        var minutesRest = (int)((seconds - hours * 3_600) / 60);
+        return minutesRest == 0
+            ? string.Format(CultureInfo.InvariantCulture, "{0} h", hours)
+            : string.Format(CultureInfo.InvariantCulture, "{0} h {1} min", hours, minutesRest);
+    }
+
     private static AdviceBlock ComposePermissions(Fact fact)
     {
         var share = fact.Metadata.GetValueOrDefault("rows_redacted_share");
@@ -183,6 +332,8 @@ public static partial class PgTargetAdvice
         inv.Append(" PostgreSQL does not refuse pg_stat_activity to a role without pg_read_all_stats — it returns every other role's backend with state, wait_event, xact_start, query_start, backend_type and the query text blanked, leaving pid, database, user, application_name and the xid/xmin columns; measured on a live instance, the privileged role saw four idle-in-transaction sessions and the unprivileged one zero of the same nine backends.");
         inv.Append(CultureInfo.InvariantCulture,
             $" The peak capture counted {peak:0} sessions — a bare count, which survives redaction — but what state they were in, and whether the captures that stored rows describe the pool or the login's own backends, cannot be read, so this pass emits no connection-saturation ratio for this server rather than one built on blank rows.");
+        if (fact.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionUnobservableKey) > 0)
+            inv.Append(" The idle-in-transaction read was not attempted either (idle_in_transaction_unobservable = 1): state and the transaction duration are privileged columns, so \"no session parked past the floor\" would have been the login's blindness reported as an all-clear.");
 
         return s_permissionsStatic with
         {

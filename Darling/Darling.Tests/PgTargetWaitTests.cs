@@ -423,9 +423,11 @@ public sealed class PgTargetWaitTests
         Assert.Empty(graph.GetActiveEdges(LockRelation, quiet.ToFactLookup()));
         Assert.Single(graph.GetAllEdges(LockRelation));
         Assert.Single(graph.GetAllEdges(Lock));
-        /* Both directions of the mesh are declared from saturation too. */
+        /* Both directions of the mesh are declared from saturation too — plus, since lane 14 of #3691, the
+           PG_IDLE_IN_TRANSACTION leaf (gated on the saturation fact's own parked share; PgTargetSessionsTests pins
+           it). A Lock wait's own edges stay Single: the direct Lock → idle leaf is not declared. */
         Assert.Equal(
-            new[] { Lock, LockRelation }.Order(StringComparer.Ordinal),
+            new[] { Lock, LockRelation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(PgTargetFactKeys.ConnectionSaturation).Select(e => e.Destination).Order(StringComparer.Ordinal));
         Assert.Equal(new[] { LockRelation }, Assert.Single(new InferenceEngine(graph).BuildStories(quiet)).Path);
     }

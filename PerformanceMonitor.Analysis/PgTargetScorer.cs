@@ -82,7 +82,7 @@ public static partial class PgTargetScorer
             _ when key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal) => QueriesAmplifiers(key),
             PgTargetFactKeys.BufferCachePressure or PgTargetFactKeys.ConfigSharedBuffers => BufferAmplifiers(key),
             PgTargetFactKeys.CheckpointPressure or PgTargetFactKeys.ConfigMaxWalSize or PgTargetFactKeys.WalVolumeShift => WriteAmplifiers(key),
-            PgTargetFactKeys.ConnectionSaturation => SessionsAmplifiers(key),
+            PgTargetFactKeys.ConnectionSaturation or PgTargetFactKeys.IdleInTransaction => SessionsAmplifiers(key),
             PgTargetFactKeys.AutovacuumBacklog or PgTargetFactKeys.WraparoundTrend or PgTargetFactKeys.XminHold
                 or PgTargetFactKeys.ConfigAutovacuumOff or PgTargetFactKeys.ConfigMaintWorkMem => VacuumAmplifiers(key),
             PgTargetFactKeys.TempSpill or PgTargetFactKeys.ConfigWorkMem => TempAmplifiers(key),
