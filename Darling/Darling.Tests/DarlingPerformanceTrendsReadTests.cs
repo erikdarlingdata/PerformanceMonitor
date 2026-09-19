@@ -145,7 +145,11 @@ public sealed class DarlingPerformanceTrendsReadTests
             Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
             Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
             Assert.Equal(1, procs.GetProperty("unrated_points").GetInt32());
-            Assert.Contains("no previous one inside the window", procs.GetProperty("unrated_note").GetString()!, StringComparison.Ordinal);
+            /* #3653: the note names both unrated reasons — the first-in-window LAG this seed exercises and the
+               stored-0 restart it does not — in the one sentence Lite carries byte-identical. */
+            var unratedNote = procs.GetProperty("unrated_note").GetString()!;
+            Assert.Contains("rated against the PREVIOUS one and has none inside the window", unratedNote, StringComparison.Ordinal);
+            Assert.Contains("STORED sample interval is 0", unratedNote, StringComparison.Ordinal);
 
             var second = procTrend[1];
             Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");

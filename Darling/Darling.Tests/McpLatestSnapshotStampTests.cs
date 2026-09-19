@@ -383,7 +383,9 @@ public sealed class McpLatestSnapshotStampTests
     {
         var body = Strip(ToolBody(ReadRepoFileLf(DarlingFileOf(typeof(DarlingMcpLatchSpinlockTools)).Split('/')), "get_latch_stats"));
         Assert.Contains("severity_banded_from = new", body, StringComparison.Ordinal);
-        Assert.Contains("delta_wait_time_ms = r.LatestDeltaWaitTimeMs", body, StringComparison.Ordinal);
+        /* #3653 A16: the delta the band came from is published only when the interval it accrued over was
+           knowable — the marker's stored 0 is not a measurement (#3642), and neither is a band from it. */
+        Assert.Contains("delta_wait_time_ms = r.LatestIntervalSeconds is null ? (long?)null : r.LatestDeltaWaitTimeMs", body, StringComparison.Ordinal);
         Assert.Contains("interval_seconds =", body, StringComparison.Ordinal);
         Assert.Contains("captured_at = r.LatestCollectionTime", body, StringComparison.Ordinal);
 

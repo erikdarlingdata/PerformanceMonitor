@@ -267,6 +267,62 @@ public sealed class McpPageContractTests
         }
     }
 
+    /* ───────────────────────── #3653 A16: the unknowable row, one spelling ───────────────────────── */
+
+    /// <summary>
+    /// The two delta-family tools whose rows are NOT the same shape across SKUs — Darling aggregates the window,
+    /// Lite serves the newest snapshot — and whose unknowable-row vocabulary therefore has to be pinned on its
+    /// own rather than by whole-row key equality. Per tool: the interval key and the per-second keys it
+    /// explains. A restart / first-sample row (stored interval 0) publishes every one of them null on both
+    /// SKUs, with the delta beside them null too (#3642, #3702); the executed halves are Lite's
+    /// <c>McpPageContractTests.Get*Stats_PublishesNullDeltas*_OnTheRestartMarkerRow</c> over DuckDB and
+    /// <c>DarlingMcpLatchSpinlockToolsLivePostgresTests</c> over Postgres. This fact holds the KEY SETS equal
+    /// from source, so one SKU cannot grow a rate or rename the interval without the other.
+    /// </summary>
+    public static readonly (Type Tools, string ToolName, string LiteFile, string[] Keys)[] UnknowableRowTools =
+    [
+        (typeof(DarlingMcpLatchSpinlockTools), "get_latch_stats", "Lite/Mcp/McpLatchSpinlockTools.cs", ["interval_seconds", "wait_ms_per_second", "waits_per_second"]),
+        (typeof(DarlingMcpLatchSpinlockTools), "get_spinlock_stats", "Lite/Mcp/McpLatchSpinlockTools.cs", ["collisions_per_second", "interval_seconds", "spins_per_second"]),
+    ];
+
+    /// <summary>The keys that spell the row: the interval, and any rate named <c>*_per_second</c>. Matched as
+    /// an object-initializer member (<c>name =</c>), which is how both SKUs' anonymous projections spell a
+    /// wire key; <c>avg_wait_ms_per_request</c> and <c>spins_per_collision</c> are ratios of two deltas, not
+    /// rates over the interval, and do not match.</summary>
+    private static readonly Regex UnknowableRowKeys = new(@"\b(interval_seconds|[a-z_]+_per_second)\s*=", RegexOptions.Compiled);
+
+    [Fact]
+    public void TheSameToolName_SpellsTheUnknowableRowTheSameWay_OnBothSkus()
+    {
+        foreach (var (type, toolName, liteFile, expected) in UnknowableRowTools)
+        {
+            var darlingBody = Strip(ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), toolName));
+            var liteBody = Strip(ToolBody(ReadRepoFileLf(liteFile.Split('/')), toolName));
+
+            var darlingKeys = UnknowableRowKeys.Matches(darlingBody).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            var liteKeys = UnknowableRowKeys.Matches(liteBody).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+
+            Assert.Equal(expected, darlingKeys);
+            Assert.Equal(expected, liteKeys);
+
+            /* The why-key is documented where a caller reads it, on both SKUs: each description names
+               interval_seconds and says the row's rates are null with it when the interval was unknowable. */
+            foreach (var (label, body) in new[] { ("Darling", darlingBody), ("Lite", liteBody) })
+            {
+                var description = Regex.Match(body, @"Description\((?:\s*)""((?:[^""\\]|\\.)*)""\)\]").Groups[1].Value;
+                Assert.False(string.IsNullOrEmpty(description), $"{label} {toolName}: could not locate the Description");
+                Assert.Contains("interval_seconds", description, StringComparison.Ordinal);
+                Assert.Contains("unknowable", description, StringComparison.Ordinal);
+            }
+        }
+
+        /* The matcher, witnessed both ways. */
+        Assert.Matches(UnknowableRowKeys, "                waits_per_second = PerSecond(r.DeltaWaitingRequestsCount, r.SampleIntervalSeconds),");
+        Assert.Matches(UnknowableRowKeys, "                    interval_seconds = r.LatestIntervalSeconds is double seconds ? Math.Round(seconds, 0) : (double?)null,");
+        Assert.DoesNotMatch(UnknowableRowKeys, "                avg_wait_ms_per_request = r.TotalDeltaWaitingRequests > 0");
+        Assert.DoesNotMatch(UnknowableRowKeys, "                spins_per_collision = Math.Round(r.SpinsPerCollision, 1),");
+    }
+
     /// <summary>The Lite descriptions carry the same commitment as Darling's, read from source.</summary>
     [Fact]
     public void EveryLitePagedTool_SaysWhatBoundsItsPage_InItsDescription()

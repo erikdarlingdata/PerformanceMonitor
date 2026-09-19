@@ -11,11 +11,41 @@ namespace PerformanceMonitorLite.Mcp;
 /// DuckDB store. Each wraps the existing latest-snapshot reader (GetLatchStatsSnapshotAsync /
 /// GetSpinlockStatsSnapshotAsync): the per-class / per-spinlock cumulative counters plus the last
 /// collection interval's delta at the most recent collection in the window. STORED reads, no live hit.
+///
+/// <para>
+/// <b>The unknowable row is spelled one way on both SKUs (#3653 A16).</b> Darling's twins are window
+/// AGGREGATES and these are the newest snapshot, so the rows as a whole differ and always have; the keys that
+/// spell "this row's latest interval was unknowable" do not. A restart / first-sample row stores
+/// <c>sample_interval_seconds = 0</c> beside deltas of 0 that were never measured (#3540's marker), and both
+/// SKUs publish it as: the <c>delta_*</c> null (#3642's rule, here since #3702), the per-second rates null,
+/// and <c>interval_seconds</c> null beside them — the why. Before this a caller here read a bare null delta
+/// with nothing to say whether the interval was unknowable or the row was quiet, and Darling's caller read a
+/// null rate beside a delta of 0. <see cref="KnownInterval"/> / <see cref="PerSecond"/> are the rule;
+/// <c>Darling.Tests/McpPageContractTests.TheSameToolName_SpellsTheUnknowableRowTheSameWay_OnBothSkus</c>
+/// holds the key set equal per tool. A pre-v60 row that never stored an interval publishes its deltas (they
+/// are real) with <c>interval_seconds</c> and the rates null — the snapshot read has no previous row to LAG
+/// against, so the rate is not knowable from one row and is not invented.
+/// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class McpLatchSpinlockTools
 {
-    [McpServerTool(Name = "get_latch_stats"), Description("Gets the latest latch-contention snapshot by latch class: cumulative waiting requests and wait time (with the max single wait) plus the last collection interval's delta waits. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or a page-latch class indicates allocation/page contention (often TempDB). LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: latches_returned is how many latch classes you got, heaviest last-interval wait first, and truncated says the snapshot held more than limit - a sum over the page is a sum over the page, not over the server. Raise limit when truncated is true. delta_waiting_requests_count, delta_wait_time_ms and avg_wait_ms_per_request are null on a restart / first-sample row (the interval they would have accrued over was unknowable) - null, never 0, so a restart cannot read as a quiet latch.")]
+    /// <summary>The stored interval as the wire publishes it: the seconds when measured, null when the store
+    /// holds the calculator's 0 marker or (pre-v60) nothing. Darling's reader collapses the same two to null in
+    /// SQL (<c>NULLIF(…, 0)</c> then a LAG that has no predecessor), so <c>interval_seconds</c> reads the same
+    /// on both SKUs; the deltas beside it carry the 0-versus-NULL distinction (null on the marker, real on a
+    /// pre-v60 row).</summary>
+    private static int? KnownInterval(int? sampleIntervalSeconds) =>
+        sampleIntervalSeconds is int seconds && seconds > 0 ? seconds : null;
+
+    /// <summary>A snapshot delta over the stored interval it accrued over, rounded as Darling rounds its rates;
+    /// null when either side is unknowable, so a restart cannot read as 0.00 of anything per second.</summary>
+    private static double? PerSecond(long? delta, int? sampleIntervalSeconds) =>
+        delta is long measured && KnownInterval(sampleIntervalSeconds) is int seconds
+            ? Math.Round((double)measured / seconds, 2)
+            : null;
+
+    [McpServerTool(Name = "get_latch_stats"), Description("Gets the latest latch-contention snapshot by latch class: cumulative waiting requests and wait time (with the max single wait) plus the last collection interval's delta waits. High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or a page-latch class indicates allocation/page contention (often TempDB). LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: latches_returned is how many latch classes you got, heaviest last-interval wait first, and truncated says the snapshot held more than limit - a sum over the page is a sum over the page, not over the server. Raise limit when truncated is true. interval_seconds is the seconds the deltas accrued over, and waits_per_second / wait_ms_per_second are the deltas over it - the same keys Darling's twin derives from its latest interval. On a restart / first-sample row (the interval they would have accrued over was unknowable, stored as 0) delta_waiting_requests_count, delta_wait_time_ms, avg_wait_ms_per_request, interval_seconds and both per-second rates are all null - null, never 0, so a restart cannot read as a quiet latch; interval_seconds is also null, with the deltas standing, on a row collected before the interval was stored.")]
     public static async Task<string> GetLatchStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -72,7 +102,12 @@ public sealed class McpLatchSpinlockTools
                     delta_wait_time_ms = r.DeltaWaitTimeMs,
                     avg_wait_ms_per_request = r.DeltaWaitingRequestsCount is long requests && requests > 0 && r.DeltaWaitTimeMs is long waitMs
                         ? Math.Round((double)waitMs / requests, 2)
-                        : (double?)null
+                        : (double?)null,
+                    /* #3653 A16: Darling's per-second pair and the interval they divide by, so a null delta above
+                       has its why beside it and the two SKUs spell the unknowable row with one key set. */
+                    waits_per_second = PerSecond(r.DeltaWaitingRequestsCount, r.SampleIntervalSeconds),
+                    wait_ms_per_second = PerSecond(r.DeltaWaitTimeMs, r.SampleIntervalSeconds),
+                    interval_seconds = KnownInterval(r.SampleIntervalSeconds)
                 })
             }, McpHelpers.JsonOptions);
         }
@@ -82,7 +117,7 @@ public sealed class McpLatchSpinlockTools
         }
     }
 
-    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets the latest spinlock-contention snapshot: cumulative collisions, spins, backoffs and spins-per-collision plus the last collection interval's delta collisions/spins. High spinlock contention is CPU-bound internal contention that does not appear in wait stats. LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: spinlocks_returned is how many spinlocks you got, most last-interval collisions first, and truncated says the snapshot held more than limit - sys.dm_os_spinlock_stats carries well over a hundred, so at the default the page is the hot tail, not the population. Raise limit when truncated is true. delta_collisions and delta_spins are null on a restart / first-sample row (the interval they would have accrued over was unknowable) - null, never 0.")]
+    [McpServerTool(Name = "get_spinlock_stats"), Description("Gets the latest spinlock-contention snapshot: cumulative collisions, spins, backoffs and spins-per-collision plus the last collection interval's delta collisions/spins. High spinlock contention is CPU-bound internal contention that does not appear in wait stats. LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end. THE PAGE IS BOUNDED BY limit: spinlocks_returned is how many spinlocks you got, most last-interval collisions first, and truncated says the snapshot held more than limit - sys.dm_os_spinlock_stats carries well over a hundred, so at the default the page is the hot tail, not the population. Raise limit when truncated is true. interval_seconds is the seconds the deltas accrued over, and collisions_per_second / spins_per_second are the deltas over it - the same keys Darling's twin derives from its latest interval. On a restart / first-sample row (the interval they would have accrued over was unknowable, stored as 0) delta_collisions, delta_spins, interval_seconds and both per-second rates are all null - null, never 0; interval_seconds is also null, with the deltas standing, on a row collected before the interval was stored.")]
     public static async Task<string> GetSpinlockStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -129,7 +164,11 @@ public sealed class McpLatchSpinlockTools
                     sleep_time = r.SleepTime,
                     backoffs = r.Backoffs,
                     delta_collisions = r.DeltaCollisions,
-                    delta_spins = r.DeltaSpins
+                    delta_spins = r.DeltaSpins,
+                    /* #3653 A16: see get_latch_stats — Darling's per-second pair and their denominator. */
+                    collisions_per_second = PerSecond(r.DeltaCollisions, r.SampleIntervalSeconds),
+                    spins_per_second = PerSecond(r.DeltaSpins, r.SampleIntervalSeconds),
+                    interval_seconds = KnownInterval(r.SampleIntervalSeconds)
                 })
             }, McpHelpers.JsonOptions);
         }

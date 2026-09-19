@@ -358,6 +358,13 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     /// fabricated (0, 0) as "a quiet latch" (#3642's zero-is-a-measurement rule reaching this twin). The
     /// measured row beside it publishes its numbers as before, and the marker still ranks (the reader ranks
     /// the STORED deltas) so it is not hidden from the page either.
+    /// <para>#3653 A16 — the unknowable row spelled the way Darling's twin spells it: <c>interval_seconds</c>
+    /// beside the deltas (the WHY a null delta could not say on its own) and the two per-second rates Darling
+    /// derives from its latest interval, all three null on the marker and real on the measured row —
+    /// 4,000 ms / 100 requests over a stored 60 s is 66.67 ms/s and 1.67 waits/s, the delta over the STORED
+    /// interval, not over any spacing. A third state is seeded so the two nulls are not one: a pre-v60 row
+    /// that never stored an interval keeps its deltas (they are real) and nulls only the interval and the
+    /// rates, because a single snapshot row has nothing to LAG against and the rate is not invented.</para>
     /// </summary>
     [Fact]
     public async Task GetLatchStats_PublishesNullDeltas_OnTheRestartMarkerRow()
@@ -365,18 +372,65 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         var now = DateTime.UtcNow;
         await SeedLatchAsync(now, "LOG_MANAGER", 4000);
         await SeedLatchAsync(now, "BUFFER", 0, intervalSeconds: 0);
+        await SeedLatchAsync(now, "FGCB_ADD_REMOVE", 2000, intervalSeconds: null);
 
         var page = Parse(await McpLatchSpinlockTools.GetLatchStats(_dataService, _serverManager, ServerName, 24, 10));
         var latches = page.GetProperty("latches").EnumerateArray().ToDictionary(l => l.GetProperty("latch_class").GetString()!);
-        Assert.Equal(2, latches.Count);
+        Assert.Equal(3, latches.Count);
 
-        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("delta_wait_time_ms").ValueKind);
-        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("delta_waiting_requests_count").ValueKind);
-        Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty("avg_wait_ms_per_request").ValueKind);
+        /* The marker: every key that spells the row is null, the deltas and the why alike. */
+        foreach (var key in new[] { "delta_wait_time_ms", "delta_waiting_requests_count", "avg_wait_ms_per_request", "interval_seconds", "waits_per_second", "wait_ms_per_second" })
+        {
+            Assert.Equal(JsonValueKind.Null, latches["BUFFER"].GetProperty(key).ValueKind);
+        }
 
+        /* The measured row: the deltas as before, and the rates over the STORED interval. */
         Assert.Equal(4000, latches["LOG_MANAGER"].GetProperty("delta_wait_time_ms").GetInt64());
         Assert.Equal(100, latches["LOG_MANAGER"].GetProperty("delta_waiting_requests_count").GetInt64());
         Assert.Equal(40.0, latches["LOG_MANAGER"].GetProperty("avg_wait_ms_per_request").GetDouble());
+        Assert.Equal(60, latches["LOG_MANAGER"].GetProperty("interval_seconds").GetInt32());
+        Assert.Equal(66.67, latches["LOG_MANAGER"].GetProperty("wait_ms_per_second").GetDouble());
+        Assert.Equal(1.67, latches["LOG_MANAGER"].GetProperty("waits_per_second").GetDouble());
+
+        /* The pre-v60 row: real deltas, no interval to rate them over — the two nulls are not the same state. */
+        Assert.Equal(2000, latches["FGCB_ADD_REMOVE"].GetProperty("delta_wait_time_ms").GetInt64());
+        Assert.Equal(20.0, latches["FGCB_ADD_REMOVE"].GetProperty("avg_wait_ms_per_request").GetDouble());
+        Assert.Equal(JsonValueKind.Null, latches["FGCB_ADD_REMOVE"].GetProperty("interval_seconds").ValueKind);
+        Assert.Equal(JsonValueKind.Null, latches["FGCB_ADD_REMOVE"].GetProperty("wait_ms_per_second").ValueKind);
+        Assert.Equal(JsonValueKind.Null, latches["FGCB_ADD_REMOVE"].GetProperty("waits_per_second").ValueKind);
+    }
+
+    /// <summary>The spinlock twin of the test above (#3653 A16): the marker row null on the deltas, the
+    /// rates and <c>interval_seconds</c>; the measured row rated over its STORED 60 s (4,000 collisions and
+    /// the seed's 1,000 spins → 66.67 and 16.67 per second); the pre-v60 row keeping its deltas with the
+    /// interval and the rates null.</summary>
+    [Fact]
+    public async Task GetSpinlockStats_PublishesNullDeltasAndRates_OnTheRestartMarkerRow()
+    {
+        var now = DateTime.UtcNow;
+        await SeedSpinlockAsync(now, "LOCK_HASH", 4000);
+        await SeedSpinlockAsync(now, "SOS_CACHESTORE", 0, intervalSeconds: 0);
+        await SeedSpinlockAsync(now, "XDESMGR", 2000, intervalSeconds: null);
+
+        var page = Parse(await McpLatchSpinlockTools.GetSpinlockStats(_dataService, _serverManager, ServerName, 24, 10));
+        var spinlocks = page.GetProperty("spinlocks").EnumerateArray().ToDictionary(l => l.GetProperty("spinlock_name").GetString()!);
+        Assert.Equal(3, spinlocks.Count);
+
+        foreach (var key in new[] { "delta_collisions", "delta_spins", "interval_seconds", "collisions_per_second", "spins_per_second" })
+        {
+            Assert.Equal(JsonValueKind.Null, spinlocks["SOS_CACHESTORE"].GetProperty(key).ValueKind);
+        }
+
+        Assert.Equal(4000, spinlocks["LOCK_HASH"].GetProperty("delta_collisions").GetInt64());
+        Assert.Equal(1000, spinlocks["LOCK_HASH"].GetProperty("delta_spins").GetInt64());
+        Assert.Equal(60, spinlocks["LOCK_HASH"].GetProperty("interval_seconds").GetInt32());
+        Assert.Equal(66.67, spinlocks["LOCK_HASH"].GetProperty("collisions_per_second").GetDouble());
+        Assert.Equal(16.67, spinlocks["LOCK_HASH"].GetProperty("spins_per_second").GetDouble());
+
+        Assert.Equal(2000, spinlocks["XDESMGR"].GetProperty("delta_collisions").GetInt64());
+        Assert.Equal(JsonValueKind.Null, spinlocks["XDESMGR"].GetProperty("interval_seconds").ValueKind);
+        Assert.Equal(JsonValueKind.Null, spinlocks["XDESMGR"].GetProperty("collisions_per_second").ValueKind);
+        Assert.Equal(JsonValueKind.Null, spinlocks["XDESMGR"].GetProperty("spins_per_second").ValueKind);
     }
 
     [Fact]

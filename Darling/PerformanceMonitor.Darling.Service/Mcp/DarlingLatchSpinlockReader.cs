@@ -52,10 +52,13 @@ internal static class DarlingLatchSpinlockReader
         double? LatestIntervalSeconds);
 
     /// <summary>One spinlock aggregated over the window: the summed deltas plus the latest interval's
-    /// per-second collision/spin rates.</summary>
+    /// per-second collision/spin rates. <see cref="LatestIntervalSeconds"/> is the span those rates divide by
+    /// (#3653 A16 — the latch row has carried it since #3541 A10; the spinlock row gains it so a null rate on
+    /// EITHER tool sits beside the same why-key on both SKUs); null when the interval was unknowable.</summary>
     public sealed record SpinlockStatRow(
         string SpinlockName, long TotalDeltaCollisions, long TotalDeltaSpins, long TotalDeltaBackoffs,
-        double? CollisionsPerSecond, double? SpinsPerSecond, DateTime LatestCollectionTime);
+        double? CollisionsPerSecond, double? SpinsPerSecond, DateTime LatestCollectionTime,
+        double? LatestIntervalSeconds);
 
     /* ─────────────────────────── latch stats (top N over the window) ─────────────────────────── */
 
@@ -157,9 +160,10 @@ internal static class DarlingLatchSpinlockReader
     /// The top-N spinlocks over the window, one row per spinlock — the collision analog of
     /// <see cref="LatchStatsTopNSql"/>, mirroring the Dashboard's <c>get_spinlock_stats</c> per-name
     /// aggregation (top by total delta collisions). Per-second collision/spin rates from the latest interval's
-    /// stored <c>sample_interval_seconds</c> (per-name <c>LAG</c> for pre-V127 rows), null when unknowable.
-    /// Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end
-    /// (naive UTC), $4 top.
+    /// stored <c>sample_interval_seconds</c> (per-name <c>LAG</c> for pre-V127 rows), null when unknowable,
+    /// with that interval itself as <c>latest_interval_seconds</c> — the latch query's own line (#3541 A10),
+    /// so a caller reading a null <c>collisions_per_second</c> sees WHY beside it rather than inferring it
+    /// (#3653 A16). Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end (naive UTC), $4 top.
     /// </summary>
     public const string SpinlockStatsTopNSql = """
         WITH windowed AS
@@ -198,7 +202,10 @@ internal static class DarlingLatchSpinlockReader
             SELECT DISTINCT ON (spinlock_name)
                 spinlock_name,
                 CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS double precision) / interval_seconds END AS collisions_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_spins AS double precision) / interval_seconds END AS spins_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_spins AS double precision) / interval_seconds END AS spins_per_second,
+                /* #3653 A16: the span the two rates above divide by, published beside them as interval_seconds
+                   (null when unknowable) — the same line LatchStatsTopNSql carries for the severity block. */
+                CASE WHEN interval_seconds > 0 THEN CAST(interval_seconds AS double precision) END AS latest_interval_seconds
             FROM windowed
             ORDER BY spinlock_name, collection_time DESC
         )
@@ -209,7 +216,8 @@ internal static class DarlingLatchSpinlockReader
             a.total_delta_backoffs,
             l.collisions_per_second,
             l.spins_per_second,
-            a.latest_collection_time
+            a.latest_collection_time,
+            l.latest_interval_seconds
         FROM agg AS a
         JOIN latest AS l ON l.spinlock_name = a.spinlock_name
         ORDER BY a.total_delta_collisions DESC
@@ -234,7 +242,8 @@ internal static class DarlingLatchSpinlockReader
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? null : reader.GetDouble(5),
-                reader.GetDateTime(6)));
+                reader.GetDateTime(6),
+                reader.IsDBNull(7) ? null : reader.GetDouble(7)));
         }
 
         return rows;
