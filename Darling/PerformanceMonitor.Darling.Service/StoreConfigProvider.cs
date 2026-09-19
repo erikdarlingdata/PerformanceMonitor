@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -961,7 +962,8 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
 
         /* Every knob rung APPENDS to this column list and to the bindings below in the same order, so
            no existing placeholder ordinal moves: #2349's four file-growth gates, then #3297's two
-           Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120).
+           Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120), ..., then #3653's two
+           Long-Running Query opt-out lists (text[], the excluded_databases shape).
 
            ANNOTATE HERE. THE COLUMN LIST CARRIES NO COMMENTS AT ALL, and that is a hard rule rather
            than a preference: ConfigSeedStatementArityTests parses this statement with one regex that
@@ -994,11 +996,12 @@ INSERT INTO config_alert_settings (
     deadlock_warn_per_hour, deadlock_critical_per_hour,
     pg_deadlock_count_threshold, pg_blocking_count_threshold,
     fleet_sweep_enabled, fleet_sweep_interval_minutes,
-    self_disk_free_warn_gb)
+    self_disk_free_warn_gb,
+    long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68)
+        $64, $65, $66, $67, $68, $69, $70)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1094,6 +1097,13 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            the floor-at-0 lives on DarlingAlertSettings, so what the store holds is what
            get_alert_settings reports back. */
         command.Parameters.AddWithValue(a.SelfDiskFreeWarnGb);
+        /* #3653 (A5, Q5), bound in the same order the two text[] columns were appended (V135). Seeded through
+           the shared normaliser (trim, blanks dropped, case-insensitive dedupe) so the store holds the list the
+           engine will apply and get_alert_settings reports back. On a fresh install these are darling.json's
+           values, which default to the production read's seeds (the job-step program prefix; the two NT
+           AUTHORITY logins) — the same values the rung's column DEFAULT gives a pre-rung row. */
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedProgramNamePrefixes));
+        AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedLogins));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1382,7 +1392,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        deadlock_warn_per_hour, deadlock_critical_per_hour,
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
-       self_disk_free_warn_gb
+       self_disk_free_warn_gb,
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1513,6 +1524,16 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                but not read here -- or read but not selected -- would silently reset the floor to the
                shipped default on every worker start. */
             SelfDiskFreeWarnGb = reader.GetInt32(66),
+
+            /* #3653 (A5, Q5) Long-Running Query opt-out lists appended at ordinals 67-68 (V135), text[] NOT
+               NULL, DEFAULT the two seeded lists (NOT '{}' like excluded_databases: the seeds are what a row
+               that never held the key should read as, and an operator's cleared list is stored as an explicit
+               '{}', which is honoured). Same reachability rule as every appended knob: ApplyToConfig
+               replaces config.Alerts wholesale, so a column selected but not read here -- or read but not
+               selected -- would silently reset the knob on every worker start, and the sessions an
+               operator excluded would page again while get_alert_settings still showed the list. */
+            LongRunningQueryExcludedProgramNamePrefixes = ReadTextArray(reader, 67),
+            LongRunningQueryExcludedLogins = ReadTextArray(reader, 68),
         };
         var analysis = new AnalysisConfig
         {

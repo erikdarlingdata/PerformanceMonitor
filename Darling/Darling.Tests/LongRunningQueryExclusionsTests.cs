@@ -212,8 +212,9 @@ public sealed class LongRunningQueryExclusionsTests
     /// Both hosts SEED the knob and both tell an absent key from a present-and-empty one — source-pinned on the
     /// Lite loader (WPF-hosted) and on Darling's settings seam. Lite: the static initialisers are the two
     /// default lists and the settings.json reader replaces a list only when its key is present; the sample
-    /// documents the seeds under the renamed keys. Darling (pre-V135): <c>DarlingAlertSettings</c> returns the
-    /// defaults, not an empty knob, so both SKUs evaluate the same population from day one.
+    /// documents the seeds under the renamed keys. Darling (V135): <c>DarlingAlertSettings</c> forwards
+    /// <c>AlertsConfig</c>'s lists by reference, and those initialise to the seeds, so both SKUs evaluate the same
+    /// population from day one.
     /// </summary>
     [Fact]
     public void BothHosts_SeedTheDefaults_AndLiteTellsAbsentFromPresentAndEmpty()
@@ -237,9 +238,14 @@ public sealed class LongRunningQueryExclusionsTests
         Assert.Contains("root[\"alert_long_running_query_excluded_program_name_prefixes\"]", window, StringComparison.Ordinal);
         Assert.Contains("root[\"alert_long_running_query_excluded_logins\"]", window, StringComparison.Ordinal);
 
+        /* Darling since V135: by reference through AlertsConfig, whose initialisers are the seeds (the rung's column
+           DEFAULT is the same two lists — LongRunningQueryExclusionKnobRungTests pins the three equal). */
         var darling = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertSettings.cs");
-        Assert.Contains("LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExclusions.DefaultProgramNamePrefixes;", darling, StringComparison.Ordinal);
-        Assert.Contains("LongRunningQueryExcludedLogins => LongRunningQueryExclusions.DefaultLogins;", darling, StringComparison.Ordinal);
+        Assert.Contains("LongRunningQueryExcludedProgramNamePrefixes => _config.Alerts.LongRunningQueryExcludedProgramNamePrefixes;", darling, StringComparison.Ordinal);
+        Assert.Contains("LongRunningQueryExcludedLogins => _config.Alerts.LongRunningQueryExcludedLogins;", darling, StringComparison.Ordinal);
+        var config = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingConfig.cs");
+        Assert.Contains("LongRunningQueryExcludedProgramNamePrefixes { get; set; } = LongRunningQueryExclusions.DefaultProgramNamePrefixes.ToList();", config, StringComparison.Ordinal);
+        Assert.Contains("LongRunningQueryExcludedLogins { get; set; } = LongRunningQueryExclusions.DefaultLogins.ToList();", config, StringComparison.Ordinal);
     }
 
     private static string DarlingAlertReadAdapterTemplate(string source)

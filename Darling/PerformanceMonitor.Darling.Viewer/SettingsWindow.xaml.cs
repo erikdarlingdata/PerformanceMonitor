@@ -744,6 +744,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = r.LongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = r.LongRunningQueryExcludeMiscWaits;
         LrqExcludeCdcCheckBox.IsChecked = r.LongRunningQueryExcludeCdc;
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", r.LongRunningQueryExcludedProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", r.LongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", r.ExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
@@ -828,6 +830,9 @@ public partial class SettingsWindow : Window
             LongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true,
             LongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true,
             LongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true,
+            /* #3653 (A5, Q5): comma-separated in the boxes; the row's bind normalises through the shared rule. */
+            LongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList(),
+            LongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList(),
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
@@ -1013,6 +1018,9 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = true;
         LrqExcludeMiscWaitsCheckBox.IsChecked = true;
         LrqExcludeCdcCheckBox.IsChecked = true;
+        /* #3653 (A5, Q5): "defaults" for the opt-out knob are the SEEDS (the rung's column DEFAULT), not empty boxes. */
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
@@ -1176,6 +1184,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsEnabled = enabled;
         LrqExcludeMiscWaitsCheckBox.IsEnabled = enabled;
         LrqExcludeCdcCheckBox.IsEnabled = enabled;
+        AlertLrqExcludedProgramNamePrefixesBox.IsEnabled = enabled;
+        AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
