@@ -3903,6 +3903,44 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// The tier a PostgreSQL "High CPU" fire wears (#3653, A8e — the PostgreSQL host's half of what #3660
+    /// did for <c>AlertEngine.GradeCpuFire</c>): Critical when the CPU health band bands the reading Critical,
+    /// Warning otherwise. Pure, so the boundary can be pinned without a store or a deliverer fake, the same
+    /// seam <see cref="BuildPgDeadlockIncident"/> is.
+    ///
+    /// <para><b>It is the card's classifier, called on the card's inputs, not a copy of its ladder.</b>
+    /// <see cref="ServerHealthClassifier.CpuSeverity"/> is handed the raw Performance Insights CPU percent and
+    /// the ACU utilization percent — the two figures <see cref="EvaluatePgCpuAsync"/> already read off the
+    /// sample — on the <see cref="FleetCpuSource.PerformanceInsights"/> arm, and it runs
+    /// <see cref="FleetCpuProvenance.CpuBandInputPercent"/> itself to pick the capacity percent (#3281): the
+    /// figure this grades is therefore the figure the gate thresholded, by construction rather than by two
+    /// call sites agreeing. Re-stating <c>&gt;= 95</c> here against the capacity percent would band the same
+    /// number, and would be the second spelling of the ladder that the band's own comment forbids.</para>
+    ///
+    /// <para><b>What the bar is, and is not.</b> <see cref="ServerHealthThresholds.CpuCriticalPercent"/> is
+    /// the ONE ladder the fleet card, <c>get_fleet_overview</c>, <c>/api/fleet</c> and the Performance
+    /// Calendar band on (#3539 A2). It is stated against a quantity, not measured on a fleet distribution
+    /// the way the deadlock tiers are (#3368) — <c>AlertEngine.GradeCpuFire</c>'s doc says the same of the
+    /// SQL Server arm — so this is not a claim that 95% of the configured ceiling is a measured Critical; it
+    /// is the claim that the alert row and the card must not disagree about the colour of the same minute.
+    /// On the PostgreSQL arm that quantity is percent of the CONFIGURED ACU ceiling (the <c>db.serverless</c>
+    /// reading where 100% means the ceiling really is reached), never the percent-of-allocated raw CPU.</para>
+    ///
+    /// <para><b>The band's other arms map to Warning.</b> Healthy and Warning both: the operator's
+    /// <c>CpuThresholdPercent</c> already decided this fire was asked for, and a delivered alert is never
+    /// rendered as nothing (the <c>GradeDeadlockFire</c> floor). Unknown — no capacity reading — cannot reach
+    /// the fire site at all (<c>breaching</c> requires <c>lastCapacityPercent.HasValue</c>, and the reading
+    /// graded is the one that produced it), and maps to Warning too rather than throwing, for the same reason.
+    /// An operator whose threshold is 97 sees every fire Critical, which is a coherent reading of a knob above
+    /// the bar.</para>
+    /// </summary>
+    internal static AlertSeverityLevel GradePgCpuFire(double cpuPercent, double? acuUtilizationPercent) =>
+        ServerHealthClassifier.CpuSeverity(cpuPercent, acuUtilizationPercent, FleetCpuSource.PerformanceInsights)
+            == HealthSeverity.Critical
+            ? AlertSeverityLevel.Critical
+            : AlertSeverityLevel.Warning;
+
+    /// <summary>
     /// The Postgres High CPU alert (#2719), reading the <c>pg_cpu_utilization</c> table
     /// <see cref="DarlingCollectorRunner.IngestPgCpuAsync"/> fills from AWS Performance Insights. Reuses
     /// <see cref="DarlingAlertSettings.CpuEnabled"/>/<see cref="DarlingAlertSettings.CpuThresholdPercent"/> —
@@ -4157,6 +4195,21 @@ public sealed class DarlingWorker : BackgroundService
                     ? $"  Allocated: {reading.ServerlessCapacityAcu:0.#} of {reading.MaxConfiguredAcu:0.#} ACU\n"
                     : string.Empty;
 
+                /* #3653 (A8e, the PostgreSQL host): GRADE the fire from the reading it fired on. Until now
+                   this arm passed Severity: null, so every PostgreSQL High CPU row rendered amber by NAME
+                   (#3635's replay arm) — a 100%-of-ceiling fire indistinguishable from an 80% one while the
+                   fleet card beside it was red — after #3660 gave the SQL Server twin its tier. The grade is
+                   the CPU health band's own classifier (ServerHealthClassifier.CpuSeverity) handed the same
+                   two figures the card is handed, on the Performance Insights arm, so it bands the SAME
+                   capacity percent this gate thresholded (CpuBandInputPercent decides which figure inside
+                   the classifier, exactly as it did for `capacityPercent` above) and lands Critical at the
+                   band's 95% bar — the card's ladder, not a new number; GradePgCpuFire says what that bar is
+                   and is not. The context stays null: this host has exactly one deliverer, and it folds the
+                   outcome's tier into the persisted context (#2090, DarlingAlertDeliverer.SendAndRecordAsync)
+                   before the row is written — the path every Tier-0 and Poison Wait fire in this file already
+                   rides — so the history grids and get_alert_history read the tier this fire wore. */
+                var grade = GradePgCpuFire(reading.CpuPercent, reading.AcuUtilizationPercent);
+
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         key,
@@ -4179,7 +4232,7 @@ public sealed class DarlingWorker : BackgroundService
                         NumericCurrentValue: lastCapacityPercent.Value,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
                         Muted: muted,
-                        Severity: null,
+                        Severity: grade,
                         ShortMessage:
                             $"Capacity at {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
                             + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
@@ -4282,8 +4335,10 @@ public sealed class DarlingWorker : BackgroundService
             var cooldownElapsed = !_lastPgDeadlockAlert.TryGetValue(key, out var last) || now - last >= cooldown;
 
             /* #3444: read ONCE, then handed to the gate and the delivered message alike, so the two cannot
-               quote different numbers when a store reload swaps config.Alerts mid-evaluation. */
+               quote different numbers when a store reload swaps config.Alerts mid-evaluation. The rate tiers
+               the fire is GRADED on (#3653, below) are read at the same spot for the same reason. */
             var threshold = alertSettings.PgDeadlockCountThreshold;
+            var rateTiers = alertSettings.DeadlockRateThresholds;
 
             var decision = RollingCountAlertGate.Evaluate(
                 count, threshold, watermark, cooldownElapsed, suppressed: false);
@@ -4311,6 +4366,37 @@ public sealed class DarlingWorker : BackgroundService
                     MetricName = metricName,
                 }) ?? false;
 
+                /* #3653 (A8e, the PostgreSQL host): GRADE the fire the gate already decided on, exactly as
+                   #3660 graded the SQL Server twin — the same AlertEngine.GradeDeadlockFire, on the same
+                   count over the same window, against the same store-tunable pair. Until now this arm passed
+                   Severity: null, so every PostgreSQL Deadlocks Detected row rendered red by NAME (#3635's
+                   replay arm): one deadlock and a storm wore one colour. The count IS the hourly rate here
+                   (the window is AlertEngine.RollingCountWindowHours, one hour, the same constant the
+                   grader divides by), so Critical lands at deadlock_critical_per_hour (shipped 20/hr —
+                   #3368's measured tier, inside the empty interval of 14,448 production server-hours) and
+                   Warning everywhere else; the band's Healthy maps to Warning too, because the count knob
+                   above already decided this fire was asked for and a delivered alert is never rendered as
+                   nothing. The tiers are DarlingAlertSettings.DeadlockRateThresholds — the V120 knobs the
+                   PostgreSQL fleet card bands this same server on since #3638 — not the shipped Default, so
+                   an operator who moved the card's Critical tier sees the alert row move with it.
+
+                   The instrument is the alert's own, deliberately: the deduped pg_deadlocks report count
+                   the message quotes, not the pg_stat_database.deadlocks difference the card bands on.
+                   Grading a row on a number it does not display would be a second card/alert
+                   disagreement in place of the one this ends, and the counter is not in hand here — it is
+                   the fleet reader's own read (FleetPgDeadlockSql), so reusing it would cost one more
+                   alert-path store read per PostgreSQL server per sweep for a number the row cannot show.
+                   The two instruments differ when the log capture misses what the server counted, in
+                   which case the row is graded on the smaller, honest number. One stated edge: the read
+                   above caps at 50 distinct reports, so the count — and therefore the grade — saturates
+                   there; a Critical tier raised past 50/hr is unreachable on this host (the shipped 20 is
+                   well under it, and the message quotes the same capped count, so grade and text agree).
+
+                   The tier rides the outcome only, like every graded fire in this file (the Tier-0 trio and
+                   Poison Wait pass finding.Severity the same way): this host's one deliverer folds it into
+                   the persisted context (#2090) before the row is written, which is what #3635's grids and
+                   get_alert_history read. The SQL engine sets both because it serves two SKUs' deliverers;
+                   this host serves one. */
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         key,
@@ -4326,7 +4412,7 @@ public sealed class DarlingWorker : BackgroundService
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
                         Muted: muted,
-                        Severity: null,
+                        Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
                 readClock.Restart();
@@ -4350,6 +4436,29 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// The tier a PostgreSQL "Blocking Detected" fire wears (#3653, A8e): Warning, and ONLY Warning — stated
+    /// at the fire site rather than left to <c>AlertSeverity.ForMetric</c>'s by-name arm, so the persisted row
+    /// says what it fired at and the name decides only for rows written before it did (#3635).
+    ///
+    /// <para><b>No Critical tier, on purpose, because no measured bar exists to grade one on.</b> The rule
+    /// #3660 applied to tempdb Space: existing measured bars only, no new constants without lineage. The
+    /// candidates were checked and declined. The SQL Server blocking health band's tiers (#3596) were measured
+    /// in <i>reports per server-hour</i> on engine-recorded evidence; this alert counts distinct root blockers
+    /// SEEN in a once-a-minute sample of <c>pg_stat_activity</c>, so a waiter present in three consecutive
+    /// captures is one wait observed three times, not three reports — the very denominator mismatch that keeps
+    /// the PostgreSQL blocking band Unknown-with-reason (<c>Darling/README.md</c>, engine-coverage table).
+    /// The operator's <c>PgBlockingCountThreshold</c> is a fire bar, not a tier. And the sampled-shape
+    /// distribution an honest PostgreSQL tier would be cut from (share of captures holding a waiter; longest
+    /// observed wait) has not been taken — #3539's residue on #3653 names it, and #3601's <c>lock_wait</c>
+    /// log events (one line per wait past <c>deadlock_timeout</c>) as the event-grain source a report-rate
+    /// tier would read. When that measurement exists it lands here as a second tier with nothing else to
+    /// unpick; until then a distinct-blocker count over the operator's bar is a Warning, honestly labelled.
+    /// The SQL Server twin (<c>AlertEngine.CheckBlockingAsync</c>) still fires with no tier at all; that
+    /// site is the shared engine's and outside this host.</para>
+    /// </summary>
+    internal const AlertSeverityLevel PgBlockingFireSeverity = AlertSeverityLevel.Warning;
+
+    /// <summary>
     /// The rolling-1-hour-window Postgres Blocking alert (#2711). Counts DISTINCT root blockers, not raw
     /// chain rows — <see cref="DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync"/> (#2714) already
     /// dedupes by root INSIDE the query, before its own LIMIT, so a single persistent blocker sampled every
@@ -4360,6 +4469,8 @@ public sealed class DarlingWorker : BackgroundService
     /// reuse and parity-named metrics as <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why —
     /// and the same #3444 settings treatment: <see cref="DarlingAlertSettings.PgBlockingCountThreshold"/> is the
     /// count gate, under <see cref="DarlingAlertSettings.BlockingEnabled"/>.
+    /// <para>Fires at <see cref="PgBlockingFireSeverity"/> — an explicit Warning, and only Warning (#3653);
+    /// that constant's doc says why no Critical tier exists here.</para>
     /// </summary>
     private async Task EvaluatePgBlockingAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -4439,6 +4550,11 @@ public sealed class DarlingWorker : BackgroundService
                     MetricName = metricName,
                 }) ?? false;
 
+                /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, so the row
+                   carries what it fired at (through the deliverer's #2090 fold, as the deadlock arm above
+                   explains) rather than leaving #3635's by-name replay arm to imply it. Warning, and only
+                   Warning — PgBlockingFireSeverity's doc says which bars were considered and why none
+                   qualifies as a Critical tier tonight. */
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         key,
@@ -4454,7 +4570,7 @@ public sealed class DarlingWorker : BackgroundService
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
                         Muted: muted,
-                        Severity: null,
+                        Severity: PgBlockingFireSeverity,
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
                 readClock.Restart();
@@ -4489,6 +4605,24 @@ public sealed class DarlingWorker : BackgroundService
     private const int PgLongRunningQueryRecencyMinutes = ServerHealthThresholds.CollectionStoppedMinutesDefault;
 
     /// <summary>
+    /// The tier a PostgreSQL "Long-Running Query" fire wears (#3653, A8e): Warning, and ONLY Warning, stated
+    /// at the fire site for the reason <see cref="PgBlockingFireSeverity"/> gives.
+    ///
+    /// <para><b>No Critical tier, because nothing measured supports one.</b> The only bar this alert has is
+    /// the operator's <c>LongRunningQueryThresholdMinutes</c>, a fire bar — "N times the threshold" would be
+    /// a folklore multiplier with no lineage, the constant the repo's rule refuses. The measured evidence
+    /// that exists (the SQL Server twin's population, one production store class, #3653 A5) points the other
+    /// way: 191 distinct sessions over 30 minutes in seven days, the p90 seen in 6,192 snapshots — permanent
+    /// background requests, which is why that row shapes the alert's rollout as opt-out coverage rather
+    /// than a gate; a duration tier cut from such a population would grade the background as the emergency,
+    /// and no PostgreSQL distribution has been taken at all. No health band exists for the condition on
+    /// either engine to borrow a ladder from. The SQL Server twin
+    /// (<c>AlertEngine.CheckLongRunningQueriesAsync</c>) still fires with no tier at all; that site is the
+    /// shared engine's and outside this host.</para>
+    /// </summary>
+    internal const AlertSeverityLevel PgLongRunningQueryFireSeverity = AlertSeverityLevel.Warning;
+
+    /// <summary>
     /// The live-state Postgres Long-Running Query alert (#2711): fires when the most recent
     /// <c>pg_session_states</c> capture shows any session whose CURRENT query has run past
     /// <see cref="IAlertEngineSettings.LongRunningQueryThresholdMinutes"/> — the SAME configured threshold SQL
@@ -4515,6 +4649,9 @@ public sealed class DarlingWorker : BackgroundService
     /// is still reported carries its <c>command_tag</c> on the incident line, so a <c>CREATE</c> that is an
     /// index build reads as what it is rather than being dropped on a guess — the annotate-never-suppress
     /// posture SQL Server's Agent-job name (#3497) takes on its card.</para>
+    ///
+    /// <para>Fires at <see cref="PgLongRunningQueryFireSeverity"/> — an explicit Warning, and only Warning
+    /// (#3653); that constant's doc says why no Critical tier exists here.</para>
     /// </summary>
     private async Task EvaluatePgLongRunningQueryAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -4572,6 +4709,9 @@ public sealed class DarlingWorker : BackgroundService
                     DatabaseName = worst.DatabaseName,
                 }) ?? false;
 
+                /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, for the
+                   reason the blocking arm above gives. Warning, and only Warning —
+                   PgLongRunningQueryFireSeverity's doc says why. */
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         key,
@@ -4587,7 +4727,7 @@ public sealed class DarlingWorker : BackgroundService
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
                         Muted: muted,
-                        Severity: null,
+                        Severity: PgLongRunningQueryFireSeverity,
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
