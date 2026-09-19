@@ -36,5 +36,25 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.CheckpointPressure, PgTargetFactKeys.ConfigMaxWalSize, "checkpoint_pressure",
             "max_wal_size at the shipped default — the ceiling the requested checkpoints are hitting was never sized",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigMaxWalSize, out var knob) && knob.BaseSeverity > 0);
+
+        /* Lane 5's wait edges into this chain (#3542 step 5). The WAL waits are the SYMPTOM a backend feels of
+           the pressure above: IO:WALSync is fsync on the segment, LWLock:WALWrite is the queue behind the WAL
+           writer, and both inflate with the full-page images every forced checkpoint re-arms — so a fired WAL
+           wait leads to PG_CHECKPOINT_PRESSURE, which leads to the ceiling: IO:WALSync → PG_CHECKPOINT_PRESSURE
+           → CONFIG_PG_MAX_WAL_SIZE. The IO and LWLock ROLLUPS have no edge here: a rollup scores 0 whenever its
+           named standout fired (PgTargetScorer.Waits.cs — one wait is graded once), so the standout is the
+           root and the rollup never competes with it. The edges run symptom → cause only: when the pressure
+           OUTRANKS the wait (a near-total requested share amplified by its knob), the pressure roots first,
+           walks to the knob, and the wait roots a one-fact story whose advice names the co-fire — accepted
+           and pinned, because a reverse pressure → wait edge would make the walk prefer the higher-severity
+           wait over the knob and leave the knob to root a third card. Predicates read the destination's verdict
+           (BaseSeverity > 0 — a PostgreSQL wait fact scores 0 below its concerning bar, so "fired" means "a
+           finding"); the bars are PgTargetScorer.Waits.cs's with their lineage. */
+        AddEdge(PgTargetFactKeys.WaitKey("IO", "WALSync"), PgTargetFactKeys.CheckpointPressure, "checkpoint_pressure",
+            "Requested checkpoints dominate — the full-page images forced checkpoints re-arm are the WAL these fsyncs are waiting on",
+            facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0);
+        AddEdge(PgTargetFactKeys.WaitKey("LWLock", "WALWrite"), PgTargetFactKeys.CheckpointPressure, "checkpoint_pressure",
+            "Requested checkpoints dominate — WAL volume is forcing checkpoints, and every commit is queued behind the same WAL",
+            facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0);
     }
 }
