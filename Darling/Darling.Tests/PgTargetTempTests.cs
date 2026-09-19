@@ -406,9 +406,14 @@ public sealed class PgTargetTempTests
         Assert.Contains("workMem.Metadata[PgTargetScorer.WorkMemSpillBytesPerSecKey] = bytesPerSec;", code, StringComparison.Ordinal);
         /* A trend needs both halves observed; one half is not a trend. */
         Assert.Contains("if (intervalsFirstHalf > 0 && intervalsSecondHalf > 0)", code, StringComparison.Ordinal);
-        /* Rates over observed time, never the nominal window. */
+        /* Rates over observed time, never the nominal window: the one use of the window's own span is the
+           midpoint bound for the trend halves, and nothing divides by a TimeSpan of it. */
         Assert.Contains("context.ObservedDurationMs / 1000.0", code, StringComparison.Ordinal);
-        Assert.DoesNotContain("TimeRangeEnd - context.TimeRangeStart", code, StringComparison.Ordinal);
+        Assert.Equal(1, code.Split("TimeRangeEnd - context.TimeRangeStart").Length - 1);
+        Assert.Contains("(context.TimeRangeEnd - context.TimeRangeStart) / 2", code, StringComparison.Ordinal);
+        Assert.DoesNotContain(".TotalMilliseconds", code, StringComparison.Ordinal);
+        Assert.DoesNotContain(".TotalSeconds", code, StringComparison.Ordinal);
+        Assert.DoesNotContain(".TotalHours", code, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -564,9 +569,13 @@ public sealed class PgTargetTempTests
             Assert.Equal(0, spill.Metadata["threshold_lineage"]);
             Assert.False(deadlock.Metadata.ContainsKey("threshold_lineage"));
 
-            /* ── THE EXIT CRITERION: the real analyze_server. */
+            /* ── THE EXIT CRITERION: the real analyze_server, ANCHORED at the planted window's end. Un-anchored it
+               ends at UtcNow, a minute or two past windowEnd, and its window start slides past the first planted
+               minutes — each a 120 MiB step — so the exact totals below would drift by however long the planting
+               took (27.8 GB on one CI run). The anchored run is exploratory (not persisted), which nothing here reads. */
             var service = new DarlingAnalysisService(postgres);
-            var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
+            var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(analysis))
             {
                 var root = doc.RootElement;
