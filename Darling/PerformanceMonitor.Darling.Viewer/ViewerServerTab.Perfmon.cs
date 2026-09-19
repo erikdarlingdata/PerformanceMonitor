@@ -187,13 +187,17 @@ public partial class ViewerServerTab
     /// fetched <c>MAX(sample_interval_seconds)</c> onto every row since #2234 and this chart plotted the raw
     /// delta beside it under a Y axis that said "Value" — <c>Batch Requests/sec</c> drew batches-per-sweep
     /// (a ~300 s sweep on the measured fleet, so ~300x the number its name promises), and a restart's
-    /// fabricated (0, 0) drew as a real trough. Now a counter the name-suffix PROXY calls a rate (its name
-    /// ends in <c>/sec</c>; <c>cntr_type</c> is not stored, the rung that stores it is queued under #3653 and
-    /// is the fix for the proxy's mis-classes, which <see cref="DeltaSeriesShaping"/> enumerates) plots
-    /// delta / interval; every other counter plots its raw delta with " (Δ/interval)" on its legend entry;
-    /// a stored interval of 0 plots NaN, which ScottPlot draws as a line break — the restart reads as
-    /// absence, composing with #1944's cadence gap rule that <c>Add.TimeSeries</c> already applies on X. The
-    /// Y label is composed from the bases actually plotted, so a mixed selection is labelled as mixed rather
+    /// fabricated (0, 0) drew as a real trough. Each series is classified by its STORED <c>cntr_type</c>
+    /// (V132, #3653 A7): a rate counter plots delta / interval; a gauge plots its raw value as the level it is
+    /// (the store held it all along; only the type was missing); everything else plots its raw delta with
+    /// " (Δ/interval)" on its legend entry. The #3702 name-suffix proxy (<c>/sec</c> = rate) is the fallback
+    /// for a series with no stored type — rows written before the rung, or a counter whose instances mix
+    /// types — and never says "gauge", so history renders as it did before the rung until a row carries the
+    /// type. A counter's type does not change, so the series takes ANY point's non-null type: a gauge's whole
+    /// window plots as a level the morning after the upgrade. A stored interval of 0 plots NaN on a delta
+    /// series, which ScottPlot draws as a line break — the restart reads as absence, composing with #1944's
+    /// cadence gap rule that <c>Add.TimeSeries</c> already applies on X; a level ignores the interval. The Y
+    /// label is composed from the bases actually plotted, so a mixed selection is labelled as mixed rather
     /// than under one unit. The Y ceiling ignores the NaNs (an all-restart window still gets an axis).
     /// </summary>
     private async Task UpdatePerfmonChartFromPickerAsync()
@@ -228,10 +232,14 @@ public partial class ViewerServerTab
                 if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
                 var counterName = selected[i].DisplayName;
-                var basis = DeltaSeriesShaping.BasisFor(counterName);
+                /* The series' type is any point's non-null type — a counter's type does not change, and the
+                   read reports one only where the point's instance rows agree. Null on every point means
+                   pre-rung rows or a mixed-type family: the name proxy decides, as it did before V132. */
+                var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
+                var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
                 var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
                 var values = DeltaSeriesShaping.Shape(
-                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds)).ToList(),
+                    trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
                     basis);
                 var label = DeltaSeriesShaping.LegendLabel(counterName, basis);
 

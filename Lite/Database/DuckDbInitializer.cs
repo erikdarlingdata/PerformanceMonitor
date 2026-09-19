@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 61;
+    internal const int CurrentSchemaVersion = 62;
 
     private readonly string _archivePath;
 
@@ -1709,6 +1709,48 @@ public class DuckDbInitializer
                 {
                     _logger?.LogWarning("Migration to v61 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
                 }
+            }
+        }
+
+        if (fromVersion < 62)
+        {
+            /* v62 (#3653 A7): perfmon_stats gains cntr_type — the Windows performance-counter type id
+               sys.dm_os_performance_counters reports for every row, twinning Darling's V132. Until now the
+               store could not say which of its perfmon rows were COUNTS and which were LEVELS, so the
+               collector differenced every counter it read: Total Server Memory (KB) exactly like Batch
+               Requests/sec, and a target that released memory — a falling level — read to the shared delta
+               calculator as a counter reset, storing the (0, 0) "no delta knowable" marker at exactly the
+               moment the drop mattered. With the type stored the collector writes a gauge (65792,
+               PERF_COUNTER_LARGE_RAWCOUNT) as its raw value with NULL delta and NULL interval — NULL, not
+               (0, 0), because 0 is a claim about a delta and a gauge has none — and a rate (272696576,
+               PERF_COUNTER_BULK_COUNT) exactly as before; the readers classify by the stored type through
+               PerformanceMonitor.Common.PerfmonCounterTypes and fall back to #3702's name-suffix proxy only
+               for a NULL type.
+
+               Appended at the end of the PayloadColumns list, so the positional appender and old parquet are
+               unaffected. Nothing to backfill and nothing that COULD be: a row collected before the upgrade
+               never recorded its type, the store holds no way to recover one from a name, and NULL is the
+               honest value — the readers treat it as "classify as you did before the rung", so history
+               renders as the operator last saw it. Because a counter's type does not change, the viewers take
+               any row's non-null type as the series' type, so a gauge's whole history plots as a level the
+               morning after the upgrade (its pre-rung rows stored cntr_value all along).
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first perfmon batch — the
+               whole batch, not the column. Fresh installs get it from DuckDbSchemaGenerator; this ALTER is
+               for an existing database and is idempotent. The v_ passthrough view needs no work here: Lite
+               rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this). Non-fatal,
+               matching v59/v60/v61. */
+            _logger?.LogInformation("Running migration to v62: perfmon_stats stores each counter's type, so gauges are no longer differenced");
+
+            try
+            {
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE perfmon_stats ADD COLUMN IF NOT EXISTS cntr_type INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v62 on perfmon_stats.cntr_type encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

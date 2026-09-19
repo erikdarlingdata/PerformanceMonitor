@@ -330,9 +330,11 @@ public sealed class ViewerPerfmonShapingParityTests
         var body = CSharpSourceWalker.BraceBalanced(stripped, open);
         var rawBody = raw.Substring(open, body.Length);
 
-        Assert.Contains("DeltaSeriesShaping.BasisFor(counterName)", body, StringComparison.Ordinal);
+        /* Since V132 / v62 the classification takes the series' stored type, the name proxy only as its
+           fallback (PerfmonCounterTypeRungTests pins the two-argument call and the seriesType line). */
+        Assert.Contains("DeltaSeriesShaping.BasisFor(counterName, seriesType)", body, StringComparison.Ordinal);
         Assert.Contains("DeltaSeriesShaping.Shape(", body, StringComparison.Ordinal);
-        Assert.Contains("new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds)", body, StringComparison.Ordinal);
+        Assert.Contains("new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)", body, StringComparison.Ordinal);
         Assert.Contains("DeltaSeriesShaping.LegendLabel(counterName, basis)", body, StringComparison.Ordinal);
         Assert.Contains("PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases))", body, StringComparison.Ordinal);
         Assert.Contains("DeltaSeriesShaping.MaxFinite(values, 0)", body, StringComparison.Ordinal);

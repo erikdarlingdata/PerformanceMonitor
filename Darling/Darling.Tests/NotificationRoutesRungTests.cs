@@ -28,17 +28,19 @@ namespace Darling.Tests;
 /// ACL, the column parity between the three readers/writers that name its columns, and the viewer probe's
 /// top arm.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>PgLogEventsRungTests</c> (V129,
-/// via V130) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current. When the next rung lands, those claims move
-/// on and what stays is everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this class carried moved to <c>PerfmonCounterTypeRungTests</c> (V132)
+/// when that rung landed, the same handoff this class received from <c>PgLogEventMetricsRungTests</c> (V130).
+/// What stays here is the one-rung-behind half: a store carrying this and not V132 maps to 131, which is the
+/// honest answer for it and what makes the upgrade banner correct in both directions.</para>
 /// </summary>
 public sealed class NotificationRoutesRungTests
 {
     private const int RungVersion = 131;
     private const int PreviousVersion = 130;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V132 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later rung
+    /// appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 106;
 
     private const string Table = "config_notification_routes";
@@ -50,14 +52,16 @@ public sealed class NotificationRoutesRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("notification-routes", V131.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V132 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to PerfmonCounterTypeRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V131 is expected to sit below the ladder's top now that V132 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -280,22 +284,21 @@ public sealed class NotificationRoutesRungTests
         Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Deadlocks Detected", PagerDutyRoutingKey = "k" }));
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites, one rung behind the top) -------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
-    /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// The viewer probe's three sites carry this rung's sentinel, and the map has an arm for it one rung behind
+    /// the top. The probe asks the question, the caller reads the answer, the map has the parameter — a sentinel
+    /// present at only some of them shifts every LATER ordinal onto the wrong column, and a missing arm maps a
+    /// store that stopped here one rung short.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains($"table_name = '{Table}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasNotificationRoutes", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -303,9 +306,12 @@ public sealed class NotificationRoutesRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V132 has appended its own; the
+           "is the last argument" claim moved to PerfmonCounterTypeRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V131's sentinel is expected to sit below the top rung's now that V132 has landed");
 
+        /* Every sentinel true = a fully-migrated store, which must map to exactly the ladder's top. Stated
+           against StorageVersion rather than this rung's number, so it survives every later rung. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
@@ -316,14 +322,14 @@ public sealed class NotificationRoutesRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns THIS rung's version. */
         var thisArm = viewer.IndexOf("if (hasNotificationRoutes)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf(PreviousArmSource, StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V131 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V131 sentinel arm — a store that stopped here would map to 130");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V131 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V131 arm sits below the previous rung's, so a store that stopped here maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 

@@ -211,6 +211,7 @@ public static class PgMigrations
         new Migration(129, "pg-log-events", V129Sql),
         new Migration(130, "pg-log-event-metrics", V130Sql),
         new Migration(131, "notification-routes", V131Sql),
+        new Migration(132, "perfmon-counter-type", V132Sql),
     };
 
     /// <summary>
@@ -1075,6 +1076,74 @@ DROP TRIGGER IF EXISTS trg_bump_notification_routes ON config.config_notificatio
 CREATE TRIGGER trg_bump_notification_routes
     AFTER INSERT OR UPDATE OR DELETE ON config.config_notification_routes
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
+    /// V132 — <c>cntr_type</c> on <c>collect.perfmon_stats</c> (#3653 A7's rung; the measurement contract's
+    /// rule 8, "gauges are never delta'd"): the Windows performance-counter type id
+    /// <c>sys.dm_os_performance_counters</c> reports for every row, stored beside the raw value so the store
+    /// can finally say which of its perfmon rows are COUNTS and which are LEVELS. Until this rung the
+    /// collector differenced every counter it read — <c>Total Server Memory (KB)</c> exactly like
+    /// <c>Batch Requests/sec</c> — and a target that released memory, a FALLING level, presented to the
+    /// shared delta calculator as a counter reset: the (0, 0) "no delta knowable" marker written at exactly
+    /// the moment the drop mattered, and the perfmon chart drawing a level's meaningless per-sweep
+    /// difference as "activity". The viewers had to classify by a name-suffix proxy (<c>/sec</c> = rate,
+    /// #3702) because the row could not tell them. Pinned by <c>PerfmonCounterTypeRungTests</c>.
+    ///
+    /// <para><b>What the column means, row by row.</b> The DMV's raw <c>cntr_type</c> word, stored verbatim:
+    /// <c>272696576</c> (<c>PERF_COUNTER_BULK_COUNT</c>) is a rate and the row keeps its pre-rung write — raw
+    /// value, delta, measured interval; <c>65792</c> (<c>PERF_COUNTER_LARGE_RAWCOUNT</c>) is a gauge and the
+    /// collector now writes the raw value with <c>delta_cntr_value</c> AND <c>sample_interval_seconds</c>
+    /// NULL — NULL, not (0, 0), because 0 is the calculator's "no delta knowable" marker and a gauge has no
+    /// delta to know; the average/fraction/base family (<c>1073874176</c> <c>PERF_AVERAGE_BULK</c> and
+    /// siblings) keeps the pre-rung write too, its delta a real per-interval change of the raw value that the
+    /// stored type tells a reader not to divide. The vocabulary and the three-way reading every consumer
+    /// applies live in <c>PerformanceMonitor.Common.PerfmonCounterTypes</c>; the collector's own gauge set
+    /// is pinned equal to it.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128 and every column-adding rung on a
+    /// collector table: a row written before this rung never recorded its type, and NULL is the honest value
+    /// for it. Readers treat NULL as "classify as you did before the rung" — the viewers fall back to the
+    /// #3702 name proxy, the MCP tools publish <c>counter_kind: null</c> and say so — so history renders
+    /// exactly as the operator last saw it, and the type decides the moment a row carries one. Because a
+    /// counter's type does not change, the viewers take ANY row's non-null type as the series' type: a
+    /// gauge's whole 30-day history plots as a level the morning after the upgrade (its pre-rung rows stored
+    /// <c>cntr_value</c> all along), which is the correction, not a discontinuity. No backfill could do
+    /// better — the store holds no way to recover a type from a name — and a backfilled 0 would be a lie
+    /// about every historical row.</para>
+    ///
+    /// <para><b>The compressed-chunk shape.</b> <c>perfmon_stats</c> is a compressed hypertable on the fleet
+    /// (one-day chunks, compression segmented by <c>server_id</c>, 30 days of raw retention like its
+    /// delta-family siblings). A nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL and TimescaleDB
+    /// accepts it on a compressed hypertable with a compression policy attached — the shape V127 and V128
+    /// used on <c>wait_stats</c> and <c>procedure_stats</c> and verified live on 2.28.1; verified again for
+    /// this rung against a store stopped at 131 with a compressed <c>perfmon_stats</c> chunk, which climbed
+    /// to 132 in one rung with the pre-rung rows reading NULL through the compressed chunk. A DEFAULT would
+    /// be the trap: TimescaleDB has to rewrite compressed segments to honour one, which on a
+    /// multi-hundred-GB table is neither instant nor safe inside the migration transaction.</para>
+    ///
+    /// <para><b>The passthrough view is refreshed</b> for the V14/V80/V81/V127/V128 reason: Postgres freezes
+    /// a view's <c>SELECT *</c> column list at CREATE, so without the <c>CREATE OR REPLACE VIEW</c> every
+    /// <c>v_perfmon_stats</c> reader — both trend reads, the latest-snapshot read, the analysis facts —
+    /// would never see the column. Appending is the one alteration <c>CREATE OR REPLACE VIEW</c> permits,
+    /// which is exactly what an <c>ADD COLUMN</c> produces. A fresh store gets the column from the generated
+    /// CREATE TABLE at V4 (the collector definition carries it, appended last) and the ALTER no-ops there;
+    /// the view refresh is idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not divide a <c>PERF_AVERAGE_BULK</c>
+    /// numerator by its <c>PERF_LARGE_RAW_BASE</c> sibling (the default list carries ten such instance rows,
+    /// the wait-statistics <c>Average wait time (ms)</c> family; their per-interval delta is plotted as
+    /// exactly that and the average their name promises needs a join this store does not make — a stated
+    /// finding, its own lane). It does not touch <c>perfmon_interval_baseline</c> or the analysis facts
+    /// (<c>Batch Requests/sec</c> and the compilation counters only, all rates). It does not backfill.</para>
+    /// </summary>
+    private const string V132Sql = @"
+ALTER TABLE collect.perfmon_stats
+    ADD COLUMN IF NOT EXISTS cntr_type integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V132 column list forever — the V14 lesson, restated by V80, V81, V127 and V128. Appending is the one
+   alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_perfmon_stats AS SELECT * FROM collect.perfmon_stats;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

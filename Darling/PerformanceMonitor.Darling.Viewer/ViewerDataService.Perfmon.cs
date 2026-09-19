@@ -26,13 +26,20 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// nullable under the three-state rule (#3540): <c>0</c> is the calculator's "no delta knowable" marker,
 /// <c>null</c> a row that never stored one, <c>n</c> the measured sweep gap; the reader used to coerce NULL
 /// to 0 and so could not tell a restart from a pre-column row. Copied from Lite's <c>PerfmonTrendPoint</c>
-/// (LocalDataService.Perfmon.cs). <see cref="Value"/> rides along for parity with Lite's row shape.
+/// (LocalDataService.Perfmon.cs).
+/// <para>Since V132 (#3653 A7) the row also carries <see cref="CntrType"/> — the counter's stored DMV type
+/// when every instance row summed into the point agrees on one, else null (a pre-rung row, or the
+/// wait-statistics family whose instances mix a rate, a gauge and an average, whose SUM was never one
+/// quantity) — which the chart classifies by, the #3702 name proxy only for a null. <see cref="DeltaValue"/>
+/// is nullable for the same rung: a gauge's instance rows store no delta, so their SUM is NULL and must not
+/// read as 0; <see cref="Value"/> is the gauge's reading and what a Level series plots.</para>
 /// </summary>
 public sealed record PerfmonTrendPoint(
     DateTime CollectionTime,
     long Value,
-    long DeltaValue,
-    long? SampleIntervalSeconds);
+    long? DeltaValue,
+    long? SampleIntervalSeconds,
+    int? CntrType = null);
 
 public sealed partial class ViewerDataService
 {
@@ -62,6 +69,12 @@ public sealed partial class ViewerDataService
     /// typed <c>GetInt64</c> reader would throw against a numeric — the same typed-reader reason the
     /// tempdb/CPU trends CAST their aggregates. A caller passing <paramref name="counterCount"/> = 0 is
     /// a bug the <see cref="GetPerfmonTrendsByCountersAsync"/> guard prevents.
+    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
+    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// NULL and so does a mixed-type family, and both fall to the name proxy in the chart — the MIN/MAX
+    /// equality is what stops a mixed sum (the wait-statistics object's instances are a rate, a gauge and
+    /// an average under one counter name) from being classified by whichever instance's id happened to
+    /// sort first. Byte-identical to Lite's expression.</para>
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
     {
@@ -72,7 +85,8 @@ public sealed partial class ViewerDataService
                 collection_time,
                 CAST(SUM(cntr_value) AS bigint) AS cntr_value,
                 CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
-                CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds
+                CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
+                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
             FROM v_perfmon_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -154,9 +168,11 @@ public sealed partial class ViewerDataService
             list.Add(new PerfmonTrendPoint(
                 reader.GetDateTime(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                /* NULL stays NULL: a gauge's instance rows store no delta (V132), so the SUM is NULL, not 0. */
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
-                reader.IsDBNull(4) ? null : reader.GetInt64(4)));
+                reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                reader.IsDBNull(5) ? null : reader.GetInt32(5)));
         }
 
         return result;

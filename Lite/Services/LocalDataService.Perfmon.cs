@@ -28,7 +28,8 @@ SELECT
     instance_name,
     cntr_value,
     delta_cntr_value,
-    collection_time
+    collection_time,
+    cntr_type
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -45,8 +46,10 @@ ORDER BY counter_name";
                 CounterName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 InstanceName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                CollectionTime = reader.GetDateTime(4)
+                /* NULL stays NULL: a gauge row stores no delta (v62), and a 0 here would be #3642's fabricated zero. */
+                DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                CollectionTime = reader.GetDateTime(4),
+                CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5)
             });
         }
 
@@ -99,7 +102,8 @@ SELECT
     collection_time,
     SUM(cntr_value) AS cntr_value,
     SUM(delta_cntr_value) AS delta_cntr_value,
-    MAX(sample_interval_seconds) AS sample_interval_seconds
+    MAX(sample_interval_seconds) AS sample_interval_seconds,
+    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   counter_name = $2
@@ -121,9 +125,11 @@ ORDER BY collection_time";
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                DeltaValue = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                /* NULL stays NULL: a gauge's instance rows store no delta (v62), so the SUM over them is NULL, not 0. */
+                DeltaValue = reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
-                SampleIntervalSeconds = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3))
+                SampleIntervalSeconds = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
+                CntrType = reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4))
             });
         }
 
@@ -152,7 +158,8 @@ SELECT
     collection_time,
     SUM(cntr_value) AS cntr_value,
     SUM(delta_cntr_value) AS delta_cntr_value,
-    MAX(sample_interval_seconds) AS sample_interval_seconds
+    MAX(sample_interval_seconds) AS sample_interval_seconds,
+    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -180,8 +187,9 @@ ORDER BY counter_name, collection_time";
             {
                 CollectionTime = reader.GetDateTime(1),
                 Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                SampleIntervalSeconds = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4))
+                DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                SampleIntervalSeconds = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4)),
+                CntrType = reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5))
             });
         }
 
@@ -197,14 +205,34 @@ public class PerfmonRow
     public string CounterName { get; set; } = "";
     public string InstanceName { get; set; } = "";
     public long Value { get; set; }
-    public long DeltaValue { get; set; }
+
+    /// <summary>The stored per-interval delta; <c>null</c> on a gauge row, which stores none (v62) — the
+    /// reader used to coerce that to 0, which is #3642's fabricated zero on a level that has no delta.</summary>
+    public long? DeltaValue { get; set; }
+
+    /// <summary>The DMV's <c>cntr_type</c> as stored (v62, #3653 A7): the id every reader classifies by through
+    /// <c>PerfmonCounterTypes</c>; <c>null</c> on a row written before the rung.</summary>
+    public int? CntrType { get; set; }
 }
 
 public class PerfmonTrendPoint
 {
     public DateTime CollectionTime { get; set; }
+
+    /// <summary>The raw <c>cntr_value</c> summed across the counter's instances — for a gauge, the reading the
+    /// chart plots (v62); for a rate, the cumulative count the delta was taken from.</summary>
     public long Value { get; set; }
-    public long DeltaValue { get; set; }
+
+    /// <summary>The stored per-interval delta summed across instances; <c>null</c> when no instance row stored one
+    /// — a gauge since v62 — rather than the 0 the reader used to manufacture.</summary>
+    public long? DeltaValue { get; set; }
+
+    /// <summary>The counter's stored <c>cntr_type</c> when every instance row summed into this point agrees on
+    /// one (v62, #3653 A7), else <c>null</c>: a row written before the rung, or a counter whose instances carry
+    /// different types (the wait-statistics object's <c>Lock waits</c> family mixes a rate, a gauge and an
+    /// average across its instances — their SUM was never one quantity, and no single type can describe it),
+    /// which the chart classifies by the #3702 name proxy as it did before the rung.</summary>
+    public int? CntrType { get; set; }
 
     /// <summary>The wall-clock seconds <see cref="DeltaValue"/> covers, and the only thing that makes a
     /// zero delta readable: the collector reports 0 in exactly the cases where no delta was knowable

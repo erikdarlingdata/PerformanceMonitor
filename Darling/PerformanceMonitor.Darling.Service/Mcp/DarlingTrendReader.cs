@@ -67,8 +67,13 @@ internal static class DarlingTrendReader
     /// policy), so (0, 0) is "unknown" while (0, n) is "genuinely idle". Without it the two are the same
     /// number and a fabricated zero reads as quiet (#2234).</para>
     /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
-    /// derived over a window spanning the upgrade is only as good as its newest rows.</para></summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue, long SampleIntervalSeconds);
+    /// derived over a window spanning the upgrade is only as good as its newest rows.</para>
+    /// <para>Since V132 (#3653 A7) <c>CntrType</c> is the counter's stored DMV type when every instance row
+    /// summed into the point agrees on one, else null (a pre-rung row, or a family whose instances mix
+    /// types); <c>DeltaValue</c> and <c>SampleIntervalSeconds</c> are nullable because a GAUGE row stores
+    /// neither — its <c>Value</c> is the reading — and a 0 manufactured in their place would be #3642's
+    /// fabricated zero on a level that has no delta.</para></summary>
+    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType = null);
 
     /// <summary>One file I/O-latency-trend point: average read/write latency (stall-ms / op) per collection
     /// for one (database, file) — the tool surfaces database_name + latencies, mirroring Lite's
@@ -250,13 +255,19 @@ internal static class DarlingTrendReader
     /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
     /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
     /// unknown.</para>
+    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
+    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
+    /// an average under one counter name) — the equality is what stops a mixed sum being classified by
+    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expression.</para>
     /// </summary>
     public const string PerfmonTrendSql = """
         SELECT
             collection_time,
             CAST(SUM(cntr_value) AS bigint) AS cntr_value,
             CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
-            CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds
+            CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
+            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2
@@ -282,8 +293,11 @@ internal static class DarlingTrendReader
             items.Add(new PerfmonTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+                /* NULL stays NULL on both: a gauge's instance rows store neither (V132), and a pre-V132 row's
+                   NULL interval is #3540's third state; 0 is the marker and must not be manufactured. */
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
         }
 
         return items;

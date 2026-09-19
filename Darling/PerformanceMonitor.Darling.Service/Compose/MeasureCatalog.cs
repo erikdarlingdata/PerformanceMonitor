@@ -1201,8 +1201,18 @@ public static class MeasureCatalog
             DefaultTimeAgg = ComposeAggregate.Count, ValidAggs = PerEventAggs, AllowedDimensions = JobHistoryDims,
         },
 
-        /* ── perfmon_stats (EAV: the counter value; the unit VARIES per counter — cntr_type is not stored — so
-             it is tagged 'count' as an honest placeholder, and the user picks the counter via counter_name) ── */
+        /* ── perfmon_stats (EAV: the counter value; the unit VARIES per counter, so it is tagged 'count' as an
+             honest placeholder, and the user picks the counter via counter_name). Two measures, one per stored
+             number, and the row's stored cntr_type (V132, #3653 A7) decides which is meaningful for the counter
+             picked: a GAUGE (Total Server Memory (KB)) is perfmon_value — since V132 the collector writes no
+             delta for it, so perfmon_value_delta over a gauge aggregates only NULLs and comes back empty rather
+             than inventing activity; a RATE (Batch Requests/sec) is perfmon_value_delta — its perfmon_value is
+             the cumulative count, as it always was. No cntr_type row guard is compiled here, on purpose: for
+             rows written since the rung the write path already makes it redundant (the gauge's delta IS NULL),
+             and for rows written before it the type is NULL on gauge and rate alike, so no row-level predicate
+             on the column can separate them — a guard would be dead text under both populations. The
+             MeasuredDeltaFilter on the delta measure (#3695) is unaffected: a gauge row's NULL interval passes
+             IS DISTINCT FROM 0 and its NULL delta adds nothing. ── */
         new ComposeMeasure
         {
             Key = "perfmon_value", DisplayName = "Perfmon counter value", Category = CatPerfmon, SourceTable = "perfmon_stats",

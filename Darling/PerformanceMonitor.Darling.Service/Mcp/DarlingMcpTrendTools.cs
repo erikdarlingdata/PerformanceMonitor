@@ -193,7 +193,7 @@ public sealed class DarlingMcpTrendTools
         return aligned;
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names.")]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored.")]
     public static async Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
@@ -259,7 +259,14 @@ public sealed class DarlingMcpTrendTools
                counter reset, or a gap past the policy), so delta_value = 0 with an interval of 0 must
                NOT be read as "no activity". Derive rates as delta_value / sample_interval_seconds
                rather than assuming a fixed cadence — fleet gaps run p50 299 s, p99 830 s, so dividing
-               by the configured 60 s is wrong by whatever the jitter was (#2233, #2234). */
+               by the configured 60 s is wrong by whatever the jitter was (#2233, #2234).
+
+               counter_kind is the series' stored type read three ways (V132, #3653 A7): the type of any
+               point that has one, because a counter's type does not change and the read reports a type
+               only where the point's instance rows agree; null when no point has one. A gauge's points
+               publish null delta_value and null sample_interval_seconds — the collector writes neither for a
+               level — and value is the reading. Twin of Lite's McpPerfmonTools. */
+            var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
@@ -272,6 +279,8 @@ public sealed class DarlingMcpTrendTools
             {
                 server = resolved.ServerName,
                 counter_name,
+                cntr_type = seriesType,
+                counter_kind = PerfmonCounterTypes.Word(seriesType),
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions);
