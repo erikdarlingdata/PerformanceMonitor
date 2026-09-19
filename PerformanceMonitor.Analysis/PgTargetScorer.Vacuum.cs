@@ -19,9 +19,17 @@ namespace PerformanceMonitor.Analysis;
 /// other's literal. Everything ELSE numeric in this file is the engine's own per-table trigger line
 /// (engine-defined), a backlog bar the #3691 fleet calibration measured on 2026-09-19 (14 days × 50 Aurora
 /// PostgreSQL clusters of the dogfood fleet, hourly <c>pg_autovacuum_stats</c> — the constants carry their
-/// percentiles; the quantity is engine-neutral, the stock-PostgreSQL population is not yet measured), or a
-/// co-fire boost still marked unmeasured. The backlog fact carries <c>threshold_lineage = 1</c> so
-/// <c>get_analysis_facts</c> shows that every bar it was graded on is measured or engine-defined.
+/// percentiles; the quantity is engine-neutral, the stock-PostgreSQL population is not yet measured), a
+/// co-fire boost still marked unmeasured, or the §3.1 band for a table that turned autovacuum off and fell
+/// behind (<see cref="AutovacuumDisabledBaseSeverity"/>, #3691 step 22 — the argument for its lineage is on
+/// the constant). The backlog fact carries <c>threshold_lineage = 1</c> so <c>get_analysis_facts</c> shows
+/// that every bar it was graded on is measured or engine-defined; the disabled-table fact carries the same.
+///
+/// <para><c>CONFIG_PG_AUTOVACUUM_DISABLED</c> has NO amplifier arm: the shared dispatcher's <c>CONFIG_PG_</c>
+/// prefix arm carries it to lane 2's <c>ConfigAmplifiers</c>, which answers the empty list, and that is right
+/// — the co-fire D5 would amplify it with (the backlog) is the condition of its emission, and the backlog fact
+/// already carries the +0.5 "reloption off" amplifier for the same table. Two boosts on one reloption would
+/// count it twice.</para>
 ///
 /// <para><b>Metadata contract with the collector</b> (<c>PgTargetFactCollector.Vacuum.cs</c>): the keys below
 /// are the whole interface between the read and the grade, and the advice partial reads the same names. A
@@ -108,6 +116,43 @@ public static partial class PgTargetScorer
     /// </summary>
     public const int BacklogManyTables = 5;
 
+    /* ── CONFIG_PG_AUTOVACUUM_DISABLED (#3691 step 22, design §3.1) ── */
+
+    /// <summary>
+    /// Base severity for a table whose <c>autovacuum_enabled</c> reloption is off AND which has sat past its
+    /// own trigger line for <see cref="BacklogPersistenceSamples"/> consecutive hourly samples. Lineage:
+    /// <b>engine-defined</b> — the design's band for "the engine's own maintenance was switched off on an
+    /// object that needs it" (§3.1): the number is D5's advisory base raised into the incident band because the
+    /// workload co-fire D5 demands is BUILT INTO the emission — the collector emits the fact only for a table
+    /// past the line PostgreSQL itself draws (<c>autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor ×
+    /// n_live_tup</c>, reloptions honoured, or the insert arm), so a disabled table nobody needs vacuumed never
+    /// scores at all. Below 1.0 because the ratio, slope and run count that say HOW bad live on
+    /// <c>PG_AUTOVACUUM_BACKLOG</c>, which grades them and roots the story; this card is the named cause. The
+    /// persistence gate is <see cref="BacklogPersistenceSamples"/> by name (measured, 2026-09-19) and the line is
+    /// the engine's, so the fact carries <c>threshold_lineage = 1</c>.
+    /// </summary>
+    public const double AutovacuumDisabledBaseSeverity = 0.9;
+
+    /// <summary>Metadata key: how many tables with <c>autovacuum_enabled = off</c> met the persistence gate
+    /// this pass (the fact names the worst by ratio in <see cref="Fact.ObjectName"/>; the others are
+    /// <c>get_pg_autovacuum_health</c>'s).</summary>
+    public const string AutovacuumDisabledTablesKey = "disabled_tables_in_backlog";
+
+    /// <summary>Metadata key: 1 when <c>CONFIG_PG_AUTOVACUUM_OFF</c> also reads off this pass (the launcher is
+    /// off server-wide, so the per-table reloption is moot until it is back on), else 0. Stamped by the collector
+    /// off the config fact emitted earlier in the same pass (emission order: Config before Vacuum).</summary>
+    public const string AutovacuumDisabledServerOffKey = "server_autovacuum_off";
+
+    /// <summary>The metadata key for the backlog ratio of the <paramref name="rank"/>-th worst disabled table
+    /// (2 and 3 — the worst is the fact itself and rides in <see cref="BacklogRatioKey"/>). Names cannot ride
+    /// in <see cref="Fact.Metadata"/> (doubles), so the advice states the shape of the others and sends the
+    /// reader to the tool for their names.</summary>
+    public static string AutovacuumDisabledRankRatioKey(int rank) => $"disabled_rank_{rank}_ratio";
+
+    /// <summary>The metadata key for how many hours the <paramref name="rank"/>-th worst disabled table has
+    /// been past its line (the run's own span, latest sample minus first sample of the run).</summary>
+    public static string AutovacuumDisabledRankHoursKey(int rank) => $"disabled_rank_{rank}_hours";
+
     /* ── PG_WRAPAROUND_TREND ── */
 
     public const string WraparoundXidAgeKey = "xid_age";
@@ -172,8 +217,37 @@ public static partial class PgTargetScorer
         PgTargetFactKeys.AutovacuumBacklog => ScoreAutovacuumBacklog(fact),
         PgTargetFactKeys.WraparoundTrend => ScoreWraparoundTrend(fact),
         PgTargetFactKeys.XminHold => ScoreXminHold(fact),
+        /* #3691 step 22: a CONFIG_PG_ key under the pg_vacuum SOURCE — the base dispatcher routes by source, so
+           this arm (not lane 2's ScoreConfigFact) grades it; the per-table reloption is read from
+           pg_autovacuum_stats, not pg_settings. */
+        PgTargetFactKeys.ConfigAutovacuumDisabled => ScoreAutovacuumDisabled(fact),
         _ => 0.0,
     };
+
+    /// <summary>
+    /// <c>CONFIG_PG_AUTOVACUUM_DISABLED</c>: flat at <see cref="AutovacuumDisabledBaseSeverity"/> once the
+    /// same two gates the backlog fact stands on hold — the persistence gate (the collector binds
+    /// <see cref="BacklogPersistenceSamples"/> into the read; re-checked here so a hand-built fact under the
+    /// gate scores 0, the conservative default) and the ratio at or past the table's own line. No ramp: the
+    /// ratio is graded on the backlog fact, which the same pass emits for the same table (the backlog read
+    /// ranks disabled tables first), and a second ramp on the same number would double-count it in the story
+    /// severity. Not an advisory root and not evidence-gated in D5's sense: it clears the incident line on its
+    /// own because the evidence is a precondition of its existence.
+    /// </summary>
+    private static double ScoreAutovacuumDisabled(Fact fact)
+    {
+        if (fact.Metadata.GetValueOrDefault(BacklogTrailingSamplesKey) < BacklogPersistenceSamples)
+            return 0.0;
+
+        /* engine-defined: 1.0 is the table's own autovacuum trigger line (threshold + scale_factor × live tuples,
+           reloptions honoured by the collector) — the same line the backlog fact's concerning bar sits on. The
+           persistence gate above is BacklogPersistenceSamples by name (measured, 2026-09-19); so lineage 1. */
+        if (fact.Metadata.GetValueOrDefault(BacklogRatioKey, fact.Value) < 1.0)
+            return 0.0;
+
+        fact.Metadata["threshold_lineage"] = 1;
+        return AutovacuumDisabledBaseSeverity;
+    }
 
     /// <summary>
     /// The collector emits the fact only for a table past its line for <see cref="BacklogPersistenceSamples"/>

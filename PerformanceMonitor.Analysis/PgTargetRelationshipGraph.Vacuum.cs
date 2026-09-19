@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Analysis;
@@ -32,11 +33,22 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para><c>PG_XMIN_HOLD</c> → idle-in-transaction / slot xmin are v2 leaves; in v1 the hold fact carries
 /// <c>holder_source</c> metadata and the advice names the fix per source, so no edge is declared to a
-/// destination that cannot yet exist. The config leaves are one-directional (a setting is never a root of
-/// this chain) and D5 holds for <c>maintenance_work_mem</c>: its own base stays under the story threshold
-/// and the backlog co-fire amplifier (<c>PgTargetScorer.Vacuum.cs</c>) is what lifts it. Every predicate
-/// reads the fact set only — a destination is followed when it fired; the bars live in
-/// <see cref="PgTargetScorer"/> with their lineage.</para>
+/// destination that cannot yet exist. The two <c>pg_config</c>-sourced leaves are one-directional (a server
+/// setting is never a root of this chain) and D5 holds for <c>maintenance_work_mem</c>: its own base stays
+/// under the story threshold and the backlog co-fire amplifier (<c>PgTargetScorer.Vacuum.cs</c>) is what
+/// lifts it. Every predicate reads the fact set only — a destination is followed when it fired; the bars
+/// live in <see cref="PgTargetScorer"/> with their lineage.</para>
+///
+/// <para><b><c>CONFIG_PG_AUTOVACUUM_DISABLED</c> (#3691 step 22) is the one config key in this chain that CAN
+/// root</b> — it is <c>pg_vacuum</c>-sourced, sits at 0.9 on its own, and exists only beside a backlog on the
+/// same table — so its edge with the backlog is declared in BOTH directions, gated on the two facts naming
+/// the SAME table (database and <c>schema.table</c>): when the backlog leads (its reloption amplifier lifts it
+/// to the cap, so in practice it does) the walk reaches the disabled card as the named cause; when the
+/// disabled card leads it reaches the backlog as the damage. The intersection gate is what keeps the edge
+/// honest — the backlog read ranks disabled tables first, so the two facts name the same table whenever
+/// both fire, but the graph does not ASSUME the read's ordering. <c>CONFIG_PG_AUTOVACUUM_OFF</c> ↔ the
+/// disabled card is declared both ways too: the launcher being off server-wide subsumes every per-table
+/// reloption, and the walk should carry both settings into one story from whichever end it enters.</para>
 /// </summary>
 public sealed partial class PgTargetRelationshipGraph
 {
@@ -75,7 +87,34 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigMaintWorkMem, VacuumCategory,
             "CONFIG_PG_MAINT_WORK_MEM — the dead-tuple memory each autovacuum pass may use bounds how much of the backlog one run can clear",
             facts => Fired(facts, PgTargetFactKeys.ConfigMaintWorkMem));
+
+        /* the per-table disable ↔ the backlog it causes (#3691 step 22): both directions, gated on the SAME table. */
+        AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled, VacuumCategory,
+            "CONFIG_PG_AUTOVACUUM_DISABLED — this table has autovacuum_enabled = off; the engine computed the line and was told not to act on it",
+            facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumDisabled)
+                && SameTable(facts, PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled));
+        AddEdge(PgTargetFactKeys.ConfigAutovacuumDisabled, PgTargetFactKeys.AutovacuumBacklog, VacuumCategory,
+            "PG_AUTOVACUUM_BACKLOG fired on the same table — the damage the reloption is doing: past its own line and staying there",
+            facts => Fired(facts, PgTargetFactKeys.AutovacuumBacklog)
+                && SameTable(facts, PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled));
+
+        /* server-wide off ↔ per-table off: the launcher being off subsumes the reloption. */
+        AddEdge(PgTargetFactKeys.ConfigAutovacuumOff, PgTargetFactKeys.ConfigAutovacuumDisabled, VacuumCategory,
+            "CONFIG_PG_AUTOVACUUM_DISABLED — a table with its own reloption off, moot while the launcher is off server-wide; the server setting subsumes it",
+            facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumDisabled));
+        AddEdge(PgTargetFactKeys.ConfigAutovacuumDisabled, PgTargetFactKeys.ConfigAutovacuumOff, VacuumCategory,
+            "CONFIG_PG_AUTOVACUUM_OFF fired — autovacuum is off server-wide as well, so re-enabling the table alone changes nothing until the launcher runs",
+            facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumOff));
     }
+
+    /// <summary>Whether the two facts name the SAME table — <see cref="Fact.DatabaseName"/> and
+    /// <see cref="Fact.ObjectName"/> (<c>schema.table</c>) equal, ordinal, both present. Two facts about
+    /// different tables share no edge: a disabled table and a backlog on an unrelated one are two findings.</summary>
+    private static bool SameTable(IReadOnlyDictionary<string, Fact> facts, string keyA, string keyB) =>
+        facts.TryGetValue(keyA, out var a) && facts.TryGetValue(keyB, out var b)
+        && !string.IsNullOrEmpty(a.ObjectName)
+        && string.Equals(a.ObjectName, b.ObjectName, StringComparison.Ordinal)
+        && string.Equals(a.DatabaseName, b.DatabaseName, StringComparison.Ordinal);
 
     /// <summary>Whether <paramref name="key"/> is in the scored set with a positive severity — the one
     /// predicate shape this chain uses. (<see cref="RelationshipGraph"/>'s <c>HasFact</c> is private to it.)</summary>

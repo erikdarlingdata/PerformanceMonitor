@@ -63,6 +63,7 @@ public static partial class PgTargetAdvice
                 => ComposeSessions(rootFactKey, factsByKey),
             PgTargetFactKeys.AutovacuumBacklog or PgTargetFactKeys.WraparoundTrend or PgTargetFactKeys.XminHold
                 or PgTargetFactKeys.ConfigAutovacuumOff or PgTargetFactKeys.ConfigMaintWorkMem
+                or PgTargetFactKeys.ConfigAutovacuumDisabled   /* #3691 step 22: pg_vacuum-sourced; the prefix arm below would compose null */
                 => ComposeVacuum(rootFactKey, factsByKey),
             PgTargetFactKeys.TempSpill or PgTargetFactKeys.ConfigWorkMem
                 => ComposeTemp(rootFactKey, factsByKey),

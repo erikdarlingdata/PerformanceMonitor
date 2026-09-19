@@ -179,6 +179,19 @@ public static class PgTargetFactKeys
     public const string ConfigAutovacuumOff = "CONFIG_PG_AUTOVACUUM_OFF";
     /// <summary>Evidence-gated on <see cref="AutovacuumBacklog"/> (D5); NOT an advisory root.</summary>
     public const string ConfigMaintWorkMem = "CONFIG_PG_MAINT_WORK_MEM";
+    /// <summary>
+    /// A table whose <c>autovacuum_enabled</c> reloption is off AND which sits persistently past its own
+    /// trigger line (design §3.1, #3691 step 22). Source <c>pg_vacuum</c>, not <c>pg_config</c>: the value is
+    /// read per table from <c>pg_autovacuum_stats</c>, never from <c>pg_settings</c>, and the fact exists only
+    /// when the backlog does — a disabled table nobody needs vacuumed is not a finding. The workload co-fire
+    /// is therefore built into the emission, which is why its base sits in the 0.9 band rather than at D5's
+    /// 0.4 advisory base; it is NOT in <see cref="ConfigAdvisoryRoots"/> (it clears the incident line on its
+    /// own). The <c>CONFIG_PG_</c> prefix is kept because the finding IS a configuration — one an operator set
+    /// with <c>ALTER TABLE … SET (autovacuum_enabled = off)</c> — so it routes through the config prefix arms
+    /// of the shared switches; its base score comes through its SOURCE (<c>ScoreVacuumFact</c>), and the
+    /// vacuum family names it in the advice dispatcher the way it names <see cref="ConfigAutovacuumOff"/>.
+    /// </summary>
+    public const string ConfigAutovacuumDisabled = "CONFIG_PG_AUTOVACUUM_DISABLED";
 
     /* ── Lane 5 — wait profile. Dynamic keys under one prefix; see WaitKey. ── */
 

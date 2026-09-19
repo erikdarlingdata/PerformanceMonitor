@@ -71,6 +71,7 @@ public static partial class PgTargetAdvice
         PgTargetFactKeys.XminHold => ComposeXminHold(factsByKey),
         PgTargetFactKeys.ConfigAutovacuumOff => ComposeConfigAutovacuumOff(factsByKey),
         PgTargetFactKeys.ConfigMaintWorkMem => ComposeConfigMaintWorkMem(factsByKey),
+        PgTargetFactKeys.ConfigAutovacuumDisabled => ComposeConfigAutovacuumDisabled(factsByKey),
         _ => null,
     };
 
@@ -467,6 +468,95 @@ public static partial class PgTargetAdvice
         }
 
         return s_maintWorkMemStatic;
+    }
+
+    /* ── CONFIG_PG_AUTOVACUUM_DISABLED (#3691 step 22, design §3.1): a table that turned autovacuum off and fell
+          behind. Collected and scored in this family (source pg_vacuum — the reloption is per table, read from
+          pg_autovacuum_stats); the card is the NAMED CAUSE beside the backlog fact, which carries the grade. ── */
+
+    private static readonly AdviceBlock s_autovacuumDisabledStatic = new(
+        Headline: "A table with autovacuum_enabled = off has sat past its own autovacuum trigger line",
+        Investigation:
+            "ALTER TABLE … SET (autovacuum_enabled = off) tells the launcher to skip one table; PostgreSQL still " +
+            "computes that table's trigger line (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × " +
+            "n_live_tup, or the insert line on 13+) and the collector stores it hourly, so this finding is a table " +
+            "the engine WOULD have vacuumed, in at least three consecutive samples, if it had been allowed to. A " +
+            "disabled table with no backlog is not reported — someone may be vacuuming it by hand on a schedule — so " +
+            "the fact exists only when the reloption has a measured consequence. The one exception the engine " +
+            "keeps: the wraparound-prevention vacuum ignores the reloption and will still run at " +
+            "autovacuum_freeze_max_age.",
+        Remediation:
+            "Re-enable it — ALTER TABLE … SET (autovacuum_enabled = true); takes effect at the launcher's next look, " +
+            "no restart — at the cost of the vacuum I/O whoever disabled it was avoiding; if a run hurt the workload, " +
+            "a per-table cost delay or a lower scale factor is the lever, not the switch. Or keep it off and " +
+            "schedule VACUUM (ANALYZE) on the table yourself, accepting that a manual vacuum reads every page and " +
+            "holds SHARE UPDATE EXCLUSIVE while it runs (reads and writes continue; DDL and other vacuums wait). " +
+            "Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE and rewrites the table.");
+
+    private static AdviceBlock ComposeConfigAutovacuumDisabled(IReadOnlyDictionary<string, Fact> facts)
+    {
+        if (!facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumDisabled, out var f))
+            return s_autovacuumDisabledStatic;
+
+        var m = f.Metadata;
+        var table = string.IsNullOrEmpty(f.ObjectName) ? "A table" : f.ObjectName;
+        var db = string.IsNullOrEmpty(f.DatabaseName) ? string.Empty : $" in {f.DatabaseName}";
+        var ratio = m.GetValueOrDefault(PgTargetScorer.BacklogRatioKey, f.Value);
+        var insertArm = m.GetValueOrDefault(PgTargetScorer.BacklogArmIsInsertKey) >= 1;
+        var hours = m.GetValueOrDefault(PgTargetScorer.BacklogHoursKey);
+        var trailing = m.GetValueOrDefault(PgTargetScorer.BacklogTrailingSamplesKey);
+        var dead = m.GetValueOrDefault(PgTargetScorer.BacklogDeadTuplesKey);
+        var threshold = m.GetValueOrDefault(PgTargetScorer.BacklogVacuumThresholdKey);
+        var live = m.GetValueOrDefault(PgTargetScorer.BacklogLiveTuplesKey);
+        var inserts = m.GetValueOrDefault(PgTargetScorer.BacklogInsertsSinceVacuumKey);
+        var insertThreshold = m.GetValueOrDefault(PgTargetScorer.BacklogInsertThresholdKey);
+        var totalBytes = m.GetValueOrDefault(PgTargetScorer.BacklogTotalBytesKey);
+        var others = Math.Max(0, m.GetValueOrDefault(PgTargetScorer.AutovacuumDisabledTablesKey) - 1);
+        var serverOff = m.GetValueOrDefault(PgTargetScorer.AutovacuumDisabledServerOffKey) >= 1
+            || (facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var off) && off.BaseSeverity > 0);
+        var hasLastAutovacuum = m.TryGetValue(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, out var sinceLast);
+
+        var headline = $"{table}{db} has autovacuum_enabled = off and sits at {ratio:0.#}× its own {(insertArm ? "insert-vacuum" : "autovacuum trigger")} line for {FmtHours(hours)}";
+
+        var inv = new StringBuilder();
+        inv.Append(insertArm
+            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive hourly samples spanning {FmtHours(hours)}. "
+            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive hourly samples spanning {FmtHours(hours)}. ");
+        inv.Append("The engine computed that line and would have fired; the reloption is the only reason it did not. ");
+        if (hasLastAutovacuum)
+            inv.Append($"autovacuum last ran on this table {FmtHours(sinceLast)} before the window end. ");
+        else
+            inv.Append("autovacuum has never run on this table as far as the statistics go (last_autovacuum is null). ");
+        if (totalBytes > 0)
+            inv.Append($"The table is {FmtBytes(totalBytes)} on disk. ");
+        if (serverOff)
+            inv.Append("CONFIG_PG_AUTOVACUUM_OFF also fired: the launcher is off server-wide, so the per-table reloption is moot until autovacuum = on — the server setting subsumes this card. ");
+        if (others > 0)
+        {
+            inv.Append($"{others:0} more disabled table{(others == 1 ? " has" : "s have")} met the same gate");
+            var shapes = new List<string>();
+            for (var rank = 2; rank <= 3; rank++)
+            {
+                if (m.TryGetValue(PgTargetScorer.AutovacuumDisabledRankRatioKey(rank), out var r))
+                    shapes.Add($"{r:0.#}× for {FmtHours(m.GetValueOrDefault(PgTargetScorer.AutovacuumDisabledRankHoursKey(rank)))}");
+            }
+            if (shapes.Count > 0)
+                inv.Append($" ({string.Join(", ", shapes)})");
+            inv.Append(" — get_pg_autovacuum_health names them, disabled tables first. ");
+        }
+        if (facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0)
+            inv.Append("PG_AUTOVACUUM_BACKLOG carries the grade (ratio, slope, tables in backlog); this card names the cause. ");
+
+        var rem = new StringBuilder();
+        if (serverOff)
+            rem.Append("Turn autovacuum back on server-wide first (autovacuum = on in postgresql.conf, then pg_reload_conf()); the per-table reloption below only matters once the launcher runs. ");
+        rem.Append($"Two levers, each with its cost. (1) Re-enable autovacuum on this table — ALTER TABLE {table} SET (autovacuum_enabled = true); — no restart; the launcher picks it up at its next autovacuum_naptime pass and will vacuum it at once because it is already past its line. Counter-objective: the autovacuum I/O whoever disabled it was avoiding returns to this table; if a run was hurting the workload, pair it with ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 2); (the server default; the reloption exists so ONE table can be throttled without touching the rest) rather than leaving it off. ");
+        rem.Append($"(2) Keep it off and schedule the vacuum yourself — VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs — reads and writes continue, DDL and other vacuums wait — and a schedule that slips becomes this finding again. ");
+        rem.Append("Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE, rewrites the whole table and blocks every reader and writer for the duration; it is for reclaiming space AFTER the backlog is under control, if ever. ");
+        if (!insertArm && live > 0 && threshold > 0)
+            rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###}); halves the trigger from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+
+        return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
 
     /* ── formatting ── */

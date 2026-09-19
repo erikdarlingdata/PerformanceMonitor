@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -454,6 +455,7 @@ public sealed class PgTargetVacuumTests
         {
             PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.WraparoundTrend, PgTargetFactKeys.XminHold,
             PgTargetFactKeys.ConfigAutovacuumOff, PgTargetFactKeys.ConfigMaintWorkMem,
+            PgTargetFactKeys.ConfigAutovacuumDisabled,   /* #3691 step 22 */
         })
         {
             var block = PgTargetAdvice.Static(key);
@@ -481,9 +483,209 @@ public sealed class PgTargetVacuumTests
         Assert.Contains("30.8 kB", maintAdvice.Investigation, StringComparison.Ordinal);
     }
 
+    /* ── CONFIG_PG_AUTOVACUUM_DISABLED (#3691 step 22, design §3.1) ── */
+
+    /// <summary>
+    /// The card's two gates are the backlog's own: under the persistence gate it is 0 (a hand-built fact, or a
+    /// window too short to hold three samples), under the table's own line it is 0, and past both it is the
+    /// flat 0.9 band with <c>threshold_lineage = 1</c> — the engine's line and the measured gate, by name.
+    /// "Disabled but quiet" and "enabled but backlogged" never reach the scorer at all: the read's WHERE is
+    /// what excludes them, pinned by text below.
+    /// </summary>
+    [Theory]
+    [InlineData(2, 4.2, 0.0)]
+    [InlineData(3, 0.8, 0.0)]
+    [InlineData(3, 1.0, 0.9)]
+    [InlineData(6, 4.2, 0.9)]
+    [InlineData(6, 350.0, 0.9)]
+    public void TheDisabledCard_IsTheFlatBand_PastThePersistenceGateAndTheTablesOwnLine_AndZeroUnderEither(int trailing, double ratio, double expected)
+    {
+        var fact = Disabled(ratio, trailing, hours: trailing - 1);
+        Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 9);
+        Assert.Equal(0.9, PgTargetScorer.AutovacuumDisabledBaseSeverity);
+        if (expected > 0)
+            Assert.Equal(1, fact.Metadata["threshold_lineage"]);
+        else
+            Assert.False(fact.Metadata.ContainsKey("threshold_lineage"));
+
+        /* No amplifier arm: the shared dispatcher's CONFIG_PG_ prefix carries the key to ConfigAmplifiers' empty
+           list, and the backlog fact already carries the reloption boost for the same table. */
+        new FactScorer().ScoreAll([fact]);
+        Assert.Equal(fact.BaseSeverity, fact.Severity);
+        Assert.Empty(fact.AmplifierResults);
+    }
+
+    /// <summary>
+    /// The disabled read is the backlog read's CTE chain and projection with a different tail: the SAME
+    /// persistence parameter (<c>$4</c>), a <c>WHERE</c> that adds only the reloption, no disabled-first ORDER
+    /// (every row is disabled). The backlog read keeps its shape byte-for-byte (its live pins depend on it)
+    /// and stays reloption-agnostic — an ENABLED backlogged table is that fact's business, not this one's.
+    /// </summary>
+    [Fact]
+    public void TheDisabledRead_SharesTheBacklogReadsRuns_AndAddsOnlyTheReloptionFilter()
+    {
+        /* The source file is CRLF, so the verbatim literals carry \r\n; compare on one line-ending shape. */
+        var backlog = PgTargetFactCollector.PgTargetAutovacuumBacklogSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var disabled = PgTargetFactCollector.PgTargetAutovacuumDisabledSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        var backlogTail = backlog.LastIndexOf("\nWHERE ", StringComparison.Ordinal);
+        var disabledTail = disabled.LastIndexOf("\nWHERE ", StringComparison.Ordinal);
+        Assert.True(backlogTail > 0 && disabledTail > 0);
+        Assert.Equal(backlog[..backlogTail], disabled[..disabledTail]);
+
+        Assert.Contains("WHERE l.autovacuum_disabled\nAND   l.trailing_samples_past_line >= $4", disabled, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE l.autovacuum_disabled", backlog, StringComparison.Ordinal);
+        Assert.Contains("WHERE l.trailing_samples_past_line >= $4", backlog, StringComparison.Ordinal);
+        Assert.Contains("l.autovacuum_disabled DESC", backlog, StringComparison.Ordinal);
+        Assert.DoesNotContain("l.autovacuum_disabled DESC", disabled, StringComparison.Ordinal);
+        Assert.EndsWith("LIMIT $5", disabled, StringComparison.Ordinal);
+        Assert.Contains(PgTargetFactCollector.PgTargetAutovacuumDisabledSql, PgTargetFactCollector.AllSql);
+    }
+
+    /// <summary>
+    /// The edge is gated on the two facts naming the SAME table. Same table: one story, backlog-led (its
+    /// reloption amplifier lifts it to the cap) with the disabled card as the named cause. A different table:
+    /// two findings — a disabled table and an unrelated backlog share no hop, and the 0.9 card roots on its own.
+    /// </summary>
+    [Fact]
+    public void TheDisabledCard_JoinsTheBacklogsStory_OnlyWhenBothNameTheSameTable()
+    {
+        var backlog = Backlog(4.2, 6, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1));
+        backlog.DatabaseName = "appdb";
+        backlog.ObjectName = "public.hot";
+        var same = Disabled(4.2, 6, hours: 6);
+        var facts = new List<Fact> { backlog, same };
+        new FactScorer().ScoreAll(facts);
+        /* 4.2× grades 0.68, the reloption boost (+0.5) lifts it past the card's flat 0.9: the backlog leads. */
+        Assert.True(backlog.Severity > same.Severity, $"{backlog.Severity} {same.Severity}");
+        Assert.Equal(0.9, same.Severity);
+
+        var story = Assert.Single(new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts));
+        Assert.Equal(new[] { PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled }, story.Path);
+        Assert.Equal("vacuum_starvation", Assert.Single(new PgTargetRelationshipGraph().GetActiveEdges(PgTargetFactKeys.AutovacuumBacklog, Lookup(backlog, same))).Category);
+
+        var elsewhere = Disabled(4.2, 6, hours: 6);
+        elsewhere.ObjectName = "public.other";
+        var split = new List<Fact> { Backlog(4.2, 6, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1)), elsewhere };
+        split[0].DatabaseName = "appdb";
+        split[0].ObjectName = "public.hot";
+        new FactScorer().ScoreAll(split);
+        var stories = new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(split);
+        Assert.Equal(2, stories.Count);
+        Assert.Contains(stories, s => s.Path.SequenceEqual([PgTargetFactKeys.AutovacuumBacklog]));
+        Assert.Contains(stories, s => s.Path.SequenceEqual([PgTargetFactKeys.ConfigAutovacuumDisabled]));
+
+        /* Same schema.table in a different database is a different table. */
+        var otherDb = Disabled(4.2, 6, hours: 6);
+        otherDb.DatabaseName = "otherdb";
+        Assert.Empty(new PgTargetRelationshipGraph().GetActiveEdges(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(backlog, otherDb)));
+    }
+
+    /// <summary>The server-wide switch and the reloption ride in ONE story with the backlog. Severities after
+    /// amplification: the backlog 0.68 × (1 + 0.5 reloption + 0.5 server-off co-fire) = 1.356 leads by a hair
+    /// over <c>autovacuum = off</c> at its 0.9 posture band × 1.5 backlog co-fire = 1.35, then the flat card at
+    /// 0.9 — so the walk is backlog → off → disabled, the last hop being the off → disabled edge this step
+    /// added. Pinned as an order because the mesh's promise is that the PATH follows severity; a different
+    /// leader (the executed pins found the off setting a whisker behind) would still reach all three.</summary>
+    [Fact]
+    public void WhenAutovacuumIsOffServerWideToo_TheWalkCarriesBothSettingsIntoOneStory()
+    {
+        var backlog = Backlog(4.2, 6, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1));
+        backlog.DatabaseName = "appdb";
+        backlog.ObjectName = "public.hot";
+        var disabled = Disabled(4.2, 6, hours: 6, (PgTargetScorer.AutovacuumDisabledServerOffKey, 1));
+        var off = new Fact { Source = PgTargetSources.ConfigSource, Key = PgTargetFactKeys.ConfigAutovacuumOff, Value = 1, ServerId = 1 };
+        var facts = new List<Fact> { backlog, disabled, off };
+        new FactScorer().ScoreAll(facts);
+        Assert.Equal(1.35, off.Severity, precision: 6);
+        Assert.True(backlog.Severity > off.Severity && off.Severity > disabled.Severity, $"{backlog.Severity} {off.Severity} {disabled.Severity}");
+
+        var story = Assert.Single(new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts));
+        Assert.Equal(
+            new[] { PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumOff, PgTargetFactKeys.ConfigAutovacuumDisabled },
+            story.Path);
+
+        var advice = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(backlog, disabled, off))!;
+        Assert.Contains("CONFIG_PG_AUTOVACUUM_OFF also fired", advice.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Turn autovacuum back on server-wide first", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDisabledAdvice_StatesTheTableTheRatioTheHoursAndTheShapeOfTheOthers_AndOffersBothLeversWithTheirCosts()
+    {
+        var disabled = Disabled(4.2, 7, hours: 6,
+            (PgTargetScorer.BacklogDeadTuplesKey, 4_410), (PgTargetScorer.BacklogVacuumThresholdKey, 1_050), (PgTargetScorer.BacklogLiveTuplesKey, 10_000),
+            (PgTargetScorer.BacklogTotalBytesKey, 8_192_000), (PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, 30),
+            (PgTargetScorer.AutovacuumDisabledTablesKey, 3),
+            (PgTargetScorer.AutovacuumDisabledRankRatioKey(2), 3.1), (PgTargetScorer.AutovacuumDisabledRankHoursKey(2), 5),
+            (PgTargetScorer.AutovacuumDisabledRankRatioKey(3), 1.4), (PgTargetScorer.AutovacuumDisabledRankHoursKey(3), 2));
+        var backlog = Backlog(4.2, 7, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1));
+        backlog.DatabaseName = "appdb";
+        backlog.ObjectName = "public.hot";
+        new FactScorer().ScoreAll([backlog, disabled]);
+
+        var block = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(backlog, disabled))!;
+        Assert.Equal("public.hot in appdb has autovacuum_enabled = off and sits at 4.2× its own autovacuum trigger line for 6 hours", block.Headline);
+        Assert.Contains("4,410 dead tuples against its own trigger line of 1,050", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("for 7 consecutive hourly samples spanning 6 hours", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("autovacuum last ran on this table 30 hours before the window end", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("7.8 MB on disk", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("2 more disabled tables have met the same gate (3.1× for 5 hours, 1.4× for 2 hours)", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PG_AUTOVACUUM_BACKLOG carries the grade", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("CONFIG_PG_AUTOVACUUM_OFF also fired", block.Investigation, StringComparison.Ordinal);
+
+        Assert.Contains("ALTER TABLE public.hot SET (autovacuum_enabled = true);", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("VACUUM (ANALYZE) public.hot;", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("Never VACUUM FULL as the first lever", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("autovacuum_vacuum_scale_factor = 0.053", block.Remediation, StringComparison.Ordinal);
+        /* Every lever names its cost: re-enable, manual schedule, and the lower-line variant. */
+        Assert.Equal(3, Regex.Matches(block.Remediation, "Counter-objective").Count);
+        Assert.DoesNotContain("CREATE INDEX", block.Investigation + block.Remediation, StringComparison.OrdinalIgnoreCase);
+        AssertNeverDisablesAutovacuum(block);
+        Assert.Null(block.RemediationTsql);
+
+        /* The insert arm names its own line and no scale-factor statement for the dead-tuple line. */
+        var appendOnly = Disabled(2.5, 3, hours: 2, (PgTargetScorer.BacklogArmIsInsertKey, 1),
+            (PgTargetScorer.BacklogInsertsSinceVacuumKey, 52_500), (PgTargetScorer.BacklogInsertThresholdKey, 21_000), (PgTargetScorer.BacklogLiveTuplesKey, 100_000));
+        var insert = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(appendOnly))!;
+        Assert.Contains("2.5× its own insert-vacuum line for 2 hours", insert.Headline, StringComparison.Ordinal);
+        Assert.Contains("52,500 inserts since its last vacuum against its own insert line of 21,000", insert.Investigation, StringComparison.Ordinal);
+        Assert.Contains("never run on this table", insert.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("autovacuum_vacuum_scale_factor", insert.Remediation, StringComparison.Ordinal);
+
+        /* Next reads: the per-table list and what it cost, get_pg_ only. */
+        var tools = PerformanceMonitor.Darling.Service.Mcp.PgTargetToolRecommendations.GetForKey(PgTargetFactKeys.ConfigAutovacuumDisabled)!;
+        Assert.Equal(new[] { "get_pg_autovacuum_health", "get_pg_table_bloat" }, tools.Select(t => t.Tool));
+    }
+
     /* ── helpers ── */
 
     private static IReadOnlyDictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
+
+    private static Fact Disabled(double ratio, int trailing, double hours, params (string Key, double Value)[] extra)
+    {
+        var fact = new Fact
+        {
+            Source = PgTargetSources.VacuumSource,
+            Key = PgTargetFactKeys.ConfigAutovacuumDisabled,
+            Value = ratio,
+            ServerId = 1,
+            DatabaseName = "appdb",
+            ObjectName = "public.hot",
+            Metadata =
+            {
+                [PgTargetScorer.BacklogRatioKey] = ratio,
+                [PgTargetScorer.BacklogTrailingSamplesKey] = trailing,
+                [PgTargetScorer.BacklogSamplesInWindowKey] = trailing + 1,
+                [PgTargetScorer.BacklogHoursKey] = hours,
+                [PgTargetScorer.BacklogTableAutovacuumDisabledKey] = 1,
+                [PgTargetScorer.AutovacuumDisabledTablesKey] = 1,
+                [PgTargetScorer.AutovacuumDisabledServerOffKey] = 0,
+            },
+        };
+        foreach (var (k, v) in extra) fact.Metadata[k] = v;
+        return fact;
+    }
 
     private static void AssertNeverDisablesAutovacuum(AdviceBlock block)
     {

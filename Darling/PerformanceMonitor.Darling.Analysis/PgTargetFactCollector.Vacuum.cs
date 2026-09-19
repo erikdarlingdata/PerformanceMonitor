@@ -38,8 +38,44 @@ public sealed partial class PgTargetFactCollector
     /// (window functions run before it), so the one fact can say how many others there are.</description></item>
     /// </list>
     /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> persistence samples, <c>$5</c> row limit.
+    ///
+    /// <para><b>Composition (#3691 step 22).</b> The CTE chain and the projection are the private
+    /// <see cref="BacklogRunsCte"/> / <see cref="BacklogProjection"/> halves, and this const and
+    /// <see cref="PgTargetAutovacuumDisabledSql"/> are each <c>halves + own WHERE / ORDER / LIMIT</c> — a
+    /// compile-time constant either way (<c>const</c> concatenation), so <c>AllSql</c>'s reflection closure and
+    /// the dialect / FROM-target censuses read the finished text. One run definition, two reads: the disabled
+    /// read is "the same runs, only the tables whose reloption is off", and a second copy of ninety lines of
+    /// window arithmetic would be the first place the two drifted.</para>
     /// </summary>
-    public const string PgTargetAutovacuumBacklogSql = @"
+    public const string PgTargetAutovacuumBacklogSql = BacklogRunsCte + BacklogProjection + @"
+WHERE l.trailing_samples_past_line >= $4
+ORDER BY
+    l.autovacuum_disabled DESC,
+    backlog_ratio DESC NULLS LAST,
+    GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC
+LIMIT $5";
+
+    /// <summary>
+    /// The per-table DISABLED read (#3691 step 22, design §3.1): the same runs as
+    /// <see cref="PgTargetAutovacuumBacklogSql"/>, restricted to tables whose <c>autovacuum_enabled</c> reloption
+    /// is off (<c>autovacuum_disabled</c>, stamped per row by the collector from <c>reloptions</c>) that ALSO
+    /// met the persistence gate — a disabled table with no backlog is not returned, because someone may be
+    /// vacuuming it by hand and the fact would be an opinion about their schedule. Ranked worst-first by the
+    /// ratio to the table's own line; <c>tables_in_backlog</c> here counts the DISABLED tables that met the gate
+    /// (the window function runs after this WHERE). <c>$5</c> is the top-N the fact carries the shape of.
+    /// </summary>
+    public const string PgTargetAutovacuumDisabledSql = BacklogRunsCte + BacklogProjection + @"
+WHERE l.autovacuum_disabled
+AND   l.trailing_samples_past_line >= $4
+ORDER BY
+    backlog_ratio DESC NULLS LAST,
+    GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC
+LIMIT $5";
+
+    /// <summary>The CTE chain both autovacuum reads share: samples → marked → runs → latest → run_start
+    /// (documented on <see cref="PgTargetAutovacuumBacklogSql"/>). Private and not <c>*Sql</c>-suffixed on
+    /// purpose: it is half a statement, never executed on its own, and must stay out of <c>AllSql</c>.</summary>
+    private const string BacklogRunsCte = @"
 WITH samples AS (
     SELECT
         database_name, schema_name, table_name, collection_time,
@@ -88,7 +124,12 @@ run_start AS (
       AND l.schema_name   IS NOT DISTINCT FROM r.schema_name
       AND l.table_name    IS NOT DISTINCT FROM r.table_name
       AND l.run_started_at = r.collection_time
-)
+)";
+
+    /// <summary>The projection both autovacuum reads share — the latest sample beside the run's first, the
+    /// two-arm ratio, and the post-WHERE table count. Ends at <c>JOIN run_start</c>; each read appends its own
+    /// <c>WHERE</c>, <c>ORDER BY</c> and <c>LIMIT</c>.</summary>
+    private const string BacklogProjection = @"
 SELECT
     l.database_name,
     l.schema_name,
@@ -122,13 +163,7 @@ FROM latest AS l
 JOIN run_start AS rs
   ON  rs.database_name IS NOT DISTINCT FROM l.database_name
   AND rs.schema_name   IS NOT DISTINCT FROM l.schema_name
-  AND rs.table_name    IS NOT DISTINCT FROM l.table_name
-WHERE l.trailing_samples_past_line >= $4
-ORDER BY
-    l.autovacuum_disabled DESC,
-    backlog_ratio DESC NULLS LAST,
-    GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC
-LIMIT $5";
+  AND rs.table_name    IS NOT DISTINCT FROM l.table_name";
 
     /// <summary>
     /// The wraparound read: the LATEST reading per database with the window's peak and FIRST reading for each
@@ -233,6 +268,16 @@ CROSS JOIN window_stats AS w";
     private const int BacklogRowLimit = 1;
 
     /// <summary>
+    /// How many disabled-and-backlogged tables the disabled read returns: the worst is the fact (its name in
+    /// <see cref="Fact.ObjectName"/>, its figures under the backlog metadata keys), the next two ride as ratio
+    /// and hours under <see cref="PgTargetScorer.AutovacuumDisabledRankRatioKey"/> /
+    /// <see cref="PgTargetScorer.AutovacuumDisabledRankHoursKey"/> so the advice can state the shape of the
+    /// rest ("two more, 3.1× for 5 h and 1.4× for 2 h") without their names, which doubles cannot carry.
+    /// Three because the card is a summary, not the list — <c>get_pg_autovacuum_health</c> is the list.
+    /// </summary>
+    private const int AutovacuumDisabledRowLimit = 3;
+
+    /// <summary>
     /// <c>PG_AUTOVACUUM_BACKLOG</c> (the worst persistently-backlogged table, ratio to its OWN line and slope
     /// over the run), <c>PG_WRAPAROUND_TREND</c> (the relatively-worst database and counter, XID and MultiXact
     /// graded separately) and <c>PG_XMIN_HOLD</c> (the latest winning holder with its persistence) —
@@ -249,12 +294,128 @@ CROSS JOIN window_stats AS w";
     /// fact — the engine-defined top of that fact's severity ramp (a horizon held past the freeze age stops the
     /// forced anti-wraparound vacuum advancing <c>relfrozenxid</c>, §3.3). Absent, the xmin base stays flat at
     /// the alert's Warning.</para>
+    ///
+    /// <para><c>CONFIG_PG_AUTOVACUUM_DISABLED</c> (#3691 step 22) is the fourth read, after the backlog: a table
+    /// whose reloption is off AND which met the same persistence gate. Its own degrade, same table, same
+    /// 42P01 classification; a disabled table with no backlog produces nothing (§3.1).</para>
     /// </summary>
     private async partial Task CollectVacuumFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         var freezeMaxAge = await ReadWraparoundTrendAsync(context, facts);
         await ReadAutovacuumBacklogAsync(context, facts);
+        await ReadAutovacuumDisabledAsync(context, facts);
         await ReadXminHoldAsync(context, facts, freezeMaxAge);
+    }
+
+    /// <summary>
+    /// Emits <c>CONFIG_PG_AUTOVACUUM_DISABLED</c> for the worst table (by ratio to its own line) whose
+    /// <c>autovacuum_enabled</c> reloption is off and which has sat past that line for
+    /// <see cref="PgTargetScorer.BacklogPersistenceSamples"/> consecutive hourly samples — the same gate as the
+    /// backlog, bound the same way, so the two facts can never disagree about whether a table is backlogged.
+    /// The worst table's figures ride under the backlog metadata keys (one vocabulary, the advice reads both
+    /// facts with the same names); ranks 2 and 3 ride as ratio + hours; the count of disabled tables that met
+    /// the gate is <see cref="PgTargetScorer.AutovacuumDisabledTablesKey"/>. "Hours past line" is the run's
+    /// own span (latest sample minus the run's first), never an assumed cadence.
+    ///
+    /// <para>Whether autovacuum is ALSO off server-wide is read off the <c>CONFIG_PG_AUTOVACUUM_OFF</c> fact the
+    /// config read emitted earlier in this pass (emission order: Config before Vacuum), never from a second
+    /// <c>pg_server_config</c> read — one pass, one truth about the setting. Absent config fact (no snapshot in
+    /// the window) reads as "not known to be off", 0.</para>
+    /// </summary>
+    private async Task ReadAutovacuumDisabledAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(PgTargetAutovacuumDisabledSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(PgTargetScorer.BacklogPersistenceSamples);
+            cmd.Parameters.AddWithValue(AutovacuumDisabledRowLimit);
+
+            Fact? fact = null;
+            var rank = 0;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                rank++;
+                var latestAt = reader.GetDateTime(3);
+                var runStartedAt = reader.GetDateTime(15);
+                var ratio = reader.IsDBNull(19) ? 0.0 : Convert.ToDouble(reader.GetValue(19));
+                var runHours = (latestAt - runStartedAt).TotalHours;
+
+                if (fact is not null)
+                {
+                    /* Ranks 2 and 3: the shape only. Same column positions as the first row; the names stay with
+                       the tool. */
+                    fact.Metadata[PgTargetScorer.AutovacuumDisabledRankRatioKey(rank)] = ratio;
+                    fact.Metadata[PgTargetScorer.AutovacuumDisabledRankHoursKey(rank)] = runHours;
+                    continue;
+                }
+
+                var databaseName = reader.IsDBNull(0) ? null : reader.GetString(0);
+                var schema = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var table = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var live = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+                var dead = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                var vacuumThreshold = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                var inserts = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+                var insertThreshold = reader.IsDBNull(8) ? -1L : ToInt64(reader.GetValue(8));
+                var totalBytes = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                DateTime? lastAutovacuum = reader.IsDBNull(11) ? null : reader.GetDateTime(11);
+                var samplesInWindow = ToInt64(reader.GetValue(13));
+                var trailing = ToInt64(reader.GetValue(14));
+                var disabledTables = ToInt64(reader.GetValue(20));
+
+                /* The arm the ratio came from — the backlog read's re-derivation, so the advice names the right line. */
+                var deadRatio = vacuumThreshold > 0 ? (double)dead / vacuumThreshold : 0.0;
+                var insertRatio = insertThreshold > 0 ? (double)inserts / insertThreshold : 0.0;
+                var insertArm = insertRatio > deadRatio;
+
+                var serverOff = facts.Find(f => f.Key == PgTargetFactKeys.ConfigAutovacuumOff) is { Value: > 0 };
+
+                fact = new Fact
+                {
+                    Source = PgTargetSources.VacuumSource,
+                    Key = PgTargetFactKeys.ConfigAutovacuumDisabled,
+                    Value = ratio,
+                    ServerId = context.ServerId,
+                    DatabaseName = databaseName,
+                    ObjectName = string.IsNullOrEmpty(table) ? null : string.IsNullOrEmpty(schema) ? table : $"{schema}.{table}",
+                    Metadata =
+                    {
+                        [PgTargetScorer.BacklogRatioKey] = ratio,
+                        [PgTargetScorer.BacklogArmIsInsertKey] = insertArm ? 1 : 0,
+                        [PgTargetScorer.BacklogTrailingSamplesKey] = trailing,
+                        [PgTargetScorer.BacklogSamplesInWindowKey] = samplesInWindow,
+                        [PgTargetScorer.BacklogDeadTuplesKey] = dead,
+                        [PgTargetScorer.BacklogVacuumThresholdKey] = vacuumThreshold,
+                        [PgTargetScorer.BacklogLiveTuplesKey] = live,
+                        [PgTargetScorer.BacklogInsertsSinceVacuumKey] = inserts,
+                        [PgTargetScorer.BacklogInsertThresholdKey] = insertThreshold,
+                        [PgTargetScorer.BacklogTotalBytesKey] = totalBytes,
+                        [PgTargetScorer.BacklogHoursKey] = runHours,
+                        [PgTargetScorer.BacklogTableAutovacuumDisabledKey] = 1,
+                        [PgTargetScorer.AutovacuumDisabledTablesKey] = disabledTables,
+                        [PgTargetScorer.AutovacuumDisabledServerOffKey] = serverOff ? 1 : 0,
+                    },
+                };
+
+                if (lastAutovacuum.HasValue)
+                    fact.Metadata[PgTargetScorer.BacklogHoursSinceLastAutovacuumKey] = (AsNaive(context.TimeRangeEnd) - lastAutovacuum.Value).TotalHours;
+            }
+
+            if (fact is not null)
+                facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Same table as the backlog read, same classification: pg_autovacuum_stats arrived in V68, 42P01 on
+               a pre-migration store is quiet; an abandonment is NOT swallowed (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
     }
 
     private async Task ReadAutovacuumBacklogAsync(AnalysisContext context, List<Fact> facts)
