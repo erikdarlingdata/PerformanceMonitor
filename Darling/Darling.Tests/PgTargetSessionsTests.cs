@@ -215,8 +215,9 @@ public sealed class PgTargetSessionsTests
         Assert.False(cpu.Predicate(Lookup(Saturation(90), quietCpu)));
         Assert.False(cpu.Predicate(Lookup(Saturation(90))));
 
-        /* Through the real scorer: the parked share is the fact's own and fires; the CPU family is a stub (base 0)
-           so its arm is wired and inert until lane 9 lands its bar. 1.0 × (1 + 0.25) = 1.25. */
+        /* Through the real scorer: the parked share is the fact's own and fires; a CPU fact whose 95 is the RAW
+           percent-of-allocated reading (no capacity_measured flag — lane 9's scorer grades only the capacity
+           percent, #3281) scores 0 and its arm is wired and inert. 1.0 × (1 + 0.25) = 1.25. */
         var facts = new List<Fact>
         {
             Saturation(90, idleInTransaction: 30),
@@ -228,6 +229,22 @@ public sealed class PgTargetSessionsTests
         Assert.Equal(2, facts[0].AmplifierResults.Count);
         Assert.True(facts[0].AmplifierResults[0].Matched);
         Assert.False(facts[0].AmplifierResults[1].Matched);
+
+        /* And with the capacity reading measured at 95% of the configured ceiling the CPU fact fires (1.0) and the
+           arm lifts saturation to 1.0 × (1 + 0.25 + 0.25) = 1.5 — the D7 "queueing at the cliff" shape. */
+        var atCapacity = new List<Fact>
+        {
+            Saturation(90, idleInTransaction: 30),
+            new()
+            {
+                Source = PgTargetSources.CpuSource, Key = PgTargetFactKeys.CpuPercent, Value = 95,
+                Metadata = { [PgTargetScorer.CpuCapacityMeasuredKey] = 1 },
+            },
+        };
+        new FactScorer().ScoreAll(atCapacity);
+        Assert.Equal(1.0, atCapacity[1].BaseSeverity, precision: 9);
+        Assert.Equal(1.5, atCapacity[0].Severity, precision: 9);
+        Assert.True(atCapacity[0].AmplifierResults[1].Matched);
 
         /* And below the warning band nothing fires at all — the fact is context, and no sibling can lift it. */
         var calm = new List<Fact> { Saturation(70, idleInTransaction: 60), firedCpu };
