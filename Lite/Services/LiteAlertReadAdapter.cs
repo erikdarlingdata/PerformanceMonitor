@@ -137,7 +137,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
                 .ToList();
         }
 
-        return new LongRunningQueryReadResult(longRunning, read.ExcludedCount);
+        return new LongRunningQueryReadResult(longRunning, read.ExcludedByProgramPrefix, read.ExcludedByLogin);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(

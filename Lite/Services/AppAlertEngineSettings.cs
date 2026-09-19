@@ -74,8 +74,9 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool LongRunningQueryExcludeBackups => App.AlertLongRunningQueryExcludeBackups;
     public bool LongRunningQueryExcludeMiscWaits => App.AlertLongRunningQueryExcludeMiscWaits;
     public bool LongRunningQueryExcludeCdc => App.AlertLongRunningQueryExcludeCdc;
-    /* #3653 (A5, Q5): the opt-out knob, two settings.json arrays; the engine normalises them on read. */
-    public IReadOnlyList<string> LongRunningQueryExcludedProgramNames => App.AlertLongRunningQueryExcludedProgramNames;
+    /* #3653 (A5, Q5): the opt-out knob, two settings.json arrays seeded with the production read's defaults (App
+       says how absent vs present-and-empty are told apart); the engine normalises them on read. */
+    public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => App.AlertLongRunningQueryExcludedProgramNamePrefixes;
     public IReadOnlyList<string> LongRunningQueryExcludedLogins => App.AlertLongRunningQueryExcludedLogins;
 
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;

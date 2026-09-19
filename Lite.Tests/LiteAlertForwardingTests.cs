@@ -129,7 +129,7 @@ public class LiteAlertForwardingTests : IDisposable
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
             IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new LongRunningQueryReadResult(new List<LongRunningQueryInfo>(LongRunning), 0));
+            Task.FromResult(new LongRunningQueryReadResult(new List<LongRunningQueryInfo>(LongRunning), 0, 0));
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
@@ -1150,6 +1150,12 @@ public class LiteAlertForwardingTests : IDisposable
 
         App.AlertExcludedDatabases = new List<string> { "tempdb", "model" };
         Assert.Equal(new[] { "tempdb", "model" }, settings.ExcludedDatabases);
+
+        /* #3653 (A5, Q5): the Long-Running Query opt-out knob's two lists, forwarded raw (the engine normalises). */
+        App.AlertLongRunningQueryExcludedProgramNamePrefixes = new List<string> { "SQLAgent - TSQL JobStep", "HammerDB" };
+        Assert.Equal(new[] { "SQLAgent - TSQL JobStep", "HammerDB" }, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        App.AlertLongRunningQueryExcludedLogins = new List<string> { @"NT AUTHORITY\SYSTEM" };
+        Assert.Equal(new[] { @"NT AUTHORITY\SYSTEM" }, settings.LongRunningQueryExcludedLogins);
 
         /* The one mapped member: Lite's persisted enum → the engine's enum. */
         App.AlertCpuMode = CpuAlertMode.Total;

@@ -439,16 +439,21 @@ ORDER BY accumulated_wait_ms DESC";
     /// <c>NOW() - INTERVAL '10 MINUTES'</c> becomes the parameterized naive-UTC $4 (a bare
     /// <c>now()</c> is timestamptz — wrong basis against naive-UTC timestamp columns), and the
     /// N'' literals in the opt-out filters (<c>{0}</c> placeholder) lose their N prefix.
-    /// $1 server_id, $2 elapsed-ms threshold, $3 max results, $4 staleness floor; <c>{1}</c> is the #3653
-    /// (A5, Q5) opt-out knob's flag expression — <c>FALSE</c> for an empty knob, otherwise the shared
-    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicate"/> text whose operands bind as $5 onward.
+    /// $1 server_id, $2 elapsed-ms threshold, $3 max results, $4 staleness floor; <c>{1}</c> and <c>{2}</c> are
+    /// the #3653 (A5, Q5) opt-out knob's two arm expressions — the shared
+    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicates"/> text (the literal <c>FALSE</c> for an arm with
+    /// no entries) whose operands bind as $5 onward, program prefixes first.
     ///
-    /// <para><b>Why a CTE and a flag rather than one more <c>AND NOT</c>.</b> The knob is applied ahead of
+    /// <para><b>Why a CTE and two flags rather than one more <c>AND NOT</c>.</b> The knob is applied ahead of
     /// <c>LIMIT</c> (the sessions it removes are the longest-running by construction and would otherwise fill
-    /// the cap), and the fire payload wants to know how many it removed. Flagging every over-threshold row once
-    /// lets the outer query keep the unflagged ones under the cap AND count the flagged ones as an uncorrelated
-    /// scalar over the same CTE — one statement (Npgsql positional parameters do not survive a batch), one
-    /// snapshot, so the rows and the count describe the same instant. The outer alias is <c>r</c> like the
+    /// the cap), and the fire payload wants to know how many it removed and WHICH ARM did it. Flagging every
+    /// over-threshold row once per arm lets the outer query keep the unflagged ones under the cap AND count the
+    /// flagged ones as two uncorrelated scalars over the same CTE — one statement (Npgsql positional parameters
+    /// do not survive a batch), one snapshot, so the rows and the counts describe the same instant. The counts
+    /// are DISTINCT <c>session_id</c>s, not rows: the read looks at one collection of one server, where the
+    /// (server_id, session_id, tran_start_time) session identity collapses to <c>session_id</c>, and a MARS
+    /// session with two request rows is one session. The login count is taken <c>AND NOT</c> the program flag so
+    /// a session matching both arms counts once, under the program prefix. The outer alias is <c>r</c> like the
     /// inner's so the pins on this text keep reading.</para>
     /// </summary>
     public const string LongRunningQueriesSqlTemplate = @"
@@ -467,7 +472,8 @@ WITH candidates AS (
         r.program_name,
         r.login_name,
         r.total_elapsed_time_ms,
-        {1} AS excluded_by_knob
+        {1} AS excluded_by_program_prefix,
+        {2} AS excluded_by_login
     FROM query_snapshots AS r
     WHERE r.server_id = $1
         AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM query_snapshots AS vqs WHERE vqs.server_id = $1)
@@ -489,9 +495,10 @@ SELECT
     r.query_hash,
     r.program_name,
     r.login_name,
-    CAST((SELECT COUNT(*) FROM candidates AS x WHERE x.excluded_by_knob) AS integer) AS excluded_count
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count
 FROM candidates AS r
-WHERE NOT r.excluded_by_knob
+WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)
 ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
@@ -534,21 +541,24 @@ LIMIT $3";
             excludeCdc ? CdcFilter : ""
         }.Where(f => f.Length > 0));
 
-        /* #3653 (A5, Q5): the opt-out knob's operands bind as $5 onward, after the four fixed parameters. */
-        var (exclusionPredicate, exclusionOperands) = exclusions.BuildSqlPredicate("r.program_name", "r.login_name", firstParameterOrdinal: 5);
+        /* #3653 (A5, Q5): the opt-out knob's two arms, operands binding as $5 onward after the four fixed
+           parameters (program prefixes first, then logins — the builder's order is the binding order). */
+        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", firstParameterOrdinal: 5);
         var sql = LongRunningQueriesSqlTemplate
             .Replace("{0}", filters)
-            .Replace("{1}", exclusionPredicate.Length == 0 ? "FALSE" : exclusionPredicate);
+            .Replace("{1}", exclusionSql.ProgramPrefixPredicate)
+            .Replace("{2}", exclusionSql.LoginPredicate);
 
         var items = new List<LongRunningQueryInfo>();
-        int excludedCount = 0;
+        int excludedByProgramPrefix = 0;
+        int excludedByLogin = 0;
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
         command.Parameters.AddWithValue(maxResults);
         command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-10));
-        foreach (var operand in exclusionOperands)
+        foreach (var operand in exclusionSql.Operands)
         {
             command.Parameters.AddWithValue(operand);
         }
@@ -572,9 +582,10 @@ LIMIT $3";
                     ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
                     LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
                 });
-                /* The same scalar on every row — read once is enough; a read with no rows has nothing to
-                   fire and therefore nothing to render the count beside. */
-                excludedCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
+                /* The same two scalars on every row — read once is enough; a read with no rows has nothing to
+                   fire and therefore nothing to render the counts beside. */
+                excludedByProgramPrefix = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
+                excludedByLogin = reader.IsDBNull(13) ? 0 : reader.GetInt32(13);
             }
         }
 
@@ -587,7 +598,7 @@ LIMIT $3";
                 .ToList();
         }
 
-        return new LongRunningQueryReadResult(items, excludedCount);
+        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin);
     }
 
     /* ---------------- database file growth (#2349) ---------------- */

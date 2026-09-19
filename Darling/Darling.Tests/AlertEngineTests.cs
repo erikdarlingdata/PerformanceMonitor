@@ -65,10 +65,12 @@ public sealed class AlertEngineTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
-        /* #3653 (A5, Q5): the opt-out knob, empty unless a test sets it — every session evaluated, the shipped default. */
-        public List<string> LongRunningQueryExcludedProgramNamesList { get; } = new();
+        /* #3653 (A5, Q5): the opt-out knob, empty unless a test sets it — every session evaluated. The SEEDING is
+           the hosts' (App / DarlingAlertSettings), not the engine's, so the engine fakes start empty and the pins
+           that want the seeds pass LongRunningQueryExclusions.Defaults explicitly. */
+        public List<string> LongRunningQueryExcludedProgramNamePrefixesList { get; } = new();
         public List<string> LongRunningQueryExcludedLoginsList { get; } = new();
-        public IReadOnlyList<string> LongRunningQueryExcludedProgramNames => LongRunningQueryExcludedProgramNamesList;
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExcludedProgramNamePrefixesList;
         public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExcludedLoginsList;
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
@@ -166,7 +168,11 @@ public sealed class AlertEngineTests
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
             LastLrqExclusions = exclusions;
             var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
-            return Task.FromResult(new LongRunningQueryReadResult(kept, LongRunning.Count(q => exclusions.Excludes(q.ProgramName, q.LoginName))));
+            /* Counts in SESSIONS (distinct session_id), split by arm through the shared Classify — a session matching
+               both arms lands under ProgramPrefix, exactly as the two SQL scalars count it. */
+            var byProgram = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.ProgramPrefix).Select(q => q.SessionId).Distinct().Count();
+            var byLogin = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.Login).Select(q => q.SessionId).Distinct().Count();
+            return Task.FromResult(new LongRunningQueryReadResult(kept, byProgram, byLogin));
         }
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
@@ -2373,24 +2379,85 @@ public sealed class AlertEngineTests
         QueryHash = "0x" + sessionId.ToString("X16")
     };
 
+    /// <summary>A named human's ad-hoc query — class 4 of the production read, the population the page is for.</summary>
+    private static LongRunningQueryInfo HumanSession(int sessionId = 73, long elapsedSeconds = 2159) => new()
+    {
+        SessionId = sessionId, DatabaseName = "StackOverflow", QueryText = "SELECT COUNT(*) FROM Users",
+        ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "erik",
+        ElapsedSeconds = elapsedSeconds, QueryHash = "0x9AAF0129E4E9AD07"
+    };
+
     [Fact]
     public async Task LongRunningQuery_TheOptOutKnobTravelsIntoTheRead_Normalised()
     {
         /* THE Q5 RULING's mechanism: the two settings lists reach the READ, not a post-read filter, because the
            sessions they name are the longest-running on the server by construction and would fill the row cap
            (LongRunningQueryExclusions says why). Normalised on the way — trimmed, blanks dropped, case-insensitive
-           dedupe, a bare * refused — so a Settings-window string and an MCP array mean the same thing. */
+           dedupe — so a Settings-window string and an MCP array mean the same thing. */
         var h = new Harness();
         h.Settings.LongRunningQueryEnabled = true;
-        h.Settings.LongRunningQueryExcludedProgramNamesList.AddRange(new[] { " HammerDB ", "hammerdb", "", "SQLAgent - TSQL JobStep*" });
-        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(new[] { "svc_etl", "*" });
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(new[] { " HammerDB ", "hammerdb", "", "SQLAgent - TSQL JobStep" });
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(new[] { "svc_etl", " ", @"NT AUTHORITY\SYSTEM" });
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var exclusions = h.Adapter.LastLrqExclusions;
         Assert.NotNull(exclusions);
-        Assert.Equal(new[] { "HammerDB", "SQLAgent - TSQL JobStep*" }, exclusions!.ProgramNames);
-        Assert.Equal(new[] { "svc_etl" }, exclusions.Logins);
+        Assert.Equal(new[] { "HammerDB", "SQLAgent - TSQL JobStep" }, exclusions!.ProgramNamePrefixes);
+        Assert.Equal(new[] { "svc_etl", @"NT AUTHORITY\SYSTEM" }, exclusions.Logins);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_TheSeededDefaults_RemoveTheProductionReadsBackground_AndKeepTheHuman()
+    {
+        /* THE ADDENDUM's finding, as the engine sees it. The 7-day read of one large production store split the
+           long-running population into four classes: SQL Agent job steps (program prefix), the two NT AUTHORITY
+           service logins (multi-day CDC-shaped background), the application's admin login (NOT excluded — it carries
+           the job wave but also real ad-hoc long-runners), and named humans (never excluded). With the SEEDED
+           defaults and nothing else, the job step and the two service sessions are gone before the decision, the
+           admin login's ad-hoc query and the human's are evaluated, and the card's split says which default did
+           what — in SESSIONS, with the job step that ALSO runs as SYSTEM counted once, under the prefix. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(LongRunningQueryExclusions.DefaultLogins);
+
+        /* Class 1: a job step under the admin login (the usual shape) and one under SYSTEM (matches both arms). */
+        h.Adapter.LongRunning.Add(PermanentSession(61, "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 3)", "app_admin", elapsedSeconds: 3_600));
+        h.Adapter.LongRunning.Add(PermanentSession(62, "sqlagent - tsql jobstep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", @"NT AUTHORITY\SYSTEM", elapsedSeconds: 2_400));
+        /* Class 2: the multi-day background under the two service principals, generic driver program names. */
+        h.Adapter.LongRunning.Add(PermanentSession(63, ".Net SqlClient Data Provider", @"nt authority\system", elapsedSeconds: 500_000));
+        h.Adapter.LongRunning.Add(PermanentSession(64, "Replication Log Reader", @"NT AUTHORITY\NETWORK SERVICE", elapsedSeconds: 700_000));
+        /* Class 3: the admin login's OWN ad-hoc query — evaluated, because blinding the login would hide this. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 65, DatabaseName = "StackOverflow", QueryText = "UPDATE Posts SET Score = Score + 1",
+            ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "app_admin",
+            ElapsedSeconds = 4_000, QueryHash = "0x1111111111111111"
+        });
+        /* Class 4: the human. */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Equal("2 query(s), longest 66m", fired.CurrentValue);
+        Assert.StartsWith("Session #65 running 66m", fired.ShortMessage, StringComparison.Ordinal);
+        /* The excluded sessions are not on the card as SESSIONS (the knob item lists the prefix itself, by design). */
+        Assert.DoesNotContain("Job 0x", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Replication Log Reader", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #61", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #63", fired.DetailText, StringComparison.Ordinal);
+
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("4 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("4", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        /* 61 and 62 by prefix (62 also matched SYSTEM — counted here, once); 63 and 64 by login. */
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal(@"NT AUTHORITY\SYSTEM, NT AUTHORITY\NETWORK SERVICE", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
     }
 
     [Fact]
@@ -2399,21 +2466,16 @@ public sealed class AlertEngineTests
         /* Measured on one production store class: 191 distinct sessions over the 30-minute bar in 7 days, the p90
            seen in 6,192 snapshots — permanent background requests no gate can separate from a runaway query. With
            the knob set, the permanent session is not read into the decision at all (not counted in "N query(s)",
-           not the longest, not fingerprinted), and the card's knob item says how many the knob removed so the
-           operator can see it working. */
+           not the longest, not fingerprinted), and the card's knob item says how many the knob removed, by arm, so
+           the operator can see it working. */
         var h = new Harness();
         h.Settings.LongRunningQueryEnabled = true;
-        h.Settings.LongRunningQueryExcludedProgramNamesList.Add("QueueWorker");
-        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc_*");
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("QueueWorker");
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc_replication");
 
-        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user", elapsedSeconds: 500_000));
-        h.Adapter.LongRunning.Add(PermanentSession(72, "Replication Reader", "SVC_Replication", elapsedSeconds: 400_000));
-        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
-        {
-            SessionId = 73, DatabaseName = "StackOverflow", QueryText = "SELECT COUNT(*) FROM Users",
-            ProgramName = "Microsoft SQL Server Management Studio - Query", LoginName = "erik",
-            ElapsedSeconds = 2159, QueryHash = "0x9AAF0129E4E9AD07"
-        });
+        h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker v2.1 (pool 7)", "app_user", elapsedSeconds: 500_000));   /* prefix */
+        h.Adapter.LongRunning.Add(PermanentSession(72, "Replication Reader", "SVC_Replication", elapsedSeconds: 400_000));  /* exact login, any case */
+        h.Adapter.LongRunning.Add(HumanSession());
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
@@ -2429,13 +2491,41 @@ public sealed class AlertEngineTests
         var knobItem = fired.Context!.Details[^1];
         Assert.Equal("2 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
         Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
-        Assert.Equal("QueueWorker", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Programs").Value);
-        Assert.Equal("svc_*", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.Equal("QueueWorker", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
+        Assert.Equal("svc_replication", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Logins").Value);
         Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedCountLabel}: 2", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel}: 1", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByLoginLabel}: 1", fired.DetailText, StringComparison.Ordinal);
 
         /* NOT a mute: the excluded sessions were never fingerprinted, so no incident exists for them to hold open. */
         Assert.NotNull(fired.Context.Incidents);
         Assert.Single(fired.Context.Incidents!);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_ALoginIsExactAndAProgramIsAPrefix_NeverTheOtherWayRound()
+    {
+        /* The two arms have two rules and the card must not blur them: a login entry does not match a longer
+           login (svc must not swallow svc_owner), and a program entry matches anything that starts with it.
+           A "*" typed by an operator who expects the retired wildcard grammar is a literal character that
+           matches nothing real — the entry is listed on the card so the misspelling is visible. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("SQLAgent - TSQL JobStep*");   /* literal *, matches nothing below */
+        h.Settings.LongRunningQueryExcludedLoginsList.Add("svc");
+
+        h.Adapter.LongRunning.Add(PermanentSession(81, "SQLAgent - TSQL JobStep (Job 0x01 : Step 1)", "svc_owner", elapsedSeconds: 9_000));
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 query(s), longest 150m", fired.CurrentValue);
+        var knobItem = fired.Context!.Details[^1];
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("SQLAgent - TSQL JobStep*", Assert.Single(knobItem.Fields, f => f.Label == "Excluded Program Prefixes").Value);
     }
 
     [Fact]
@@ -2452,7 +2542,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
 
-        h.Settings.LongRunningQueryExcludedProgramNamesList.Add("queueworker");
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("queue");
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Single(h.Deliverer.Outcomes);
@@ -2462,8 +2552,10 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task LongRunningQuery_AnEmptyKnob_LeavesTheCardWithoutTheKnobItem()
     {
-        /* An "Excluded Count: 0" line on the card of every operator who never configured the knob would be a line
-           about nothing, so the item exists only when the knob is set — the pre-#3653 card, byte for byte. */
+        /* An operator who cleared BOTH seeded lists has said "evaluate everything"; an "Excluded Count: 0" line
+           on their every card would be a line about nothing, so the item exists only when the knob is set — the
+           pre-#3653 card, byte for byte. (The engine does not re-seed an emptied list: present-and-empty is a
+           decision, and the seeding is the hosts' job on an ABSENT key.) */
         var h = new Harness();
         h.Settings.LongRunningQueryEnabled = true;
         h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
@@ -2478,11 +2570,11 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task LongRunningQuery_AKnobThatRemovedNothing_StillSaysSo()
     {
-        /* A set knob that matched no session this evaluation reports 0 — the receipt is the point, and "0" is a
-           receipt too (it is also how an operator learns a pattern is misspelled). */
+        /* A set knob that matched no session this evaluation reports 0 on every line — the receipt is the point,
+           and "0" is a receipt too (it is also how an operator learns an entry is misspelled). */
         var h = new Harness();
         h.Settings.LongRunningQueryEnabled = true;
-        h.Settings.LongRunningQueryExcludedProgramNamesList.Add("NotRunningToday");
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("NotRunningToday");
         h.Adapter.LongRunning.Add(PermanentSession(71, "QueueWorker", "app_user"));
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
@@ -2491,6 +2583,9 @@ public sealed class AlertEngineTests
         var knobItem = fired.Context!.Details[^1];
         Assert.Equal("0 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
         Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        Assert.DoesNotContain(knobItem.Fields, f => f.Label == "Excluded Logins");
     }
 
     [Fact]
@@ -2501,7 +2596,7 @@ public sealed class AlertEngineTests
            reasoning that has it read with every noise filter off. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
-        h.Settings.LongRunningQueryExcludedProgramNamesList.Add("RdsAdminService");
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.Add("RdsAdminService");
         h.Adapter.LongRunning.Add(BackupSession());
         var engine = h.Build();
 

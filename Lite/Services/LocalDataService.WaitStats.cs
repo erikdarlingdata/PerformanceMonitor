@@ -660,16 +660,21 @@ LIMIT 2000";
     /// <summary>
     /// Gets long-running queries from the latest collection snapshot.
     /// Returns sessions whose total elapsed time exceeds the given threshold, and — since #3653 (A5, Q5) — how
-    /// many over-threshold sessions the <paramref name="exclusions"/> opt-out knob removed from the same snapshot.
+    /// many over-threshold sessions the <paramref name="exclusions"/> opt-out knob removed from the same snapshot,
+    /// split by the arm that removed them (program-name prefix / exact login).
     ///
     /// <para><b>The knob is applied IN the read, ahead of <c>LIMIT</c>.</b> The read is longest-elapsed first and
     /// capped at <paramref name="maxResults"/> (default 5); the sessions an operator excludes here are permanent
     /// background requests, i.e. the longest-running on the server by construction, so a post-read filter would
     /// let them fill the cap on every sweep and hide the real long-running query behind them. The <c>candidates</c>
-    /// CTE flags each over-threshold row, the outer query keeps the unflagged ones under the cap, and the excluded
-    /// count is an uncorrelated scalar over the same CTE — one statement, one snapshot, so the count and the rows
-    /// describe the same instant. With an empty knob the flag expression is the literal <c>FALSE</c> and the rows
-    /// are exactly what the pre-knob read returned.</para>
+    /// CTE flags each over-threshold row once per arm, the outer query keeps the unflagged ones under the cap, and
+    /// the two excluded counts are uncorrelated scalars over the same CTE — one statement, one snapshot, so the
+    /// counts and the rows describe the same instant. The counts are DISTINCT <c>session_id</c>s (one collection
+    /// of one server, where the production read's (server_id, session_id, tran_start_time) identity collapses to
+    /// <c>session_id</c>; a MARS session with two request rows is one session), and the login count is taken
+    /// <c>AND NOT</c> the program flag so a session matching both arms counts once, under the prefix. An arm with
+    /// no entries is the literal <c>FALSE</c>, and with both empty the rows are exactly what the pre-knob read
+    /// returned.</para>
     /// </summary>
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         int serverId,
@@ -707,10 +712,10 @@ LIMIT 2000";
             ? "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE" : "";
         maxResults = Math.Clamp(maxResults, 1, 1000);
 
-        /* #3653 (A5, Q5): the opt-out knob's operands bind as $5 onward, after the four fixed parameters below;
-           the shared builder spells the ILIKE … ESCAPE predicate so this read and Darling's cannot drift. */
-        var (exclusionPredicate, exclusionOperands) = exclusions.BuildSqlPredicate("r.program_name", "r.login_name", firstParameterOrdinal: 5);
-        string excludedFlag = exclusionPredicate.Length == 0 ? "FALSE" : exclusionPredicate;
+        /* #3653 (A5, Q5): the opt-out knob's two arms, operands binding as $5 onward after the four fixed
+           parameters below (program prefixes first, then logins); the shared builder spells the ILIKE … ESCAPE
+           predicates so this read and Darling's cannot drift. */
+        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", firstParameterOrdinal: 5);
 
         command.CommandText = @$"
                 WITH candidates AS (
@@ -728,7 +733,8 @@ LIMIT 2000";
                         r.program_name,
                         r.login_name,
                         r.total_elapsed_time_ms,
-                        {excludedFlag} AS excluded_by_knob
+                        {exclusionSql.ProgramPrefixPredicate} AS excluded_by_program_prefix,
+                        {exclusionSql.LoginPredicate} AS excluded_by_login
                     FROM v_query_snapshots AS r
                     WHERE r.server_id = $1
                         AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
@@ -754,9 +760,10 @@ LIMIT 2000";
                     r.query_hash,
                     r.program_name,
                     r.login_name,
-                    CAST((SELECT COUNT(*) FROM candidates AS x WHERE x.excluded_by_knob) AS INTEGER) AS excluded_count
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_program_prefix_count,
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_login_count
                 FROM candidates AS r
-                WHERE NOT r.excluded_by_knob
+                WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)
                 ORDER BY r.total_elapsed_time_ms DESC
                 LIMIT $3;";
 
@@ -768,13 +775,14 @@ LIMIT 2000";
            comparison resolves the naive side in the host's TimeZone. East of UTC the floor lands in the
            future and this read returns nothing, so the long-running-query alert never fires at all. */
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - LatestSnapshotFreshness });
-        foreach (var operand in exclusionOperands)
+        foreach (var operand in exclusionSql.Operands)
         {
             command.Parameters.Add(new DuckDBParameter { Value = operand });
         }
 
         var items = new List<LongRunningQueryInfo>();
-        int excludedCount = 0;
+        int excludedByProgramPrefix = 0;
+        int excludedByLogin = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -796,12 +804,13 @@ LIMIT 2000";
                 ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
                 LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
             });
-            /* The same scalar on every row — read once is enough, and a read with no rows has nothing to
-               fire and therefore nothing to render the count beside (LongRunningQueryReadResult says why). */
-            excludedCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
+            /* The same two scalars on every row — read once is enough, and a read with no rows has nothing to
+               fire and therefore nothing to render the counts beside (LongRunningQueryReadResult says why). */
+            excludedByProgramPrefix = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
+            excludedByLogin = reader.IsDBNull(13) ? 0 : reader.GetInt32(13);
         }
 
-        return new LongRunningQueryReadResult(items, excludedCount);
+        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin);
     }
 }
 

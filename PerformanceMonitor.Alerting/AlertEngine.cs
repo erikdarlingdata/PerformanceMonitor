@@ -1707,9 +1707,12 @@ public sealed class AlertEngine
             /* #3653 (A5, Q5): the opt-out knob rides INTO the read, ahead of the row cap — see
                LongRunningQueryExclusions for why a post-read filter would blind the alert. Normalised here
                from the two raw settings lists on every sweep (trim, blanks dropped, case-insensitive dedupe)
-               so a Settings-window string and an MCP array mean the same thing to both stores. */
+               so a Settings-window string and an MCP array mean the same thing to both stores. The lists
+               arrive SEEDED from each host (the job-step program prefix and the two NT AUTHORITY logins the
+               production read found) unless an operator cleared them; the engine does not re-seed an empty
+               list, because present-and-empty is the operator's decision. */
             var exclusions = LongRunningQueryExclusions.From(
-                _settings.LongRunningQueryExcludedProgramNames, _settings.LongRunningQueryExcludedLogins);
+                _settings.LongRunningQueryExcludedProgramNamePrefixes, _settings.LongRunningQueryExcludedLogins);
             var read = await _readAdapter.GetLongRunningQueriesAsync(              /* :346 */
                 key,
                 _settings.LongRunningQueryThresholdMinutes,
@@ -1820,16 +1823,18 @@ public sealed class AlertEngine
 
                     var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
 
-                    /* #3653 (A5, Q5): the knob's own evidence on the card — how many candidates it removed this
-                       evaluation — so an operator can see it working; a setting whose only effect is a page
-                       NOT arriving is one nobody can verify. Only when the knob is SET: an "Excluded: 0" line
-                       on every card of every operator who never configured it would be noise about nothing.
-                       Appended, never prepended — the sessions are the alert; this is a footnote about the
-                       ones that are not. ANNOTATION, NEVER SUPPRESSION, like #3497's job names: the fire is
-                       decided above and this can only add a line. */
+                    /* #3653 (A5, Q5): the knob's own evidence on the card — how many sessions it removed this
+                       evaluation, split by the arm that removed them — so an operator can see it working and
+                       see which default did the work; a setting whose only effect is a page NOT arriving is
+                       one nobody can verify. Only when the knob is SET (it is, by default, on both SKUs — the
+                       seeds are set): an operator who cleared BOTH lists has said "evaluate everything", and an
+                       "Excluded: 0" line on their every card would be noise about nothing. Appended, never
+                       prepended — the sessions are the alert; this is a footnote about the ones that are not.
+                       ANNOTATION, NEVER SUPPRESSION, like #3497's job names: the fire is decided above and
+                       this can only add a line. */
                     if (!exclusions.IsEmpty && lrqContext is not null)
                     {
-                        lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, read.ExcludedCount));
+                        lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin));
                     }
 
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */

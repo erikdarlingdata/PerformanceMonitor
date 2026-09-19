@@ -114,10 +114,12 @@ public sealed class AlertSettingsControlWiringTests
 
         Assert.NotEmpty(assigned);
 
-        /* AlertExcludedDatabases is the one legitimate exception: it is a collection, so it reaches the
-           document as a JsonArray built a few lines earlier rather than as a bare "= App.X" assignment. */
+        /* The collections are the legitimate exceptions: each reaches the document as a JsonArray built a
+           few lines earlier rather than as a bare "= App.X" assignment. AlertExcludedDatabases was the one;
+           #3653 (A5, Q5) added the Long-Running Query opt-out knob's two lists in the same shape, and the
+           source pin in Darling.Tests.LongRunningQueryExclusionsTests holds their root["..."] keys. */
         var unpersisted = assigned.Except(persisted)
-            .Except(new[] { "AlertExcludedDatabases" })
+            .Except(new[] { "AlertExcludedDatabases", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins" })
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 

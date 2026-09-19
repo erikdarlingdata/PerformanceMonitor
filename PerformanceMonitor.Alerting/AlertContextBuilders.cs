@@ -710,31 +710,49 @@ public static class AlertContextBuilders
     /// opt-out knob working. A constant so the engine, the tests and any reader spell it once.</summary>
     public const string LongRunningQueryExcludedCountLabel = "Excluded Count";
 
+    /// <summary>The knob item's per-arm split (#3653 A5, Q5 addendum): sessions the <c>program_name</c> PREFIX arm
+    /// removed. A session matching both arms is counted here and not under the login arm, so the two labels sum
+    /// to <see cref="LongRunningQueryExcludedCountLabel"/>.</summary>
+    public const string LongRunningQueryExcludedByProgramPrefixLabel = "Excluded By Program Prefix";
+
+    /// <summary>The knob item's per-arm split: sessions the exact <c>login_name</c> arm removed and the program
+    /// arm did not.</summary>
+    public const string LongRunningQueryExcludedByLoginLabel = "Excluded By Login";
+
     /// <summary>
     /// The Long-Running Query card's OPT-OUT KNOB item (#3653 A5, ruling Q5): how many over-threshold sessions
-    /// the <see cref="LongRunningQueryExclusions"/> knob removed from this evaluation, and the patterns that did
-    /// it. Appended by the engine after the session items, and only when the knob is set — a card that says
-    /// "Excluded Count: 0" to an operator who never configured the knob is a line about nothing.
+    /// the <see cref="LongRunningQueryExclusions"/> knob removed from this evaluation, split by the arm that
+    /// removed them, and the entries that did it. Appended by the engine after the session items, and only when
+    /// the knob is set — it is set by default (the seeded job-step prefix and the two NT AUTHORITY logins), so
+    /// the item is absent only for an operator who cleared both lists, to whom "Excluded Count: 0" on every
+    /// card would be a line about nothing.
     ///
     /// <para>Why the count is on the card at all: the knob's only effect is a page NOT arriving, and a setting
     /// whose effect is an absence is one an operator cannot verify from the outside. The count is the knob's
-    /// receipt — "I removed 4 sessions before deciding this" — which is also how a pattern that is too broad
-    /// shows itself (a count that equals the whole snapshot). The patterns are listed so the card is
-    /// self-describing to whoever reads it in six months without the Settings window open.</para>
+    /// receipt — "I removed 4 sessions before deciding this" — which is also how an entry that is too broad
+    /// shows itself (a count that equals the whole snapshot). The SPLIT says which default did the work: a
+    /// fleet whose login arm removes seventy sessions and whose prefix arm removes none has learned something
+    /// about its background. The counts are SESSIONS, not snapshot rows, and a session matching both arms is
+    /// counted once, under the program prefix. The entries are listed so the card is self-describing to
+    /// whoever reads it in six months without the Settings window open.</para>
     /// </summary>
     /// <param name="exclusions">The knob as the engine applied it (normalised).</param>
-    /// <param name="excludedCount">The read's count of candidates the knob removed.</param>
-    public static AlertDetailItem BuildLongRunningQueryExclusionItem(LongRunningQueryExclusions exclusions, int excludedCount)
+    /// <param name="excludedByProgramPrefix">The read's count of sessions the program-prefix arm removed (including any that also matched a login).</param>
+    /// <param name="excludedByLogin">The read's count of sessions the login arm removed and the program arm did not.</param>
+    public static AlertDetailItem BuildLongRunningQueryExclusionItem(LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin)
     {
         if (exclusions is null) throw new ArgumentNullException(nameof(exclusions));
 
+        var excludedCount = excludedByProgramPrefix + excludedByLogin;
         var fields = new List<(string Label, string Value)>
         {
-            (LongRunningQueryExcludedCountLabel, excludedCount.ToString(CultureInfo.InvariantCulture))
+            (LongRunningQueryExcludedCountLabel, excludedCount.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByProgramPrefixLabel, excludedByProgramPrefix.ToString(CultureInfo.InvariantCulture)),
+            (LongRunningQueryExcludedByLoginLabel, excludedByLogin.ToString(CultureInfo.InvariantCulture))
         };
-        if (exclusions.ProgramNames.Count > 0)
+        if (exclusions.ProgramNamePrefixes.Count > 0)
         {
-            fields.Add(("Excluded Programs", string.Join(", ", exclusions.ProgramNames)));
+            fields.Add(("Excluded Program Prefixes", string.Join(", ", exclusions.ProgramNamePrefixes)));
         }
 
         if (exclusions.Logins.Count > 0)

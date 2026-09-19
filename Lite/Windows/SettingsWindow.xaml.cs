@@ -649,8 +649,8 @@ public partial class SettingsWindow : Window
         LrqExcludeBackupsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeMiscWaits;
         LrqExcludeCdcCheckBox.IsChecked = App.AlertLongRunningQueryExcludeCdc;
-        LrqExcludedProgramNamesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNames);
-        LrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
@@ -741,9 +741,11 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true;
         /* #3653 (A5, Q5): comma-separated in the box, normalised through the shared rule (trim, blanks dropped,
-           case-insensitive dedupe, a bare * refused) so the list the engine reads is the list the card shows. */
-        App.AlertLongRunningQueryExcludedProgramNames = LongRunningQueryExclusions.Normalize(LrqExcludedProgramNamesBox.Text.Split(',')).ToList();
-        App.AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(LrqExcludedLoginsBox.Text.Split(',')).ToList();
+           case-insensitive dedupe) so the list the engine reads is the list the card shows. An emptied box is an
+           EMPTY list, persisted as such below: the seeded defaults are defaults, and clearing one is the
+           operator's decision to evaluate that arm's sessions. */
+        App.AlertLongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList();
+        App.AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList();
         App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
             .Split(',')
             .Select(s => s.Trim())
@@ -844,8 +846,8 @@ public partial class SettingsWindow : Window
         foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
         root["alert_excluded_databases"] = dbArray;
         var lrqProgramArray = new System.Text.Json.Nodes.JsonArray();
-        foreach (var name in App.AlertLongRunningQueryExcludedProgramNames) lrqProgramArray.Add(name);
-        root["alert_long_running_query_excluded_program_names"] = lrqProgramArray;
+        foreach (var name in App.AlertLongRunningQueryExcludedProgramNamePrefixes) lrqProgramArray.Add(name);
+        root["alert_long_running_query_excluded_program_name_prefixes"] = lrqProgramArray;
         var lrqLoginArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var login in App.AlertLongRunningQueryExcludedLogins) lrqLoginArray.Add(login);
         root["alert_long_running_query_excluded_logins"] = lrqLoginArray;
@@ -925,8 +927,9 @@ public partial class SettingsWindow : Window
         AnalysisNotifySeverityBox.Text = "1.5";
         AnalysisNotifyCooldownBox.Text = "360";
         AlertExcludedDatabasesBox.Text = "";
-        LrqExcludedProgramNamesBox.Text = "";
-        LrqExcludedLoginsBox.Text = "";
+        /* #3653 (A5, Q5): "defaults" for the opt-out knob are the SEEDS, not empty boxes. */
+        AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
     }
@@ -1009,6 +1012,9 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
+        /* #3653 (A5, Q5): the opt-out knob's two lists ride the master switch like every other threshold box. */
+        AlertLrqExcludedProgramNamePrefixesBox.IsEnabled = enabled;
+        AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;

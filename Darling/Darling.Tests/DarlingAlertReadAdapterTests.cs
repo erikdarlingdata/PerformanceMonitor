@@ -281,6 +281,30 @@ public sealed class DarlingAlertReadAdapterTests
                 2L, collectionTime, TestServerId, TestServerName, 72, "ExcludedDb",
                 "SELECT 1", 720000L, 1L, 1L, 0L, "CXPACKET", 0, "0x1111111111111111", "HammerDB");
 
+            /* --- long-running queries, the #3653 (A5, Q5) opt-out knob's four classes in one snapshot, so the
+                   SEEDED knob can be exercised against real PostgreSQL ILIKE … ESCAPE and real COUNT(DISTINCT):
+                   74 a job step under the admin login (prefix arm); 75 a job step running as SYSTEM (BOTH arms —
+                   must count ONCE, under the prefix); 76 the multi-day background under NETWORK SERVICE, spelled
+                   in lower case and carrying TWO request rows (one session, not two — the counts are sessions);
+                   71 above is the named human's ad-hoc query that stays. --- */
+            const string lrqInsert = "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name, login_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+            await InsertAsync(connection, lrqInsert,
+                3L, collectionTime, TestServerId, TestServerName, 74, "StackOverflow",
+                "EXEC dbo.NightlyRebuild", 3_600_000L, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x2222222222222222",
+                "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 2)", "app_admin");
+            await InsertAsync(connection, lrqInsert,
+                4L, collectionTime, TestServerId, TestServerName, 75, "StackOverflow",
+                "EXEC dbo.CdcCapture", 2_400_000L, 5L, 5L, 5L, "SLEEP_TASK", 0, "0x3333333333333333",
+                "SQLAgent - TSQL JobStep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", @"NT AUTHORITY\SYSTEM");
+            await InsertAsync(connection, lrqInsert,
+                5L, collectionTime, TestServerId, TestServerName, 76, "StackOverflow",
+                "sp_replcmds", 500_000_000L, 5L, 5L, 5L, "PREEMPTIVE_OS_WAITFORSINGLEOBJECT", 0, "0x4444444444444444",
+                ".Net SqlClient Data Provider", @"nt authority\network service");
+            await InsertAsync(connection, lrqInsert,
+                5L, collectionTime, TestServerId, TestServerName, 76, "StackOverflow",
+                "sp_replcmds (second request, MARS)", 499_000_000L, 5L, 5L, 5L, "PREEMPTIVE_OS_WAITFORSINGLEOBJECT", 0, "0x4444444444444444",
+                ".Net SqlClient Data Provider", @"nt authority\network service");
+
             /* --- volumes: two files on C:\ (MAX total / MIN free), one on healthy D:\ --- */
             await InsertAsync(connection,
                 "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, volume_mount_point, volume_total_mb, volume_free_mb) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -362,18 +386,51 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal("THREADPOOL", storm.WaitType);
             Assert.Equal(AlertSeverityLevel.Warning, storm.Severity);
 
-            /* --- long-running queries: threshold + excluded-database drop --- */
+            /* --- long-running queries: threshold + excluded-database drop, with an EMPTY knob — every session
+                   evaluated, both counts 0, and the two arms' FALSE literals leave the pre-knob rows intact. --- */
             var lrqRead = await adapter.GetLongRunningQueriesAsync(
-                TestServerKey, thresholdMinutes: 5, maxResults: 5,
+                TestServerKey, thresholdMinutes: 5, maxResults: 10,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
                 excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(0, lrqRead.ExcludedByProgramPrefix);
+            Assert.Equal(0, lrqRead.ExcludedByLogin);
             Assert.Equal(0, lrqRead.ExcludedCount);
-            var query = Assert.Single(lrqRead.Sessions);
-            Assert.Equal(71, query.SessionId);
+            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, lrqRead.Sessions.Select(q => q.SessionId).ToArray()); /* longest first; 72 dropped client-side */
+            var query = Assert.Single(lrqRead.Sessions, q => q.SessionId == 71);
             Assert.Equal(600L, query.ElapsedSeconds);
             Assert.Equal("HammerDB", query.ProgramName);
+            Assert.Equal("", query.LoginName);                                    /* NULL login_name reads as empty */
             Assert.Equal("0x9AAF0129E4E9AD07", query.QueryHash);
+            Assert.Equal(@"nt authority\network service", lrqRead.Sessions[0].LoginName);
+
+            /* --- the SEEDED knob against real PostgreSQL: the three background sessions are gone BEFORE the cap
+                   (a cap of 2 would otherwise have held only the two longest of them), the human's query is the
+                   one row left, and the counts are SESSIONS by arm — 74 and 75 under the prefix (75 also runs as
+                   SYSTEM: once, here), 76 under login despite its two request rows. The cap is 2, not 1, because
+                   the excluded-DATABASE row (72) is still dropped CLIENT-SIDE after the cap — the pre-existing
+                   shape this knob deliberately does not share — and a cap of 1 would hold 72 alone. --- */
+            var seededRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 2,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, ct);
+            Assert.Equal(71, Assert.Single(seededRead.Sessions).SessionId);
+            Assert.Equal(2, seededRead.ExcludedByProgramPrefix);
+            Assert.Equal(1, seededRead.ExcludedByLogin);
+            Assert.Equal(3, seededRead.ExcludedCount);
+
+            /* --- an operator who CLEARED the login default: the prefix arm alone, so the NETWORK SERVICE session
+                   is evaluated again and is the longest. Present-and-empty means empty, not re-seeded. --- */
+            var prefixOnlyRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 2,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" },
+                LongRunningQueryExclusions.From(LongRunningQueryExclusions.DefaultProgramNamePrefixes, null), ct);
+            Assert.Equal(new[] { 76, 76 }, prefixOnlyRead.Sessions.Select(q => q.SessionId).ToArray()); /* its two request rows fill the cap of 2 */
+            Assert.Equal(2, prefixOnlyRead.ExcludedByProgramPrefix);
+            Assert.Equal(0, prefixOnlyRead.ExcludedByLogin);
 
             /* --- volumes: per-volume rollup, worst free-ratio first --- */
             var volumes = await adapter.GetVolumeFreeSpaceAsync(TestServerKey, ct);

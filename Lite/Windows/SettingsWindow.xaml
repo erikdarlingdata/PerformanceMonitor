@@ -302,14 +302,16 @@
                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,0"/>
                 <!-- #3653 (A5, Q5): the opt-out knob for permanent background requests. Excluded sessions are
                      not evaluated at all (not read, not counted, not fingerprinted) — unlike a mute rule, which
-                     silences a fire already decided. -->
-                <TextBlock Text="Exclude sessions by program name (comma-separated; trailing * matches any suffix):"
+                     silences a fire already decided. The two boxes open SEEDED with the production read's
+                     defaults (the job-step program prefix; the two NT AUTHORITY logins); emptying a box
+                     clears that default for good, and "Reset to defaults" puts the seeds back. -->
+                <TextBlock Text="Exclude sessions whose program name STARTS WITH (comma-separated, case-insensitive; no wildcards):"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,6,0,4" FontSize="12"/>
-                <TextBox x:Name="LrqExcludedProgramNamesBox" Margin="20,0,0,4"/>
-                <TextBlock Text="Exclude sessions by login (comma-separated; trailing * matches any suffix):"
+                <TextBox x:Name="AlertLrqExcludedProgramNamePrefixesBox" Margin="20,0,0,4"/>
+                <TextBlock Text="Exclude sessions whose login IS (comma-separated, case-insensitive, whole name):"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
-                <TextBox x:Name="LrqExcludedLoginsBox" Margin="20,0,0,4"/>
-                <TextBlock Text="e.g. SQLAgent - TSQL JobStep*, svc__replication — matched case-insensitively against the whole value; an excluded session is never evaluated, and the alert card counts how many were excluded"
+                <TextBox x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
+                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded — they are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">

@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -85,6 +86,15 @@ public sealed class DarlingAlertTuningKnobsTests
         Assert.True(settings.LongRunningQueryExcludeBackups);
         Assert.True(settings.LongRunningQueryExcludeMiscWaits);
         Assert.True(settings.LongRunningQueryExcludeCdc);
+
+        /* #3653 (A5, Q5): the opt-out knob is the SEEDED DEFAULTS on Darling until its store home (V135) lands —
+           the job-step program prefix and the two NT AUTHORITY logins the production read found — never an empty
+           knob, so both SKUs evaluate the same population from day one. Not yet by reference: there is no
+           config member for a reload to mutate, and this pin flips to the by-reference shape with the rung. */
+        Assert.Equal(LongRunningQueryExclusions.DefaultProgramNamePrefixes, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Equal(LongRunningQueryExclusions.DefaultLogins, settings.LongRunningQueryExcludedLogins);
+        Assert.Equal(new[] { "SQLAgent - TSQL JobStep" }, settings.LongRunningQueryExcludedProgramNamePrefixes);
+        Assert.Equal(new[] { @"NT AUTHORITY\SYSTEM", @"NT AUTHORITY\NETWORK SERVICE" }, settings.LongRunningQueryExcludedLogins);
 
         /* A store reload mutates the held config in place; the SAME adapter instance reflects it (no caching). */
         config.Alerts.LongRunningQueryMaxResults = 25;

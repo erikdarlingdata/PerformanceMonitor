@@ -72,8 +72,8 @@ public sealed class DarlingSelfAlertTests
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool LongRunningQueryExcludeCdc { get; set; } = true;
-        /* #3653 (A5, Q5): the opt-out knob, empty in the fakes — every session evaluated, the shipped default. */
-        public IReadOnlyList<string> LongRunningQueryExcludedProgramNames { get; set; } = Array.Empty<string>();
+        /* #3653 (A5, Q5): the opt-out knob, empty in the fakes — every session evaluated; the hosts seed it, the engine does not. */
+        public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes { get; set; } = Array.Empty<string>();
         public IReadOnlyList<string> LongRunningQueryExcludedLogins { get; set; } = Array.Empty<string>();
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;

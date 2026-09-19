@@ -73,12 +73,19 @@
   "alert_long_running_query_exclude_backups": true,
   "alert_long_running_query_exclude_misc_waits": true,
   "alert_long_running_query_exclude_cdc": true,
-  // The opt-out knob for permanent background requests (#3653): sessions whose program_name or
-  // login_name matches an entry are NOT evaluated by this alert at all - unlike a mute rule, which
-  // silences a fire already decided. Case-insensitive, whole value; a trailing * matches any suffix.
-  // Applied ahead of the row cap, so an excluded session never consumes one of the max_results slots.
-  "alert_long_running_query_excluded_program_names": [],   // e.g. ["SQLAgent - TSQL JobStep*"]
-  "alert_long_running_query_excluded_logins": [],          // e.g. ["svc_replication"]
+  // The opt-out knob for permanent background requests (#3653): sessions whose program_name STARTS
+  // WITH a prefix below, or whose login_name IS a login below (both case-insensitive, no wildcards),
+  // are NOT evaluated by this alert at all - unlike a mute rule, which silences a fire already decided.
+  // Applied ahead of the row cap, so an excluded session never consumes one of the max_results slots;
+  // the fired card counts how many sessions each list removed.
+  // The values below are the SEEDED DEFAULTS, measured over 7 days on one large production store:
+  // SQL Agent job steps (~460 sessions/week, medians 35-62 min; the program name embeds the job id, hence
+  // a prefix) and the two NT AUTHORITY service logins (the permanent multi-day CDC-shaped background).
+  // The application's admin login is deliberately NOT a default: it runs the job wave but also real ad-hoc
+  // long-runners, and the job-step prefix already covers its share. Named humans are never excluded.
+  // A key that is ABSENT reads as these defaults; a key that is PRESENT and [] excludes nothing on that arm.
+  "alert_long_running_query_excluded_program_name_prefixes": ["SQLAgent - TSQL JobStep"],
+  "alert_long_running_query_excluded_logins": ["NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\NETWORK SERVICE"],
 
   // ---- Database exclusions ------------------------------------------------------------
   // Applies to every alert type. Names only; anything blank is dropped on read.
