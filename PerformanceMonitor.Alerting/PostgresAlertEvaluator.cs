@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -20,8 +21,10 @@ namespace PerformanceMonitor.Alerting;
 /// put the highest-blast-radius file on this branch in the path of every PostgreSQL change. This is a pure
 /// function of (rows, settings) instead — no I/O, no state — so it is exhaustively testable and the host
 /// keeps ownership of delivery and dedup.</para>
-/// <para><b>Thresholds are constants here, on purpose, for this first cut.</b> Every one is derived from
-/// PostgreSQL's own mechanics rather than picked — see each constant — so there is no obvious knob a user
+/// <para><b>Thresholds are constants, on purpose, for this first cut</b> — the three outage predictors'
+/// on <see cref="PostgresOutagePredictorThresholds"/> (shared with the analysis scorer, #3542 D9), the
+/// poison-wait ones on <see cref="PoisonWaitEvaluator"/>, aliased here under their original names. Every
+/// one is derived from PostgreSQL's own mechanics rather than picked — see each constant — so there is no obvious knob a user
 /// would set differently, and the product's stated position is to add configuration when it is genuinely
 /// needed rather than speculatively (the same reasoning as having no collection-schedule settings). Making
 /// them configurable means new columns on <c>config_alert_settings</c>, a migration, and Settings-window
@@ -29,81 +32,38 @@ namespace PerformanceMonitor.Alerting;
 /// </summary>
 public static class PostgresAlertEvaluator
 {
-    /* Wraparound. The wall is 2 billion transactions, but the number that matters first is the server's
-       OWN autovacuum_freeze_max_age: at that age autovacuum force-starts a wraparound-prevention vacuum
-       whether or not a table is otherwise due, so crossing it means the server has begun defending itself.
-       Critical fires at 2x it, which on a stock 200-million setting is 400 million: comfortably clear of
-       the 2-billion stop, but far enough past the engine's own line to mean its defence is not keeping up.
-       Both are ratios of a setting the row carries, so a cluster tuned to 1.5 billion gets thresholds
-       scaled to its own configuration rather than to a constant that would never fire for it.
+    /* #3542 D9: the wraparound, xmin and slot bars below are ALIASES of PostgresOutagePredictorThresholds
+       (PerformanceMonitor.Analysis), the one definition both this evaluator and the PostgreSQL-target
+       analysis scorer grade on — so the surface that pages and the surface that narrates cannot disagree by
+       construction. Each constant's derivation (why 1.0x / 2x the setting, why 74.5% of the ceiling, why 50
+       million and a majority over at least five observations, why 10 GB) moved with the definition; the
+       names are kept here so the read adapter, the host, the MCP wraparound tool and the tests that cite
+       them keep compiling — the same shape the poison-wait constants take from PoisonWaitEvaluator. A
+       source pin holds that this file carries none of those literals itself. */
 
-       #2689: Warning used to fire at 90% of freeze_max_age unconditionally, and that is a ROUTINE operating
-       point — every healthy database climbs to ~that age on every freeze cycle and is reset, the expected
-       sawtooth. Firing there paged on essentially every healthy database, permanently (one fleet database
-       re-fired the identical alert every ~5-minute cycle at 9% of the way to actual wraparound). The real
-       risk is not "approaching freeze_max_age", it is "age has REACHED freeze_max_age and autovacuum is not
-       bringing it back down" - i.e. the forced vacuum this crossing itself triggers is not winning. So the
-       relative Warning arm now sits AT the setting (1.0x, the crossing point itself) and is gated by
-       FreezingIsKeepingUp: a database sitting above its own setting but coming back down each cycle does not
-       warn; one stuck at or above it, never seen lower within the window, does. */
-    public const double WraparoundWarningFractionOfFreezeMaxAge = 1.0;
-    public const double WraparoundCriticalMultipleOfFreezeMaxAge = 2.0;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundWarningFractionOfFreezeMaxAge"/>.</summary>
+    public const double WraparoundWarningFractionOfFreezeMaxAge = PostgresOutagePredictorThresholds.WraparoundWarningFractionOfFreezeMaxAge;
 
-    /// <summary>
-    /// The 32-bit comparison space both counters age within — the same denominator the collector stores its
-    /// percentages against, so the alert and <c>pct_toward_wraparound</c> can never disagree.
-    /// </summary>
-    public const long WraparoundCeiling = 2_147_483_648L;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCriticalMultipleOfFreezeMaxAge"/>.</summary>
+    public const double WraparoundCriticalMultipleOfFreezeMaxAge = PostgresOutagePredictorThresholds.WraparoundCriticalMultipleOfFreezeMaxAge;
 
-    /// <summary>
-    /// The absolute Critical arm, as a fraction of <see cref="WraparoundCeiling"/>: PostgreSQL's own
-    /// <c>vacuum_failsafe_age</c> (1.6B by default) is ~74.5% of the space, and past it the engine abandons
-    /// cost limits and skips index cleanup to catch up. Matching the ladder
-    /// <c>DarlingMcpPgWraparoundTools</c> already classifies against.
-    /// <para>This exists because the RELATIVE arm alone leaves Critical unreachable on exactly the clusters
-    /// most at risk: <c>criticalAt = 2 x setting</c> exceeds the 2^31 wall once the setting passes ~1.07B, and
-    /// the setting is tunable to 2B. A tuned cluster would have warned and then never escalated.</para>
-    /// </summary>
-    public const double WraparoundCriticalFractionOfCeiling = 0.745;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCeiling"/>.</summary>
+    public const long WraparoundCeiling = PostgresOutagePredictorThresholds.WraparoundCeiling;
 
-    /// <summary>
-    /// #2689: an absolute early-Warning arm, the same reasoning as <see cref="WraparoundCriticalFractionOfCeiling"/>
-    /// applied one severity down. On a cluster tuned high enough (past ~1.07B), the RELATIVE Warning arm
-    /// (1.0x setting) can land beyond or right at the Critical ceiling arm, robbing the operator of any
-    /// early warning at all. Unconditional (no FreezingIsKeepingUp gate) like the Critical ceiling arm,
-    /// because half the true wraparound space is already such a rare, high-consequence number that no
-    /// healthy database reaches it under a routine sawtooth regardless of oscillation history.
-    /// </summary>
-    public const double WraparoundWarningFractionOfCeiling = 0.5;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundCriticalFractionOfCeiling"/>.</summary>
+    public const double WraparoundCriticalFractionOfCeiling = PostgresOutagePredictorThresholds.WraparoundCriticalFractionOfCeiling;
 
-    /* xmin horizon. 50 million transactions of held-back horizon is roughly where bloat becomes visible
-       rather than theoretical on a busy database. The persistence gate is what makes it actionable: a
-       holder seen in a majority of the window's observations is chronic, while one seen once is a query
-       that ran long, and only the first is worth waking anyone for. */
-    public const long XminAgeWarningThreshold = 50_000_000;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.WraparoundWarningFractionOfCeiling"/>.</summary>
+    public const double WraparoundWarningFractionOfCeiling = PostgresOutagePredictorThresholds.WraparoundWarningFractionOfCeiling;
 
-    /// <summary>
-    /// The majority standard both persistence arms apply (#3537) — one fraction, two denominators. The
-    /// IDENTITY arm asks it of the collections that recorded any holder ("of the times something held it,
-    /// how often was it this one"); the HORIZON arm asks it of the window's real captures ("of the times we
-    /// looked, how often was the horizon pinned past the threshold"). Majority is the line in both readings
-    /// because it is where "keeps happening" stops being arguable: below it every fire needs a judgment
-    /// call about how much less than half still counts, and there is no mechanics-derived number under 0.5
-    /// to anchor one.
-    /// </summary>
-    public const double XminPersistenceFraction = 0.5;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>.</summary>
+    public const long XminAgeWarningThreshold = PostgresOutagePredictorThresholds.XminAgeWarningThreshold;
 
-    /// <summary>
-    /// #3537: the floor under BOTH persistence denominators. Without it the identity arm read the first
-    /// holder after quiet hours as 1 win in 1 observation — 100%, "chronic", off a single sample — because
-    /// its denominator counts only holder-bearing collections and quiet hours contribute none. 5 because it
-    /// is the smallest denominator whose majority test cannot be satisfied by fewer than three sightings
-    /// (at 1–4 observations, one or two sightings clear 50% — the exact shape of the false fire), and at
-    /// the collector's 1-minute cadence three sightings means the condition spanned minutes, not a moment.
-    /// Higher would buy little: a holder that has aged the horizon 50 million transactions has existed for
-    /// minutes on any workload fast enough for the extra samples to cost real delay.
-    /// </summary>
-    public const int XminMinimumObservations = 5;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminPersistenceFraction"/>.</summary>
+    public const double XminPersistenceFraction = PostgresOutagePredictorThresholds.XminPersistenceFraction;
+
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.XminMinimumObservations"/>.</summary>
+    public const int XminMinimumObservations = PostgresOutagePredictorThresholds.XminMinimumObservations;
 
     /// <summary>
     /// The stable subject a horizon-arm fire carries when no single holder owns the incident (#3537). A
@@ -113,11 +73,8 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public const string XminRotatingHoldersSubject = "rotating holders";
 
-    /* Replication slots. No byte threshold for the terminal states — `lost` and `unreserved` are failures
-       that have already happened, at any size. For a slot merely retaining WAL, 10 GB is the point where
-       an unbounded pile stops being noise on any volume worth monitoring; growth is what escalates it,
-       since max_slot_wal_keep_size defaults to -1 and nothing will stop it. */
-    public const long SlotRetainedWalWarningBytes = 10L * 1024 * 1024 * 1024;
+    /// <summary>Alias of <see cref="PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes"/>.</summary>
+    public const long SlotRetainedWalWarningBytes = PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes;
 
     /* Poison waits (#2711). SQL Server's Poison Wait alert fires on THREADPOOL / RESOURCE_SEMAPHORE /
        RESOURCE_SEMAPHORE_QUERY_COMPILE because all three share one defining trait: near-zero in healthy

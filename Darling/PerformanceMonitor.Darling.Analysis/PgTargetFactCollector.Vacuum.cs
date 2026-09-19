@@ -6,8 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -15,16 +17,543 @@ namespace PerformanceMonitor.Darling.Analysis;
 public sealed partial class PgTargetFactCollector
 {
     /// <summary>
-    /// <c>PG_AUTOVACUUM_BACKLOG</c> (per table, dead/threshold ratio and slope over ≥ 3 consecutive hourly
-    /// samples), <c>PG_WRAPAROUND_TREND</c> (XID and MultiXact graded separately, never collapsed) and
-    /// <c>PG_XMIN_HOLD</c> (per-source attribution). Patterns: <c>DarlingPgAutovacuumReader</c>,
-    /// <c>DarlingPgWraparoundReader</c>, <c>DarlingPgXminReader</c>.
-    /// <para>/* filled by lane 4 — returns immediately until then. The SQL it will run is declared as a
-    /// <c>public const string …Sql</c> in THIS file so <see cref="AllSql"/> picks it up by reflection; every
-    /// command sets <c>CommandTimeout = FactCommandTimeoutSeconds</c>, every store call passes
-    /// <c>context.CancellationToken</c>, the catch is the <c>when (!AnalysisShutdown.IsExpectedAbandon(ex,
-    /// context.CancellationToken))</c> shape that calls <see cref="ReportCollectionFailure"/>, and every
-    /// rate divides by <see cref="AnalysisContext.ObservedDurationMs"/>, never the nominal window. */</para>
+    /// The per-table backlog read: every table whose LATEST <see cref="PgTargetScorer.BacklogPersistenceSamples"/>
+    /// (<c>$4</c>) consecutive hourly samples sit past the engine's own trigger line, ranked worst-first by the
+    /// ratio to that line, <c>$5</c> rows. Pattern: <c>DarlingPgAutovacuumReader.PgAutovacuumSql</c> — the same
+    /// two-arm line (dead tuples against <c>vacuum_threshold</c>, inserts against <c>insert_vacuum_threshold</c>
+    /// where the major has it; the <c>-1</c> sentinel stays out of the arithmetic), the same ratio-not-count
+    /// ranking with disabled tables first, the same <c>IS NOT DISTINCT FROM</c> joins on the nullable name
+    /// triple — plus what only an analysis read adds:
+    /// <list type="bullet">
+    /// <item><description><b>Persistence</b>: <c>trailing_samples_past_line</c> counts samples past the line
+    /// with no clear sample after them (everything newer than the table's last clear reading), so one clear
+    /// hour resets the run. "Consecutive" is by sample, which at the hourly cadence is by hour.</description></item>
+    /// <item><description><b>Slope inputs</b>: the run's first sample (<c>run_started_at</c>, its dead and
+    /// insert gauges) beside the latest, so the caller divides a LEVEL's change by the run's own span — never
+    /// the nominal window, never an assumed cadence.</description></item>
+    /// <item><description><b>Run count inputs</b>: <c>autovacuum_count</c> at both ends of the run. It is a
+    /// CUMULATIVE counter (the store keeps PostgreSQL counters raw), so it is differenced by the caller and
+    /// never summed; a negative difference is a statistics reset and reads as "unknown".</description></item>
+    /// <item><description><c>tables_in_backlog</c>: how many tables met the gate, computed before the LIMIT
+    /// (window functions run before it), so the one fact can say how many others there are.</description></item>
+    /// </list>
+    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> persistence samples, <c>$5</c> row limit.
     /// </summary>
-    private partial Task CollectVacuumFactsAsync(AnalysisContext context, List<Fact> facts) => Task.CompletedTask;
+    public const string PgTargetAutovacuumBacklogSql = @"
+WITH samples AS (
+    SELECT
+        database_name, schema_name, table_name, collection_time,
+        live_tuples, dead_tuples, vacuum_threshold,
+        inserts_since_vacuum, insert_vacuum_threshold,
+        autovacuum_disabled, total_bytes, last_autovacuum, autovacuum_count,
+        (vacuum_threshold > 0 AND dead_tuples > vacuum_threshold)
+            OR (insert_vacuum_threshold > 0 AND inserts_since_vacuum > insert_vacuum_threshold) AS past_line
+    FROM pg_autovacuum_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+),
+marked AS (
+    SELECT
+        s.*,
+        COUNT(*) OVER per_table AS samples_in_window,
+        MAX(CASE WHEN NOT past_line THEN collection_time END) OVER per_table AS last_clear_time
+    FROM samples AS s
+    WINDOW per_table AS (PARTITION BY database_name, schema_name, table_name)
+),
+runs AS (
+    SELECT
+        m.*,
+        COUNT(*) FILTER (WHERE past_line AND (last_clear_time IS NULL OR collection_time > last_clear_time))
+            OVER per_table AS trailing_samples_past_line,
+        MIN(collection_time) FILTER (WHERE past_line AND (last_clear_time IS NULL OR collection_time > last_clear_time))
+            OVER per_table AS run_started_at
+    FROM marked AS m
+    WINDOW per_table AS (PARTITION BY database_name, schema_name, table_name)
+),
+latest AS (
+    SELECT DISTINCT ON (database_name, schema_name, table_name) *
+    FROM runs
+    ORDER BY database_name, schema_name, table_name, collection_time DESC
+),
+run_start AS (
+    SELECT
+        r.database_name, r.schema_name, r.table_name,
+        r.dead_tuples          AS run_first_dead_tuples,
+        r.inserts_since_vacuum AS run_first_inserts_since_vacuum,
+        r.autovacuum_count     AS run_first_autovacuum_count
+    FROM runs AS r
+    JOIN latest AS l
+      ON  l.database_name IS NOT DISTINCT FROM r.database_name
+      AND l.schema_name   IS NOT DISTINCT FROM r.schema_name
+      AND l.table_name    IS NOT DISTINCT FROM r.table_name
+      AND l.run_started_at = r.collection_time
+)
+SELECT
+    l.database_name,
+    l.schema_name,
+    l.table_name,
+    l.collection_time,
+    l.live_tuples,
+    l.dead_tuples,
+    l.vacuum_threshold,
+    l.inserts_since_vacuum,
+    l.insert_vacuum_threshold,
+    l.autovacuum_disabled,
+    l.total_bytes,
+    l.last_autovacuum,
+    l.autovacuum_count,
+    l.samples_in_window,
+    l.trailing_samples_past_line,
+    l.run_started_at,
+    rs.run_first_dead_tuples,
+    rs.run_first_inserts_since_vacuum,
+    rs.run_first_autovacuum_count,
+    GREATEST(
+        l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0),
+        CASE
+            WHEN l.insert_vacuum_threshold > 0
+                THEN l.inserts_since_vacuum::numeric / l.insert_vacuum_threshold
+            ELSE 0
+        END
+    ) AS backlog_ratio,
+    COUNT(*) OVER () AS tables_in_backlog
+FROM latest AS l
+JOIN run_start AS rs
+  ON  rs.database_name IS NOT DISTINCT FROM l.database_name
+  AND rs.schema_name   IS NOT DISTINCT FROM l.schema_name
+  AND rs.table_name    IS NOT DISTINCT FROM l.table_name
+WHERE l.trailing_samples_past_line >= $4
+ORDER BY
+    l.autovacuum_disabled DESC,
+    backlog_ratio DESC NULLS LAST,
+    GREATEST(l.dead_tuples, l.inserts_since_vacuum) DESC
+LIMIT $5";
+
+    /// <summary>
+    /// The wraparound read: the LATEST reading per database with the window's peak and FIRST reading for each
+    /// counter. Pattern: <c>DarlingPgWraparoundReader.PgWraparoundSql</c> — a level, not accumulated work, so
+    /// the current value is read (never averaged, never summed) and the window peak answers "did autovacuum
+    /// claw it back" (#2689's <c>FreezingIsKeepingUp</c>: latest below peak). The first reading is what this
+    /// read adds, for the slope → time-to-wall arithmetic; the two counters ride separately because they
+    /// are graded against different settings (<c>PostgresAlertInfo</c>'s per-counter argument) and are never
+    /// collapsed. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    /// </summary>
+    public const string PgTargetWraparoundSql = @"
+SELECT DISTINCT ON (database_name)
+    database_name,
+    collection_time,
+    frozen_xid_age,
+    min_multixid_age,
+    autovacuum_freeze_max_age,
+    autovacuum_multixact_freeze_max_age,
+    xids_remaining,
+    multixids_remaining,
+    MAX(frozen_xid_age)   OVER per_db AS window_peak_frozen_xid_age,
+    MAX(min_multixid_age) OVER per_db AS window_peak_min_multixid_age,
+    FIRST_VALUE(frozen_xid_age)   OVER ordered AS first_frozen_xid_age,
+    FIRST_VALUE(min_multixid_age) OVER ordered AS first_min_multixid_age,
+    FIRST_VALUE(collection_time)  OVER ordered AS first_seen_at,
+    COUNT(*) OVER per_db AS samples_in_window
+FROM pg_wraparound_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+WINDOW per_db AS (PARTITION BY database_name),
+       ordered AS (PARTITION BY database_name ORDER BY collection_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY database_name, collection_time DESC";
+
+    /// <summary>
+    /// The xmin read: the latest WINNING holder in the window and how persistently that (source, holder) won.
+    /// Pattern: <c>DarlingPostgresAlertReadAdapter.XminSql</c>'s <c>latest</c> and <c>window_stats</c> CTEs —
+    /// held is counted per (source, holder), not per source (sixty different sessions each winning once is
+    /// the OPPOSITE of a chronic holder); the denominator is DISTINCT collection times that recorded any
+    /// holder (several sources are stored per collection, and the collector writes nothing when the horizon
+    /// is unheld); <c>observations_above_threshold</c> counts collections whose winning age sat at or above
+    /// the shared bar (<c>$4</c> = <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>,
+    /// bound so the condition counted here and the one graded cannot drift).
+    ///
+    /// <para><b>What it deliberately does NOT read.</b> The alert's HORIZON arm divides that last count by the
+    /// collector's SUCCESS captures in <c>collection_log</c> (#3537, #3642 — every time the collector LOOKED,
+    /// including the healthy zero-row runs). That table is not a collector table, and an analysis read may
+    /// name only collector tables and the registry; so v1 grades the IDENTITY arm only and carries the horizon
+    /// numerator as metadata. The alternative — fractioning over holder-bearing collections — is exactly the
+    /// dishonest denominator #3642 removed from the MCP payload, and is not taken.</para>
+    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> age bar.
+    /// </summary>
+    public const string PgTargetXminHoldSql = @"
+WITH latest AS (
+    SELECT source, holder, detail, xmin_age, collection_time
+    FROM pg_xmin_horizon
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   is_winner
+    ORDER BY collection_time DESC, xmin_age DESC
+    LIMIT 1
+),
+window_stats AS (
+    SELECT
+        COUNT(DISTINCT collection_time) AS observations_total,
+        COUNT(DISTINCT collection_time) FILTER (
+            WHERE is_winner
+            AND   source = (SELECT source FROM latest)
+            AND   holder IS NOT DISTINCT FROM (SELECT holder FROM latest)
+        ) AS observations_held,
+        COUNT(DISTINCT collection_time) FILTER (
+            WHERE is_winner
+            AND   xmin_age >= $4
+        ) AS observations_above_threshold,
+        MAX(xmin_age) FILTER (WHERE is_winner) AS peak_winning_age
+    FROM pg_xmin_horizon
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    l.source,
+    l.holder,
+    l.detail,
+    l.xmin_age,
+    l.collection_time,
+    w.observations_total,
+    w.observations_held,
+    w.observations_above_threshold,
+    w.peak_winning_age
+FROM latest AS l
+CROSS JOIN window_stats AS w";
+
+    /// <summary>
+    /// How many backlogged tables the read returns. The fact carries ONE — the worst by ratio, the way
+    /// <c>ANOMALY_OBJECT_GROWTH</c> carries its one table in <see cref="Fact.ObjectName"/> — because the
+    /// engine keys facts by <see cref="Fact.Key"/> and a second row under the same key would be dropped by
+    /// <c>ToFactLookup</c>; the count of the others rides in metadata and <c>get_pg_autovacuum</c> lists them.
+    /// One row is therefore all the fact needs; the limit is the read's own bound.
+    /// </summary>
+    private const int BacklogRowLimit = 1;
+
+    /// <summary>
+    /// <c>PG_AUTOVACUUM_BACKLOG</c> (the worst persistently-backlogged table, ratio to its OWN line and slope
+    /// over the run), <c>PG_WRAPAROUND_TREND</c> (the relatively-worst database and counter, XID and MultiXact
+    /// graded separately) and <c>PG_XMIN_HOLD</c> (the latest winning holder with its persistence) —
+    /// filled by lane 4 of #3542. Three reads, each behind its own degrade so a missing table (a pre-V68 store, a
+    /// flavour on which a collector does not run) costs only its own fact.
+    ///
+    /// <para>Emission is evidence-gated: no rows in the window → no fact, never a zero. The wraparound and
+    /// xmin facts ARE emitted at base 0 when rows exist but nothing graded — a healthy sawtooth and a
+    /// transient holder are context the story engine ignores and <c>get_analysis_facts</c> shows; the backlog
+    /// fact exists only when a table met the persistence gate, because "no table is past its line" has no
+    /// number to carry.</para>
+    ///
+    /// <para>The wraparound read runs first so its <c>autovacuum_freeze_max_age</c> can be handed to the xmin
+    /// fact — the engine-defined top of that fact's severity ramp (a horizon held past the freeze age stops the
+    /// forced anti-wraparound vacuum advancing <c>relfrozenxid</c>, §3.3). Absent, the xmin base stays flat at
+    /// the alert's Warning.</para>
+    /// </summary>
+    private async partial Task CollectVacuumFactsAsync(AnalysisContext context, List<Fact> facts)
+    {
+        var freezeMaxAge = await ReadWraparoundTrendAsync(context, facts);
+        await ReadAutovacuumBacklogAsync(context, facts);
+        await ReadXminHoldAsync(context, facts, freezeMaxAge);
+    }
+
+    private async Task ReadAutovacuumBacklogAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(PgTargetAutovacuumBacklogSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(PgTargetScorer.BacklogPersistenceSamples);
+            cmd.Parameters.AddWithValue(BacklogRowLimit);
+
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+
+            var databaseName = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var schema = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var table = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var latestAt = reader.GetDateTime(3);
+            var live = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+            var dead = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+            var vacuumThreshold = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+            var inserts = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+            var insertThreshold = reader.IsDBNull(8) ? -1L : ToInt64(reader.GetValue(8));
+            var disabled = !reader.IsDBNull(9) && reader.GetBoolean(9);
+            var totalBytes = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+            DateTime? lastAutovacuum = reader.IsDBNull(11) ? null : reader.GetDateTime(11);
+            var autovacuumCount = reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12));
+            var samplesInWindow = ToInt64(reader.GetValue(13));
+            var trailing = ToInt64(reader.GetValue(14));
+            var runStartedAt = reader.GetDateTime(15);
+            var runFirstDead = reader.IsDBNull(16) ? 0L : ToInt64(reader.GetValue(16));
+            var runFirstInserts = reader.IsDBNull(17) ? 0L : ToInt64(reader.GetValue(17));
+            var runFirstAutovacuumCount = reader.IsDBNull(18) ? 0L : ToInt64(reader.GetValue(18));
+            var ratio = reader.IsDBNull(19) ? 0.0 : Convert.ToDouble(reader.GetValue(19));
+            var tablesInBacklog = ToInt64(reader.GetValue(20));
+
+            /* Which arm the ratio came from — the same GREATEST the SQL ranked on, re-derived here so the
+               metadata names the arm the number belongs to. */
+            var deadRatio = vacuumThreshold > 0 ? (double)dead / vacuumThreshold : 0.0;
+            var insertRatio = insertThreshold > 0 ? (double)inserts / insertThreshold : 0.0;
+            var insertArm = insertRatio > deadRatio;
+
+            var fact = new Fact
+            {
+                Source = PgTargetSources.VacuumSource,
+                Key = PgTargetFactKeys.AutovacuumBacklog,
+                Value = ratio,
+                ServerId = context.ServerId,
+                DatabaseName = databaseName,
+                ObjectName = string.IsNullOrEmpty(table) ? null : string.IsNullOrEmpty(schema) ? table : $"{schema}.{table}",
+                Metadata =
+                {
+                    [PgTargetScorer.BacklogRatioKey] = ratio,
+                    [PgTargetScorer.BacklogArmIsInsertKey] = insertArm ? 1 : 0,
+                    [PgTargetScorer.BacklogTrailingSamplesKey] = trailing,
+                    [PgTargetScorer.BacklogSamplesInWindowKey] = samplesInWindow,
+                    [PgTargetScorer.BacklogDeadTuplesKey] = dead,
+                    [PgTargetScorer.BacklogVacuumThresholdKey] = vacuumThreshold,
+                    [PgTargetScorer.BacklogLiveTuplesKey] = live,
+                    [PgTargetScorer.BacklogInsertsSinceVacuumKey] = inserts,
+                    [PgTargetScorer.BacklogInsertThresholdKey] = insertThreshold,
+                    [PgTargetScorer.BacklogTableAutovacuumDisabledKey] = disabled ? 1 : 0,
+                    [PgTargetScorer.BacklogTablesKey] = tablesInBacklog,
+                    [PgTargetScorer.BacklogTotalBytesKey] = totalBytes,
+                },
+            };
+
+            /* Slope: a LEVEL (n_dead_tup / n_ins_since_vacuum are gauges) differenced across the run and divided
+               by the run's own span — the series' timestamps, not the nominal window and not an assumed cadence.
+               A run whose samples share a timestamp has no span to divide by and says so. */
+            var runHours = (latestAt - runStartedAt).TotalHours;
+            fact.Metadata[PgTargetScorer.BacklogHoursKey] = runHours;
+            if (runHours > 0)
+            {
+                var delta = insertArm ? inserts - runFirstInserts : dead - runFirstDead;
+                fact.Metadata[PgTargetScorer.BacklogSlopePerHourKey] = delta / runHours;
+                fact.Metadata[PgTargetScorer.BacklogSlopeComputableKey] = 1;
+            }
+            else
+            {
+                fact.Metadata[PgTargetScorer.BacklogSlopeComputableKey] = 0;
+            }
+
+            /* autovacuum_count is CUMULATIVE: difference the run's ends, never sum. Backwards = a statistics
+               reset (pg_stat_reset, a crash), which is "unknown", not zero runs. */
+            var runs = autovacuumCount - runFirstAutovacuumCount;
+            if (runs >= 0)
+            {
+                fact.Metadata[PgTargetScorer.BacklogAutovacuumRunsKey] = runs;
+                fact.Metadata[PgTargetScorer.BacklogRunsComputableKey] = 1;
+            }
+            else
+            {
+                fact.Metadata[PgTargetScorer.BacklogRunsComputableKey] = 0;
+            }
+
+            if (lastAutovacuum.HasValue)
+                fact.Metadata[PgTargetScorer.BacklogHoursSinceLastAutovacuumKey] = (AsNaive(context.TimeRangeEnd) - lastAutovacuum.Value).TotalHours;
+
+            facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* pg_autovacuum_stats arrived in V68 and does not run in recovery (AppliesTo => !IsInRecovery) — a
+               pre-migration store raises 42P01, classified quiet. An abandonment is NOT swallowed (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
+
+    /// <summary>
+    /// Emits <c>PG_WRAPAROUND_TREND</c> for the relatively-worst (database, counter) and returns that
+    /// database's <c>autovacuum_freeze_max_age</c> (0 when nothing was read) for the xmin fact's ramp.
+    /// "Worst" is decided by <see cref="PgTargetScorer.GradeWraparoundCounter"/> — the same walk the alert
+    /// evaluator takes — severity first, then the counter's fraction of its OWN setting, so a Critical
+    /// MultiXact is never hidden behind a merely-warning XID with a bigger raw number.
+    /// </summary>
+    private async Task<long> ReadWraparoundTrendAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(PgTargetWraparoundSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+            Fact? worst = null;
+            var worstSeverity = -1.0;
+            var worstFraction = -1.0;
+            long worstFreezeMaxAge = 0;
+            var databases = 0;
+            var graded = 0;
+
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                databases++;
+                var databaseName = reader.IsDBNull(0) ? null : reader.GetString(0);
+                var latestAt = reader.GetDateTime(1);
+                var xidAge = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                var multiAge = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+                var freezeMaxAge = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+                var multiFreezeMaxAge = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                var xidsRemaining = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                var multiRemaining = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+                var xidPeak = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+                var multiPeak = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
+                var firstXidAge = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                var firstMultiAge = reader.IsDBNull(11) ? 0L : ToInt64(reader.GetValue(11));
+                var firstSeenAt = reader.GetDateTime(12);
+                var samples = ToInt64(reader.GetValue(13));
+
+                /* #2689: "keeping up" = the latest reading is below the window's peak — the counter has come
+                   down at least once inside the window. Latest == peak (including a one-sample window) reads
+                   as NOT keeping up, the conservative default PostgresAlertInfo takes. */
+                var xidKeepingUp = xidAge < xidPeak;
+                var multiKeepingUp = multiAge < multiPeak;
+
+                var xid = PgTargetScorer.GradeWraparoundCounter(xidAge, freezeMaxAge, xidKeepingUp);
+                var multi = PgTargetScorer.GradeWraparoundCounter(multiAge, multiFreezeMaxAge, multiKeepingUp);
+                var xidFraction = freezeMaxAge > 0 ? (double)xidAge / freezeMaxAge : 0.0;
+                var multiFraction = multiFreezeMaxAge > 0 ? (double)multiAge / multiFreezeMaxAge : 0.0;
+
+                var multiWins = multi.Severity > xid.Severity
+                    || (multi.Severity == xid.Severity && multiFraction > xidFraction);
+                var severity = multiWins ? multi.Severity : xid.Severity;
+                var fraction = multiWins ? multiFraction : xidFraction;
+                if (severity > 0) graded++;
+
+                if (severity < worstSeverity || (severity == worstSeverity && fraction <= worstFraction))
+                    continue;
+
+                worstSeverity = severity;
+                worstFraction = fraction;
+                worstFreezeMaxAge = freezeMaxAge;
+
+                var age = multiWins ? multiAge : xidAge;
+                var firstAge = multiWins ? firstMultiAge : firstXidAge;
+                var remaining = multiWins ? multiRemaining : xidsRemaining;
+                var fact = new Fact
+                {
+                    Source = PgTargetSources.VacuumSource,
+                    Key = PgTargetFactKeys.WraparoundTrend,
+                    Value = age,
+                    ServerId = context.ServerId,
+                    DatabaseName = databaseName,
+                    Metadata =
+                    {
+                        [PgTargetScorer.WraparoundXidAgeKey] = xidAge,
+                        [PgTargetScorer.WraparoundMultiXactAgeKey] = multiAge,
+                        [PgTargetScorer.WraparoundFreezeMaxAgeKey] = freezeMaxAge,
+                        [PgTargetScorer.WraparoundMultiXactFreezeMaxAgeKey] = multiFreezeMaxAge,
+                        [PgTargetScorer.WraparoundXidPeakKey] = xidPeak,
+                        [PgTargetScorer.WraparoundMultiXactPeakKey] = multiPeak,
+                        [PgTargetScorer.WraparoundXidKeepingUpKey] = xidKeepingUp ? 1 : 0,
+                        [PgTargetScorer.WraparoundMultiXactKeepingUpKey] = multiKeepingUp ? 1 : 0,
+                        [PgTargetScorer.WraparoundCounterIsMultiXactKey] = multiWins ? 1 : 0,
+                        [PgTargetScorer.WraparoundXidsRemainingKey] = xidsRemaining,
+                        [PgTargetScorer.WraparoundMultiXidsRemainingKey] = multiRemaining,
+                        [PgTargetScorer.WraparoundArmKey] = multiWins ? multi.Arm : xid.Arm,
+                        [PgTargetScorer.WraparoundSamplesKey] = samples,
+                    },
+                };
+
+                /* Slope → time-to-wall: the worst counter's change across the window over the window's own
+                   span. Positive slope → hours to the 2^31 wall from xids_remaining; zero or negative (autovacuum
+                   clawed it back) → NOT computable, and the fact says so rather than carrying an infinity. */
+                var spanHours = (latestAt - firstSeenAt).TotalHours;
+                var slope = spanHours > 0 ? (age - firstAge) / spanHours : 0.0;
+                fact.Metadata[PgTargetScorer.WraparoundSlopePerHourKey] = slope;
+                if (slope > 0 && remaining > 0)
+                {
+                    fact.Metadata[PgTargetScorer.WraparoundHoursToWallKey] = remaining / slope;
+                    fact.Metadata[PgTargetScorer.WraparoundTimeToWallComputableKey] = 1;
+                }
+                else
+                {
+                    fact.Metadata[PgTargetScorer.WraparoundTimeToWallComputableKey] = 0;
+                }
+
+                worst = fact;
+            }
+
+            if (worst is null) return 0;
+
+            worst.Metadata[PgTargetScorer.WraparoundDatabasesKey] = databases;
+            worst.Metadata[PgTargetScorer.WraparoundDatabasesGradedKey] = graded;
+            facts.Add(worst);
+            return worstFreezeMaxAge;
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* pg_wraparound_stats arrived in V63 — a pre-migration store raises 42P01, classified quiet. An
+               abandonment is NOT swallowed (#2443). */
+            ReportCollectionFailure(ex, context);
+            return 0;
+        }
+    }
+
+    private async Task ReadXminHoldAsync(AnalysisContext context, List<Fact> facts, long freezeMaxAge)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(PgTargetXminHoldSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(PostgresOutagePredictorThresholds.XminAgeWarningThreshold);
+
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            /* Zero rows is the HEALTHY state (an unheld horizon stores nothing) — no fact, never a zero. */
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+
+            var source = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var holder = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var xminAge = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            var lastSeenAt = reader.GetDateTime(4);
+            var observationsTotal = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+            var observationsHeld = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+            var observationsAbove = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+            var peakWinningAge = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+
+            var fact = new Fact
+            {
+                Source = PgTargetSources.VacuumSource,
+                Key = PgTargetFactKeys.XminHold,
+                Value = xminAge,
+                ServerId = context.ServerId,
+                /* source:holder, the evaluator's subject shape, so the story names the same thing the alert did. */
+                ObjectName = string.IsNullOrWhiteSpace(holder) ? source : $"{source}:{holder}",
+                Metadata =
+                {
+                    [PgTargetScorer.XminAgeKey] = xminAge,
+                    [PgTargetScorer.XminHolderSourceKey] = PgTargetAdvice.HolderSourceCode(source),
+                    [PgTargetScorer.XminObservationsTotalKey] = observationsTotal,
+                    [PgTargetScorer.XminObservationsHeldKey] = observationsHeld,
+                    [PgTargetScorer.XminObservationsAboveThresholdKey] = observationsAbove,
+                    [PgTargetScorer.XminHeldFractionKey] = observationsTotal > 0 ? (double)observationsHeld / observationsTotal : 0.0,
+                    [PgTargetScorer.XminPeakWinningAgeKey] = peakWinningAge,
+                    [PgTargetScorer.XminMinutesSinceLastHolderKey] = (AsNaive(context.TimeRangeEnd) - lastSeenAt).TotalMinutes,
+                },
+            };
+            if (freezeMaxAge > 0)
+                fact.Metadata[PgTargetScorer.XminFreezeMaxAgeKey] = freezeMaxAge;
+
+            facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* pg_xmin_horizon arrived in V66 — a pre-migration store raises 42P01, classified quiet. An
+               abandonment is NOT swallowed (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
 }
