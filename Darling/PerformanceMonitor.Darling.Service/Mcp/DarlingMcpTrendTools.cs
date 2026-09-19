@@ -438,7 +438,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route every point is a rate over the gap since the PREVIOUS collection, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no such point.")]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point.")]
     public static async Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -499,7 +499,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route every point is a rate over the gap since the PREVIOUS collection, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no such point.")]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point.")]
     public static async Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -544,7 +544,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point (interval start or rollup bucket), so the window's first point - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -758,8 +758,16 @@ public sealed class DarlingMcpTrendTools
         };
         disclosure.WriteTo(envelope);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
-           and why. On the raw route the window's first collection has no previous one to difference
-           against; the hourly route divides by the bucket width and produces none. */
+           and why. On the raw route a collection with no denominator is unrated: the window's first
+           collection of a stretch that recorded no interval (its LAG has no previous one to difference
+           against), and — since the plan-cache trends read the STORED interval (#3540 V128 for procedures,
+           #3695 / #3653 for query_stats) — a restart collection whose interval the calculator could not
+           measure (stored 0 → NULL). The hourly route divides by the bucket width and produces none, and a
+           Query Store rollup bucket is rated over its width too (#3695); only a raw Query Store point is
+           LAG-rated. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
+           it byte-identical, pinned by McpMissMessageParityPinTests), and it still names only the
+           first-collection case; widening it to the restart case is a both-SKU edit of one sentence and its
+           parity pin, not this file's alone. */
         var unrated = points.Count(p => !p.HasRate);
         envelope["unrated_points"] = unrated;
         envelope["unrated_note"] = unrated == 0

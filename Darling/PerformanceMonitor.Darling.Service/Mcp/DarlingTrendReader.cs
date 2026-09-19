@@ -90,8 +90,10 @@ internal static class DarlingTrendReader
     {
         /// <summary>
         /// Whether this point carries a rate at all (#3541 A12). False for the window's first differenced
-        /// collection — no previous collection to difference against — and for a collection landing in the
-        /// same second as its predecessor; both have no denominator, and neither is 0.
+        /// collection — no previous collection to difference against — for a collection landing in the
+        /// same second as its predecessor, and (on the plan-cache trends, which read the STORED interval:
+        /// #3540 V128, #3653) for a restart collection whose interval the calculator could not measure; none
+        /// has a denominator, and none is 0.
         /// </summary>
         public bool HasRate => Value.HasValue;
     }
@@ -388,50 +390,49 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── query duration trend ─────────────────────────── */
 
     /// <summary>
-    /// The query-stats duration trend — the viewer's <c>QueryDurationTrendSql</c> (Lite's
-    /// <c>GetQueryDurationTrendAsync</c>): per collection, the summed <c>delta_elapsed_time</c> (→ ms) and
-    /// <c>delta_execution_count</c> divided by the seconds since the previous collection (the truncate-then-
-    /// diff LAG epoch idiom proven value-identical DuckDB↔Postgres) for an elapsed-ms/sec + executions/sec
-    /// rate. Reads the base <c>query_stats</c> table because it projects no text — a read that wanted
-    /// <c>query_text</c> or <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the
-    /// #1767 payload dimensions. Summed bigints come back as numeric, so the reads Convert tolerantly.
-    /// $1 server_id, $2/$3 window (naive UTC).
+    /// The query-stats duration trend — <see cref="DurationTrendRouting.QueryDurationTrendRawSql"/> WITHOUT
+    /// the viewer's <c>$4</c> database filter, by alias (#3653, measurement A11): per collection, the summed
+    /// <c>delta_elapsed_time</c> (→ ms) and <c>delta_execution_count</c> divided by the collection's STORED
+    /// <c>sample_interval_seconds</c> for an elapsed-ms/sec + executions/sec rate. The viewer's
+    /// <c>QueryDurationTrendSql</c> is the same builder's output with the filter (Lite's
+    /// <c>GetQueryDurationTrendAsync</c> is the same shape over <c>v_query_stats</c>), so the tool and the
+    /// desktop chart run one statement on the raw tier. Reads the base <c>query_stats</c> table because it
+    /// projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
+    /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. Summed bigints come back as
+    /// numeric, so the reads Convert tolerantly. $1 server_id, $2/$3 window (naive UTC).
     ///
-    /// <para><b>The first collection in the window has no rate (#3541 A12, #3540 A8).</b> Its LAG is NULL
-    /// — there is no previous collection inside the window to difference against — so its rate is
-    /// unknowable, and the shape this replaced (<c>CASE ... ELSE 0 END</c>, Lite's original behaviour)
-    /// published that unknowable as a measured 0.0: every duration series began with a fabricated quiet
-    /// instant, which an agent charting the window read as "idle, then busy" and which dragged every
-    /// first-bucket average toward zero. Contract rule 5 — zero is a measurement — so the CASE has no ELSE
-    /// and the rate columns are NULL for that row (and for the degenerate two-collections-in-one-second
-    /// case, whose denominator is 0 and whose rate is equally undefined). The row is KEPT rather than
-    /// filtered, deliberately: the collection happened, <c>effective_start</c> is truthfully its instant,
-    /// and a window holding exactly one collection is "one collection, no rate yet" rather than an empty
-    /// series the empty ladder would mis-describe as a quiet window. The reader carries the nulls through
-    /// (<see cref="QueryDurationTrendPoint"/>) and the tool publishes them with the reason. The hourly
-    /// twin below has no such row: its denominator is the bucket width, known for every bucket.</para>
+    /// <para><b>Why this is an alias and not the LAG text that stood here.</b> Until #3653 this const was
+    /// its own copy of the read, and its denominator was <c>LAG(collection_time)</c> — the seconds between
+    /// this collection and the previous one, recomputed from the row clock. #3695 moved the viewer and Lite
+    /// to the interval the store HAS (<c>sample_interval_seconds</c>, stamped per row by the delta
+    /// calculator from the same two instants), read three-state: <c>MAX</c> over the collection's rows, 0 →
+    /// NULL (a restart collection, whose deltas are the #2234 "nothing knowable" marker, is UNRATED), NULL →
+    /// the LAG (a collection that never recorded an interval renders as it always did). This file was
+    /// outside that lane's boundary, so between #3695 and this alias the tool's raw route and the viewer's chart
+    /// disagreed about exactly one row class: a restart collection, which the LAG divided into a confident
+    /// <c>0.00 ms/sec</c> while the viewer skipped it. The mechanism is documented once, on
+    /// <see cref="DurationTrendRouting.BuildRawTrendSql"/>; DarlingMcpTrendToolsTests pins the declaration
+    /// as an alias and the file as free of the retired LAG-only text, so there is one definition and nothing
+    /// to drift. A static readonly rather than a const because the Storage side is a builder, as for the
+    /// hourly twin below.</para>
+    ///
+    /// <para><b>An unrated collection has null rates and is KEPT (#3541 A12, #3540 A8).</b> Three rows have
+    /// no denominator: the first collection of a stretch that recorded no interval (its LAG is NULL — there
+    /// is no previous collection inside the window to difference against), a restart collection (stored
+    /// interval 0), and the degenerate two-collections-in-one-second case. The shape this replaced in #3642
+    /// (<c>CASE ... ELSE 0 END</c>, Lite's original behaviour) published that unknowable as a measured 0.0:
+    /// every duration series began with a fabricated quiet instant, which an agent charting the window read
+    /// as "idle, then busy" and which dragged every first-bucket average toward zero. Contract rule 5 —
+    /// zero is a measurement — so the CASE has no ELSE and the rate columns are NULL for such a row. The row
+    /// is KEPT rather than filtered, deliberately: the collection happened, <c>effective_start</c> is
+    /// truthfully its instant, and a window holding exactly one collection is "one collection, no rate yet"
+    /// rather than an empty series the empty ladder would mis-describe as a quiet window. The reader carries
+    /// the nulls through (<see cref="QueryDurationTrendPoint"/>) and the tool publishes them with the
+    /// reason. The hourly twin below has no such row: its denominator is the bucket width, known for every
+    /// bucket.</para>
     /// </summary>
-    public const string QueryDurationTrendSql = """
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                SUM(delta_execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
-        ORDER BY collection_time
-        """;
+    public static readonly string QueryDurationTrendSql =
+        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false);
 
     /* ───────────── the tier ladder and the hourly-tier SQL: aliases of DurationTrendRouting (#3653) ─────────────
 
@@ -441,16 +442,20 @@ internal static class DarlingTrendReader
        arrangement: the viewer reads the store beside the service, never through it). That PR pinned this
        file's copies EQUAL to the Storage members in ViewerTrendRoutingPortTests rather than editing this
        file, which belonged to other lanes that night. Equality is a pin; it fails only after the two have
-       drifted. This PR (#3653) makes each member an ALIAS — a const bound to the Storage const, a static
+       drifted. #3684 made each member an ALIAS — a const bound to the Storage const, a static
        readonly bound to the Storage builder's output, an expression-bodied delegation for the pure
        functions — so there is one definition and nothing to drift. The names stay: DarlingMcpTrendTools,
        DarlingQueryTrendTieringTests and DarlingMcpTrendToolsTests read them by these names, the payload
        vocabulary they document (source / effective_start / truncated) is this reader's contract, and the
        reasoning for each — the wall-clock age rule, the bucket-width denominator, the ninety-minute slack —
-       lives ONCE, on the Storage member each alias names. The two SQL aliases are static readonly rather
+       lives ONCE, on the Storage member each alias names. The SQL aliases are static readonly rather
        than const because the Storage side is a builder (one text with and one without the viewer's $4
        database filter), and a const cannot be initialized from a call; no consumer needed the const-ness
-       (the tests read the values, and the reads pass them as command text). */
+       (the tests read the values, and the reads pass them as command text). The two RAW-tier consts —
+       QueryDurationTrendSql above and ProcedureDurationTrendSql below — joined the block last, once #3695
+       had built the raw read in Storage and pinned the builder line-equal to the hand-kept procedure text:
+       the query alias changed the tool's answer on one row class (see its remarks), the procedure alias
+       changed nothing but where the text lives. */
 
     /// <summary>
     /// The seconds in one hourly-rollup bucket, as the SQL literal the hourly-tier duration trends divide by
@@ -469,10 +474,10 @@ internal static class DarlingTrendReader
     /// hourly tier. The mechanism (why the denominator is the bucket width and not a LAG, why an hour the
     /// collector covered only partly reads LOW and never high, why the series trails the clock by up to two
     /// hours) is documented once, on <see cref="DurationTrendRouting.BuildHourlyTrendSql"/>. What is this
-    /// reader's to add: the payload STATES that trade (<c>aggregate_note</c>) rather than hiding it, and the
-    /// raw read beside this one still LAG-recomputes an interval the store has carried since V128 — the
-    /// measurement lane's A11a, reported and pinned as such, not silently rewritten. $1 server_id, $2/$3
-    /// window (naive UTC).
+    /// reader's to add: the payload STATES that trade (<c>aggregate_note</c>) rather than hiding it. The raw
+    /// read beside this one reads the interval the store has carried since V128 through the same Storage
+    /// builder's raw twin (the measurement lane's A11a, closed in #3695 for the viewer and here for the
+    /// tool). $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public static readonly string QueryDurationTrendHourlySql =
         DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: false);
@@ -604,8 +609,10 @@ internal static class DarlingTrendReader
     /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
 
     /// <summary>
-    /// The procedure-stats duration trend - the viewer's <c>ProcedureDurationTrendSql</c>, verbatim apart
-    /// from the database filter the MCP copy of its query-stats twin already drops.
+    /// The procedure-stats duration trend - <see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>
+    /// without the viewer's database filter, by alias (#3653). The viewer's <c>ProcedureDurationTrendSql</c>
+    /// is the same builder's output with the filter; before the alias the two were hand-kept copies that
+    /// #3695 pinned line-equal to the builder, so making them aliases moved the text and changed no answer.
     /// <para>Not a duplicate of the query-stats trend, and the difference is the point: <c>query_stats</c>
     /// attributes a procedure's work to the individual statements inside it, so a procedure that got slower
     /// shows up smeared across however many statements it runs. This charges the whole call to the
@@ -618,32 +625,11 @@ internal static class DarlingTrendReader
     /// UNRATED point the reader keeps rather than rendering 0.00 ms/sec (#3541 A12; see
     /// <see cref="QueryDurationTrendSql"/> for why the row stays). NULL (a pre-V128 collection) falls back to
     /// the LAG this read always used, whose first row is likewise unrated, never a fabricated 0. No
-    /// <c>ELSE 0</c>. Verbatim from the viewer's copy apart from the database filter, as before.</para>
+    /// <c>ELSE 0</c>. This was the idiom the query-stats twin above caught up with in #3695 / #3653; the
+    /// builder's remarks carry it once for both tables.</para>
     /// </summary>
-    public const string ProcedureDurationTrendSql = """
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                SUM(delta_execution_count) AS total_executions,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM procedure_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
-        ORDER BY collection_time
-        """;
+    public static readonly string ProcedureDurationTrendSql =
+        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false);
 
     /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
