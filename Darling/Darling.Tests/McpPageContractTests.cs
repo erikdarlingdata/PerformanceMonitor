@@ -569,6 +569,114 @@ public sealed class McpPageContractTests
         Assert.DoesNotMatch(WindowTotalColumn, "GREATEST(reads - LAG(reads) OVER series, 0) AS d_reads");
     }
 
+    /* ───────────────────────── #3653: the Darling-only PostgreSQL state pages ───────────────────────── */
+
+    /// <summary>
+    /// The four paged tools in <see cref="DarlingMcpPgServerStateTools"/>, each of which inferred truncation
+    /// from <c>rows.Count &gt;= limit</c> — the shape rule 2 above forbids — and one of which
+    /// (<c>get_pg_server_config</c>) also published a count over the rows FETCHED as <c>non_default_count</c>,
+    /// so at <c>limit = 25</c> against a server with forty chosen settings it said 25 and read as a fact about
+    /// the server. Darling-only — Lite has no PostgreSQL tools — so, like the A7 roster, there is no
+    /// twin-parity arm; the body shape, the reader's parameterised cap and the description are pinned here,
+    /// and <see cref="McpPageContractLivePostgresTests.PgServerConfig_CountsTheSnapshotNotThePage_AgainstDevPostgres"/>
+    /// executes the boundary pair against live Postgres.
+    /// </summary>
+    public static readonly (string ToolName, string ReadName, string Sql)[] PgServerStatePagedTools =
+    [
+        ("get_pg_server_config", nameof(DarlingPgServerConfigReader.CurrentConfigSql), DarlingPgServerConfigReader.CurrentConfigSql),
+        ("get_pg_server_config_changes", nameof(DarlingPgServerConfigReader.ConfigChangesSql), DarlingPgServerConfigReader.ConfigChangesSql),
+        ("get_pg_extensions", nameof(DarlingPgExtensionAvailabilityReader.PgExtensionAvailabilitySql), DarlingPgExtensionAvailabilityReader.PgExtensionAvailabilitySql),
+        ("get_pg_lock_stats", nameof(DarlingPgLockStatsReader.PgLockStatsSql), DarlingPgLockStatsReader.PgLockStatsSql),
+    ];
+
+    /// <summary>The over-fetch that makes observation possible, on a reader that takes the window too.</summary>
+    private static readonly Regex FetchesLimitPlusOne = new(@"\blimit \+ 1\b", RegexOptions.Compiled);
+
+    [Fact]
+    public void EveryPgServerStatePage_ObservesTruncation_AndNeverInfersIt()
+    {
+        var source = ReadRepoFileLf(DarlingFileOf(typeof(DarlingMcpPgServerStateTools)).Split('/'));
+        foreach (var (name, _, _) in PgServerStatePagedTools)
+        {
+            var text = Strip(ToolBody(source, name));
+            var inferred = TruncationInferred.Match(text);
+            Assert.False(inferred.Success,
+                $"{name}: `{inferred.Value}` infers truncation from the cap; fetch limit + 1 and compare Count > limit");
+            /* Either spelling of the observation: a bare row list, or the page record the config tool reads
+               its snapshot count off (the A7 tools' shape). */
+            Assert.True(TruncationObserved.IsMatch(text) || PageTruncationObserved.IsMatch(text),
+                $"{name}: no `var truncated = x.Count > limit;` — a paged tool that never observes its own cap");
+            Assert.True(FetchesLimitPlusOne.IsMatch(text), $"{name}: the reader is not asked for the row past the cap");
+        }
+
+        /* The whole file, not only the four bodies: a fifth paged tool added to it inherits the rule. */
+        var stripped = Strip(source);
+        Assert.False(TruncationInferred.IsMatch(stripped),
+            $"{typeof(DarlingMcpPgServerStateTools).Name}: `{TruncationInferred.Match(stripped).Value}` infers truncation from the cap");
+    }
+
+    [Fact]
+    public void EveryPgServerStateRead_BindsItsCapAsAParameter_NeverALiteral()
+    {
+        foreach (var (_, name, sql) in PgServerStatePagedTools)
+        {
+            Assert.False(LiteralLimit.IsMatch(sql), $"{name} caps with a literal the caller cannot see: {LiteralLimit.Match(sql).Value}");
+            Assert.True(ParameterLimit.IsMatch(sql.TrimEnd()),
+                $"{name} does not end in a parameterised LIMIT, so the tool's limit + 1 over-fetch has nothing to bind to");
+        }
+    }
+
+    /// <summary>
+    /// The count is the SNAPSHOT's, on the row statement, above the cap (#3613's idiom): a <c>COUNT(*) FILTER
+    /// (WHERE …) OVER ()</c> over the filtered result, which PostgreSQL evaluates before <c>ORDER BY</c> and
+    /// <c>LIMIT</c>, so it is the same number at every page size. And the default-view filter is a predicate
+    /// of the statement, not a <c>.Where(</c> over the page: the first shape cut the whole snapshot at
+    /// <c>limit</c> and filtered afterwards, so <c>truncated</c> was true on nearly every default-view call
+    /// (several hundred parameters, a default limit of 100) while every chosen setting was on the page.
+    /// </summary>
+    [Fact]
+    public void PgServerConfig_CountsTheSnapshotOnTheRowStatement_AndFiltersInTheQuery()
+    {
+        var sql = DarlingPgServerConfigReader.CurrentConfigSql;
+        Assert.Contains("COUNT(*) FILTER (WHERE coalesce(c.source, 'default') <> 'default') OVER ()::int AS snapshot_non_default_count", sql, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("OVER ()", StringComparison.Ordinal) < sql.LastIndexOf("ORDER BY", StringComparison.Ordinal),
+            "the snapshot count must be computed above the ordering and the cap, or it counts the page");
+        /* The FILTER's predicate is the SAME expression the row's is_default column is read from, so the
+           count is provably of the very flag the rows report. */
+        Assert.Contains("(coalesce(c.source, 'default') = 'default') AS is_default", sql, StringComparison.Ordinal);
+        /* include_defaults is the statement's, and a pending-restart row survives the default view. */
+        Assert.Contains("($2::boolean", sql, StringComparison.Ordinal);
+        Assert.Contains("OR coalesce(c.pending_restart, false))", sql, StringComparison.Ordinal);
+
+        var body = Strip(ToolBody(ReadRepoFileLf(DarlingFileOf(typeof(DarlingMcpPgServerStateTools)).Split('/')), "get_pg_server_config"));
+        Assert.Contains("non_default_count = page.SnapshotNonDefaultCount", body, StringComparison.Ordinal);
+        Assert.Contains("non_default_returned = rows.Count(r => !r.IsDefault)", body, StringComparison.Ordinal);
+        Assert.Contains("settings_returned = rows.Count", body, StringComparison.Ordinal);
+        Assert.DoesNotMatch(PostReadWhere, body.Replace(".Where(r => r.PendingRestart)", string.Empty, StringComparison.Ordinal));
+        Assert.Contains("GetCurrentConfigPageAsync(", body, StringComparison.Ordinal);
+        Assert.Contains("limit + 1, include_defaults)", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The description names both denominators, so an agent that cannot see the code knows which
+    /// count is the server's and which is the page's; and the limit parameter says it bounds the page.</summary>
+    [Fact]
+    public void PgServerConfig_NamesItsDenominators_InItsDescription()
+    {
+        var method = ToolMethod(typeof(DarlingMcpPgServerStateTools), "get_pg_server_config");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("truncated", description, StringComparison.Ordinal);
+        Assert.Contains("THE PAGE IS BOUNDED BY limit", description, StringComparison.Ordinal);
+        Assert.Contains("COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE", description, StringComparison.Ordinal);
+        Assert.Contains("non_default_count", description, StringComparison.Ordinal);
+        Assert.Contains("non_default_returned", description, StringComparison.Ordinal);
+        Assert.Contains("settings_returned", description, StringComparison.Ordinal);
+
+        var limit = method.GetParameters().Single(p => p.Name == "limit");
+        Assert.Contains("truncated", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        var includeDefaults = method.GetParameters().Single(p => p.Name == "include_defaults");
+        Assert.Contains("pending_restart", includeDefaults.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+    }
+
     /* ───────────────────────── #3541 A13: a filter is part of the query ───────────────────────── */
 
     /// <summary>
@@ -792,7 +900,127 @@ public sealed class McpPageContractLivePostgresTests
         "long_query_completions", "plan_correction", "waiting_tasks", "wait_stats",
         /* #3541 A7: the five PostgreSQL percent tools' tables. */
         "pg_statement_stats", "pg_wait_stats", "pg_wait_sampling", "pg_kernel_stats", "pg_io_stats",
+        /* #3653: get_pg_server_config's snapshot. */
+        "pg_server_config",
     ];
+
+    /// <summary>
+    /// #3653 against live PostgreSQL: the statement that produces <c>snapshot_non_default_count</c> and the
+    /// <c>include_defaults</c> predicate are what the in-process pins cannot execute. One snapshot of six
+    /// settings — four chosen, two at default, none pending — plus an OLDER snapshot with eight chosen
+    /// settings that the newest-snapshot anchor must ignore, and a session-scoped row the read must exclude.
+    ///
+    /// <para>The boundary pair, on the default view (population = 4): <c>limit = 3</c> must read truncated
+    /// with <c>settings_returned = 3</c>, and <c>limit = 4</c> must NOT — a population of exactly <c>limit</c>
+    /// rows is the case <c>Count &gt;= limit</c> got wrong. On both pages <c>non_default_count</c> must be 4:
+    /// the old <c>rows.Count(!IsDefault)</c> said 3 on the cut page. With <c>include_defaults</c> the
+    /// population is 6: <c>limit = 5</c> truncated, <c>limit = 6</c> not, and <c>non_default_count</c> still 4
+    /// on both while <c>non_default_returned</c> is 4 — the whole page's worth of chosen settings — and the
+    /// two default rows sort last so a <c>limit = 4</c> page there holds exactly the four chosen ones.</para>
+    /// </summary>
+    [Fact]
+    public async Task PgServerConfig_CountsTheSnapshotNotThePage_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live server-config page test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            var older = newest.AddHours(-1);
+
+            /* The older snapshot: eight chosen settings. If the count ever leaks across snapshots it reads 12. */
+            for (var i = 0; i < 8; i++)
+                await SeedConfigAsync(connection, ct, older, "old_setting_" + i, "1", "configuration file", "0");
+
+            /* The newest: four chosen, two default, one session-scoped row that describes the collector. */
+            await SeedConfigAsync(connection, ct, newest, "shared_buffers", "131072", "configuration file", "16384");
+            await SeedConfigAsync(connection, ct, newest, "work_mem", "65536", "configuration file", "4096");
+            await SeedConfigAsync(connection, ct, newest, "max_connections", "500", "configuration file", "100");
+            await SeedConfigAsync(connection, ct, newest, "log_min_duration_statement", "1000", "database", "-1");
+            await SeedConfigAsync(connection, ct, newest, "autovacuum", "on", "default", "on");
+            await SeedConfigAsync(connection, ct, newest, "wal_level", "replica", "default", "replica");
+            await SeedConfigAsync(connection, ct, newest, "application_name", "collector", "session", "");
+
+            /* The default view: population 4. */
+            var cut = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 3)).RootElement;
+            Assert.Equal("server_config", cut.GetProperty("status").GetString());
+            Assert.Equal(3, cut.GetProperty("settings_returned").GetInt32());
+            Assert.True(cut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, cut.GetProperty("non_default_count").GetInt32());
+            Assert.Equal(3, cut.GetProperty("non_default_returned").GetInt32());
+            Assert.Equal(3, cut.GetProperty("settings").GetArrayLength());
+
+            var whole = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 4)).RootElement;
+            Assert.Equal(4, whole.GetProperty("settings_returned").GetInt32());
+            Assert.False(whole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, whole.GetProperty("non_default_count").GetInt32());
+            Assert.Equal(4, whole.GetProperty("non_default_returned").GetInt32());
+            Assert.All(whole.GetProperty("settings").EnumerateArray(), s => Assert.False(s.GetProperty("is_default").GetBoolean()));
+            Assert.DoesNotContain("application_name", whole.GetRawText(), StringComparison.Ordinal);
+            Assert.DoesNotContain("old_setting_", whole.GetRawText(), StringComparison.Ordinal);
+            Assert.Equal(newest.ToString("o"), whole.GetProperty("captured_at").GetString());
+
+            /* Every setting: population 6, and the snapshot count does not move. */
+            var allCut = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 5, include_defaults: true)).RootElement;
+            Assert.Equal(5, allCut.GetProperty("settings_returned").GetInt32());
+            Assert.True(allCut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, allCut.GetProperty("non_default_count").GetInt32());
+            Assert.Equal(4, allCut.GetProperty("non_default_returned").GetInt32());
+
+            var allWhole = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 6, include_defaults: true)).RootElement;
+            Assert.Equal(6, allWhole.GetProperty("settings_returned").GetInt32());
+            Assert.False(allWhole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, allWhole.GetProperty("non_default_count").GetInt32());
+            Assert.Equal(4, allWhole.GetProperty("non_default_returned").GetInt32());
+
+            /* Chosen first: a limit = 4 page WITH defaults holds exactly the four chosen ones. */
+            var chosenFirst = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 4, include_defaults: true)).RootElement;
+            Assert.True(chosenFirst.GetProperty("truncated").GetBoolean());
+            Assert.Equal(4, chosenFirst.GetProperty("non_default_returned").GetInt32());
+
+            /* A pending-restart row whose RUNNING value is still the default stays in the default view: it is
+               the row that says the file and the server disagree, and the old shape counted it in
+               pending_restart_settings while hiding it from settings. It is not a chosen setting, so the
+               snapshot count holds at 4 while the default-view population becomes 5. */
+            await SeedConfigAsync(connection, ct, newest, "max_worker_processes", "8", "default", "8", pendingRestart: true);
+            var pending = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 5)).RootElement;
+            Assert.False(pending.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, pending.GetProperty("settings_returned").GetInt32());
+            Assert.Equal(4, pending.GetProperty("non_default_count").GetInt32());
+            Assert.Equal(4, pending.GetProperty("non_default_returned").GetInt32());
+            Assert.Equal(1, pending.GetProperty("pending_restart_count").GetInt32());
+            Assert.Equal("max_worker_processes", pending.GetProperty("settings")[0].GetProperty("name").GetString());
+            Assert.True(pending.GetProperty("settings")[0].GetProperty("is_default").GetBoolean());
+            Assert.True(JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 4)).RootElement.GetProperty("truncated").GetBoolean());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static Task SeedConfigAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime collectionTime,
+        string name, string setting, string source, string bootVal, bool pendingRestart = false) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_server_config
+    (collection_id, collection_time, server_id, server_name, name, setting, unit, category, context, vartype,
+     source, boot_val, reset_val, sourcefile, sourceline, pending_restart, short_desc)
+VALUES ($1, $2, $3, $4, $5, $6, NULL, 'Resource Usage / Memory', 'postmaster', 'integer', $7, $8, $6, NULL, 0, $9, NULL)",
+            CollectionIdGenerator.Next(), collectionTime, ServerId, ServerName, name, setting, source, bootVal, pendingRestart);
 
     [Fact]
     public async Task PagedTools_ObserveTruncationAtTheBoundary_AndDescribeThePage_AgainstDevPostgres()

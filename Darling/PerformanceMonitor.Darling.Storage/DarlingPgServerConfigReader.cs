@@ -60,6 +60,18 @@ public static class DarlingPgServerConfigReader
            the tool reads it off rows[0]. Naive UTC, the store's timestamp discipline. */
         DateTime CollectionTimeUtc);
 
+    /// <summary>
+    /// The paged current-config read: the rows the caller's cap admitted, and beside them the ONE figure the
+    /// page cannot supply — how many settings of the whole snapshot are not at their default (#3653, the
+    /// #3541 A3 residue on this tool). <c>get_pg_server_config</c> used to publish <c>rows.Count(!IsDefault)</c>
+    /// as <c>non_default_count</c>: a count over the rows FETCHED, so at <c>limit = 25</c> against a server with
+    /// forty chosen settings it said 25 and read as a fact about the server. <see cref="SnapshotNonDefaultCount"/>
+    /// is computed on the same statement as the rows, above the <c>LIMIT</c>, so it is the same number at every
+    /// page size. The MCP tool asks for <c>limit + 1</c> rows so it can OBSERVE truncation rather than infer it
+    /// from a page that happens to be exactly <c>limit</c> long.
+    /// </summary>
+    public sealed record PgConfigPage(List<PgConfigRow> Rows, int SnapshotNonDefaultCount);
+
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
         string Name,
@@ -75,6 +87,23 @@ public static class DarlingPgServerConfigReader
     /// server rather than on "within the last N hours": a configuration read has no window — it is the
     /// state now — and an hours filter would return NOTHING on a server whose hourly collector last ran
     /// just outside it, which reads as "this server has no configuration".
+    ///
+    /// <para><b>The default-view filter is IN the statement</b> (#3653, from #3541 A3/A13). <c>$2</c> is the
+    /// tool's <c>include_defaults</c>; when false the population is the settings somebody chose plus any row
+    /// whose file value is waiting on a restart, and the <c>LIMIT</c> cuts THAT population. The first version
+    /// cut the whole snapshot at <c>limit</c> and filtered the defaults out in C# afterwards, which made
+    /// <c>truncated</c> true on nearly every default-view call (a server has several hundred parameters, the
+    /// default limit is 100) even when every chosen setting was on the page — a flag that is always up says
+    /// nothing. A pending-restart row is kept in the default view whatever its <c>source</c>, because the
+    /// ordering already put it first for the reason the tool's description gives: it is the one row that
+    /// says the file and the running server disagree, and hiding it while counting it was the old shape.</para>
+    ///
+    /// <para><b>The snapshot's non-default count rides on the row statement.</b> <c>COUNT(*) FILTER (WHERE …)
+    /// OVER ()</c> is a window aggregate over the filtered result, which PostgreSQL evaluates BEFORE
+    /// <c>ORDER BY</c> and <c>LIMIT</c> — the #3613 idiom — so it is the same figure whether the caller asked
+    /// for 5 rows or 500, and whether or not defaults are included (the FILTER counts only the non-default
+    /// rows, and every non-default row is in both populations). Identical on every row; the reader takes it
+    /// off any one of them.</para>
     /// </summary>
     public const string CurrentConfigSql = """
         SELECT
@@ -102,7 +131,10 @@ public static class DarlingPgServerConfigReader
                 does not get to decide this. */
             (coalesce(c.source, 'default') = 'default') AS is_default,
             /* #3653: the stamp, on the row statement (see PgConfigRow.CollectionTimeUtc). */
-            c.collection_time
+            c.collection_time,
+            /* #3653: the SNAPSHOT's non-default count, on the row statement and above the LIMIT, so the tool
+               has a figure about the server rather than about the page (see PgConfigPage). */
+            COUNT(*) FILTER (WHERE coalesce(c.source, 'default') <> 'default') OVER ()::int AS snapshot_non_default_count
         FROM pg_server_config AS c
         WHERE c.server_id = $1
         AND   c.collection_time = (
@@ -110,13 +142,17 @@ public static class DarlingPgServerConfigReader
                   FROM pg_server_config
                   WHERE server_id = $1)
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+        /* #3653: the default view's population, decided here rather than after the cut. */
+        AND   ($2::boolean
+               OR coalesce(c.source, 'default') <> 'default'
+               OR coalesce(c.pending_restart, false))
         /* Non-default first: 415 settings sorted alphabetically is a dump, not an answer. pending_restart
            outranks even that, because it is the one row that says the file and the running server
            disagree. */
         ORDER BY coalesce(c.pending_restart, false) DESC,
                  (coalesce(c.source, 'default') = 'default'),
                  c.name
-        LIMIT $2
+        LIMIT $3
         """;
 
     /// <summary>
@@ -163,17 +199,34 @@ public static class DarlingPgServerConfigReader
         LIMIT $4
         """;
 
+    /// <summary>The rows alone, every setting included — the WPF Viewer's grid, which filters for itself
+    /// and has no column for the snapshot count.</summary>
     public static async Task<List<PgConfigRow>> GetCurrentConfigAsync(
-        NpgsqlDataSource postgres, int serverId, int limit, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int limit, CancellationToken cancellationToken = default) =>
+        (await GetCurrentConfigPageAsync(postgres, serverId, limit, includeDefaults: true, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The paged read (#3653): up to <paramref name="limit"/> rows of the population
+    /// <paramref name="includeDefaults"/> selects, pending-restart first, then non-default, then by name, and
+    /// the whole snapshot's non-default count beside them. The MCP tool passes <c>limit + 1</c> and reads the
+    /// extra row as the truncation signal.
+    /// </summary>
+    public static async Task<PgConfigPage> GetCurrentConfigPageAsync(
+        NpgsqlDataSource postgres, int serverId, int limit, bool includeDefaults,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<PgConfigRow>();
+        var snapshotNonDefaultCount = 0;
         await using var command = postgres.CreateCommand(CurrentConfigSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(includeDefaults);
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+            snapshotNonDefaultCount = reader.GetInt32(14);
             rows.Add(new PgConfigRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
@@ -191,7 +244,7 @@ public static class DarlingPgServerConfigReader
                 reader.GetDateTime(13)));
         }
 
-        return rows;
+        return new PgConfigPage(rows, snapshotNonDefaultCount);
     }
 
     public static async Task<List<PgConfigChangeRow>> GetConfigChangesAsync(

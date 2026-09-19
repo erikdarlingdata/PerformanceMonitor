@@ -147,10 +147,10 @@ public sealed class DarlingMcpPgServerStateTools
                contradicted by its own label. */
             var scope = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name);
 
-            var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, scope);
+            var fetched = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, scope);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_extension_availability")
@@ -171,8 +171,13 @@ public sealed class DarlingMcpPgServerStateTools
                the PAGE and reads as a fact about the SERVER. Measured while writing this: at limit=50 the
                tool reported "installed: 10" for a server with more than that, because 50 was all it had
                looked at. Suppressed rather than renamed — "installed_in_this_page" is a number nobody
-               wants. */
-            var truncated = rows.Count >= limit;
+               wants.
+
+               #3653 (the #3541 A3 class): truncation is OBSERVED off the limit + 1 fetch above, not inferred
+               from a page that happens to be exactly `limit` long — a one-database host whose slice is
+               exactly the limit is complete, and the old `>= limit` withheld its state totals for it. */
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
 
             /* THE POPULATION FIGURES AND THE INSTALL CENSUS, from their own query that no row limit touches
                (#3425) — the #3278 pattern, applied to a read whose truncation removes precisely the rows a
@@ -405,10 +410,13 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
-            var rows = await DarlingPgLockStatsReader.GetPgLockStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+            /* #3653 (the #3541 A3 class): limit + 1 as the fetch, the extra row as the observed truncation
+               signal. Under the old `rows.Count >= limit`, a window holding exactly `limit` contended
+               (type, mode, relation) groups read as truncated and its ungranted total was withheld. */
+            var fetched = await DarlingPgLockStatsReader.GetPgLockStatsAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats")
@@ -420,7 +428,8 @@ public sealed class DarlingMcpPgServerStateTools
                         + "that nothing was ever locked.");
             }
 
-            var truncated = rows.Count >= limit;
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
             var ungranted = rows.Count(r => !r.Granted);
 
             var locks = rows.Select(r => new
@@ -592,12 +601,12 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Maximum settings to return. Default 100.")] int limit = 100,
-        [Description("When true, include settings still at their default. Default false - the non-default ones are the answer.")] bool include_defaults = false)
+        [Description("Maximum settings to return. Default 100. This is what bounds the page - read truncated to know whether the population held more; non_default_count stays the whole snapshot's whatever this is set to.")] int limit = 100,
+        [Description("When true, include settings still at their default. Default false - the non-default ones are the answer, and a setting marked pending_restart is kept in that view whatever its source, because it is the row that says the file and the server disagree.")] bool include_defaults = false)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -607,11 +616,20 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
-            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(
-                postgres, resolved.ServerId, limit);
+            /* #3653 (the #3541 A3 residue on this tool): the caller's limit + 1 as the fetch, the extra row as
+               the OBSERVED truncation signal, and the include_defaults filter inside the statement so the cap
+               cuts the population the caller asked for. The first shape fetched exactly `limit` rows of the
+               whole snapshot, filtered the defaults out in C#, and published `rows.Count >= limit` as
+               truncated: a snapshot of exactly `limit` non-session rows read as truncated, and the default
+               view read as truncated on nearly every call because a server has several hundred parameters. */
+            var page = await DarlingPgServerConfigReader.GetCurrentConfigPageAsync(
+                postgres, resolved.ServerId, limit + 1, include_defaults);
 
-            if (rows.Count == 0)
+            if (page.Rows.Count == 0)
             {
+                /* Empty on the default view can mean two things: no snapshot, or a snapshot in which nothing
+                   is set and nothing is pending. SnapshotNonDefaultCount cannot tell them apart (it rides on
+                   rows that did not come back), so the capability read decides as it always has. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
                     ?? McpHelpers.Status(
@@ -621,7 +639,8 @@ public sealed class DarlingMcpPgServerStateTools
                         + "reached its first collection.");
             }
 
-            var shown = include_defaults ? rows : rows.Where(r => !r.IsDefault).ToList();
+            var truncated = page.Rows.Count > limit;
+            var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
             var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
 
             return JsonSerializer.Serialize(new
@@ -633,12 +652,17 @@ public sealed class DarlingMcpPgServerStateTools
                    answer says when it was true. No age_seconds and no as_of: this read takes no window to
                    anchor against (the Stamped dialect, McpLatestSnapshotStampTests.DarlingOnlyStamped). */
                 captured_at = rows[0].CollectionTimeUtc.ToString("o"),
-                /* Both counts, because they answer different questions and one without the other invites
-                   the wrong conclusion: a small returned count is reassuring only if you know it was
-                   filtered rather than truncated. */
-                settings_returned = shown.Count,
-                non_default_count = rows.Count(r => !r.IsDefault),
-                truncated = rows.Count >= limit,
+                /* Three counts, each with its denominator in its name (#3653). settings_returned is the page.
+                   non_default_count is the SNAPSHOT's: computed on the reader's statement above the LIMIT, so
+                   it is the same figure at limit = 5 and at limit = 500 — the old `rows.Count(!IsDefault)`
+                   counted the rows fetched and, at a limit below the number of chosen settings, reported the
+                   limit as a fact about the server. non_default_returned is how many of the snapshot's
+                   chosen settings are on THIS page; when it equals non_default_count every chosen setting is
+                   here, whatever truncated says about the rest of the population. */
+                settings_returned = rows.Count,
+                non_default_count = page.SnapshotNonDefaultCount,
+                non_default_returned = rows.Count(r => !r.IsDefault),
+                truncated,
                 pending_restart_count = pendingRestart.Count,
                 pending_restart_settings = pendingRestart.Count > 0 ? pendingRestart : null,
                 note = pendingRestart.Count > 0
@@ -650,7 +674,7 @@ public sealed class DarlingMcpPgServerStateTools
                       + "what changing it would take - postmaster needs a restart, sighup a reload, user "
                       + "nothing. Session-scoped rows are excluded: pg_settings is a per-connection view "
                       + "and those describe the monitoring connection rather than the server.",
-                settings = shown.Select(r => new
+                settings = rows.Select(r => new
                 {
                     name = r.Name,
                     setting = r.Setting,
@@ -693,10 +717,12 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
-            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+            /* #3653 (the #3541 A3 class): limit + 1 as the fetch, the extra row as the observed truncation
+               signal, so a week with exactly `limit` changes is not reported as holding more. */
+            var fetched = await DarlingPgServerConfigReader.GetConfigChangesAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
 
-            if (rows.Count == 0)
+            if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
@@ -707,13 +733,16 @@ public sealed class DarlingMcpPgServerStateTools
                         + "read compares consecutive snapshots, so an unchanged server produces no rows.");
             }
 
+            var truncated = fetched.Count > limit;
+            var rows = truncated ? fetched.Take(limit).ToList() : fetched;
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
                 status = "config_changes",
                 change_count = rows.Count,
-                truncated = rows.Count >= limit,
+                truncated,
                 note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
                      + "change happened at some point in the hour before it - this collector runs hourly. "
                      + "A setting appearing for the first time is not reported here.",
