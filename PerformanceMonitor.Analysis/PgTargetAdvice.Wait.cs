@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace PerformanceMonitor.Analysis;
@@ -103,12 +104,24 @@ public static partial class PgTargetAdvice
             var samples = KnobMeta(fact, PgTargetScorer.WaitDeltaSamplesKey) ?? 0;
             var period = KnobMeta(fact, PgTargetScorer.WaitEstimateResolutionMsKey) ?? 0;
             var peakBackends = KnobMeta(fact, PgTargetScorer.WaitPeakBackendsKey) ?? 0;
-            sb.Append("Over ").Append(KnobSeconds(observedMs / 1000.0)).Append(" of observed wait-sampling time (")
-              .Append(KnobNum(collections)).Append(" collection intervals), ").Append(display)
+            var intervalMs = KnobMeta(fact, PgTargetScorer.WaitSourceIntervalMsKey) ?? observedMs;
+            var sampledMsKnown = (KnobMeta(fact, PgTargetScorer.WaitSampledMsKnownKey) ?? 0) > 0;
+            sb.Append("Over ").Append(KnobSeconds(observedMs / 1000.0)).Append(" the sampler was watching (")
+              .Append(KnobNum(collections)).Append(" collection intervals");
+            /* The duty cycle, stated when the watched time and the wall time differ: the #3604 service sampler
+               watches 30 s of each 300 s cycle and V133 stores what it watched, so the fraction is per second WATCHED
+               — the honest rate — and a reader must not divide the same seconds by the wall interval again. */
+            if (intervalMs > 0 && Math.Abs(intervalMs - observedMs) / intervalMs > 0.05)
+                sb.Append(" spanning ").Append(KnobSeconds(intervalMs / 1000.0)).Append(" of wall clock — the sampler watches part of each cycle and the fraction is per second watched");
+            sb.Append("), ").Append(display)
               .Append(" was seen in ").Append(KnobNum(samples)).Append(" backend-samples at a ").Append(KnobNum(period))
               .Append(" ms sampling period — about ").Append(KnobSeconds(waitMs / 1000.0))
               .Append(" of waiting, estimated from sampling, which is ").Append(WaitBackendEquivalents(fact.Value))
               .Append(" of one backend waiting on this continuously. ");
+            if (!sampledMsKnown)
+                sb.Append("Some or all of these collections did not record how long the sampler watched (rows written before V133, or the " +
+                          "pg_wait_sampling extension, which watches the whole interval), so they are read over their whole interval; on " +
+                          "the service-side sampler that reads about a tenth of the true rate. ");
             sb.Append("The estimate cannot see a wait shorter than ").Append(KnobNum(period))
               .Append(" ms and rounds a continuous wait to the nearest period per backend-sample, and the count is per BACKEND-sample — " +
                       "ten backends waiting one second is ten seconds of waiting — so this is time summed over tasks, not a share " +
@@ -137,12 +150,106 @@ public static partial class PgTargetAdvice
             sb.Append(" and ").Append(KnobPct(typeShare.Value)).Append(" of its own wait type");
         sb.Append(". ");
 
-        if (witnessMs > 0 && Math.Abs(witnessMs - observedMs) / witnessMs > 0.05)
+        /* On a sampled fact the wall time between collections is the figure to hold against the witness — the
+           watched time is a fraction of it by design and has already been stated above. */
+        var sourceWallMs = sampled ? (KnobMeta(fact, PgTargetScorer.WaitSourceIntervalMsKey) ?? observedMs) : observedMs;
+        if (witnessMs > 0 && Math.Abs(witnessMs - sourceWallMs) / witnessMs > 0.05)
         {
             sb.Append("The pass's coverage witness (pg_database_stats) observed ").Append(KnobSeconds(witnessMs / 1000.0))
               .Append("; the fraction above is over the wait source's own ").Append(KnobSeconds(observedMs / 1000.0))
               .Append(" because that is the time the wait figure was summed across. ");
         }
+    }
+
+    /* ── lane 24 (#3691): the stock SAMPLED wait-profile anomaly ── */
+
+    private static readonly AdviceBlock s_sampledWaitProfileStatic = new(
+        Headline: "The server's sampled wait profile shifted well above its normal for this time of week (estimated from sampling)",
+        Investigation:
+            "The window's peak all-types wait rate — milliseconds of sampled waiting per second the sampler was watching, " +
+            "estimated from sampling (pg_wait_sampling: Δ backend-samples × the sampling period, over each collection's " +
+            "sampled_ms), CPU/Running excluded — judged against this server's hour-of-week baseline of the same estimate. " +
+            "A profile shift says the server was seen waiting far more than it usually is at this hour; the named wait " +
+            "types say on what. The estimate cannot see a wait shorter than the sampling period and counts per " +
+            "backend-sample, so it is time summed over tasks, not a share of the clock." + s_anomalyHedge,
+        Remediation:
+            "get_pg_wait_sampling over this window shows which wait types and which statements drove the shift; chase the " +
+            "dominant one with its own playbook (Lock — the holder via get_pg_blocking, lock_timeout, " +
+            "idle_in_transaction_session_timeout; IO — the buffer-cache and checkpoint findings; LWLock:WALWrite — the WAL " +
+            "device and commit batching). If the elevated profile persists across windows the threshold-based sampled wait " +
+            "finding for the leading wait will fire and the standard advice applies.");
+
+    /// <summary>
+    /// The stock sampled wait-profile anomaly's block (<c>ANOMALY_PG_SAMPLED_WAIT_PROFILE</c>, lane 24): the Aurora
+    /// composer's shape in the SAMPLED grade's own words — peak sampled ms per second watched, the multiple or the
+    /// modified z, the window mean beside the peak (the #3653 peak-and-mean gate), the leading <c>contrib_Type:event</c>
+    /// contributors, the duty cycle when the watched time and the wall time differ, and the pre-V133 caveat when
+    /// <c>sampled_ms_known = 0</c> — or the first-occurrence rendering when <c>is_new</c>. Says "estimated from
+    /// sampling"; never "the engine measured", never "spent". Static when the fact set does not carry the key.
+    /// </summary>
+    private static AdviceBlock ComposeSampledWaitAnomaly(IReadOnlyDictionary<string, Fact> factsByKey)
+    {
+        if (!factsByKey.TryGetValue(PgTargetFactKeys.AnomalySampledWaitProfile, out var fact)
+            || !fact.Metadata.TryGetValue("current_ms_per_sec", out var current))
+            return s_sampledWaitProfileStatic;
+
+        var contributors = new List<(string Name, double Ms)>();
+        foreach (var (metaKey, value) in fact.Metadata)
+        {
+            if (metaKey.StartsWith(PgTargetFactKeys.WaitContributorMetadataPrefix, StringComparison.Ordinal))
+                contributors.Add((metaKey.Substring(PgTargetFactKeys.WaitContributorMetadataPrefix.Length), value));
+        }
+        contributors.Sort((a, b) => b.Ms != a.Ms ? b.Ms.CompareTo(a.Ms) : string.CompareOrdinal(a.Name, b.Name));
+        var led = contributors.Count == 0 ? "the sampled wait types" : string.Join(", ", contributors.Take(3).Select(c => c.Name));
+        var currentText = current.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        var meanText = (KnobMeta(fact, "mean_ms_per_sec") ?? 0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+
+        var instrument = new StringBuilder(320);
+        var observedMs = KnobMeta(fact, PgTargetScorer.WaitSourceObservedMsKey) ?? 0;
+        var intervalMs = KnobMeta(fact, PgTargetScorer.WaitSourceIntervalMsKey) ?? observedMs;
+        if (observedMs > 0 && intervalMs > 0 && Math.Abs(intervalMs - observedMs) / intervalMs > 0.05)
+        {
+            instrument.Append(" The sampler watched ").Append(KnobSeconds(observedMs / 1000.0)).Append(" of the ")
+                      .Append(KnobSeconds(intervalMs / 1000.0)).Append(" between collections, and the rate is per second watched.");
+        }
+        if ((KnobMeta(fact, PgTargetScorer.WaitSampledMsKnownKey) ?? 0) <= 0)
+        {
+            instrument.Append(" Some collections did not record how long the sampler watched (rows written before V133, or the " +
+                              "pg_wait_sampling extension) and are read over their whole interval, which on the service-side sampler " +
+                              "understates the rate about tenfold; the baseline was built the same way.");
+        }
+
+        if (fact.Metadata.GetValueOrDefault("is_new") >= 1.0)
+        {
+            return s_sampledWaitProfileStatic with
+            {
+                Headline = "The server's sampled wait profile is heavy, with no baseline yet for this time of week (estimated from sampling)",
+                Investigation =
+                    $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
+                    $"sampler was watching this window (mean {meanText} ms/sec; CPU/Running excluded), led by {led}. This server's " +
+                    "hour-of-week sampled-wait baseline is too thin to trust a deviation against yet, so this fired on its absolute level " +
+                    "— a first look at where the server is seen waiting, not a proven shift." + instrument + s_anomalyHedge,
+            };
+        }
+
+        var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+        var ratio = fact.Metadata.GetValueOrDefault("ratio");
+        var mean = fact.Metadata.GetValueOrDefault("baseline_mean");
+        var meanBaselineText = mean.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        var deviation = modifiedZ > 0
+            ? $"{modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} robust sigmas above its {meanBaselineText} ms/sec baseline"
+            : $"about {ratio.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}× its {meanBaselineText} ms/sec baseline";
+        return s_sampledWaitProfileStatic with
+        {
+            Headline = modifiedZ > 0
+                ? $"The server's sampled wait profile shifted to {currentText} ms/sec — {modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}σ above its baseline for this time of week (estimated from sampling)"
+                : $"The server's sampled wait profile shifted to about {ratio.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}× its baseline for this time of week (estimated from sampling)",
+            Investigation =
+                $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
+                $"sampler was watching this window (mean {meanText} ms/sec, also above the bar; CPU/Running excluded) — {deviation} for " +
+                $"this hour-of-week — led by {led}. This is a shift in the overall sampled wait profile, and the named contributors are " +
+                "where to look." + instrument + s_anomalyHedge,
+        };
     }
 
     /// <summary>"0.35 of a backend" reads better than "35 %" for a figure that can exceed one.</summary>

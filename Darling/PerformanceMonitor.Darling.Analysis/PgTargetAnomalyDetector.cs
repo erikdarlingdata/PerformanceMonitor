@@ -33,7 +33,10 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// the Aurora all-types wait rate (<see cref="PgTargetFactKeys.AnomalyWaitProfile"/>). Each reads its window
 /// statistic from the SAME raw table and the SAME difference its regular fact reads (the PG_TPS / PG_DEADLOCK_RATE
 /// read, the session peak read, the Aurora wait read), and its baseline from <see cref="PgTargetBaselineProvider"/>'s
-/// matching arm, so the number an anomaly is judged against is the number the fact it folds into states.</para>
+/// matching arm, so the number an anomaly is judged against is the number the fact it folds into states. The v2
+/// and wave-3 detectors (I/O latency, replication lag, WAL volume, blocking) and lane 24's stock SAMPLED wait profile
+/// (<see cref="PgTargetFactKeys.AnomalySampledWaitProfile"/> — <c>pg_wait_sampling</c> over <c>sampled_ms</c>, the
+/// Aurora profile's sibling on another instrument) each live in their own partial file.</para>
 ///
 /// <para><b>The metadata is the shared gate's, unchanged.</b> A z-family fact carries <c>deviation_sigma</c>,
 /// <c>fire_threshold</c>, <c>baseline_low_quality</c>, <c>fallback_exceedance</c>, <c>baseline_samples</c> and the
@@ -182,7 +185,8 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
     /// The window's Aurora all-types wait rate per collection (CPU excluded; the three-state interval of the wait
     /// partial and the <c>pg_wait_ms_per_sec</c> baseline arm — stored <c>NULLIF</c>, NULL <c>LAG</c>, a restart
     /// collection is not a sample), then PEAK, total and the count of rated collections. Zero rows means this
-    /// flavour does not write the table and the detector sits out; stock's sampled estimate is not read here (v1).
+    /// flavour does not write the table and the detector sits out; stock's sampled estimate is its own detector
+    /// (<c>SampledWaitRateWindowSql</c>, lane 24).
     /// </summary>
     public const string WaitRateWindowSql = @"
 WITH per_collection AS (
@@ -241,6 +245,9 @@ LIMIT 6";
         await DetectWalVolumeAnomalies(context, anomalies);
         /* wave 3 (#3691, between waves): the blocking detector (PgTargetAnomalyDetector.Blocking.cs), inert until lane 17. */
         await DetectBlockingAnomalies(context, anomalies);
+        /* lane 24 (#3691): stock's SAMPLED wait profile over sampled_ms (PgTargetAnomalyDetector.WaitsSampled.cs); sits
+           out on Aurora and wherever pg_wait_stats also wrote the window. */
+        await DetectSampledWaitProfileAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -253,6 +260,7 @@ LIMIT 6";
     private partial Task DetectReplicationAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectWalVolumeAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectSampledWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;
@@ -538,8 +546,8 @@ LIMIT 6";
     /// 2026-09-19 fleet read — see <see cref="AnomalyThresholds.PgWaitProfileFallbackMsPerSec"/>) AND the magnitude bar; classical bucket: the ratio at
     /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>; untrustworthy: the bar alone, <c>is_new</c>, no
     /// sentinel. Top contributors ride as <c>contrib_Type:event</c>. The stock sampled estimate is never read here
-    /// (class summary) and the fact therefore never carries <c>is_sampled</c>; a sampled arm, when it comes, is
-    /// its own metric and its own bar.
+    /// and the fact therefore never carries <c>is_sampled</c>; the sampled arm is its own metric, key and bar
+    /// (<c>DetectSampledWaitProfileAnomalies</c>, lane 24) and sits out whenever this table has rows.
     /// </summary>
     private async Task DetectWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies)
     {

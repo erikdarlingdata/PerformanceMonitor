@@ -69,6 +69,8 @@ public sealed class PgTargetAnomalyTests
         MetricNames.PgWalBytesPerSec,
         /* wave 3 (#3691) lane 17: the blocked-sessions point series over the edges and the collection log. */
         MetricNames.PgBlockedSessions,
+        /* lane 24 (#3691): stock's SAMPLED wait rate over sampled_ms — its own metric beside the Aurora one. */
+        MetricNames.PgSampledWaitMsPerSec,
     ];
 
     private static readonly (string Metric, string Table)[] s_metricTables =
@@ -83,6 +85,7 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgReplayLagBytes, "pg_replication_stats"),
         (MetricNames.PgWalBytesPerSec, "pg_write_stats"),
         (MetricNames.PgBlockedSessions, "pg_blocking_edges"),
+        (MetricNames.PgSampledWaitMsPerSec, "pg_wait_sampling"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
@@ -90,7 +93,7 @@ public sealed class PgTargetAnomalyTests
     [Fact]
     public void TheServedPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
     {
-        Assert.Equal(8, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(9, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
         foreach (var metric in s_pgMetricNames)
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
@@ -279,6 +282,9 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.WalVolumeWindowSql,
         /* wave 3 (#3691) lane 17 */
         PgTargetAnomalyDetector.BlockedSessionsWindowSql,
+        /* lane 24 (#3691): the sampled wait profile's two reads */
+        PgTargetAnomalyDetector.SampledWaitRateWindowSql,
+        PgTargetAnomalyDetector.SampledWaitContribWindowSql,
     ];
 
     [Fact]
@@ -323,6 +329,9 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("FROM collection_log", PgTargetAnomalyDetector.BlockedSessionsWindowSql, StringComparison.Ordinal);
         Assert.Contains("collector_name = 'pg_blocking'", PgTargetAnomalyDetector.BlockedSessionsWindowSql, StringComparison.Ordinal);
         Assert.Contains("COUNT(DISTINCT blocked_pid)::DOUBLE PRECISION", PgTargetAnomalyDetector.BlockedSessionsWindowSql, StringComparison.Ordinal);
+        /* Lane 24: the sampled profile reads pg_wait_sampling (and counts pg_wait_stats' collections to sit out when both wrote). */
+        Assert.Contains("FROM pg_wait_sampling", PgTargetAnomalyDetector.SampledWaitRateWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_wait_sampling", PgTargetAnomalyDetector.SampledWaitContribWindowSql, StringComparison.Ordinal);
 
         /* The window reads share the fact reads' shapes. */
         Assert.Contains("stats_reset", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgTps)!, StringComparison.Ordinal);
@@ -404,8 +413,10 @@ public sealed class PgTargetAnomalyTests
             .ToList();
         /* Five v1 anomalies (lane 9) plus the three v2 ones the plumbing registered by shape (#3691: I/O latency,
            replication lag, WAL volume — all z-score, all deviation-scored) plus the wave-3 blocking anomaly the
-           between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored). */
-        Assert.Equal(9, anomalyKeys.Count);
+           between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored),
+           plus lane 24's stock sampled wait profile (the Aurora profile's ratio shape on another instrument). */
+        Assert.Equal(10, anomalyKeys.Count);
+        Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalySampledWaitProfile));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
 
         foreach (var key in anomalyKeys)
@@ -649,7 +660,7 @@ public sealed class PgTargetAnomalyTests
             .Select(f => f.Name)
             .ToList();
         Assert.Equal(
-            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
+            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
             pgConstants.Order(StringComparer.Ordinal).ToArray());
 
         var lines = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');

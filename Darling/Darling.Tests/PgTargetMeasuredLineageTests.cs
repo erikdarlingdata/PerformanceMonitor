@@ -70,7 +70,8 @@ public sealed class PgTargetMeasuredLineageTests
         ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost" }),
         /* Lane 18 (#3691) added the offered-vs-delivered co-fire boost — a boost, unmeasured like its siblings. */
         ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost", "OfferedVsDeliveredBoost" }),
-        ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgRatioAnomalyThreshold" }),
+        /* Lane 24 (#3691): the stock SAMPLED profile's bar — the calibration read Aurora's exact deltas, not pg_wait_sampling. */
+        ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec" }),
     };
 
     [Fact]

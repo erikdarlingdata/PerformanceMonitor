@@ -39,8 +39,15 @@ public static class MetricNames
     public const string PgSessionCount = "pg_session_count";
     /// <summary>Deadlocks per hour — the reset-aware <c>pg_database_stats.deadlocks</c> delta, rated over the interval.</summary>
     public const string PgDeadlockRate = "pg_deadlock_rate";
-    /// <summary>All-types wait milliseconds per second — Aurora <c>pg_wait_stats</c> deltas; stock sampling has no arm in v1.</summary>
+    /// <summary>All-types wait milliseconds per second — Aurora <c>pg_wait_stats</c> deltas (the engine's measured
+    /// wait time). Stock sampling is NOT this metric: it has its own name below since lane 24.</summary>
     public const string PgWaitMsPerSec = "pg_wait_ms_per_sec";
+    /// <summary>All-types SAMPLED wait milliseconds per second the sampler was watching — stock <c>pg_wait_sampling</c>
+    /// <c>Δsample_count × profile_period_ms</c> over each collection's <c>sampled_ms</c> (V133; NULL = the whole
+    /// interval), CPU/Running excluded. The same UNIT as <see cref="PgWaitMsPerSec"/> and a different INSTRUMENT
+    /// (a per-backend-sample count quantised at the period), so it is its own name and its buckets are never
+    /// pooled with the measured series (#3689 §5; #3691 lane 24).</summary>
+    public const string PgSampledWaitMsPerSec = "pg_sampled_wait_ms_per_sec";
     /// <summary>Instance CPU as percent of the configured capacity ceiling — <c>pg_cpu_utilization.acu_utilization_percent</c> (Aurora only).</summary>
     public const string PgCpu = "pg_cpu";
 

@@ -144,6 +144,9 @@ internal static class PgTargetToolRecommendations
             new("get_pg_deadlocks", "The captured deadlock graphs"),
         ],
         [PgTargetFactKeys.AnomalyWaitProfile] = WaitReads(),
+        /* lane 24 (#3691): the stock SAMPLED wait profile reads the same three wait tools; get_pg_wait_sampling is the one
+           that carries its rows. */
+        [PgTargetFactKeys.AnomalySampledWaitProfile] = WaitReads(),
 
         /* v2 (#3691), pre-filled by the v2 plumbing as the v1 rows were: which get_pg_* read a family's table is
            a fact about the product, not a threshold, and PgTargetMcpSurfaceTests requires a row for every key

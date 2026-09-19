@@ -61,6 +61,15 @@ public sealed partial class PgTargetFactCollector
     /// distinguishable from a window with rows but no countable interval (<c>collection_count &gt; 0</c>,
     /// <c>observed_sec = 0</c> — every collection a restart, which emits nothing and does NOT fall back).
     /// A <c>CROSS JOIN</c> would have returned zero rows for both and blinded the routing.</para>
+    ///
+    /// <para><b>The header also counts the OTHER source's collections (lane 24, #3691).</b> <c>sampled_collections</c>
+    /// is <c>pg_wait_sampling</c>'s collection count over the same window, so the one read that decides the
+    /// routing also sees whether both sources wrote: a server with Aurora deltas AND sampler rows in one window
+    /// (a re-platformed target, or a sampler left running beside the engine's counters) is the adversarial pass's
+    /// "both non-empty" case lane 5 could not detect. The EXACT source wins — the sampled facts are not emitted and
+    /// the sampled anomaly sits out — and every exact fact says so (<c>sampled_suppressed_by_exact = 1</c>), so
+    /// the suppression is a stated choice on the fact and not a silent one in the code. A scalar subquery over the
+    /// hypertable's (server_id, collection_time) index, so an Aurora pass pays one index probe for the knowledge.</para>
     /// </summary>
     public const string PgWaitStatsSql = @"
 WITH per_collection AS (
@@ -82,7 +91,12 @@ observed AS (
         coalesce(SUM(interval_sec) FILTER (WHERE interval_sec > 0), 0) AS observed_sec,
         CAST(count(*) FILTER (WHERE interval_sec > 0) AS integer)      AS sample_count,
         CAST(count(*) AS integer)                                       AS collection_count,
-        CAST(count(*) FILTER (WHERE stored_interval = 0) AS integer)   AS restart_collections
+        CAST(count(*) FILTER (WHERE stored_interval = 0) AS integer)   AS restart_collections,
+        (SELECT CAST(count(DISTINCT s.collection_time) AS integer)
+         FROM pg_wait_sampling AS s
+         WHERE s.server_id = $1
+         AND   s.collection_time >= $2
+         AND   s.collection_time <= $3)                                AS sampled_collections
     FROM per_collection
 ),
 by_event AS (
@@ -109,7 +123,8 @@ SELECT
     o.observed_sec,
     o.sample_count,
     o.collection_count,
-    o.restart_collections
+    o.restart_collections,
+    o.sampled_collections
 FROM observed AS o
 LEFT JOIN by_event AS b
   ON TRUE
@@ -140,10 +155,25 @@ ORDER BY b.wait_time_us DESC NULLS LAST";
     /// this read carries <c>is_sampled = 1</c> and <c>estimate_resolution_ms = profile_period_ms</c>, and the
     /// advice says "estimated from sampling".</para>
     ///
-    /// <para><b>The denominator is the wait source's own observed time</b> — the <c>LAG</c> over distinct
-    /// collection times (this table stores no interval; it is not a delta family) — because the pass's witness
-    /// is one-minute <c>pg_database_stats</c> and this series is five-minute: a gap in one is not a gap in
-    /// the other. Both are stated on the fact. Same always-one-row header shape as <see cref="PgWaitStatsSql"/>.</para>
+    /// <para><b>The denominator is the time the sampler was WATCHING, not the time between collections (lane 24,
+    /// #3691; V133).</b> Two instruments write this table with the same <c>profile_period_ms</c> shape and a
+    /// different duty cycle: the <c>pg_wait_sampling</c> extension samples the whole interval in-engine, and the
+    /// #3604 service-side sampler watches <c>SamplerSnapshotsPerCycle</c> one-second snapshots (30 s) of each 300 s
+    /// cycle. <c>Δsamples × period</c> over the interval is honest for the first and a ~10× understatement for the
+    /// second, and nothing in the row said which until V133 stored <c>sampled_ms</c> — the milliseconds THAT
+    /// collection actually observed (30,000 from the sampler on a full window; NULL from the extension arm, which
+    /// has no duty cycle to disclose). So per countable collection the observed time is <c>sampled_ms</c> when the
+    /// row carries it and the <c>LAG</c> interval otherwise (<c>coalesce</c>, per collection — a window that
+    /// straddles the V133 install mixes the two honestly, both being milliseconds observed), and the fraction is
+    /// ms of sampled waiting per second the sampler was watching. A pre-V133 row is NULL and came from EITHER arm
+    /// — indistinguishable from the extension — so NULL is read as "the whole interval" (exactly lane 5's arithmetic)
+    /// and never guessed at 30 s; <c>unknown_sampled_collections</c> counts them so the fact can say
+    /// <c>sampled_ms_known = 0</c> when any countable collection had to be read that way. <c>interval_sec_total</c>
+    /// keeps the wall time between the same collections beside it, so the advice can state the duty cycle the
+    /// sampler ran at rather than let a reader infer it. The <c>LAG</c> is over distinct collection times (this
+    /// table stores no interval; it is not a delta family); the pass's witness is one-minute <c>pg_database_stats</c>
+    /// and this series is five-minute, so a gap in one is not a gap in the other, and both are stated on the fact.
+    /// Same always-one-row header shape as <see cref="PgWaitStatsSql"/>.</para>
     /// </summary>
     public const string PgWaitSamplingSql = @"
 WITH series AS (
@@ -155,6 +185,7 @@ WITH series AS (
         sample_count,
         profile_period_ms,
         backend_count,
+        sampled_ms,
         LAG(sample_count) OVER (PARTITION BY event_type, event, query_id ORDER BY collection_time) AS prev_count
     FROM pg_wait_sampling
     WHERE server_id = $1
@@ -162,20 +193,25 @@ WITH series AS (
     AND   collection_time <= $3
 ),
 collections AS (
-    SELECT DISTINCT collection_time
+    SELECT collection_time,
+           MAX(sampled_ms) AS sampled_ms
     FROM series
+    GROUP BY collection_time
 ),
 per_collection AS (
     SELECT
         collection_time,
+        sampled_ms,
         extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
     FROM collections
 ),
 observed AS (
     SELECT
-        coalesce(SUM(interval_sec) FILTER (WHERE interval_sec > 0), 0) AS observed_sec,
-        CAST(count(*) FILTER (WHERE interval_sec > 0) AS integer)      AS sample_count,
-        CAST(count(*) AS integer)                                       AS collection_count
+        coalesce(SUM(coalesce(sampled_ms / 1000.0, interval_sec)) FILTER (WHERE interval_sec > 0), 0) AS observed_sec,
+        coalesce(SUM(interval_sec) FILTER (WHERE interval_sec > 0), 0)                             AS interval_sec_total,
+        CAST(count(*) FILTER (WHERE interval_sec > 0) AS integer)                                  AS sample_count,
+        CAST(count(*) AS integer)                                                                   AS collection_count,
+        CAST(count(*) FILTER (WHERE interval_sec > 0 AND sampled_ms IS NULL) AS integer)           AS unknown_sampled_collections
     FROM per_collection
 ),
 deltas AS (
@@ -214,7 +250,9 @@ SELECT
     b.reset_count,
     o.observed_sec,
     o.sample_count,
-    o.collection_count
+    o.collection_count,
+    o.interval_sec_total,
+    o.unknown_sampled_collections
 FROM observed AS o
 LEFT JOIN by_event AS b
   ON TRUE
@@ -263,18 +301,27 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
     /// write that table", not "that table had a bad hour".</para>
     ///
     /// <para><b>Two evidence grades behind one key, told apart by metadata, never blended.</b> An Aurora fact
-    /// is the engine's measured wait time; a stock fact is <c>Δsamples × profile_period_ms</c> and carries
-    /// <c>is_sampled = 1</c> with <c>estimate_resolution_ms</c>, and carries them on EVERY fact the sampled
-    /// read emits — the scorer grades both on the same fraction bars with the estimate stated, the advice
-    /// says "estimated from sampling", and a reader of <c>get_analysis_facts</c> can see which grade a row is
-    /// without knowing the flavour.</para>
+    /// is the engine's measured wait time; a stock fact is <c>Δsamples × profile_period_ms</c> over the time the
+    /// sampler was WATCHING (<c>sampled_ms</c>, V133 — see <see cref="PgWaitSamplingSql"/>) and carries
+    /// <c>is_sampled = 1</c> with <c>estimate_resolution_ms</c>, <c>sampled_ms_known</c> and the wall interval
+    /// beside the watched time, and carries them on EVERY fact the sampled read emits — the scorer grades both
+    /// on the same fraction bars with the estimate stated, the advice says "estimated from sampling", and a
+    /// reader of <c>get_analysis_facts</c> can see which grade a row is without knowing the flavour.</para>
+    ///
+    /// <para><b>Both sources in one window: the exact one wins, and says so (lane 24).</b> The Aurora read's
+    /// header counts <c>pg_wait_sampling</c>'s collections over the same window; when both wrote, the sampled
+    /// facts are not emitted (they would be a second, coarser profile of the same seconds) and every exact fact
+    /// carries <c>sampled_suppressed_by_exact = 1</c>. The sampled anomaly detector applies the same rule from
+    /// its own read (<c>PgTargetAnomalyDetector.WaitsSampled.cs</c>). Lane 5's read-then-fallback read only one
+    /// source and could not see the case; the choice is now explicit and pinned.</para>
     ///
     /// <para><b>What is NOT emitted.</b> Nothing when the pass observed no time, when the chosen source has no
     /// countable interval, or for a key with zero wait in the window (a fact about nothing). No fact for the
     /// <c>CPU</c> type — on Aurora it is on-CPU time reported under the wait function, on stock the
     /// <c>CPU/Running</c> pseudo-row; it is excluded from the share denominator too, so <c>share_of_wait_time</c>
     /// is a share of WAITING. No query attribution (the sampling table's <c>query_id</c> dimension is a later
-    /// slice). No anomaly — <c>ANOMALY_PG_WAIT_PROFILE</c> is lane 9's.</para>
+    /// slice). No anomaly — <c>ANOMALY_PG_WAIT_PROFILE</c> is lane 9's and <c>ANOMALY_PG_SAMPLED_WAIT_PROFILE</c>
+    /// lane 24's, both in <c>PgTargetAnomalyDetector</c>.</para>
     /// </summary>
     private async partial Task CollectWaitFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -286,7 +333,7 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
 
             var rows = new List<WaitProfileRow>();
             double observedSec = 0;
-            int sampleCount = 0, collectionCount = 0, restartCollections = 0;
+            int sampleCount = 0, collectionCount = 0, restartCollections = 0, sampledCollections = 0;
 
             using (var cmd = new NpgsqlCommand(PgWaitStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
             {
@@ -302,6 +349,7 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
                     sampleCount = Convert.ToInt32(reader.GetValue(5));
                     collectionCount = Convert.ToInt32(reader.GetValue(6));
                     restartCollections = Convert.ToInt32(reader.GetValue(7));
+                    sampledCollections = Convert.ToInt32(reader.GetValue(8));
                     if (reader.IsDBNull(0)) continue;
                     rows.Add(new WaitProfileRow(
                         reader.GetString(0),
@@ -314,14 +362,20 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
             if (collectionCount > 0)
             {
                 /* This flavour writes pg_wait_stats. Rows with no countable interval emit nothing, and do not
-                   fall back — see the method remarks. */
+                   fall back — see the method remarks. When pg_wait_sampling ALSO wrote this window the exact source
+                   wins and the fact says the sampled profile was suppressed (method remarks). */
                 EmitWaitFacts(context, facts, rows, observedSec, sampleCount, collectionCount, sampled: null,
-                    extra: (PgTargetScorer.WaitRestartCollectionsKey, restartCollections));
+                    extra:
+                    [
+                        (PgTargetScorer.WaitRestartCollectionsKey, restartCollections),
+                        (PgTargetScorer.WaitSampledSuppressedByExactKey, sampledCollections > 0 ? 1 : 0),
+                    ]);
                 return;
             }
 
             /* The fallback: no pg_wait_stats rows in the window means this flavour does not write that table. */
-            int profilePeriodMs = 0, resetCount = 0;
+            int profilePeriodMs = 0, resetCount = 0, unknownSampledCollections = 0;
+            double intervalSecTotal = 0;
             using (var cmd = new NpgsqlCommand(PgWaitSamplingSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
             {
                 cmd.Parameters.AddWithValue(context.ServerId);
@@ -334,6 +388,8 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
                     observedSec = Convert.ToDouble(reader.GetValue(7));
                     sampleCount = Convert.ToInt32(reader.GetValue(8));
                     collectionCount = Convert.ToInt32(reader.GetValue(9));
+                    intervalSecTotal = Convert.ToDouble(reader.GetValue(10));
+                    unknownSampledCollections = Convert.ToInt32(reader.GetValue(11));
                     if (reader.IsDBNull(0)) continue;
                     rows.Add(new WaitProfileRow(
                         reader.GetString(0),
@@ -350,8 +406,11 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
 
             if (rows.Count == 0) return;
 
+            /* sampled_ms is KNOWN for the window only when every countable collection carried it; one pre-V133
+               (NULL) collection read as its whole interval makes the window's denominator partly the old
+               arithmetic, and the fact says so rather than let 30 s be guessed (PgWaitSamplingSql remarks). */
             EmitWaitFacts(context, facts, rows, observedSec, sampleCount, collectionCount,
-                sampled: (profilePeriodMs, resetCount), extra: null);
+                sampled: (profilePeriodMs, resetCount, intervalSecTotal, SampledMsKnown: unknownSampledCollections == 0), extra: null);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -366,7 +425,11 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
     /// Groups the per-(type, event) rows into the vocabulary and stamps one fact per key with wait in the
     /// window. Shared by both reads so the two grades cannot drift in shape: the only differences are the
     /// <c>is_sampled</c> / <c>estimate_resolution_ms</c> / <c>delta_samples</c> / <c>peak_backends</c> /
-    /// <c>counter_resets</c> keys on a sampled fact and <c>restart_collections</c> on an Aurora one. Internal so
+    /// <c>counter_resets</c> / <c>sampled_ms_known</c> / <c>wait_source_interval_ms</c> keys on a sampled fact and
+    /// <c>restart_collections</c> / <c>sampled_suppressed_by_exact</c> on an Aurora one. <paramref name="observedSec"/>
+    /// is the fraction's denominator in seconds: the wait source's own observed time on an Aurora call, the time the
+    /// sampler was WATCHING on a sampled one (Σ <c>sampled_ms</c>, or the interval where the row carried none);
+    /// <c>sampled.IntervalSec</c> is the wall time between the same collections, stated beside it. Internal so
     /// <c>PgTargetWaitTests</c> can execute the grouping and the estimate arithmetic on arranged rows without a
     /// store — the same seam <c>PgFactCollector.BuildCoverage</c> offers the coverage pins.
     /// </summary>
@@ -377,8 +440,8 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
         double observedSec,
         int sampleCount,
         int collectionCount,
-        (int PeriodMs, int Resets)? sampled,
-        (string Key, double Value)? extra)
+        (int PeriodMs, int Resets, double IntervalSec, bool SampledMsKnown)? sampled,
+        IReadOnlyList<(string Key, double Value)>? extra)
     {
         if (observedSec <= 0) return;
         var waitObservedMs = observedSec * 1000.0;
@@ -469,10 +532,18 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
                 fact.Metadata[PgTargetScorer.WaitDeltaSamplesKey] = count;
                 fact.Metadata[PgTargetScorer.WaitPeakBackendsKey] = peakBackends;
                 fact.Metadata[PgTargetScorer.WaitCounterResetsKey] = s.Resets;
+                /* The duty cycle, stated: the wall time between the countable collections beside the time the
+                   sampler watched (the denominator), and whether every collection disclosed the latter (V133) or
+                   some were read as their whole interval (pre-V133 NULL — lane 5's arithmetic, never a guessed 30 s). */
+                fact.Metadata[PgTargetScorer.WaitSourceIntervalMsKey] = s.IntervalSec > 0 ? s.IntervalSec * 1000.0 : waitObservedMs;
+                fact.Metadata[PgTargetScorer.WaitSampledMsKnownKey] = s.SampledMsKnown ? 1 : 0;
             }
 
-            if (extra is { } e)
-                fact.Metadata[e.Key] = e.Value;
+            if (extra is not null)
+            {
+                foreach (var (extraKey, extraValue) in extra)
+                    fact.Metadata[extraKey] = extraValue;
+            }
 
             facts.Add(fact);
         }

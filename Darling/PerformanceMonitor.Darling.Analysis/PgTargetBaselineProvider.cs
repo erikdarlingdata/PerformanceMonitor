@@ -45,13 +45,14 @@ namespace PerformanceMonitor.Darling.Analysis;
 ///
 /// <para><b>The retention dependency, stated (D10).</b> Every table the arms read is purged service-side at
 /// <c>CollectorScheduleDefaults.All[table].RetentionDays</c> — the v1 four (<c>pg_database_stats</c>,
-/// <c>pg_session_states</c>, <c>pg_wait_stats</c>, <c>pg_cpu_utilization</c>) and the v2 three (<c>pg_io_stats</c>,
-/// lane 11; <c>pg_replication_stats</c>, lane 12; <c>pg_write_stats</c>, lane 15) — and NONE is in
+/// <c>pg_session_states</c>, <c>pg_wait_stats</c>, <c>pg_cpu_utilization</c>), the v2 three (<c>pg_io_stats</c>,
+/// lane 11; <c>pg_replication_stats</c>, lane 12; <c>pg_write_stats</c>, lane 15) and <c>pg_wait_sampling</c>
+/// (lane 24) — and NONE is in
 /// <c>TimescaleSupport.RawTierCoverage</c>, the 4-day raw tier that #1757 found under the SQL Server baselines —
 /// <c>PgTargetAnomalyTests</c> pins both halves. So the supply is exactly the window: a 30-day question over 30
 /// days of rows, with the purge grain eating the oldest sliver. Retention is user-editable per collector, and
 /// <c>DarlingRetentionHorizons.BaselineServingRawCollectors</c> floors the purge horizon at the baseline window
-/// for every one of these seven exactly as it does for the SQL Server raw-reading arms (<c>cpu_utilization</c>,
+/// for every one of these exactly as it does for the SQL Server raw-reading arms (<c>cpu_utilization</c>,
 /// <c>file_io_stats</c>) — the v1 four since #3711, lane 12's table with its lane, lanes 11 and 15's with the
 /// #3691 between-waves batch; <c>BaselineSupplyTests</c> derives the floored set from the arms' own query text,
 /// so an arm added here without a floor fails there. If these tables are ever tiered to 4-day raw, PostgreSQL
@@ -62,11 +63,13 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// rated over the collection's own gap; <c>pg_session_count</c> — the denormalised <c>total_sessions</c> of
 /// each capture; <c>pg_deadlock_rate</c> — deadlocks per HOUR per collection off the same difference;
 /// <c>pg_wait_ms_per_sec</c> — the Aurora all-types wait rate under the three-state interval, CPU excluded;
-/// <c>pg_cpu</c> — percent of the configured capacity ceiling (Aurora only). Stock PostgreSQL's SAMPLED wait
-/// estimate gets NO baseline in v1: a per-backend-sample count quantised at <c>profile_period</c> has a different
-/// noise distribution from a measured microsecond sum, and a bucket that mixed the two (or a threshold tuned on
-/// one applied to the other) would be the unit error adversarial item A names. When a sampled arm arrives it is
-/// its own metric name, never this one.</para>
+/// <c>pg_cpu</c> — percent of the configured capacity ceiling (Aurora only); <c>pg_sampled_wait_ms_per_sec</c>
+/// (lane 24, #3691) — stock PostgreSQL's SAMPLED wait rate over the time the sampler was watching
+/// (<c>sampled_ms</c>, V133). v1 gave the sampled estimate NO baseline because a per-backend-sample count
+/// quantised at <c>profile_period</c> has a different noise distribution from a measured microsecond sum, and a
+/// bucket that mixed the two (or a threshold tuned on one applied to the other) would be the unit error
+/// adversarial item A names; the arm that arrived is its own metric name, never <c>pg_wait_ms_per_sec</c>, and
+/// <c>pg_wait_sampling</c> joined the floored set with it.</para>
 /// </summary>
 public sealed partial class PgTargetBaselineProvider : PgBaselineProvider
 {
@@ -220,6 +223,9 @@ WITH clean AS (
         MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),
         /* wave 3 (#3691, between waves): the blocking family's arm, null until lane 17 fills its partial. */
         MetricNames.PgBlockedSessions => BlockedSessionsBaselineQuery(),
+        /* lane 24 (#3691): stock's SAMPLED wait rate over sampled_ms (V133) — its own metric, never pooled with the
+           Aurora pg_wait_ms_per_sec arm above (PgTargetBaselineProvider.WaitsSampled.cs). */
+        MetricNames.PgSampledWaitMsPerSec => SampledWaitBaselineQuery(),
 
         _ => null,
     };
@@ -228,6 +234,7 @@ WITH clean AS (
     private static partial string? ReplayLagBaselineQuery();
     private static partial string? WalBytesPerSecBaselineQuery();
     private static partial string? BlockedSessionsBaselineQuery();
+    private static partial string? SampledWaitBaselineQuery();
 
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
 }

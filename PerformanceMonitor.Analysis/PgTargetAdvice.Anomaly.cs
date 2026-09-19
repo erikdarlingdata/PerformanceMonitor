@@ -153,6 +153,10 @@ public static partial class PgTargetAdvice
                the delegation-equality census expects of a stub, and never the SQL Server "Anomalous spike" composer. */
             case PgTargetFactKeys.AnomalyBlocking:
                 return ComposeBlockingAnomaly(factsByKey);
+            /* lane 24 (#3691): the stock SAMPLED wait profile composes beside the wait family (PgTargetAdvice.Wait.cs) —
+               the sampled grade's vocabulary ("estimated from sampling", the duty cycle) lives there, never here. */
+            case PgTargetFactKeys.AnomalySampledWaitProfile:
+                return ComposeSampledWaitAnomaly(factsByKey);
 
             default:
                 return null;
