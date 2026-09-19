@@ -212,6 +212,7 @@ public static class PgMigrations
         new Migration(130, "pg-log-event-metrics", V130Sql),
         new Migration(131, "notification-routes", V131Sql),
         new Migration(132, "perfmon-counter-type", V132Sql),
+        new Migration(133, "pg-numbackends-and-sampled-ms", V133Sql),
     };
 
     /// <summary>
@@ -1144,6 +1145,83 @@ ALTER TABLE collect.perfmon_stats
    pre-V132 column list forever — the V14 lesson, restated by V80, V81, V127 and V128. Appending is the one
    alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
 CREATE OR REPLACE VIEW collect.v_perfmon_stats AS SELECT * FROM collect.perfmon_stats;";
+
+    /// <summary>
+    /// V133 — two nullable integer columns on two PostgreSQL-target tables, the ONE rung of the #3691 v2 wave:
+    /// <c>numbackends</c> on <c>collect.pg_database_stats</c> and <c>sampled_ms</c> on
+    /// <c>collect.pg_wait_sampling</c>. Both are written by their collectors from this rung on and READ BY
+    /// NOTHING yet — the analysis-side consumers (a connection-saturation numerator, a duty-cycle-honest
+    /// sampled wait rate) are follow-on lanes once the fleet has rows to calibrate against. Pinned by
+    /// <c>PgNumbackendsAndSampledMsRungTests</c>.
+    ///
+    /// <para><b><c>numbackends</c> — the saturation NUMERATOR the design wanted.</b>
+    /// <c>pg_stat_database.numbackends</c> is the number of backends currently connected to each database:
+    /// a LEVEL, not a counter, client-only (background workers are not counted), universal (present since
+    /// PostgreSQL 8.x, so every major this repo sweeps reports it) and sampled every minute with the rest of
+    /// the row. The v1 saturation read had only <c>pg_session_states.total_sessions</c>, which is an
+    /// exception capture — that collector stores the sessions holding an open transaction old enough to
+    /// matter, so its count is the population that met its capture rule, not the connected population — and
+    /// an exception count over <c>max_connections</c> is not a saturation fraction. Stored per database like
+    /// every other column of the row
+    /// (a consumer sums across databases for the cluster figure, and the per-database split is itself a
+    /// finding: one database holding 900 of 1,000 slots is a different conversation from ten holding 90).
+    /// NULL on a pre-rung row, which a reader must treat as "not sampled" rather than 0 connections.</para>
+    ///
+    /// <para><b><c>sampled_ms</c> — the duty-cycle denominator the sampler arm owed its readers.</b> The #3604
+    /// service-side sampler stores <c>profile_period_ms = 1000</c> and its cumulative tally, but it OBSERVES
+    /// only <c>SamplerSnapshotsPerCycle</c> one-second snapshots (30 s) of each 300 s cycle, so
+    /// <c>Δsamples × period / observed_window</c> — the arithmetic a rate read over the analysis window
+    /// naturally writes — understates that arm's wait rate by the duty cycle, roughly 10×. The instrument
+    /// token that would let a reader correct for it lives in <c>collector_state</c>, outside the analysis
+    /// FROM/JOIN whitelist, and the period alone cannot say how much of the interval was watched. This column
+    /// stores, on every row a collection writes, the milliseconds of observation that collection folded into
+    /// the tally: the number of snapshots actually read × the period (30 × 1,000 = 30,000 on a full window;
+    /// fewer if the batch was cut short). The extension arm writes NULL — the module samples in-engine every
+    /// <c>profile_period</c> for the WHOLE interval, so the interval IS the observed time and there is no
+    /// duty cycle to disclose — and a reader treats NULL as "period × count over the row's whole interval",
+    /// which is exactly today's behaviour. Per row rather than cumulative-in-state: the observed window of one
+    /// collection is a fact the collection knows and nothing else can recover, a per-row value survives a
+    /// tally reset or a cap-drop without a second counter to keep in step with the first, and a consumer that
+    /// wants the window's total sums it over the collections between its two endpoints (one value per
+    /// <c>collection_time</c>; every row of a collection carries the same figure, like
+    /// <c>profile_period_ms</c>).</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128 and V132 and every column-adding
+    /// rung on a collector table: a pre-rung row never sampled either value, and NULL is the honest word for
+    /// it. Both tables are compressed hypertables on the fleet (one-day chunks, segmented by <c>server_id</c>,
+    /// 30 days of raw retention) and a nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL;
+    /// TimescaleDB accepts it on a compressed hypertable with a compression policy attached — the shape V127
+    /// and V128 used on <c>wait_stats</c>, <c>pg_wait_stats</c> and <c>pg_statement_stats</c> and V132 on
+    /// <c>perfmon_stats</c>, verified live on 2.28.1 each time. A DEFAULT would be the trap: TimescaleDB has
+    /// to rewrite compressed segments to honour one.</para>
+    ///
+    /// <para><b>No view to refresh.</b> Neither table has a <c>v_</c> passthrough — the PostgreSQL collector
+    /// tables have been view-less since V63 (V83's doc says so of <c>pg_database_stats</c>; V128 restated it
+    /// when it dressed <c>pg_wait_stats</c>), which is why this rung is two ALTERs and nothing else, unlike
+    /// V132's ALTER-plus-view. A fresh store gets both columns from the
+    /// generated CREATE TABLE (each collector definition carries its column, appended LAST so the positional
+    /// COPY writer and an upgraded store's ALTER agree on where it sits) and the ALTERs no-op there. The V101
+    /// rule applies: V83's and V96's CREATE texts carry the columns too, because <c>PgSchemaGeneratorTests</c>
+    /// holds every collector rung column-for-column equal to the generator's CURRENT output, and a store that
+    /// climbed through them before this rung existed is exactly the population these ALTERs are for.</para>
+    ///
+    /// <para><b>Lite is unchanged.</b> Lite stores no <c>pg_*</c> table
+    /// (<c>DuckDbSchemaGenerator.StoredCollectors</c> is the SQL Server set), so there is no twin column and
+    /// no DuckDB schema bump — the V96 decision, where V128's Lite bump was for the SQL Server families it
+    /// also dressed, not for <c>pg_wait_stats</c>.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It reads neither column anywhere: no MCP tool
+    /// projects <c>numbackends</c>, no fact divides by it, and
+    /// <c>DarlingPgWaitSamplingReader.EstimatedWaitMs</c> keeps its <c>samples × period</c> arithmetic with
+    /// a doc-comment naming <c>sampled_ms</c> as the denominator a rate read must use. It does not backfill,
+    /// touch <c>pg_session_states</c>, or change either collector's existing columns.</para>
+    /// </summary>
+    private const string V133Sql = @"
+ALTER TABLE collect.pg_database_stats
+    ADD COLUMN IF NOT EXISTS numbackends integer;
+
+ALTER TABLE collect.pg_wait_sampling
+    ADD COLUMN IF NOT EXISTS sampled_ms integer;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -2756,6 +2834,14 @@ ALTER TABLE collect.servers
     /// <para>Additive and view-less exactly like V63-V69 and V71: a fresh store gets the table from V1's
     /// generated schema, and this rung is what an already-existing store gets. A store monitoring no
     /// PostgreSQL target carries one more empty table and nothing else changes.</para>
+    ///
+    /// <para><b>The column after <c>stats_reset</c> is V133's (#3691), and it is here for the V101 rule.</b>
+    /// A store's tables come from one of two texts: a fresh store builds every table from the generated schema
+    /// at V1 (this CREATE then no-ops, <c>IF NOT EXISTS</c>), while a store that climbed through V83 before
+    /// V133 existed has the nine-payload-column table this text built at the time.
+    /// <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's output column for column, and
+    /// the generator emits the collector's CURRENT columns — so this text carries <c>numbackends</c> for the
+    /// fresh population, and V133's ALTER carries it for the existing one. Neither is redundant.</para>
     /// </summary>
     private const string V83Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
@@ -2771,7 +2857,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
     temp_files bigint,
     temp_bytes bigint,
     deadlocks bigint,
-    stats_reset timestamp
+    stats_reset timestamp,
+    numbackends integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_database_stats_time
@@ -4250,6 +4337,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_kernel_stats_time
     /// <para><c>event_type = 'Activity'</c> never reaches this table: those are background processes idling,
     /// and they dominate a raw profile permanently BECAUSE nothing is happening. A backend that was not
     /// waiting is stored as <c>CPU</c>/<c>Running</c> rather than as a blank row.</para>
+    ///
+    /// <para><b>The column after <c>backend_count</c> is V133's (#3691), and it is here for the V101 rule.</b>
+    /// A fresh store builds the table from the generated schema at V1 (this CREATE then no-ops,
+    /// <c>IF NOT EXISTS</c>); a store that climbed through V96 before V133 existed has the six-payload-column
+    /// table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung to be the
+    /// generator's output column for column, and the generator emits the collector's CURRENT columns — so
+    /// this text carries <c>sampled_ms</c> for the fresh population, and V133's ALTER carries it for the
+    /// existing one. Neither is redundant.</para>
     /// </summary>
     private const string V96Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
@@ -4262,7 +4357,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
     query_id bigint,
     sample_count bigint,
     profile_period_ms integer,
-    backend_count integer
+    backend_count integer,
+    sampled_ms integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_sampling_time

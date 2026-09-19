@@ -131,20 +131,26 @@ public sealed class PgWaitSamplerLiveTests
             Assert.InRange(wall.ElapsedMilliseconds, expectedWindowMs, expectedWindowMs + 30_000);
 
             /* 2. The rows: at the sampler's period, with the two workloads visible. */
-            var rows = new List<(string Type, string Event, long Samples, int PeriodMs, int Backends)>();
+            var rows = new List<(string Type, string Event, long Samples, int PeriodMs, int Backends, int? SampledMs)>();
             await using (var read = postgres.CreateCommand(
-                "SELECT event_type, event, sample_count, profile_period_ms, backend_count FROM pg_wait_sampling WHERE server_id = $1"))
+                "SELECT event_type, event, sample_count, profile_period_ms, backend_count, sampled_ms FROM pg_wait_sampling WHERE server_id = $1"))
             {
                 read.Parameters.AddWithValue(ServerId);
                 await using var reader = await read.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
-                    rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt32(3), reader.GetInt32(4)));
+                    rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt32(3), reader.GetInt32(4),
+                        reader.IsDBNull(5) ? null : reader.GetInt32(5)));
                 }
             }
 
             Assert.NotEmpty(rows);
             Assert.All(rows, r => Assert.Equal(PgWaitSamplingCollector.SamplerPeriodMs, r.PeriodMs));
+            /* V133 (#3691): the real batch yields exactly SamplerSnapshotsPerCycle four-column result sets, so
+               every row of the cycle stores the full window as its observed time - the denominator a rate read
+               divides by instead of the 300 s interval. Through the real runner and the real COPY, so the
+               appended column's position is proven against the migrated table, not a fake writer. */
+            Assert.All(rows, r => Assert.Equal(PgWaitSamplingCollector.SamplerSnapshotsPerCycle * PgWaitSamplingCollector.SamplerPeriodMs, r.SampledMs));
             var lockRow = Assert.Single(rows, r => r.Type == "Lock" && r.Event == "relation");
             /* Held for the whole window, so seen in nearly every snapshot; allow for the first snapshot racing the waiter. */
             Assert.InRange(lockRow.Samples, PgWaitSamplingCollector.SamplerSnapshotsPerCycle / 2, PgWaitSamplingCollector.SamplerSnapshotsPerCycle);

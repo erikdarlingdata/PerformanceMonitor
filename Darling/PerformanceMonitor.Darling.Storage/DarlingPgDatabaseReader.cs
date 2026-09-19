@@ -17,6 +17,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// Reads the per-database <c>pg_stat_database</c> counters from <c>pg_database_stats</c>, differenced across
 /// the window — temp-file spills, cache hit ratio, deadlocks, and the commit/rollback split (#2539).
+/// <para><b>Not yet read here: <c>numbackends</c></b> (V133, #3691) — the client backends connected to each
+/// database at the instant of the row, a LEVEL beside the counters this reader differences. A reader that
+/// takes it up must never difference it (the newest row's value is the reading, or a MAX/AVG over the window
+/// is the shape), must treat a NULL as "not sampled" rather than zero connections (every pre-V133 row is
+/// NULL), and must sum across databases for the cluster figure a <c>max_connections</c> fraction wants. The
+/// saturation consumer is the follow-on lane's; this rung only stores the column.</para>
 /// </summary>
 public static class DarlingPgDatabaseReader
 {
