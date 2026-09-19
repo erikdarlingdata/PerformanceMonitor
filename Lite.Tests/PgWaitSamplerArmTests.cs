@@ -219,6 +219,13 @@ public sealed class PgWaitSamplerArmTests
         var io = Assert.Single(rows, r => r.EventType == "IO");
         Assert.Equal(1, io.SampleCount);
 
+        /* V133 (#3691): sampled_ms is the WINDOW's observed time - three four-column snapshots were read, so
+           3 x the period - counted by result-set shape like the tally (the sleep and clear sets are not
+           snapshots), and the same on every row of the cycle. It is what a rate read divides the delta by
+           instead of the interval: here the Lock key waited in 3 of 3,000 observed ms = 100%, which
+           "3 samples x 1,000 ms over a 300,000 ms interval" would have called 1%. */
+        Assert.All(rows, r => Assert.Equal(3 * PgWaitSamplingCollector.SamplerPeriodMs, r.SampledMs));
+
         /* Most-sampled first, like the extension arm's ORDER BY. */
         Assert.Equal("Lock", rows[0].EventType);
 
@@ -252,6 +259,12 @@ public sealed class PgWaitSamplerArmTests
         var io = Assert.Single(rows, r => r.EventType == "IO");
         Assert.Equal(1, io.SampleCount);
         Assert.Equal(0, io.BackendCount);
+
+        /* sampled_ms is THIS cycle's window (one snapshot), not a cumulative across cycles (V133): the first
+           cycle observed one snapshot too, and a consumer that wants the two cycles' total sums the two rows'
+           values rather than differencing them. A carried key not seen this window still carries the window
+           it was re-emitted in - the observation covered it and found nothing. */
+        Assert.All(rows, r => Assert.Equal(1 * PgWaitSamplingCollector.SamplerPeriodMs, r.SampledMs));
 
         var roundTrip = PgWaitSamplingCollector.ParseTally(second.PendingState[PgWaitSamplingCollector.TallyStateKey]);
         Assert.Equal(2, roundTrip[("Lock", "relation", 111)]);
@@ -313,8 +326,13 @@ public sealed class PgWaitSamplerArmTests
             new FakeCollectorDataReader(new object[] { "Lock", "relation", 111L, 40L, 10, 2 }),
             context, CancellationToken.None);
 
-        Assert.Single(rows);
+        var row = Assert.Single(rows);
         Assert.Equal(PgWaitInstrument.ExtensionSampled, context.PendingState[PgWaitSamplingCollector.InstrumentStateKey]);
+        /* V133 (#3691): the extension arm has no duty cycle to disclose - the module samples the whole
+           interval in-engine - so sampled_ms is NULL, which a reader takes as "period x count over the row's
+           whole interval": today's arithmetic, unchanged. NULL rather than the interval length because the
+           collector does not know the interval; the read does. */
+        Assert.Null(row.SampledMs);
         /* And it CLEARS the sampler's tally rather than leaving the last one to be resumed months later if
            the target ever falls back to the sampler arm (#3645 review) - the host persists only PendingState
            keys, so "leave it alone" would mean "keep it forever". */

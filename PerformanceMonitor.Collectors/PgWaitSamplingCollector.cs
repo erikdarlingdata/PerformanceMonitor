@@ -91,7 +91,11 @@ namespace PerformanceMonitor.Collectors;
 /// <c>pg_blocking</c> and <c>pg_lock_stats</c> — the two existing PostgreSQL samplers — get from one snapshot a
 /// minute. The period is one second rather than five because each doubling of the period halves the odds of
 /// seeing a wait shorter than it, while the cost — a shared-memory read of <c>pg_stat_activity</c>, well under
-/// a millisecond at hundreds of backends, from a connection the pool holds open regardless — does not move.</para>
+/// a millisecond at hundreds of backends, from a connection the pool holds open regardless — does not move.
+/// Since V133 (#3691) every row this arm writes also carries <c>sampled_ms</c>, the milliseconds the window
+/// actually observed, because a 10% duty cycle that only the instrument token disclosed made every rate read
+/// over the interval a 10× understatement; the extension arm writes NULL there, having watched the whole
+/// interval.</para>
 ///
 /// <para><b>Why the sampler reads are separate statements.</b> <c>pg_stat_activity</c> is snapshotted once per
 /// transaction on first access and the same rows are returned for the rest of it; a single statement that
@@ -134,13 +138,19 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
     /// because a count means nothing without it.</param>
     /// <param name="BackendCount">How many distinct backends contributed, since the per-pid rows are
     /// aggregated away.</param>
+    /// <param name="SampledMs">The milliseconds of observation THIS collection folded into the tally — the
+    /// sampler arm's duty-cycle denominator (V133, #3691): snapshots actually read × <see cref="SamplerPeriodMs"/>,
+    /// 30,000 on a full window. NULL on the extension arm, which samples the whole interval in-engine and has no
+    /// duty cycle to disclose; a reader treats NULL as "period × count over the row's whole interval". See
+    /// <see cref="PayloadColumns"/>.</param>
     public readonly record struct Row(
         string? EventType,
         string? Event,
         long QueryId,
         long SampleCount,
         int ProfilePeriodMs,
-        int BackendCount);
+        int BackendCount,
+        int? SampledMs);
 
     /* profile_period is read with the missing_ok form and defaulted rather than assumed: it is the
        module's own GUC, so it exists whenever the module is loaded, but a version that renamed it would
@@ -358,6 +368,22 @@ LIMIT 500";
         new CollectorColumn("sample_count", CollectorColumnType.BigInt),
         new CollectorColumn("profile_period_ms", CollectorColumnType.Integer),
         new CollectorColumn("backend_count", CollectorColumnType.Integer),
+        /* V133 (#3691): how many milliseconds of the interval this collection actually WATCHED. The sampler
+           arm stores profile_period_ms = 1000 and a cumulative tally, but it observes only
+           SamplerSnapshotsPerCycle one-second snapshots (30 s) of each 300 s cycle, so a reader's natural
+           "delta samples x period / interval" understates its wait rate by the duty cycle - roughly 10x - and
+           nothing in the ROW said so (the instrument token is in collector_state, which the analysis reads
+           cannot join). This is the denominator that read must use instead of the interval: snapshots
+           actually read x SamplerPeriodMs, per row, every row of a collection carrying the same figure like
+           profile_period_ms does. The extension arm writes NULL - the module samples in-engine for the whole
+           interval, so the interval IS the observed time - and NULL means exactly today's arithmetic.
+
+           Per row rather than a cumulative in state, deliberately: the observed window of one collection is a
+           fact only that collection knows, a per-row value survives a tally reset or a cap-drop without a
+           second counter to keep in step with the first, and a consumer wanting a window's total sums one
+           value per collection_time between its endpoints. Appended LAST because an ALTER on an existing
+           store can only append and the writer is positional. Written from this rung; read by nothing yet. */
+        new CollectorColumn("sampled_ms", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -394,7 +420,9 @@ LIMIT 500";
                 /* Defaulted to the module's own default rather than 0: a zero period would make any
                    reader's count-to-time inference divide the workload into nothing. */
                 ProfilePeriodMs: reader.IsDBNull(4) ? 10 : reader.GetInt32(4),
-                BackendCount: reader.IsDBNull(5) ? 0 : reader.GetInt32(5)));
+                BackendCount: reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                /* The extension observed the whole interval; there is no duty cycle to store (V133). */
+                SampledMs: null));
         }
 
         return rows;
@@ -414,15 +442,21 @@ LIMIT 500";
     /// distinct count across cycles would grow without meaning. The extension arm's figure is cumulative
     /// because the module's is; the column means "how many backends were doing this" on both, over the
     /// span each instrument can honestly speak for.</para>
+    ///
+    /// <para><b>sampled_ms is the WINDOW's observed time</b> (V133, #3691): the snapshots this batch actually
+    /// yielded × <see cref="SamplerPeriodMs"/>, counted by result-set shape like the tally itself, so a batch
+    /// cut short stores what it watched rather than what it meant to. Every row of the cycle carries it.</para>
     /// </summary>
     internal static async ValueTask<List<Row>> ReadSamplerAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var window = new Dictionary<(string Type, string Event, long QueryId), (long Samples, HashSet<int> Pids)>();
+        var snapshots = 0;
 
         do
         {
             if (reader.FieldCount == 4)
             {
+                snapshots++;
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     var key = (
@@ -480,7 +514,8 @@ LIMIT 500";
                 QueryId: kv.Key.QueryId,
                 SampleCount: kv.Value,
                 ProfilePeriodMs: SamplerPeriodMs,
-                BackendCount: window.TryGetValue(kv.Key, out var seen) ? seen.Pids.Count : 0))
+                BackendCount: window.TryGetValue(kv.Key, out var seen) ? seen.Pids.Count : 0,
+                SampledMs: snapshots * SamplerPeriodMs))
             .ToList();
     }
 
@@ -535,6 +570,7 @@ LIMIT 500";
             .Value(row.QueryId)
             .Value(row.SampleCount)
             .Value(row.ProfilePeriodMs)
-            .Value(row.BackendCount);
+            .Value(row.BackendCount)
+            .Value(row.SampledMs);
     }
 }

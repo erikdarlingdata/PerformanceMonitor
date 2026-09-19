@@ -39,7 +39,18 @@ public static class DarlingPgWaitSamplingReader
     /// statement — a background process — kept so attributed and unattributed waits stay distinguishable.</param>
     /// <param name="SampleCount">Samples observed IN THE WINDOW, already differenced.</param>
     /// <param name="EstimatedWaitMs"><c>SampleCount × profile_period_ms</c>. An estimate from a sampling
-    /// profiler, not a measured duration.</param>
+    /// profiler, not a measured duration.
+    /// <para><b>It is wait time OBSERVED, not wait time per interval</b> — and since V133 (#3691) the row says
+    /// how much of the interval was observed. On the extension arm the module samples in-engine for the whole
+    /// interval, so this figure over the window's length is an honest rate. On the service-sampled arm the
+    /// collector watches <c>SamplerSnapshotsPerCycle</c> one-second snapshots (30 s) of each 300 s cycle, so
+    /// the same figure over the window's length understates the rate by the duty cycle, roughly 10×. A rate
+    /// read must divide by <c>pg_wait_sampling.sampled_ms</c> — the milliseconds each collection actually
+    /// observed, one value per <c>collection_time</c>, summed over the collections between the window's two
+    /// endpoints — and treat a NULL <c>sampled_ms</c> (the extension arm, or any pre-V133 row) as "the whole
+    /// interval was observed", which is exactly the arithmetic below. This reader does NOT yet make that
+    /// correction: it reports the estimate as observed and leaves the rate to the consumer, which is the
+    /// follow-on lane's change, not this rung's.</para></param>
     /// <param name="CounterReset">True when the profile was reset inside the window, so the figure covers
     /// only the time since the reset rather than the whole window.</param>
     public sealed record PgWaitSamplingRow(

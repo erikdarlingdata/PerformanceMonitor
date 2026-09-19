@@ -28,6 +28,14 @@ namespace PerformanceMonitor.Collectors;
 /// <c>deadlocks</c> is a server-recorded count we had no PostgreSQL source for at all, and
 /// <c>xact_commit</c>/<c>xact_rollback</c> is how a rollback storm becomes visible.</para>
 ///
+/// <para><b>And one level, since V133 (#3691): <c>numbackends</c></b>, the client backends connected to the
+/// database at the instant of the read. It is the only column here that is NOT a cumulative counter — a
+/// gauge sampled once a minute, never differenced — and it exists because the connection-saturation question
+/// ("how full is <c>max_connections</c>") had no honest numerator: <c>pg_session_states</c> captures only the
+/// sessions holding an old open transaction, so its count is the exceptions, not the population. Written from
+/// this rung; read by nothing yet, so a store climbing through V133 accrues a day of it before any consumer
+/// asks.</para>
+///
 /// <para><b>Per-database rows, stored per database</b> (#2539 asked for this to be argued rather than
 /// inherited). Three reasons, in order of weight:</para>
 /// <list type="number">
@@ -52,7 +60,7 @@ namespace PerformanceMonitor.Collectors;
 /// hit ratio of everything else. It is labelled by the read rather than filtered by the collector, which
 /// keeps the stored rows the same set <c>pg_stat_database</c> itself returns.</para>
 ///
-/// <para><b>Cumulative since reset, differenced at read time</b> — the same rule
+/// <para><b>Cumulative since reset, differenced at read time</b> (every column but <c>numbackends</c>) — the same rule
 /// <see cref="PgIoStatsCollector"/> follows, and for the same reason: the raw counter is what the server
 /// reports, so storing it keeps every window recomputable and leaves no delta state to get out of step with
 /// the samples.</para>
@@ -74,13 +82,17 @@ public sealed class PgDatabaseStatsCollector : PostgresCollectorDefinitionBase<P
         long? TempFiles,
         long? TempBytes,
         long? Deadlocks,
-        DateTime? StatsReset);
+        DateTime? StatsReset,
+        int? Numbackends);
 
     /* VERSION FLOORS, checked column by column rather than assumed, because getting one wrong takes the
        whole collection down every cycle with "column does not exist":
 
          xact_commit, xact_rollback, blks_read, blks_hit  : PostgreSQL 8.x. Present in every major anyone
                                                             could plausibly monitor.
+         numbackends                                      : 8.x as well - the oldest column in the view.
+                                                            Selected since V133 (#3691); it needed no gate
+                                                            and got none.
          stats_reset                                      : 9.1.
          temp_files, temp_bytes, deadlocks                : 9.2.
 
@@ -107,7 +119,14 @@ public sealed class PgDatabaseStatsCollector : PostgresCollectorDefinitionBase<P
        counters come back at zero with a fresh stats_reset, which is exactly what the read reports.
 
        stats_reset is `timestamp with time zone`; AT TIME ZONE 'UTC' rather than ::timestamp, because the
-       cast renders in the SESSION's TimeZone and the store contract is naive UTC. */
+       cast renders in the SESSION's TimeZone and the store contract is naive UTC.
+
+       numbackends is selected LAST, after stats_reset, because it was added LAST (V133, #3691): the payload
+       is positional on both the reader ordinal and the COPY column list, and an upgraded store's ALTER can
+       only append. It is the one LEVEL in a row of counters - the backends connected to the database at the
+       instant of the read, client sessions only (background workers are not counted) - so a reader must
+       never difference it; it is the connection-saturation numerator the analysis wanted and
+       pg_session_states could not honestly supply. */
     internal const string QueryText = @"
 SELECT
     d.datname                              AS database_name,
@@ -118,7 +137,8 @@ SELECT
     d.temp_files                           AS temp_files,
     d.temp_bytes                           AS temp_bytes,
     d.deadlocks                            AS deadlocks,
-    (d.stats_reset AT TIME ZONE 'UTC')     AS stats_reset
+    (d.stats_reset AT TIME ZONE 'UTC')     AS stats_reset,
+    d.numbackends                          AS numbackends
 FROM pg_catalog.pg_stat_database AS d
 ORDER BY d.datname";
 
@@ -195,6 +215,15 @@ ORDER BY d.datname";
            past the old value inside one collection interval is invisible to the differences and visible
            here. That case is why this is stored rather than inferred. */
         new CollectorColumn("stats_reset", CollectorColumnType.Timestamp),
+        /* V133 (#3691): the one LEVEL in the row. pg_stat_database.numbackends is the number of client
+           backends connected to this database at the instant of the read - a gauge sampled every minute,
+           universal (PostgreSQL 8.x), and the honest numerator for "how full is max_connections", which
+           pg_session_states cannot answer because it captures only sessions holding an old open
+           transaction. NULL on every row written before the rung, which a reader must read as "not
+           sampled" and never as zero connections. Appended LAST, because an ALTER on an existing store can
+           only append and the writer is positional. Written from this rung; read by nothing yet - the
+           saturation consumer is a follow-on lane. */
+        new CollectorColumn("numbackends", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -212,7 +241,8 @@ ORDER BY d.datname";
                 TempFiles: Long(reader, 5),
                 TempBytes: Long(reader, 6),
                 Deadlocks: Long(reader, 7),
-                StatsReset: reader.IsDBNull(8) ? null : reader.GetDateTime(8)));
+                StatsReset: reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                Numbackends: reader.IsDBNull(9) ? null : reader.GetInt32(9)));
         }
 
         return rows;
@@ -236,6 +266,7 @@ ORDER BY d.datname";
             .Value(row.TempFiles)
             .Value(row.TempBytes)
             .Value(row.Deadlocks)
-            .Value(row.StatsReset);
+            .Value(row.StatsReset)
+            .Value(row.Numbackends);
     }
 }

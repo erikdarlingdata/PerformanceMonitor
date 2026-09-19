@@ -34,10 +34,10 @@ namespace Darling.Tests;
 /// because the row could not tell them. The rung, the passthrough refresh, the viewer probe's top arm, the
 /// Darling readers that now select the type, and the MCP payloads that publish it.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>NotificationRoutesRungTests</c> (V131)
-/// when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current. When the next rung lands, those claims move on
-/// and what stays is everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this class carried moved to <c>PgNumbackendsAndSampledMsRungTests</c>
+/// (V133) when that rung landed, the same handoff this class received from <c>NotificationRoutesRungTests</c>
+/// (V131). What stays here is the one-rung-behind half: a store carrying this and not V133 maps to 132, which
+/// is the honest answer for it and what makes the upgrade banner correct in both directions.</para>
 ///
 /// <para>The collector's write shape (a gauge row is the raw value with NULL delta and NULL interval and no
 /// delta call; a rate row is unchanged plus the type) is pinned value-by-value in
@@ -49,7 +49,9 @@ public sealed class PerfmonCounterTypeRungTests
     private const int RungVersion = 132;
     private const int PreviousVersion = 131;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V133 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later rung
+    /// appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 107;
 
     private const string Table = "perfmon_stats";
@@ -66,14 +68,16 @@ public sealed class PerfmonCounterTypeRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("perfmon-counter-type", V132.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V133 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to PgNumbackendsAndSampledMsRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V132 is expected to sit below the ladder's top now that V133 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -145,16 +149,16 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Equal(7, PerfmonStatsCollector.Instance.PayloadColumns.Count);
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites, one rung behind the top) -------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
-    /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// The viewer probe's three sites carry this rung's sentinel, and the map has an arm for it one rung behind
+    /// the top. The probe asks the question, the caller reads the answer, the map has the parameter — a sentinel
+    /// present at only some of them shifts every LATER ordinal onto the wrong column, and a missing arm maps a
+    /// store that stopped here one rung short.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"table_name = '{Table}'\n                                                     AND   column_name = '{Column}'",
@@ -162,7 +166,6 @@ public sealed class PerfmonCounterTypeRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPerfmonCounterType", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -170,9 +173,12 @@ public sealed class PerfmonCounterTypeRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V133 has appended its own; the
+           "is the last argument" claim moved to PgNumbackendsAndSampledMsRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V132's sentinel is expected to sit below the top rung's now that V133 has landed");
 
+        /* Every sentinel true = a fully-migrated store, which must map to exactly the ladder's top. Stated
+           against StorageVersion rather than this rung's number, so it survives every later rung. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
@@ -183,14 +189,14 @@ public sealed class PerfmonCounterTypeRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns THIS rung's version. */
         var thisArm = viewer.IndexOf("if (hasPerfmonCounterType)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf(PreviousArmSource, StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V132 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V132 sentinel arm — a store that stopped here would map to 131");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V132 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V132 arm sits below the previous rung's, so a store that stopped here maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table is named in the probe line and nowhere in the arm's prose. */

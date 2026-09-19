@@ -112,6 +112,25 @@ public class PgWaitSamplingCollectorDefinitionTests
     }
 
     /// <summary>
+    /// V133 (#3691): <c>sampled_ms</c> is the sampler arm's duty-cycle denominator - how much of the interval
+    /// the collection actually observed - and it is LAST, because an upgraded store's ALTER can only append
+    /// and the writer is positional. Integer like the period beside it. Written NULL by the extension arm
+    /// (<c>PgWaitSamplerArmTests</c> pins both arms' values); the extension query does not select it because
+    /// the module has no notion of a duty cycle to select.
+    /// </summary>
+    [Fact]
+    public void TheObservedWindow_IsTheLastPayloadColumn_AndTheExtensionQueryDoesNotSelectIt()
+    {
+        var columns = PgWaitSamplingCollector.Instance.PayloadColumns;
+        Assert.Equal(7, columns.Count);
+        Assert.Equal("sampled_ms", columns[^1].Name);
+        Assert.Equal(CollectorColumnType.Integer, columns[^1].Type);
+        Assert.Equal("backend_count", columns[^2].Name);
+
+        Assert.DoesNotContain("sampled_ms", Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Read with the MISSING_OK form, like every other GUC this codebase reads: a renamed or absent setting
     /// must degrade one column rather than fail the whole collection.
     /// </summary>
