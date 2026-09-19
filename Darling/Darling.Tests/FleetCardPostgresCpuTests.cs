@@ -296,8 +296,9 @@ public sealed class FleetCardPostgresCpuTests
     }
 
     /// <summary>
-    /// And they agree BY CONSTRUCTION rather than by observation: the two surfaces above are the ONLY
-    /// places under <c>Darling/</c> that decide a CPU band, and both reach the shared decision. The theory
+    /// And they agree BY CONSTRUCTION rather than by observation: the two surfaces above, plus the PostgreSQL
+    /// High CPU alert's grade since #3653, are the ONLY places under <c>Darling/</c> that decide a CPU
+    /// band, and all of them reach the shared decision. The theory
     /// above would pass just as happily against two hand-written copies that currently agree, which is
     /// precisely the state #2473 found the collection-status ladder in - three copies agreeing and a fourth
     /// that did not.
@@ -313,7 +314,7 @@ public sealed class FleetCardPostgresCpuTests
     /// because every doc comment in this family QUOTES the identifiers being counted.</para>
     /// </summary>
     [Fact]
-    public void TheOnlyTwoSurfacesThatBandCpu_BothReachTheSharedDecision()
+    public void TheOnlySurfacesThatBandCpu_AllReachTheSharedDecision()
     {
         var deciders = new List<string>();
         var callers = new List<string>();
@@ -350,10 +351,22 @@ public sealed class FleetCardPostgresCpuTests
         /* The scan is the enforcement, so finding almost nothing is a broken scan, not a clean tree. */
         Assert.True(scanned > 50, $"scanned only {scanned} file(s) under Darling/");
 
-        var expected = new[] { "DarlingFleetReader.cs", "ViewerDataService.Overview.cs" };
+        /* The two CARDS build the bundle or call the ladder, and both first ask FleetCpuProvenance which
+           collector produced the reading, because a card can be either engine's. */
+        var expectedCards = new[] { "DarlingFleetReader.cs", "ViewerDataService.Overview.cs" };
 
-        Assert.Equal(expected, deciders.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Equal(expected, callers.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        /* #3653 (A8e): the third decider is the PostgreSQL High CPU ALERT (DarlingWorker.GradePgCpuFire),
+           which grades its fire through the same ladder so the row and the card cannot disagree about the
+           colour of one minute — exactly the decision this census exists to force on a new surface. It
+           is a decider and NOT a caller of the two provenance helpers, by construction rather than by
+           omission: EvaluatePgCpuAsync exists only for PostgreSQL targets and reads only pg_cpu_utilization,
+           so its source is FleetCpuSource.PerformanceInsights as a constant — there is no second collector
+           for ClassifyCpuSource to tell apart, and no ring-buffer split for TotalNonIdleCpuPercent to sum.
+           A FOURTH decider, or this one starting to classify a source it cannot have, fails here. */
+        var expectedDeciders = new[] { "DarlingFleetReader.cs", "DarlingWorker.cs", "ViewerDataService.Overview.cs" };
+
+        Assert.Equal(expectedDeciders, deciders.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal(expectedCards, callers.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 
     /* ─────────────────────────── the new read's shape ─────────────────────────── */
