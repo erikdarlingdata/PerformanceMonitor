@@ -118,6 +118,11 @@ public sealed class RepoFileAdoptionTests
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
+        /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
+           (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the
+           CommandTimeout line that follows it — the two facts the memo promised not to touch, asserted as
+           the exact shape they were in, which a single-line anchor could not tell from a rewrite. */
+        "FleetCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
