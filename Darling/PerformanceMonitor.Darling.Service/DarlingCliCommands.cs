@@ -5098,8 +5098,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorScheduleReadbackRow>();
-        await using var command = postgres.CreateCommand(CollectorScheduleReadbackSql);
-        command.CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds;
+        /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
+           #2874 straggler census counts this file's sites and reads the initializer from the construction span,
+           so a deadline assigned a statement later would be a site it cannot certify. */
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

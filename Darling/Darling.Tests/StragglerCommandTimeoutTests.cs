@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// MEMBER because the collection sweep's sites sit in files that also hold other regimes' sites. That is not
 /// true of these three: measured on the pre-change tree, <c>Targets/HypotheticalIndexExperiment.cs</c> holds
 /// 6 command sites and all 6 are this group's, <c>PgPlanForceActionStore.cs</c> holds 4 and all 4 are, and
-/// <c>DarlingCliCommands.cs</c> holds 3 and all 3 are. So a file here IS a regime, and the per-file census
+/// <c>DarlingCliCommands.cs</c> held 3 and all 3 were (4 since #3752 added the collector toggle verbs'
+/// schedule read-back, which shares the CLI store-read budget). So a file here IS a regime, and the per-file census
 /// counts below are what keep it one — a fourth site added to any of these files fails on the count and asks
 /// a person whether it shares the budget, rather than inheriting the answer by adjacency. <b>The reusable
 /// rule for the remaining groups is to scope at the smallest unit that is EXACT, and to check which unit
@@ -77,7 +78,7 @@ public sealed class StragglerCommandTimeoutTests
         ("PgPlanForceActionStore.cs", Hop.Store, 4,
             nameof(ServiceCommandDeadlines.PostAnalysisForcePlanSeconds),
             Assigns(@"ServiceCommandDeadlines\.PostAnalysisForcePlanSeconds")),
-        ("DarlingCliCommands.cs", Hop.Store, 3,
+        ("DarlingCliCommands.cs", Hop.Store, 4,
             "ServiceCommandDeadlines.Cli{StoreRead,BudgetBackstop}Seconds",
             Assigns(@"ServiceCommandDeadlines\.Cli(?:StoreRead|BudgetBackstop)Seconds")),
     };
@@ -152,7 +153,7 @@ public sealed class StragglerCommandTimeoutTests
     }
 
     /// <summary>
-    /// The same thirteen sites, judged a SECOND way — through the shared
+    /// The same fourteen sites, judged a SECOND way — through the shared
     /// <see cref="CommandDeadlineScanner"/> that #2938 extracted and #2874's other pins route through.
     ///
     /// <para><b>Additive rather than a replacement, because the two ask different questions.</b> The
@@ -167,7 +168,7 @@ public sealed class StragglerCommandTimeoutTests
     /// by side on the command plane. If they ever disagree, one of them is wrong and the build says so.</para>
     ///
     /// <para>Every site in these three files writes its deadline as an object initializer ON the
-    /// construction, so it is the scanner's CONSTRUCTION-span half that carries all thirteen; the
+    /// construction, so it is the scanner's CONSTRUCTION-span half that carries all fourteen; the
     /// name-qualified assignment half is inert here and is exercised instead by
     /// <see cref="TheCollectorRunnersUntimedSites_ThreadTheDeadlineAsAParameterInstead"/>, whose nine
     /// timed sites are all assignments.</para>
