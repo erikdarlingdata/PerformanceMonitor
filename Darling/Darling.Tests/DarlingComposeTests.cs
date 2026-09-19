@@ -2937,6 +2937,157 @@ public sealed class DarlingComposeTests
         Assert.Equal(compiledWithout.Parameters.Count, compiledWith.Parameters.Count);
     }
 
+    /* ───────── #3653: a delta aggregate excludes the unknowable marker; nothing else is touched ───────── */
+
+    private const string MeasuredDeltaFilter = " FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0)";
+
+    /// <summary>
+    /// #3653 (the Compose Cumulative-archetype item; #2234 / #3540 for the contract): on the raw tier, every
+    /// SUM/AVG/MIN/MAX over a per-interval DELTA column carries its own <c>FILTER (WHERE f.sample_interval_seconds
+    /// IS DISTINCT FROM 0)</c>, so a restart row's <c>(delta 0, interval 0)</c> marker is not averaged in as a
+    /// measured zero and never becomes the window's MIN. Pinned on the exact text so the clause is the
+    /// aggregate's own and not a statement-level WHERE (the overlay test below is why). A Delta-archetype measure
+    /// on the same table compiles to the very same column and is filtered the same way — two names for one
+    /// column must agree about one row.
+    /// </summary>
+    [Theory]
+    [InlineData("wait_stats", "wait_time_ms", "avg", "AVG(f.delta_wait_time_ms)")]
+    [InlineData("wait_stats", "wait_time_ms", "min", "MIN(f.delta_wait_time_ms)")]
+    [InlineData("wait_stats", "wait_time_ms", "max", "MAX(f.delta_wait_time_ms)")]
+    [InlineData("wait_stats", "wait_time_ms", "sum", "SUM(f.delta_wait_time_ms)")]
+    [InlineData("wait_stats", "wait_time_delta_ms", "avg", "AVG(f.delta_wait_time_ms)")]
+    [InlineData("perfmon_stats", "perfmon_value_delta", "min", "MIN(f.delta_cntr_value)")]
+    [InlineData("query_stats", "query_worker_us", "avg", "AVG(f.delta_worker_time)")]
+    [InlineData("pg_statement_stats", "pg_stmt_calls", "avg", "AVG(f.delta_calls)")]
+    public void Compile_DeltaAggregate_FiltersTheUnknowableMarker(string source, string measure, string aggregate, string aggregateText)
+    {
+        var sql = Compile(ValidPlan($"{{\"source\":\"{source}\",\"measure\":\"{measure}\",\"aggregate\":\"{aggregate}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}"));
+
+        /* The clause sits INSIDE the CAST, on the aggregate call itself; a unit-scaled measure (query_worker_us
+           µs → ms) wraps the CAST in its factor, so the pin stops at the CAST. */
+        Assert.Contains($"CAST({aggregateText}{MeasuredDeltaFilter} AS double precision)", sql, StringComparison.Ordinal);
+        /* The predicate is the aggregate's, not the statement's: the WHERE never names the column. */
+        Assert.DoesNotContain("AND f.sample_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(sql, Regex.Escape(MeasuredDeltaFilter)));
+    }
+
+    /// <summary>
+    /// The filter is earned by the column, not sprayed: a Gauge read at a restart pass is a real reading, a
+    /// PerEvent row is a row, a ratio's SUM/SUM is indifferent to a 0/0 row, COUNT(*) counts rows, and Query
+    /// Store's <c>qs_executions</c> is a Delta measure on a table OUTSIDE the ten delta families — it has no
+    /// <c>sample_interval_seconds</c>, and naming it would fail at parse time. None of them carry the clause.
+    /// </summary>
+    [Theory]
+    [InlineData("memory_grant_stats", "grant_waiters", "max", "CAST(MAX(f.waiter_count) AS double precision) AS value")]
+    [InlineData("cpu_utilization_stats", "sqlserver_cpu_utilization", "avg", "CAST(AVG(f.sqlserver_cpu_utilization) AS double precision) AS value")]
+    [InlineData("long_query_completions", "lqc_duration_us", "avg", "CAST(AVG(f.duration_microseconds) AS double precision)")]
+    [InlineData("long_query_completions", "lqc_duration_us", "count", "CAST(COUNT(*) AS double precision) AS value")]
+    [InlineData("query_store_stats", "qs_executions", "avg", "CAST(AVG(f.execution_count) AS double precision) AS value")]
+    public void Compile_NonDeltaAggregate_IsUnfiltered(string source, string measure, string aggregate, string valueText)
+    {
+        var sql = Compile(ValidPlan($"{{\"source\":\"{source}\",\"measure\":\"{measure}\",\"aggregate\":\"{aggregate}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}"));
+
+        Assert.Contains(valueText, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RatioOverDeltas_IsUnfiltered()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"ratio\":\"signal_wait_pct\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+        Assert.DoesNotContain("sample_interval_seconds", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Why the clause is the aggregate's FILTER and not a WHERE: one statement aggregates its primary and its
+    /// overlay over the SAME rows, and <c>memory_grant_stats</c> carries a Cumulative (<c>grant_timeouts</c>)
+    /// beside a Gauge (<c>grant_waiters</c>). A WHERE would drop the restart row's real waiter reading along
+    /// with the delta's marker. Here the delta aggregate is filtered, the gauge beside it is not, in both
+    /// orders — and the clause binds nothing, so the parameter count is the no-overlay count.
+    /// </summary>
+    [Fact]
+    public void Compile_Overlay_FiltersOnlyTheDeltaAggregate_InEitherPosition()
+    {
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
+
+        var deltaPrimary = ValidPlan("{\"source\":\"memory_grant_stats\",\"measure\":\"grant_timeouts\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"grant_waiters\",\"aggregate\":\"avg\"}}");
+        var (compiled, e1) = ComposeCompiler.Compile(deltaPrimary, context);
+        Assert.True(e1 is null, e1);
+        Assert.Contains($"CAST(AVG(f.timeout_error_count_delta){MeasuredDeltaFilter} AS double precision) AS value", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(AVG(f.waiter_count) AS double precision) AS value2", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AND f.sample_interval_seconds", compiled.Sql, StringComparison.Ordinal);
+
+        var gaugePrimary = ValidPlan("{\"source\":\"memory_grant_stats\",\"measure\":\"grant_waiters\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"grant_timeouts\",\"aggregate\":\"avg\"}}");
+        var (reversed, e2) = ComposeCompiler.Compile(gaugePrimary, context);
+        Assert.True(e2 is null, e2);
+        Assert.Contains("CAST(AVG(f.waiter_count) AS double precision) AS value", reversed!.Sql, StringComparison.Ordinal);
+        Assert.Contains($"CAST(AVG(f.timeout_error_count_delta){MeasuredDeltaFilter} AS double precision) AS value2", reversed.Sql, StringComparison.Ordinal);
+
+        var alone = ValidPlan("{\"source\":\"memory_grant_stats\",\"measure\":\"grant_timeouts\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        var (compiledAlone, e3) = ComposeCompiler.Compile(alone, context);
+        Assert.True(e3 is null, e3);
+        Assert.Equal(compiledAlone!.Parameters.Count, compiled.Parameters.Count);
+    }
+
+    /// <summary>
+    /// The RankedTimeSeries rank CTE (#2734) decides membership from the same expression builder, so a
+    /// series is ranked over measured rows only — a restart's zero cannot decide who is in the top N.
+    /// </summary>
+    [Fact]
+    public void Compile_RankedTimeSeries_RanksOverMeasuredRowsOnly()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}"));
+        Assert.Equal(2, Regex.Matches(sql, Regex.Escape($"CAST(AVG(f.delta_wait_time_ms){MeasuredDeltaFilter} AS double precision) AS value")).Count);
+    }
+
+    /// <summary>
+    /// The census behind the theories: EVERY scalar measure whose aggregated column is a delta on a table the
+    /// delta calculator stamps compiles with the filter for each of its legal aggregates, every other scalar
+    /// measure compiles without it, and the gate is the real schema — each filtered measure's source carries
+    /// <c>sample_interval_seconds</c> as a payload column, so the FILTER can never name an absent column and
+    /// fail at parse time on a live store. The rollup route is asserted clean too: the row is gone by then.
+    /// </summary>
+    [Fact]
+    public void EveryDeltaMeasure_OnAnIntervalCarryingSource_IsFiltered_AndNothingElseIs()
+    {
+        var payload = PayloadColumnsByTable();
+        var filtered = 0;
+        foreach (var measure in MeasureCatalog.Measures.Where(m => m.Kind == MeasureKind.Scalar))
+        {
+            var aggregatesADelta = measure.Archetype is MeasureArchetype.Cumulative or MeasureArchetype.Delta;
+            var expectFilter = aggregatesADelta && CollectorDeltaCalculator.IsDeltaFamily(measure.SourceTable);
+            if (expectFilter)
+            {
+                filtered++;
+                Assert.True(payload[measure.SourceTable].Contains("sample_interval_seconds"),
+                    $"'{measure.Key}' would be filtered on sample_interval_seconds, which '{measure.SourceTable}' does not carry.");
+            }
+
+            foreach (var aggregate in measure.ValidAggs.Where(a => a != ComposeAggregate.Count))
+            {
+                var plan = ValidPlan($"{{\"source\":\"{measure.SourceTable}\",\"measure\":\"{measure.Key}\",\"aggregate\":\"{MeasureCatalog.WireName(aggregate)}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}");
+                var sql = Compile(plan);
+                Assert.Equal(expectFilter, sql.Contains(MeasuredDeltaFilter, StringComparison.Ordinal));
+                Assert.Equal(expectFilter, sql.Contains("sample_interval_seconds", StringComparison.Ordinal));
+            }
+        }
+
+        /* 27 today: the 25 Cumulative measures plus the two Delta measures on interval-carrying tables
+           (wait_time_delta_ms, perfmon_value_delta) — qs_executions is Delta on a table without the column.
+           A floor, not an equality: a new delta measure joins the filtered set by construction. */
+        Assert.True(filtered >= 27, $"only {filtered} measures are filtered; the catalog carried 27 delta measures on interval-carrying sources when this was written.");
+
+        /* The CAGG route reads pre-aggregated columns; the row-level predicate has nothing to filter there.
+           query_stats is one of the three sources with a compose rollup (ComposeCaggCatalog), and a Cumulative
+           AVG remaps to it. */
+        var old = new ComposeRunContext(null, WindowEnd.AddDays(-10), WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown);
+        var (rollup, error) = ComposeCompiler.Compile(
+            ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"), old);
+        Assert.True(error is null, error);
+        Assert.Contains("query_stats_hourly", rollup!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds", rollup.Sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_Scatter_RanksByPrimary_AndCarriesValue2()
     {

@@ -899,6 +899,14 @@ OPTION(RECOMPILE);',
     /// always did, and the mixture resolves itself as the pre-upgrade rows age out of retention.</para>
     /// <para>The first placed interval in the window carries NULL rates, not 0 — see
     /// <see cref="GetQueryDurationTrendAsync"/> (#3541 A12).</para>
+    /// <para><b>The denominator stays the spacing to the previous point, deliberately (#3653 A11).</b> The
+    /// three delta-family trends now divide by the interval the store HAS (<c>sample_interval_seconds</c>);
+    /// <c>query_store_stats</c> stores no interval length — it is a cumulative-snapshot source outside the ten
+    /// delta families, carrying an interval START (<c>interval_start_time_utc</c>) but not its width — so the
+    /// LAG over <c>point_time</c> is the only denominator this read can honestly use. Its residual is stated:
+    /// a QUIET interval before a placed point doubles that point's spacing and halves its rate; removing that
+    /// needs the interval length stored beside the row (a collector change and a schema bump), not a read
+    /// change. Darling's raw Query Store arms carry the same rule and the same residual.</para>
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {

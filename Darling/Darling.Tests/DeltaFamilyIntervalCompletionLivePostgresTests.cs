@@ -130,6 +130,95 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     }
 
     /// <summary>
+    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the Storage
+    /// builder the viewer's duration copy IS (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>) — the
+    /// same four collections as the procedure test above, now on <c>query_stats</c>, which has carried
+    /// <c>sample_interval_seconds</c> from its first rung and whose trend reads LAG-recomputed the interval
+    /// anyway. t1/t2 pre-V128 (NULL) — t1 no prior, no rate; t2 the LAG's 300 s. t3 a restart — every row 0
+    /// — no rate (this was the confident 0.00 ms/sec and 0.00 executions/sec). t4 a steady pass with a
+    /// readmitted plan (0) beside a measured 120 s row: MAX 120 wins over the LAG's 300. Reproduced on a
+    /// PG18 + TimescaleDB 2.28.1 rig before this was written.
+    /// </summary>
+    [Fact]
+    public async Task QueryDurationAndExecutionTrends_DropTheUnknowableCollection_PreferTheStoredInterval_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live query-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var viewer = new ViewerDataService(cs!);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = Naive(TruncateToSeconds(DateTime.UtcNow.AddHours(-2)));
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
+
+            await QueryStatAsync(connection, t1, "0xA", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null, ct);
+            await QueryStatAsync(connection, t2, "0xA", 30, 600_000, null, ct);
+            await QueryStatAsync(connection, t3, "0xA", 0, 0, 0, ct);
+            await QueryStatAsync(connection, t4, "0xA", 24, 1_200_000, 120, ct);
+            await QueryStatAsync(connection, t4, "0xNEW", 0, 0, 0, ct);
+
+            /* The viewer's duration trend on the raw tier (nowUtc pinned so the window is inside the raw
+               horizon): t1 and t3 are dropped by the chart reader; t2 LAG, t4 stored. */
+            var now = t4.AddMinutes(1);
+            var duration = (await viewer.GetQueryDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), nowUtc: now, cancellationToken: ct));
+            Assert.Equal(RetentionTier.Raw, duration.Tier);
+            Assert.Equal(new[] { t2, t4 }, duration.Points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(2.0, duration.Points[0].Value, precision: 6);      /* 600 ms / LAG 300 s */
+            Assert.Equal(10.0, duration.Points[1].Value, precision: 6);     /* 1200 ms / STORED 120 s, not the LAG's 4.0 */
+
+            /* The execution-count trend reads the interval the same way: 30 / 300 = 0.1, then 24 / 120 = 0.2. */
+            var executions = await viewer.GetExecutionCountTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), nowUtc: now, cancellationToken: ct);
+            Assert.Equal(new[] { t2, t4 }, executions.Points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(0.1, executions.Points[0].Value, precision: 6);
+            Assert.Equal(0.2, executions.Points[1].Value, precision: 6);
+
+            /* The builder's text without the viewer's filter — the statement the MCP reader's raw const is the
+               alias-in-waiting of — run as the tool would run it: all four collections come back, t1 and t3 with
+               NULL rates (the MCP reader keeps them as unrated points, #3541 A12). */
+            await using (var command = postgres.CreateCommand(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)))
+            {
+                command.Parameters.AddWithValue(ServerId);
+                command.Parameters.AddWithValue(t1.AddMinutes(-1));
+                command.Parameters.AddWithValue(t4.AddMinutes(1));
+                var rows = new List<(DateTime At, double? Rate, double? Executions)>();
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    rows.Add((reader.GetDateTime(0),
+                        reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
+                        reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
+                }
+
+                Assert.Equal(new[] { t1, t2, t3, t4 }, rows.Select(r => r.At).ToArray());
+                Assert.Null(rows[0].Rate);
+                Assert.Equal(2.0, rows[1].Rate!.Value, precision: 6);
+                Assert.Null(rows[2].Rate);
+                Assert.Null(rows[2].Executions);
+                Assert.Equal(10.0, rows[3].Rate!.Value, precision: 6);
+                Assert.Equal(0.2, rows[3].Executions!.Value, precision: 6);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// The per-statement PostgreSQL trend (<see cref="DarlingPgTrendReader.QueryDurationTrendSql"/>): the same
     /// four collections for one queryid across two (dbid, userid, toplevel) entries. t3 is a
     /// <c>pg_stat_statements_reset()</c> — both entries' rows store 0 — and is absent; at t4 one entry is a
@@ -209,6 +298,22 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    private static async Task QueryStatAsync(NpgsqlConnection connection, DateTime t, string queryHash, long deltaExecutions, long deltaElapsedUs, int? interval, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand(
+            "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle, " +
+            "execution_count, total_worker_time, total_elapsed_time, delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds) " +
+            "VALUES (1, $1, $2, $3, 'AppDb', $4, '0xPLAN', '0xSQL', '0xPLANH', 0, 0, 0, $5, 0, $6, $7)", connection);
+        cmd.Parameters.AddWithValue(t);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(ServerName);
+        cmd.Parameters.AddWithValue(queryHash);
+        cmd.Parameters.AddWithValue(deltaExecutions);
+        cmd.Parameters.AddWithValue(deltaElapsedUs);
+        cmd.Parameters.AddWithValue(interval.HasValue ? interval.Value : DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task PgStatementAsync(NpgsqlConnection connection, DateTime t, long queryId, long userId, long deltaCalls, long deltaMs, int? interval, CancellationToken ct)
     {
         using var cmd = new NpgsqlCommand(
@@ -229,7 +334,7 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; DELETE FROM pg_statement_stats WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM pg_statement_stats WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

@@ -332,10 +332,74 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             Assert.Contains("/ " + DarlingTrendReader.HourlyBucketSecondsSql + " AS executions_per_second", sql, StringComparison.Ordinal);
         }
 
-        /* And the raw reads still LAG — the A11a residual is reported, not silently rewritten here. */
+        /* The raw reads keep a LAG — since #3653 A11 only as the fallback for a pre-V128 collection whose stored
+           interval is NULL; the stored-interval read itself is pinned by
+           RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheProcedureConstsAreItsIdiom below. */
         Assert.Contains("LAG(collection_time)", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #3653 (measurement A11): the raw-tier duration trend reads the interval <c>query_stats</c> has stored
+    /// from the start instead of LAG-recomputing it. The pin that stood here before ("the raw reads still LAG
+    /// — the A11a residual is reported, not silently rewritten") is retired: the shape is now the three-state
+    /// read the procedure trends have carried since V128 — <c>MAX(sample_interval_seconds)</c> per collection,
+    /// <c>0 → NULL</c> (unrated), <c>NULL →</c> the LAG — built ONCE in Storage
+    /// (<see cref="DurationTrendRouting.BuildRawTrendSql"/>) and read by the viewer's <c>QueryDurationTrendSql</c>
+    /// as the builder's output with its database filter. The wrong spelling is pinned by absence:
+    /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would fall back to a fabricated interval on
+    /// exactly the restart row the marker flags.
+    ///
+    /// <para>The builder IS the established idiom, proven rather than claimed: its procedure output equals the
+    /// two hand-kept procedure consts (line-trimmed; the MCP copy minus the viewer's filter line), so a later
+    /// alias of those consts is a no-op. The MCP reader's own <c>QueryDurationTrendSql</c> const is OUTSIDE
+    /// this PR's file boundary and still carries the LAG-only shape; the last assertion names that residual
+    /// and MUST be deleted by the PR that makes the const an alias — a deliberate must-move pin, so the
+    /// follow-up cannot land without touching the record of why.</para>
+    /// </summary>
+    [Fact]
+    public void RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheProcedureConstsAreItsIdiom()
+    {
+        foreach (var sql in new[]
+        {
+            DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false),
+            DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true),
+            ViewerDataService.QueryDurationTrendSql,
+            ViewerDataService.ExecutionCountTrendSql,
+        })
+        {
+            Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+            Assert.Contains("THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))", sql, StringComparison.Ordinal);
+            Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("COALESCE(", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+            Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
+        }
+
+        /* The viewer's duration copy IS the builder's output with the filter; the filter is the ONLY difference. */
+        Assert.Equal(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
+        Assert.Equal(
+            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)).Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray(),
+            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
+
+        /* The builder's procedure output is the two procedure consts, modulo indentation and the filter line. */
+        Assert.Equal(Lines(ViewerDataService.ProcedureDurationTrendSql), Lines(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)));
+        Assert.Equal(Lines(DarlingTrendReader.ProcedureDurationTrendSql), Lines(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)));
+
+        /* The residual, named: the MCP reader's raw query-stats const (outside this PR's fence) is still the
+           LAG-only read. DELETE these two lines in the PR that makes it
+           `DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)` by alias. */
+        Assert.DoesNotContain("sample_interval_seconds", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.NotEqual(Lines(DarlingTrendReader.QueryDurationTrendSql), Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
+    }
+
+    private static string[] Lines(string sql) => sql
+        .Replace("\r\n", "\n", StringComparison.Ordinal)
+        .Split('\n')
+        .Select(l => l.Trim())
+        .Where(l => l.Length > 0)
+        .ToArray();
 
     /// <summary>
     /// The truncation boundary the four tiered reads share, pinned to the value Lite's twin

@@ -213,6 +213,15 @@ public static class QueryStoreTrendRouting
     /// per collection hour rather than one point per collection. That supersedes the pre-tier-2
     /// treatment for the rollup region only (such rows are older than any raw retention on a store with
     /// rollups; the raw tail keeps the legacy arm byte for byte).</para>
+    ///
+    /// <para><b>Two point classes, two denominators (#3653, measurement A8).</b> A rollup point is rated over
+    /// its bucket width (<see cref="DurationTrendRouting.HourlyBucketSecondsSql"/>), a raw point over the
+    /// spacing to the previous point (the LAG idiom, the only interval <c>query_store_stats</c> has). Before
+    /// this every point was rated over a LAG to the previous EMITTED point, so an hour with no rows — a quiet
+    /// hour, or an unmaterialized hole — made the next bucket's denominator 7,200 seconds and halved its
+    /// published rate. The <c>rated</c> CTE's comment carries the rule and the residual it leaves on the raw
+    /// class. A consequence for callers: a rollup point is never unrated, so the window's first point is
+    /// NULL-rated only when it is a raw point.</para>
     /// </summary>
     public static string BuildRollupTrendSql(bool withDatabaseFilter)
     {
@@ -303,26 +312,56 @@ raw_points AS
 united AS
 (
     /* Rollup points sit strictly below $4 and raw points at or above it, so the union never carries the
-       same instant twice. */
-    SELECT point_time, total_duration_ms, total_executions FROM rollup_points
+       same instant twice. Each point carries its CLASS, because the two classes are rated over different
+       denominators below. */
+    SELECT point_time, total_duration_ms, total_executions, TRUE AS from_rollup FROM rollup_points
     UNION ALL
-    SELECT point_time, total_duration_ms, total_executions FROM raw_points
+    SELECT point_time, total_duration_ms, total_executions, FALSE AS from_rollup FROM raw_points
 ),
 rated AS
 (
+    /* The denominator is each point class's OWN covered interval (#3653, measurement A8).
+
+       A rollup point is one corrected-hourly bucket: the work the collector fetched in that collection
+       hour, deduped at interval grain. Its covered interval is the bucket width — known, the same for every
+       bucket, and the same literal the query-stats hourly tier divides by (the HourlyBucketSecondsSql
+       constant on DurationTrendRouting, pinned equal to TimescaleSupport.HourlyBucket). Before this the
+       rollup points were rated over a LAG to the previous EMITTED point, and a bucket with no rows — a quiet
+       hour on this server, or an unmaterialized hole — is simply absent from rollup_points, so the next
+       bucket's LAG read 7,200 and its true hourly rate was published HALVED. The bucket's work did not
+       spread over the quiet hour; the quiet hour has no point at all (a hole in the series, which is what
+       it is), and the bucket beside it is rated over its own 3,600 seconds. It follows that a rollup point
+       is never unrated: the first bucket in the window has a known denominator too, exactly as the
+       query-stats hourly tier's first bucket does, so the first-point NULL below is a RAW-class rule, not
+       a series rule.
+
+       A raw point is a Query Store interval placed at its own start (arm 1) or a legacy row at its
+       collection time (arm 2). query_store_stats stores no interval length — it is a cumulative-snapshot
+       source outside the ten delta families that carry sample_interval_seconds (#3540) — so the only
+       denominator the store has for it is the spacing to the previous point, and that stays the LAG over
+       the united series: across the seam the previous point is the last rollup bucket, an hour before the
+       first raw interval on the default INTERVAL_LENGTH_MINUTES = 60, which is the right denominator; a
+       raw point's first-in-window LAG is NULL and its rate unrated (#3541 A12). The residual is stated,
+       not hidden: a QUIET Query Store interval before a raw point still doubles that raw point's spacing and
+       halves its rate — the same defect this CTE removes for rollup points — and removing it there needs
+       the interval length stored beside the row (a collector change and a rung), not a read change. */
     SELECT
         point_time,
         total_duration_ms,
         total_executions,
-        extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+        CASE WHEN from_rollup
+             THEN {DurationTrendRouting.HourlyBucketSecondsSql}
+             ELSE extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+        END AS interval_seconds
     FROM united
 )
 SELECT
     point_time AS collection_time,
-    /* No ELSE: the first united point's LAG is NULL and its rate unknowable, so the rate is NULL — never a
-       fabricated 0 (#3541 A12). Shared by the MCP reader and the viewer, so both surfaces see the same
-       first bucket the same way: the MCP payload publishes it as an unrated point, the viewer's chart
-       reader skips it (a chart has nowhere to draw "unknown"). */
+    /* No ELSE: a raw point that opens the window has a NULL LAG and an unknowable rate, so the rate is NULL —
+       never a fabricated 0 (#3541 A12); a rollup point always has its bucket width (above). Shared by the
+       MCP reader and the viewer, so both surfaces see the same point the same way: the MCP payload publishes
+       an unrated point as null with the reason, the viewer's chart reader skips it (a chart has nowhere to
+       draw "unknown"). */
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM rated
