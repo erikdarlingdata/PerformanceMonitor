@@ -37,13 +37,32 @@ FROM sys.dm_os_wait_stats AS ws
 WHERE ws.wait_time_ms > 0
 OPTION(RECOMPILE);";
 
+    /* #3653 A5: the instance identity, as the batch's SECOND result set after the parity payload — the CPU
+       carrier's exact column names, read straight from the DMV. Not on Azure SQL DB (below). */
+    private const string ExpectedIdentitySet = @"
+
+SELECT
+    server_start_time = dosi.sqlserver_start_time,
+    server_name = @@SERVERNAME
+FROM sys.dm_os_sys_info AS dosi;";
+
+    /// <summary>
+    /// The payload SELECT is the verbatim parity contract and comes FIRST, so the rows land on ordinals 0-3
+    /// exactly as before; the identity set is appended after it (#3653 A5), so ReadAsync's NextResult lands
+    /// on it once the rows are drained. The Azure SQL DB batch is the pre-#3653 text byte for byte: neither
+    /// SQL Server carrier reads the pair there (#3694's ruling), so the two carriers observe under one rule.
+    /// </summary>
     [Fact]
     public void Query_IsTheVerbatimParityContract()
     {
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
-        Assert.Equal(ExpectedQuery, WaitStatsCollector.Instance.BuildQuery(context).Text);
+        Assert.Equal(ExpectedQuery + ExpectedIdentitySet, WaitStatsCollector.Instance.BuildQuery(context).Text);
         Assert.Empty(WaitStatsCollector.Instance.BuildQuery(context).Parameters);
         Assert.Null(WaitStatsCollector.Instance.WatermarkColumn);
+
+        var azure = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator(), isAzureSqlDb: true);
+        Assert.Equal(ExpectedQuery, WaitStatsCollector.Instance.BuildQuery(azure).Text);
+        Assert.DoesNotContain("dm_os_sys_info", WaitStatsCollector.Instance.BuildQuery(azure).Text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -31,9 +33,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>The shape.</b> An epoch is a pair of facts the target reports about itself that change
 /// exactly when its counters restart or belong to a different instance — for SQL Server
 /// <c>sys.dm_os_sys_info.sqlserver_start_time</c> and <c>@@SERVERNAME</c>, for the PostgreSQL statements
-/// family <c>pg_stat_statements_info.stats_reset</c> (one component; the second stays null). A carrier
-/// collector reads the pair on a round trip it already makes, hands it to <see cref="ObserveInstance"/>
-/// or <see cref="ObserveStatements"/>, and the comparison runs against the LAST PERSISTED pair from the
+/// family <c>pg_stat_statements_info.stats_reset</c>, for Aurora's wait family
+/// <c>pg_postmaster_start_time()</c> (one component each; the second stays null). A carrier
+/// collector reads the pair on a round trip it already makes, hands it to <see cref="ObserveInstance"/>,
+/// <see cref="ObserveStatements"/> or <see cref="ObservePostmaster"/>, and the comparison runs against the LAST PERSISTED pair from the
 /// host's <c>collector_state</c> (<see cref="CollectorContext.State"/>), not an in-memory one: a host that
 /// restarts seeds its baselines from its own store (#3614), so the target that restarted while the host
 /// was down must be caught on the host's first pass, and only a persisted prior can do that. On a change
@@ -50,15 +53,42 @@ namespace PerformanceMonitor.Collectors;
 /// overwrites a known one (<see cref="Merge"/> keeps the last known component), so a later known value
 /// is still compared against the last KNOWN value rather than against the gap.</para>
 ///
-/// <para><b>What this does not do.</b> It observes where the carrier sits in the schedule: on SQL
-/// Server today the carrier is <c>cpu_utilization</c>, which the schedule runs AFTER wait_stats,
-/// latch_stats, spinlock_stats, query_stats and procedure_stats — those five subtract once against the
-/// old baseline on the pass that sees the epoch, exactly as every family did before this change, and are
-/// forgotten in the same pass so the next one re-baselines; the three families after it are honest on the
-/// pass itself. Moving the carrier's two columns onto the first collector in the order makes all eight
-/// honest and is a follow-up on that collector, not on this type. A single instance-level cadence read
-/// (<c>SELECT sqlserver_start_time, @@SERVERNAME</c>) at the top of each pass would do the same at the
-/// cost of one round trip per pass and is the alternative the maintainer can choose instead.</para>
+/// <para><b>Where the SQL Server carriers sit, and why there are two.</b> Both hosts run a server's due
+/// collectors one after another in <c>CollectorScheduleDefaults.All</c>'s declared order (Darling's
+/// <c>RunDueCollectorsAsync</c> iterates the keys; Lite's <c>ScheduleManager.GetDefaultSchedules()</c> is
+/// pinned equal to it), and <c>wait_stats</c> is first on both. So <c>wait_stats</c> carries the pair as a
+/// second result set on the batch it already runs (#3653 A5's carrier-order residue, #3694's stated
+/// follow-up): it observes at the end of its read, before its own <c>WritePayload</c> subtracts, so on the
+/// pass that first sees the epoch EVERY SQL Server delta family — its own included — re-baselines against
+/// nothing instead of subtracting once from the dead instance. Until then the carrier was
+/// <c>cpu_utilization</c>, tenth in the order, and the five families before it fabricated one interval each
+/// on every restart, failover and re-point. <c>cpu_utilization</c> KEEPS carrying the pair: an operator can
+/// disable <c>wait_stats</c> on either host (a Darling <c>config_collector_schedules</c> override, Lite's
+/// schedule editor), and a carrier that can be switched off must not be the only one. Neither carrier reads
+/// the pair on Azure SQL DB — #3694's ruling, unchanged: the CPU batch there never touched the DMV, and the
+/// wait-stats batch keeps the same engine gate so the two carriers observe under one rule.</para>
+///
+/// <para><b>Two carriers, one forget.</b> Each carrier compares against the pair persisted under ITS OWN
+/// collector name (both hosts load <c>collector_state</c> by <c>(server_id, collector_name)</c>), so on the
+/// epoch pass both see the change. Two <c>ClearServer</c> calls would be worse than one: the second, from
+/// <c>cpu_utilization</c>, would forget the baselines the five families between the carriers had just
+/// re-established on the new instance and cost each of them one more (0, 0) pass — the very pass the
+/// first carrier bought back. So <see cref="ObserveInstance"/> remembers, per calculator and per server,
+/// the identity it last forgot TO, and a second observer that finds the calculator already on the current
+/// identity forgets nothing and queues no sentence; it still measures its own marker (the observation
+/// happened — this run's persisted pair did move) and catches its persisted pair up, so the next pass is
+/// quiet under both names. The memo is keyed on the calculator instance, not process-wide, because the
+/// calculator IS the thing whose baselines belong to an identity: a fresh calculator (a test, a host that
+/// re-created its runtime) knows nothing and forgets on first sight, which is the conservative direction.
+/// It is not persisted: on a host restart both carriers' persisted priors describe the same old instance,
+/// the first to run forgets the #3614-seeded baselines once, and the second finds the memo.</para>
+///
+/// <para><b>What this does not do.</b> A carrier that is disabled observes nothing; with <c>wait_stats</c>
+/// off, the CPU carrier's order (after five delta families) is the residue #3694 described, on that
+/// operator's servers only — as it is on a Lite install whose persisted schedule file was hand-reordered
+/// (Lite keeps a loaded file's order; the census pins the shipped default). No SQL Server carrier reads a
+/// pass where neither collector is due (both are per-minute by default). No epoch is rendered — the marker
+/// is the carrier run's <c>collection_log</c> note and the pair in <c>collector_state</c>.</para>
 /// </summary>
 public static class ServerEpoch
 {
@@ -92,6 +122,12 @@ public static class ServerEpoch
     /// <summary>The <c>stats_reset</c> the latest statements epoch change replaced.</summary>
     public const string StatementsPreviousStateKey = "statements_epoch_previous";
 
+    /// <summary>The persisted <c>pg_postmaster_start_time()</c> for an Aurora PostgreSQL target's wait family (<c>pg_wait_stats</c>).</summary>
+    public const string PostmasterStateKey = "postmaster_epoch";
+
+    /// <summary>The postmaster start time the latest wait-family epoch change replaced.</summary>
+    public const string PostmasterPreviousStateKey = "postmaster_epoch_previous";
+
     /* The measurement labels — counts, per CollectorMeasurement's grammar. Rendered as `identity_epoch_changes=1`
        onto the carrier run's collection_log.error_message by both hosts (#3161): that row, with its
        collection_time, IS the discontinuity marker in the store. A count of one, because a run observes one
@@ -103,7 +139,20 @@ public static class ServerEpoch
     /// <summary>Count of statements-epoch changes this run observed (0 or 1).</summary>
     public const string StatementsChangesMeasurement = "statements_epoch_changes";
 
+    /// <summary>Count of postmaster-epoch (Aurora wait family) changes this run observed (0 or 1).</summary>
+    public const string PostmasterChangesMeasurement = "postmaster_epoch_changes";
+
     private const char Separator = '|';
+
+    /* The identity each calculator's baselines were last forgotten TO, per server (the "two carriers, one
+       forget" paragraph above). Keyed on the calculator instance through a ConditionalWeakTable rather than
+       held in a static map: the memo describes THAT calculator's cache, so it must live and die with it — a
+       test's fresh calculator or a host that rebuilt its runtime starts with no memo and forgets on first
+       sight, and nothing here pins a calculator in memory. One entry per server_id; a ConcurrentDictionary
+       because Darling runs its server bodies concurrently against one calculator. A Stamp, not the serialized
+       text, so the check is IsNewEpoch's own "unknown is not different" rule: a second observer whose
+       reading agrees on every component both sides know has nothing to forget. */
+    private static readonly ConditionalWeakTable<ICollectorDeltaCalculator, ConcurrentDictionary<int, Stamp>> s_forgottenTo = new();
 
     /// <summary>
     /// True when <paramref name="current"/> is a different instance's identity than <paramref name="prior"/>:
@@ -192,12 +241,15 @@ public static class ServerEpoch
     /// The instance-identity observation for a SQL Server target — the whole server's baselines ride on it,
     /// because every cumulative DMV on the instance restarts with the instance and belongs to whichever
     /// instance the connection now reaches. Compares <paramref name="current"/> against the pair persisted
-    /// under <see cref="IdentityStateKey"/>; on an epoch, forgets every baseline and pass window for
-    /// <see cref="CollectorContext.ServerId"/> (<see cref="ICollectorDeltaCalculator.ClearServer"/>) with a
-    /// one-line account for the host to log, measures <see cref="IdentityChangesMeasurement"/> onto the run's
-    /// note, and persists the replaced pair under <see cref="IdentityPreviousStateKey"/>. Always persists the
-    /// merged pair when it differs from what the store holds — and ONLY then, so an ordinary pass writes no
-    /// state row at all. Returns true on an epoch.
+    /// under <see cref="IdentityStateKey"/> for the CALLING collector; on an epoch, forgets every baseline and
+    /// pass window for <see cref="CollectorContext.ServerId"/> (<see cref="ICollectorDeltaCalculator.ClearServer"/>)
+    /// with a one-line account for the host to log — unless the calculator was already forgotten to this same
+    /// identity by the other carrier this pass, in which case nothing is forgotten and no sentence is queued
+    /// (the "two carriers, one forget" paragraph) — measures <see cref="IdentityChangesMeasurement"/> onto
+    /// the run's note, and persists the replaced pair under <see cref="IdentityPreviousStateKey"/>. Always
+    /// persists the merged pair when it differs from what the store holds — and ONLY then, so an ordinary
+    /// pass writes no state row at all. Returns true when the persisted pair moved (an epoch, whichever
+    /// carrier did the forgetting).
     /// </summary>
     public static bool ObserveInstance(CollectorContext context, Stamp current)
     {
@@ -209,12 +261,26 @@ public static class ServerEpoch
         {
             /* IsNewEpoch is false on a null prior, so this is the known pair the epoch replaces. */
             var replaced = prior.GetValueOrDefault();
-            context.Deltas.ClearServer(
-                context.ServerId,
-                "identity epoch changed — start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
-                + ", server name " + Describe(replaced.Name) + " → " + Describe(current.Name)
-                + ": every delta baseline and pass window for this server was forgotten, so this pass re-baselines "
-                + "and the next reports the first interval measured on the instance the connection now reaches");
+            var forgottenTo = s_forgottenTo.GetOrCreateValue(context.Deltas);
+            if (!forgottenTo.TryGetValue(context.ServerId, out var known) || IsNewEpoch(known, current))
+            {
+                context.Deltas.ClearServer(
+                    context.ServerId,
+                    "identity epoch changed — start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
+                    + ", server name " + Describe(replaced.Name) + " → " + Describe(current.Name)
+                    + ": every delta baseline and pass window for this server was forgotten, so this pass re-baselines "
+                    + "and the next reports the first interval measured on the instance the connection now reaches");
+                /* What was observed, not the merge with the prior: the prior's components describe the OLD
+                   instance, and a component the new one has not reported yet stays unknown here so a later
+                   observer that does know it compares against nothing rather than against a guess. */
+                forgottenTo[context.ServerId] = current;
+            }
+            else
+            {
+                /* Already on this identity; a component that only this observer knows joins the memo. */
+                forgottenTo[context.ServerId] = Merge(known, current);
+            }
+
             context.Measure(IdentityChangesMeasurement, 1);
             context.PendingState[IdentityPreviousStateKey] = Serialize(replaced);
         }
@@ -254,6 +320,45 @@ public static class ServerEpoch
         }
 
         Persist(context, StatementsStateKey, prior, current);
+        return changed;
+    }
+
+    /// <summary>
+    /// The postmaster-epoch observation for Aurora's wait family: <paramref name="postmasterStartTime"/> is
+    /// <c>pg_postmaster_start_time()</c>, which moves on every PostgreSQL restart — clean or not — and when
+    /// the endpoint now reaches a different instance. It is the honest epoch for counters that live in
+    /// instance memory and nowhere else: <c>aurora_stat_system_waits()</c> starts from zero with the
+    /// postmaster, and <c>pg_stat_statements_info.stats_reset</c> (the statements carrier's epoch) does NOT
+    /// move on a clean restart because that extension's counters survive one, so the statements epoch can
+    /// say nothing about the wait counters. Conversely a start-time epoch would be WRONG for the statements
+    /// family (it would discard a knowable interval on every clean restart), which is why the two families
+    /// carry different epochs and forget only their own groups. Verified on the #3694 rig (PG 18.4): a clean
+    /// restart moved the start time and left <c>stats_reset</c> and the statement counters continuous. Same
+    /// persistence and marker discipline as <see cref="ObserveStatements"/>, under
+/// <see cref="PostmasterStateKey"/>; a NULL reading (a source that did not carry the column — the function
+/// itself is readable by any login and never null) is unknown, never a change. Returns true on an epoch.
+    /// </summary>
+    public static bool ObservePostmaster(CollectorContext context, DateTime? postmasterStartTime, params string[] groups)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        var current = new Stamp(postmasterStartTime, null);
+        var prior = Prior(context, PostmasterStateKey);
+        var changed = IsNewEpoch(prior, current);
+        if (changed)
+        {
+            var replaced = prior.GetValueOrDefault();
+            context.Deltas.ClearGroups(
+                context.ServerId,
+                "postmaster epoch changed — pg_postmaster_start_time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
+                + ": the pg_wait_stats baselines and pass window were forgotten, so this pass re-baselines the "
+                + "family and the next reports the first interval measured on the restarted instance",
+                groups);
+            context.Measure(PostmasterChangesMeasurement, 1);
+            context.PendingState[PostmasterPreviousStateKey] = Serialize(replaced);
+        }
+
+        Persist(context, PostmasterStateKey, prior, current);
         return changed;
     }
 

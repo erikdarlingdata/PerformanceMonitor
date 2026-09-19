@@ -51,6 +51,26 @@ namespace PerformanceMonitor.Collectors;
 /// the wait-time series' baseline stale, so the next GENUINELY active cycle could see a gap exceeding
 /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> against a baseline that is, in fact, still
 /// current — reporting a false counter-reset on an event whose waits delta correctly showed the activity.</para>
+/// <para><b>Also its own identity-epoch carrier (#3653 A5).</b> These counters live in instance memory and
+/// nowhere else: a PostgreSQL restart — clean or crash, planned failover or a Multi-AZ one — starts them
+/// from zero, and an endpoint that now reaches a different instance hands back that instance's totals. The
+/// statements carrier's epoch (<c>pg_stat_statements_info.stats_reset</c>) says nothing about them: it does
+/// NOT move on a clean restart, because that extension's counters survive one, so a wait-stats baseline read
+/// before a restart would keep being subtracted from after it. The reset branch catches the readings that
+/// FELL (near-zero after a restart) and reports them (0, 0); it cannot catch readings that ROSE — a failover
+/// onto the busier instance raises every wait counter at once and <c>new instance's total minus old
+/// instance's baseline</c> would be stored as one interval's waits. So the query carries
+/// <c>pg_postmaster_start_time()</c> as a trailing column (an uncorrelated scalar subquery, evaluated once
+/// per statement), and <see cref="ReadAsync"/> hands it to <see cref="ServerEpoch.ObservePostmaster"/> off the
+/// FIRST row and BEFORE that row's own subtraction — the ordering the statements carrier established, and the
+/// one that makes this pass honest rather than the next. On an epoch only this family's groups are
+/// forgotten (<c>pg_wait_stats_waits</c>, <c>pg_wait_stats_time</c>): the postmaster restarting says nothing
+/// about <c>pg_stat_statements</c>, whose counters may well have survived it. The other PostgreSQL delta family
+/// (<c>pg_statement_stats</c>) keeps its own epoch; the cumulative views the other PostgreSQL collectors read
+/// (<c>pg_stat_database</c>, <c>pg_stat_io</c>, index usage, the write-stats views) are stored RAW and differenced
+/// by their store readers, which carry the view's own <c>stats_reset</c> beside the counters as the reset
+/// signal — and since PostgreSQL 15 those counters survive a clean restart anyway. No other collector in the
+/// PostgreSQL set calls the delta calculator, so no other family needs a carrier.</para>
 /// </summary>
 public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWaitStatsCollector.Row>
 {
@@ -131,7 +151,12 @@ public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWai
        No delta computed in SQL: wait_time is cumulative since instance start with NO reset function
        anywhere in the Aurora API, so the only way to get an interval is snapshot-and-subtract, which
        is what the shared delta machinery already does for SQL Server. A counter that went backwards
-       means the instance restarted. */
+       means the instance restarted — and one that went FORWARDS past its baseline after a failover means
+       it too, which is what the trailing postmaster_start_time column exists to catch (#3653 A5, the class
+       remarks). An uncorrelated scalar subquery, so the planner evaluates it once per statement as an
+       InitPlan (the shape #3694 proved for stats_reset), not once per row; the same value on every row, and
+       ReadAsync reads it off the first. Trailing, at ordinal 6, so the six payload ordinals above are what
+       they were. Not a payload column: PayloadColumns and WritePayload are untouched. */
     private const string QueryText = @"
 SELECT
     w.type_id::int          AS type_id,
@@ -139,7 +164,8 @@ SELECT
     t.type_name             AS type_name,
     e.event_name            AS event_name,
     w.waits::bigint         AS waits,
-    w.wait_time::bigint     AS wait_time_us
+    w.wait_time::bigint     AS wait_time_us,
+    (SELECT pg_postmaster_start_time()) AS postmaster_start_time
 FROM aurora_stat_system_waits() AS w(type_id, event_id, waits, wait_time)
 LEFT JOIN aurora_stat_wait_type() AS t(type_id, type_name)
        ON t.type_id = w.type_id
@@ -165,6 +191,26 @@ WHERE w.wait_time > 0";
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
+    /// <summary>
+    /// The postmaster epoch this collector persists per server (#3653 A5): <c>pg_postmaster_start_time()</c>
+    /// as last observed, and the value the latest change replaced. Declared so both hosts read the prior
+    /// before the run and write the observed one after it (#1962's generic wiring). One row per server per
+    /// key; the previous-value key is written only on an epoch.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[]
+    {
+        ServerEpoch.PostmasterStateKey,
+        ServerEpoch.PostmasterPreviousStateKey,
+    };
+
+    /// <summary>
+    /// The delta groups this collector subtracts under, spelled once for the epoch forget below. The two
+    /// <c>CalculateDeltaWithInterval</c> calls keep their literals on purpose: <c>DeltaFamilySeedingCensusTests</c>
+    /// reads the groups off those call sites, and <c>ServerEpochTests.PgWaitStats_ForgetsItsOwnGroupsBeforeItsFirstSubtraction</c>
+    /// drives one read and asserts the groups the forget named are exactly the groups the pass then subtracted under.
+    /// </summary>
+    internal static readonly string[] DeltaGroups = { "pg_wait_stats_waits", "pg_wait_stats_time" };
+
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
         new CollectorColumn("wait_type_id", CollectorColumnType.Integer),
@@ -188,9 +234,26 @@ WHERE w.wait_time > 0";
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var epochObserved = false;
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #3653 A5: the epoch first, off the FIRST row and BEFORE that row's own subtraction — and before
+               the type filter below, since an ignored first row carries the same scalar as every other and
+               the forget must not wait for a row this pass happens to keep. The forget it may trigger is
+               what makes THIS pass's rows honest; forgotten after the loop, every row would already have been
+               subtracted from the dead baseline and stored. A pass that returns no rows (nothing has waited yet
+               on a freshly started instance, `wait_time > 0` matching nothing) observes nothing and catches up
+               on the first pass with a row, where the reset branch would have marked those rows (0, 0) anyway. */
+            if (!epochObserved)
+            {
+                epochObserved = true;
+                ServerEpoch.ObservePostmaster(
+                    context,
+                    reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                    DeltaGroups);
+            }
+
             var typeName = reader.IsDBNull(2) ? null : reader.GetString(2);
 
             /* Filter by type name, case-insensitively and on our own list rather than

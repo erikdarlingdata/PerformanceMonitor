@@ -18,6 +18,21 @@ namespace PerformanceMonitor.Collectors;
 /// Wait statistics from sys.dm_os_wait_stats. Extracted verbatim from Lite's
 /// RemoteCollectorService.WaitStats.cs (query text, ignored-wait filtering, delta groups/keys/gap
 /// policy, and payload order are the parity contract — WaitStatsCollectorDefinitionTests pins them).
+///
+/// <para><b>Also the FIRST identity-epoch carrier for SQL Server targets (#3653 A5).</b> Both hosts run a
+/// server's due collectors in <c>CollectorScheduleDefaults.All</c>'s declared order and this collector is
+/// first, so the instance identity (<c>sys.dm_os_sys_info.sqlserver_start_time</c>, <c>@@SERVERNAME</c>)
+/// rides here as a second result set — the same shape <see cref="CpuUtilizationCollector"/> carries — and
+/// <see cref="ReadAsync"/> hands it to <see cref="ServerEpoch.ObserveInstance"/> after the rows are read
+/// and BEFORE <see cref="WritePayload"/> subtracts any of them. That order is the whole point: a restart,
+/// failover or re-point is then forgotten before any SQL Server delta family — this one included — has
+/// subtracted from the dead instance's baseline, where the CPU carrier, tenth in the order, let five
+/// families fabricate one interval each first. The CPU carrier stays (an operator can disable this
+/// collector; see <see cref="ServerEpoch"/>'s remarks for how two observers make one forget). The DMV was
+/// already required — <c>sys.dm_os_wait_stats</c> and <c>sys.dm_os_sys_info</c> are both VIEW SERVER STATE
+/// — so this is no new permission and no new round trip; a login the first SELECT refuses never reaches the
+/// second. Not carried on Azure SQL DB, by #3694's ruling for the CPU carrier and so that the two carriers
+/// observe under one rule: the Azure batch is byte-for-byte the pre-#3653 text.</para>
 /// </summary>
 public sealed class WaitStatsCollector : CollectorDefinitionBase<WaitStatsCollector.Row>
 {
@@ -41,6 +56,18 @@ FROM sys.dm_os_wait_stats AS ws
 WHERE ws.wait_time_ms > 0
 OPTION(RECOMPILE);";
 
+    /* #3653 A5: the instance identity, appended to the batch as a SECOND result set off the payload (the
+       default_trace_events idiom for a per-run fact the rows cannot carry, and the CPU carrier's exact
+       column names). Read straight from the DMV rather than through a variable because nothing else in this
+       batch needs it; the payload SELECT above is unchanged, so every column pin on it holds. Appended only
+       when the target is not Azure SQL DB (BuildQuery), so the Azure text stays the verbatim parity contract. */
+    private const string IdentityResultSetText = @"
+
+SELECT
+    server_start_time = dosi.sqlserver_start_time,
+    server_name = @@SERVERNAME
+FROM sys.dm_os_sys_info AS dosi;";
+
     public override string Name => "wait_stats";
 
     public override string TargetTable => "wait_stats";
@@ -51,7 +78,21 @@ OPTION(RECOMPILE);";
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    public override CollectorQuery BuildQuery(CollectorContext context)
+        => new(context.Target.IsAzureSqlDb ? QueryText : QueryText + IdentityResultSetText);
+
+    /// <summary>
+    /// The identity pair this collector persists per server (#3653 A5), under its own collector name — the
+    /// same two keys <see cref="CpuUtilizationCollector"/> declares, each carrier with its own prior. Declared
+    /// so both hosts read the prior before the run and write the observed one after it (#1962's wiring,
+    /// CollectorStateContractTests). One row per server per key, for the life of the server_id; the
+    /// previous-pair key is written only on an epoch.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[]
+    {
+        ServerEpoch.IdentityStateKey,
+        ServerEpoch.IdentityPreviousStateKey,
+    };
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -88,6 +129,26 @@ OPTION(RECOMPILE);";
                 WaitingTasks: reader.GetInt64(1),
                 WaitTimeMs: reader.GetInt64(2),
                 SignalWaitTimeMs: reader.GetInt64(3)));
+        }
+
+        /* #3653 A5: the batch's SECOND result set — the instance identity. Observed HERE, after the rows are
+           read and before this method returns, because this collector's subtractions all happen in
+           WritePayload, which both hosts call only once ReadAsync has handed back the whole list: so an
+           epoch forgets the server's baselines before the first wait_stats delta of the pass, and this
+           family is honest on the very pass that sees the change (ServerEpochTests pins the order on the
+           recording double — zero delta calls before the forget). Gated on the engine flag rather than on a
+           NextResult that happens to return false, exactly as the CPU carrier is: the Azure batch has no
+           second set by construction. A NULL start time observes an unknown, which ServerEpoch treats as no
+           evidence. */
+        if (!context.Target.IsAzureSqlDb
+            && await reader.NextResultAsync(cancellationToken)
+            && await reader.ReadAsync(cancellationToken))
+        {
+            ServerEpoch.ObserveInstance(
+                context,
+                new ServerEpoch.Stamp(
+                    reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
         }
 
         return rows;

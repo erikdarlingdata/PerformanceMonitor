@@ -21,10 +21,12 @@ namespace Lite.Tests;
 /// #3653 A5 — identity-epoch detection. The pure comparator's NULL rules, the persisted form's round trip,
 /// the observation's effects on a REAL <see cref="CollectorDeltaCalculator"/> (baselines and pass window
 /// forgotten, the count measured, old and new pairs persisted, the sentence queued for the host), the
-/// change-only persistence that keeps an ordinary pass from writing state, and the two carriers: the CPU
-/// collector's second result set and the statements collector's trailing column — the latter pinned as
-/// forgetting BEFORE its first subtraction, which is the property that makes the carrier's own family
-/// honest on the pass that sees the epoch.
+/// change-only persistence that keeps an ordinary pass from writing state, and the four carriers: the
+/// wait-stats and CPU collectors' second result sets (the former first in both hosts' order and pinned as
+/// forgetting BEFORE its first subtraction; the latter kept for the operator who disables wait_stats and
+/// pinned as NOT forgetting twice on the same calculator), the statements collector's trailing column and
+/// the Aurora wait collector's trailing column — each pinned as forgetting its own groups before its first
+/// subtraction, which is the property that makes a carrier's own family honest on the pass that sees the epoch.
 ///
 /// <para>Written against the shared calculator rather than a double wherever the claim is about what the
 /// calculator forgets, because "ClearGroups leaves the other groups alone" is a claim about the real cache;
@@ -299,6 +301,102 @@ public sealed class ServerEpochTests
         Assert.Equal(0, interval);
     }
 
+    /* ---------------- two carriers, one forget ---------------- */
+
+    /// <summary>
+    /// The second SQL Server carrier on the same calculator does NOT forget again. wait_stats (first in the
+    /// order) observes the epoch and forgets; the families between the carriers re-baseline on the new
+    /// instance; then cpu_utilization observes the same current pair against ITS OWN persisted prior (a
+    /// separate collector_state row, so it too sees a change) — and the baselines just re-established must
+    /// survive it, or the five families pay one more (0, 0) pass, the very pass the first carrier bought back.
+    /// The second observer still records: its marker measured, its pair and the replaced pair persisted — it
+    /// observed a change — but exactly one forget and one sentence.
+    /// </summary>
+    [Fact]
+    public void ObserveInstance_ASecondCarrierOnTheSameCalculator_DoesNotForgetTwice()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        deltas.CalculateDelta(ServerId, "latch_stats_time", "BUFFER", 1_000, Pass.AddMinutes(-1), CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        var prior = new ServerEpoch.Stamp(T0, "SRV01");
+        var current = new ServerEpoch.Stamp(T1, "SRV01");
+
+        /* wait_stats: the forget. */
+        var first = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, prior));
+        Assert.True(ServerEpoch.ObserveInstance(first, current));
+        Assert.Single(deltas.DrainDiscontinuities(ServerId));
+
+        /* latch_stats, between the carriers: re-baselines on the new instance this pass. */
+        Assert.Equal(0, deltas.CalculateDeltaWithInterval(ServerId, "latch_stats_time", "BUFFER", 50, out var interval, Pass, CollectorDeltaCalculator.DefaultMaxGapSeconds));
+        Assert.Equal(0, interval);
+
+        /* cpu_utilization: its own prior is the old pair too, so it sees the change — and must not forget. */
+        var second = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, prior));
+        Assert.True(ServerEpoch.ObserveInstance(second, current));
+
+        Assert.Equal(20, deltas.CalculateDeltaWithInterval(ServerId, "latch_stats_time", "BUFFER", 70, out interval, Pass.AddMinutes(1), CollectorDeltaCalculator.DefaultMaxGapSeconds));
+        Assert.Equal(60, interval);
+        Assert.Empty(deltas.DrainDiscontinuities(ServerId));
+
+        Assert.Equal(ServerEpoch.IdentityChangesMeasurement + "=1", CollectorMeasurementNote.Render(second.Measurements));
+        Assert.Equal(ServerEpoch.Serialize(current), second.PendingState[ServerEpoch.IdentityStateKey]);
+        Assert.Equal(ServerEpoch.Serialize(prior), second.PendingState[ServerEpoch.IdentityPreviousStateKey]);
+    }
+
+    /// <summary>
+    /// The memo remembers an IDENTITY, not "forgot once": a second carrier that reads a FURTHER move (the
+    /// instance restarted again between the two collectors of one pass) forgets again, because the baselines
+    /// the first forget re-established belong to the instance in between.
+    /// </summary>
+    [Fact]
+    public void ObserveInstance_ASecondCarrierThatSeesAFurtherMove_ForgetsAgain()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        var prior = new ServerEpoch.Stamp(T0, "SRV01");
+
+        Assert.True(ServerEpoch.ObserveInstance(Context(deltas, StateWith(ServerEpoch.IdentityStateKey, prior)), new ServerEpoch.Stamp(T1, "SRV01")));
+        deltas.CalculateDelta(ServerId, "latch_stats_time", "BUFFER", 1_000, Pass, CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        Assert.True(ServerEpoch.ObserveInstance(Context(deltas, StateWith(ServerEpoch.IdentityStateKey, prior)), new ServerEpoch.Stamp(T1.AddMinutes(2), "SRV01")));
+
+        Assert.Equal(0, deltas.CalculateDeltaWithInterval(ServerId, "latch_stats_time", "BUFFER", 1_500, out var interval, Pass.AddMinutes(1), CollectorDeltaCalculator.DefaultMaxGapSeconds));
+        Assert.Equal(0, interval);
+        Assert.Equal(2, deltas.DrainDiscontinuities(ServerId).Count);
+    }
+
+    /// <summary>
+    /// The memo is the CALCULATOR's, not the process's: a different calculator holding the same server id
+    /// (a test, a host that rebuilt its runtime) knows nothing and forgets on first sight — the conservative
+    /// direction — and one calculator's memo for one server says nothing about its other servers.
+    /// </summary>
+    [Fact]
+    public void ObserveInstance_TheMemoIsPerCalculatorAndPerServer()
+    {
+        var prior = new ServerEpoch.Stamp(T0, "SRV01");
+        var current = new ServerEpoch.Stamp(T1, "SRV01");
+
+        var one = new CollectorDeltaCalculator();
+        Assert.True(ServerEpoch.ObserveInstance(Context(one, StateWith(ServerEpoch.IdentityStateKey, prior)), current));
+        Assert.Single(one.DrainDiscontinuities(ServerId));
+
+        var other = new CollectorDeltaCalculator();
+        Assert.True(ServerEpoch.ObserveInstance(Context(other, StateWith(ServerEpoch.IdentityStateKey, prior)), current));
+        Assert.Single(other.DrainDiscontinuities(ServerId));
+
+        /* Same calculator, another server that happens to report the same pair: its own first forget. */
+        var sibling = new CollectorContext
+        {
+            ServerId = ServerId + 1,
+            ServerName = "sibling",
+            CollectionTime = Pass,
+            Deltas = one,
+            Target = new CollectorTargetInfo(),
+            State = StateWith(ServerEpoch.IdentityStateKey, prior),
+        };
+        Assert.True(ServerEpoch.ObserveInstance(sibling, current));
+        Assert.Single(one.DrainDiscontinuities(ServerId + 1));
+    }
+
     /* ---------------- the statements observation ---------------- */
 
     /// <summary>
@@ -353,7 +451,197 @@ public sealed class ServerEpochTests
         Assert.Empty(context.Measurements);
     }
 
+    /* ---------------- the postmaster observation ---------------- */
+
+    /// <summary>
+    /// A moved pg_postmaster_start_time forgets the wait family's groups — and ONLY those: the statements
+    /// family's baseline on the same server survives, because pg_stat_statements' counters may well have
+    /// survived the restart that zeroed the wait counters (they do, on a clean one).
+    /// </summary>
+    [Fact]
+    public void ObservePostmaster_OnAnEpoch_ForgetsOnlyTheWaitGroups()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        var before = Pass.AddMinutes(-1);
+        deltas.CalculateDelta(ServerId, "pg_wait_stats_waits", "167772160", 100, before, CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltas.CalculateDelta(ServerId, "pg_wait_stats_time", "167772160", 100, before, CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltas.CalculateDelta(ServerId, "pg_statement_stats_calls", "1|1|1|1", 100, before, CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        var startedBefore = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        var startedNow = new DateTime(2026, 9, 19, 3, 59, 0, DateTimeKind.Utc);
+        var context = Context(deltas, StateWith(ServerEpoch.PostmasterStateKey, new ServerEpoch.Stamp(startedBefore, null)), postgres: true);
+
+        Assert.True(ServerEpoch.ObservePostmaster(context, startedNow, "pg_wait_stats_waits", "pg_wait_stats_time"));
+
+        foreach (var group in new[] { "pg_wait_stats_waits", "pg_wait_stats_time" })
+        {
+            Assert.Equal(0, deltas.CalculateDeltaWithInterval(ServerId, group, "167772160", 5, out var interval, Pass, CollectorDeltaCalculator.DefaultMaxGapSeconds));
+            Assert.Equal(0, interval);
+        }
+
+        Assert.Equal(50, deltas.CalculateDeltaWithInterval(ServerId, "pg_statement_stats_calls", "1|1|1|1", 150, out var callsInterval, Pass, CollectorDeltaCalculator.DefaultMaxGapSeconds));
+        Assert.Equal(60, callsInterval);
+
+        Assert.Equal(ServerEpoch.PostmasterChangesMeasurement + "=1", CollectorMeasurementNote.Render(context.Measurements));
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(startedNow, null)), context.PendingState[ServerEpoch.PostmasterStateKey]);
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(startedBefore, null)), context.PendingState[ServerEpoch.PostmasterPreviousStateKey]);
+
+        var line = Assert.Single(deltas.DrainDiscontinuities(ServerId));
+        Assert.Contains("pg_postmaster_start_time", line, StringComparison.Ordinal);
+        Assert.Contains("2026-09-01 00:00:00", line, StringComparison.Ordinal);
+        Assert.Contains("2026-09-19 03:59:00", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>A NULL start time is unknown: never a change, never an erasure of the known prior.</summary>
+    [Fact]
+    public void ObservePostmaster_WithANullStart_IsInert()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        var context = Context(deltas, StateWith(ServerEpoch.PostmasterStateKey, new ServerEpoch.Stamp(new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc), null)), postgres: true);
+
+        Assert.False(ServerEpoch.ObservePostmaster(context, null, "pg_wait_stats_waits"));
+
+        Assert.Empty(context.PendingState);
+        Assert.Empty(context.Measurements);
+    }
+
     /* ---------------- the carriers ---------------- */
+
+    /// <summary>
+    /// The wait-stats collector reads the identity off its SECOND result set at the end of ReadAsync, and its
+    /// subtractions all live in WritePayload — so driven the way both hosts drive it (read the whole list, then
+    /// write each row), the forget lands with ZERO delta calls recorded, and every wait_stats row of the pass
+    /// then subtracts under the groups the forget covered. This is the ordering that closes #3694's carrier-order
+    /// residue: first in the order, honest on its own pass.
+    /// </summary>
+    [Fact]
+    public async Task WaitStats_ReadsTheIdentityOffItsSecondResultSet_AndForgetsBeforeItsFirstSubtraction()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")));
+
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new object[][]
+            {
+                new object[] { "PAGEIOLATCH_SH", 7L, 300L, 20L },
+                new object[] { "SOS_SCHEDULER_YIELD", 10L, 200L, 150L },
+            },
+            new object[][] { new object[] { T1, "SRV02" } });
+        var rows = await WaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        foreach (var row in rows)
+        {
+            WaitStatsCollector.Instance.WritePayload(row, new RecordingCollectorRowWriter(), context);
+        }
+
+        Assert.Equal(2, rows.Count);
+        var clear = Assert.Single(deltas.Clears);
+        Assert.Equal("server", clear.Kind);
+        Assert.Equal(0, clear.DeltaCallsBefore);
+        Assert.Equal(6, deltas.Calls.Count);
+        Assert.Equal(ServerId, deltas.LastServerId);
+
+        Assert.Equal(ServerEpoch.IdentityChangesMeasurement + "=1", CollectorMeasurementNote.Render(context.Measurements));
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(T1, "SRV02")), context.PendingState[ServerEpoch.IdentityStateKey]);
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(T0, "SRV01")), context.PendingState[ServerEpoch.IdentityPreviousStateKey]);
+    }
+
+    /// <summary>A batch with no second set — the shape every pre-#3653 wait_stats pin drives — observes nothing and reads the rows exactly as before.</summary>
+    [Fact]
+    public async Task WaitStats_WithoutASecondResultSet_ObservesNothing()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")));
+
+        using var reader = new FakeCollectorDataReader(new object[] { "PAGEIOLATCH_SH", 7L, 300L, 20L });
+        var rows = await WaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Empty(deltas.Clears);
+        Assert.Empty(context.PendingState);
+        Assert.Empty(context.Measurements);
+    }
+
+    /// <summary>
+    /// Azure SQL DB: the same engine gate as the CPU carrier, so the two carriers observe under one rule — a
+    /// second set that somehow arrived is ignored, and the batch itself carries none (the definition test pins
+    /// the Azure text verbatim).
+    /// </summary>
+    [Fact]
+    public async Task WaitStats_OnAzureSqlDb_IgnoresASecondResultSetEvenIfOneArrived()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")), isAzureSqlDb: true);
+
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new object[][] { new object[] { "PAGEIOLATCH_SH", 7L, 300L, 20L } },
+            new object[][] { new object[] { T1, "SRV02" } });
+        await WaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(deltas.Clears);
+        Assert.Empty(context.PendingState);
+        Assert.DoesNotContain("dm_os_sys_info", WaitStatsCollector.Instance.BuildQuery(context).Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The wait-stats batch returns the identity as its second statement, after the payload SELECT, in the CPU carrier's column names.</summary>
+    [Fact]
+    public void WaitStats_Batch_CarriesTheIdentitySetAfterThePayload()
+    {
+        var sql = WaitStatsCollector.Instance.BuildQuery(Context(new RecordingCollectorDeltaCalculator())).Text;
+
+        Assert.Contains("server_start_time = dosi.sqlserver_start_time", sql, StringComparison.Ordinal);
+        Assert.Contains("server_name = @@SERVERNAME", sql, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("FROM sys.dm_os_wait_stats", StringComparison.Ordinal) < sql.IndexOf("FROM sys.dm_os_sys_info", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The Aurora wait collector forgets BEFORE its first subtraction of the pass, on the same groups it
+    /// subtracts under — the recorder sees zero delta calls at the moment of the forget, and the groups it
+    /// named are exactly the groups the pass then used. The first row here is an IGNORED type, so this also
+    /// pins that the observation is made off the first row read, not the first row kept.
+    /// </summary>
+    [Fact]
+    public async Task PgWaitStats_ForgetsItsOwnGroupsBeforeItsFirstSubtraction()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var startedBefore = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        var startedNow = new DateTime(2026, 9, 19, 3, 59, 0, DateTimeKind.Utc);
+        var context = Context(deltas, StateWith(ServerEpoch.PostmasterStateKey, new ServerEpoch.Stamp(startedBefore, null)), postgres: true);
+
+        using var reader = new FakeCollectorDataReader(
+            new object[] { 6, 100663296L, "Client", "ClientRead", 3283144470L, 565758023440000L, startedNow },
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L, startedNow },
+            new object[] { 3, 50331648L, "Lock", "transactionid", 4395L, 11393070000L, startedNow });
+        var rows = await PgWaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        var clear = Assert.Single(deltas.Clears);
+        Assert.Equal("groups", clear.Kind);
+        Assert.Equal(0, clear.DeltaCallsBefore);
+        Assert.Equal(
+            deltas.Calls.Select(c => c.Group).Distinct(StringComparer.Ordinal).OrderBy(g => g, StringComparer.Ordinal).ToList(),
+            clear.Groups.OrderBy(g => g, StringComparer.Ordinal).ToList());
+        Assert.Equal(4, deltas.Calls.Count);
+
+        Assert.Equal(ServerEpoch.PostmasterChangesMeasurement + "=1", CollectorMeasurementNote.Render(context.Measurements));
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(startedNow, null)), context.PendingState[ServerEpoch.PostmasterStateKey]);
+        Assert.Equal(ServerEpoch.Serialize(new ServerEpoch.Stamp(startedBefore, null)), context.PendingState[ServerEpoch.PostmasterPreviousStateKey]);
+    }
+
+    /// <summary>The same rows with the same postmaster start as the store holds: no forget, no note, no state write.</summary>
+    [Fact]
+    public async Task PgWaitStats_WithAnUnchangedPostmasterStart_ObservesQuietly()
+    {
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var started = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        var context = Context(deltas, StateWith(ServerEpoch.PostmasterStateKey, new ServerEpoch.Stamp(started, null)), postgres: true);
+
+        using var reader = new FakeCollectorDataReader(new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L, started });
+        await PgWaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(deltas.Clears);
+        Assert.Empty(context.Measurements);
+        Assert.Empty(context.PendingState);
+    }
 
     /// <summary>
     /// The statements collector forgets BEFORE its first subtraction of the pass, on the same groups it
@@ -483,18 +771,26 @@ public sealed class ServerEpochTests
     }
 
     /// <summary>
-    /// Both carriers declare the keys they persist, which is what makes both hosts load the prior before the
-    /// run and save the observation after it (#1962's wiring, pinned in CollectorStateContractTests).
+    /// All four carriers declare the keys they persist, which is what makes both hosts load the prior before
+    /// the run and save the observation after it (#1962's wiring, pinned in CollectorStateContractTests). The
+    /// two SQL Server carriers declare the SAME keys: the store keys state by (server_id, collector_name), so
+    /// each holds its own prior under its own name, which is why the second needs the memo above.
     /// </summary>
     [Fact]
     public void TheCarriersDeclareTheirStateKeys()
     {
         Assert.Equal(
             new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey },
+            WaitStatsCollector.Instance.StateKeys);
+        Assert.Equal(
+            new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey },
             CpuUtilizationCollector.Instance.StateKeys);
         Assert.Equal(
             new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey },
             PgStatementStatsCollector.Instance.StateKeys);
+        Assert.Equal(
+            new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey },
+            PgWaitStatsCollector.Instance.StateKeys);
     }
 
     /* ---------------- the calculator's own contract ---------------- */

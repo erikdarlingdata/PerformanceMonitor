@@ -67,14 +67,16 @@ namespace PerformanceMonitorLite.Tests;
 /// window (<see cref="ICollectorDeltaCalculator.ClearServer"/> / <c>ClearGroups</c>) BEFORE it subtracts,
 /// and leaves a marker the read layer can find (<c>identity_epoch_changes=1</c> on the carrier run's
 /// <c>collection_log</c> note; the replaced pair in <c>collector_state</c>). Landed in #3694 as
-/// <see cref="ServerEpoch"/>; <b>PINNED here as a call-site census</b>: exactly the two carriers observe,
-/// every forget site in the product is an epoch or a remove path
+/// <see cref="ServerEpoch"/>; <b>PINNED here as a call-site census</b>: exactly the four carriers observe
+/// (two SQL Server instance carriers, the statements carrier, the Aurora wait carrier), every forget site
+/// in the product is an epoch or a remove path
 /// (<see cref="EveryForgetSite_IsTheEpochComparatorOrAHostRemovePath"/>), both hosts drain the account and
 /// carry the marker (<see cref="BothHosts_DrainTheDiscontinuityAccount_AndCarryTheMarkerOntoTheCollectionLog"/>).
-/// Two residuals are rostered shrink-only: the five SQL Server families scheduled BEFORE the carrier, which
-/// subtract once against the dead baseline on the epoch pass
-/// (<see cref="FamiliesThatSubtractOnceBeforeTheCarrier"/>), and <c>pg_wait_stats</c>, which has no
-/// carrier at all (<see cref="FamiliesWithoutAnEpochCarrier"/>).</description></item>
+/// The two residuals #3694 left were rostered shrink-only and are now EMPTY, asserted empty from the product:
+/// no SQL Server delta family is scheduled before the first instance carrier (<c>wait_stats</c> carries the
+/// pair on both hosts, first in the order — <see cref="FamiliesThatSubtractOnceBeforeTheCarrier"/>), and
+/// no delta family lacks a carrier (<c>pg_wait_stats</c> carries <c>pg_postmaster_start_time()</c> —
+/// <see cref="FamiliesWithoutAnEpochCarrier"/>).</description></item>
 /// <item><description><b>Every delta family persists the interval its deltas accrued over.</b> COMPLETE
 /// and <b>PINNED</b> by <see cref="DeltaFamilyIntervalColumnTests"/> (Darling V127/V128, Lite v60/v61):
 /// all ten members of <see cref="CollectorDeltaCalculator.DeltaFamilyCollectors"/> carry
@@ -484,49 +486,60 @@ public sealed class MeasurementContractCensusTests
     private const string DarlingRunner = "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs";
     private const string LiteRemovePaths = "Lite/MainWindow.xaml.cs";
 
-    /// <summary>The definitions that observe an epoch, and which observation each makes (#3694). SQL Server's
-    /// carrier is the CPU collector's second result set (<c>sqlserver_start_time</c>, <c>@@SERVERNAME</c>) — the
-    /// whole server's baselines ride on it; the PostgreSQL statements family carries its own
-    /// <c>stats_reset</c>, which says nothing about any other counter and so forgets only its own groups.</summary>
+    /// <summary>The definitions that observe an epoch, and which observation each makes (#3694, and the two
+    /// residues closed after it). SQL Server's carriers are the wait-stats collector's and the CPU collector's
+    /// second result sets (<c>sqlserver_start_time</c>, <c>@@SERVERNAME</c>) — the whole server's baselines ride
+    /// on either; wait_stats is first in the order and does the forgetting, the CPU carrier is kept for the
+    /// operator who disables wait_stats and finds the calculator already forgotten (ServerEpoch's "two carriers,
+    /// one forget"). The PostgreSQL statements family carries its own <c>stats_reset</c> and Aurora's wait family
+    /// its <c>pg_postmaster_start_time()</c>; each says nothing about any other counter and forgets only its own
+    /// groups.</summary>
     private static readonly (string File, string Observation)[] Carriers =
     {
         ("PerformanceMonitor.Collectors/CpuUtilizationCollector.cs", "ObserveInstance"),
         ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatements"),
+        ("PerformanceMonitor.Collectors/PgWaitStatsCollector.cs", "ObservePostmaster"),
+        ("PerformanceMonitor.Collectors/WaitStatsCollector.cs", "ObserveInstance"),
     };
 
     /// <summary>
-    /// Every site in the product that forgets a server's baselines, with its count: the comparator's two
-    /// (one per observation), Lite's two remove paths (a closed tab, a removed server) and Darling's two
-    /// (reconcile-remove, and the same-id reconnect #3653 A5 added). Stated as an exact set so a forget that
-    /// appears anywhere else — or one of these that disappears — is a diff to this list.
+    /// Every site in the product that forgets a server's baselines, with its count: the comparator's three
+    /// (one per observation — the instance observation's single <c>ClearServer</c> serves both SQL Server
+    /// carriers; the statements and postmaster observations each <c>ClearGroups</c> their own family), Lite's
+    /// two remove paths (a closed tab, a removed server) and Darling's two (reconcile-remove, and the same-id
+    /// reconnect #3653 A5 added). Stated as an exact set so a forget that appears anywhere else — or one of
+    /// these that disappears — is a diff to this list.
     /// </summary>
     private static readonly (string File, string Method, int Count)[] ForgetSites =
     {
-        (ComparatorFile, "ClearGroups", 1),
+        (ComparatorFile, "ClearGroups", 2),
         (ComparatorFile, "ClearServer", 1),
         (DarlingHostLoop, "ClearServer", 2),
         (LiteRemovePaths, "ClearServer", 2),
     };
 
     /// <summary>
-    /// The SQL Server delta families scheduled BEFORE the carrier, which therefore subtract once against the
-    /// dead baseline on the pass that sees the epoch and are forgotten in the same pass (ServerEpoch's
-    /// remarks state this residual; #3653's dispatch table names it). Read from BOTH hosts' schedule order
-    /// below and asserted equal to this list, so moving the carrier's two columns onto the first collector in
-    /// the order — the follow-up the remarks describe — empties it, and nothing else can.
+    /// The SQL Server delta families scheduled BEFORE the first instance carrier, which would therefore
+    /// subtract once against the dead baseline on the pass that sees the epoch (#3694's stated residual: five
+    /// families, when the only carrier was <c>cpu_utilization</c>, tenth in the order). EMPTY since the pair
+    /// moved onto <c>wait_stats</c>' batch, first on both hosts — and asserted empty from BOTH hosts' schedule
+    /// order below, so a reorder that puts a delta family ahead of every carrier, or a carrier that stops
+    /// carrying, reappears here as a diff rather than as fabricated intervals. The first carrier's OWN family
+    /// is honest on the pass because it observes before its first subtraction; that ordering is pinned on the
+    /// recording double in <c>ServerEpochTests</c>, not here.
     /// </summary>
-    private static readonly string[] FamiliesThatSubtractOnceBeforeTheCarrier =
-    {
-        "latch_stats", "procedure_stats", "query_stats", "spinlock_stats", "wait_stats",
-    };
+    private static readonly string[] FamiliesThatSubtractOnceBeforeTheCarrier = Array.Empty<string>();
 
-    /// <summary>Delta families no epoch observation covers. <c>pg_wait_stats</c> (Aurora's cumulative wait
-    /// counters) restarts with the instance and has no carrier: the SQL Server pair is read off a SQL Server
-    /// DMV, and <c>stats_reset</c> speaks for the statements view alone. Named so it can only shrink.</summary>
-    private static readonly string[] FamiliesWithoutAnEpochCarrier = { "pg_wait_stats" };
+    /// <summary>Delta families no epoch observation covers. EMPTY since <c>pg_wait_stats</c> (Aurora's cumulative
+    /// wait counters, which restart with the instance) carries <c>pg_postmaster_start_time()</c> on its own
+    /// query — the SQL Server pair is read off a SQL Server DMV and <c>stats_reset</c> speaks for the statements
+    /// view alone, so neither could have covered it. Asserted empty from the catalog and the carrier list, so an
+    /// eleventh delta family arrives here before it arrives unwatched.</summary>
+    private static readonly string[] FamiliesWithoutAnEpochCarrier = Array.Empty<string>();
 
-    /// <summary>The carrier whose observation covers every SQL Server delta family.</summary>
-    private const string InstanceCarrier = "cpu_utilization";
+    /// <summary>The SQL Server collectors whose observation covers every SQL Server delta family; whichever
+    /// both hosts schedule first is the one whose position bounds <see cref="FamiliesThatSubtractOnceBeforeTheCarrier"/>.</summary>
+    private static readonly string[] InstanceCarriers = { "wait_stats", "cpu_utilization" };
 
     /// <summary>
     /// Rule 3, the comparator's call sites: exactly the two carriers observe (one <c>ObserveInstance</c>, one
@@ -569,12 +582,16 @@ public sealed class MeasurementContractCensusTests
 
         /* The comparator forgets BEFORE it records: ClearServer/ClearGroups precede the Measure and the
            PendingState write inside each observation, so the marker is never written for a forget that did
-           not happen and the forget never happens without the marker. */
+           not happen and the forget never happens without the marker. (The instance observation's forget is
+           conditional on the per-calculator memo — a second carrier finding the calculator already on the new
+           identity skips it — but the order of the three sites is what this pins, and the memo branch sits
+           inside the same `if (changed)` the marker does.) */
         var comparator = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(ComparatorFile));
         foreach (var (observation, forget, measurement) in new[]
         {
             ("ObserveInstance", "ClearServer", "IdentityChangesMeasurement"),
             ("ObserveStatements", "ClearGroups", "StatementsChangesMeasurement"),
+            ("ObservePostmaster", "ClearGroups", "PostmasterChangesMeasurement"),
         })
         {
             var body = comparator[comparator.IndexOf("public static bool " + observation + "(", StringComparison.Ordinal)..];
@@ -620,19 +637,26 @@ public sealed class MeasurementContractCensusTests
         /* The labels, as the constants the carriers measure under — a reader greps collection_log for these. */
         Assert.Equal("identity_epoch_changes", ServerEpoch.IdentityChangesMeasurement);
         Assert.Equal("statements_epoch_changes", ServerEpoch.StatementsChangesMeasurement);
+        Assert.Equal("postmaster_epoch_changes", ServerEpoch.PostmasterChangesMeasurement);
 
         /* And the persisted pair, old beside new, under the carriers' declared state keys — the other half
-           of the marker, in collector_state, needing no rung. */
+           of the marker, in collector_state, needing no rung. Both SQL Server carriers declare the SAME two
+           keys: the store keys state by (server_id, collector_name), so each holds its own prior under its
+           own name. */
+        Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, WaitStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, CpuUtilizationCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey }, PgStatementStatsCollector.Instance.StateKeys);
+        Assert.Equal(new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey }, PgWaitStatsCollector.Instance.StateKeys);
     }
 
     /// <summary>
     /// Rule 3's two residuals, read from the product rather than restated: the delta families both hosts
-    /// schedule before the instance carrier (Darling iterates <see cref="CollectorScheduleDefaults.All"/> in
+    /// schedule before the FIRST instance carrier (Darling iterates <see cref="CollectorScheduleDefaults.All"/> in
     /// declaration order; Lite's default schedule is <c>ScheduleManager.GetDefaultSchedules()</c>, pinned
     /// equal to the shared defaults elsewhere), and the family no observation covers. Each is asserted equal
-    /// to its roster, so the roster describes the product and cannot describe anything else.
+    /// to its roster — both empty — so the roster describes the product and cannot describe anything else.
+    /// Both instance carriers must be present in both orders: the CPU carrier is the one that stays when an
+    /// operator disables wait_stats, and a schedule that dropped either would silently narrow the cover.
     /// </summary>
     [Fact]
     public void TheEpochResiduals_AreExactlyTheRosteredFamilies()
@@ -641,19 +665,29 @@ public sealed class MeasurementContractCensusTests
 
         var darlingOrder = CollectorScheduleDefaults.All.Keys.ToList();
         var liteOrder = ScheduleManager.GetDefaultSchedules().Select(s => s.Name).ToList();
-        Assert.Contains(InstanceCarrier, darlingOrder);
-        Assert.Contains(InstanceCarrier, liteOrder);
+        foreach (var carrier in InstanceCarriers)
+        {
+            Assert.Contains(carrier, darlingOrder);
+            Assert.Contains(carrier, liteOrder);
+            Assert.Contains(Carriers, c => c.Observation == "ObserveInstance" && c.File.EndsWith("/" + Pascal(carrier) + "Collector.cs", StringComparison.Ordinal));
+        }
 
         foreach (var (host, order) in new[] { ("Darling", darlingOrder), ("Lite", liteOrder) })
         {
             var before = order
-                .TakeWhile(name => !string.Equals(name, InstanceCarrier, StringComparison.OrdinalIgnoreCase))
+                .TakeWhile(name => !InstanceCarriers.Contains(name, StringComparer.OrdinalIgnoreCase))
                 .Where(families.Contains)
                 .OrderBy(n => n, StringComparer.Ordinal)
                 .ToList();
             Assert.True(
                 FamiliesThatSubtractOnceBeforeTheCarrier.SequenceEqual(before, StringComparer.Ordinal),
-                $"{host}: the delta families scheduled before {InstanceCarrier} are [{string.Join(", ", before)}], the roster says [{string.Join(", ", FamiliesThatSubtractOnceBeforeTheCarrier)}] — move the roster with the schedule, or the carrier");
+                $"{host}: the delta families scheduled before the first instance carrier are [{string.Join(", ", before)}], the roster says [{string.Join(", ", FamiliesThatSubtractOnceBeforeTheCarrier)}] — move the roster with the schedule, or the carrier");
+
+            /* And the first carrier in the order is wait_stats on both hosts — the fact that makes the roster
+               empty, and the carrier whose forget-before-first-subtraction ServerEpochTests pins. Stated by
+               name so a reorder that promotes the CPU carrier ahead of it is a conscious diff here, not a
+               quiet change of which collector's ordering the whole cover rests on. */
+            Assert.Equal("wait_stats", order.First(name => InstanceCarriers.Contains(name, StringComparer.OrdinalIgnoreCase)));
         }
 
         /* The families the SQL Server carrier covers are every SQL Server delta family; the PostgreSQL
