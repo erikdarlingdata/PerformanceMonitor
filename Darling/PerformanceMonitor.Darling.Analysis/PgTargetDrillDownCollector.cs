@@ -65,6 +65,14 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
 
                 if (finding.Severity >= 0.5)
                 {
+                    /* Lane 16 of #3691: the deadlock exemplars, on EITHER deadlock root. On the measured population
+                       the regular rate never reached 5 per hour (2 in the worst hour → 0.2), so PG_DEADLOCK_RATE
+                       never roots a card there; what roots is the first-occurrence anomaly at the 1-per-hour bar,
+                       and a drill-down keyed on the regular fact alone would run for nobody who has the problem.
+                       Both facts are emitted only with a non-zero counter, so "on the path" is "deadlocks > 0". */
+                    if (pathKeys.Contains(PgTargetFactKeys.DeadlockRate) || pathKeys.Contains(PgTargetFactKeys.AnomalyDeadlockRate))
+                        await CollectDeadlockExemplarsAsync(finding, context);
+
                     if (pathKeys.Any(k => k.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
                         || pathKeys.Contains(PgTargetFactKeys.TempSpill))
                     {
@@ -91,4 +99,6 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
     /* ── Drill-downs, one per file. ── */
 
     private partial Task CollectTopStatementsAsync(AnalysisFinding finding, AnalysisContext context, HashSet<string> pathKeys);
+
+    private partial Task CollectDeadlockExemplarsAsync(AnalysisFinding finding, AnalysisContext context);
 }
