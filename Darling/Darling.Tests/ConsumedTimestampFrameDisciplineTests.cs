@@ -908,7 +908,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "blocking_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
             "start_time", "running_jobs", 1,
-            "get_running_jobs; collection_time in the same object is UTC, so a job started seconds ago "
+            "get_running_jobs; captured_at (collection_time before #3653) in the same object is UTC, so a job started seconds ago "
             + "reads as a four-hour runner — a long-running-job alert's exact signature; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
             "last_user_access", "index_object_stats", 1,

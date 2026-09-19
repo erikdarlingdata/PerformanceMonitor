@@ -272,6 +272,12 @@ VALUES ($1, $2, $3, 'memory_stats', $4, 120, 'SUCCESS', NULL, 7, 90, 30)", _next
         (typeof(McpPlanCacheSchedulerTools), "get_cpu_scheduler_pressure"),
         (typeof(McpLatchSpinlockTools), "get_latch_stats"),
         (typeof(McpLatchSpinlockTools), "get_spinlock_stats"),
+        /* #3653: the four reads that stamped themselves as collection_time before #3637's vocabulary and were
+           carried by Darling's census as a named allowance; renamed on both SKUs, roster rows on both. */
+        (typeof(McpServerInfoTools), "get_database_sizes"),
+        (typeof(McpJobTools), "get_running_jobs"),
+        (typeof(McpServerInfoTools), "get_server_properties"),
+        (typeof(McpSessionTools), "get_session_stats"),
     ];
 
     [Fact]

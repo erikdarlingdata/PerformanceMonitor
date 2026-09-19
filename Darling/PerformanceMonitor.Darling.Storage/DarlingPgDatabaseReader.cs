@@ -37,6 +37,46 @@ public static class DarlingPgDatabaseReader
         DateTime? LastSampleAt);
 
     /// <summary>
+    /// One page of the read: the rows the cap admitted, beside the WINDOW's figures over every database that
+    /// moved (#3653, the wwwroot-twins item; the #3541 A7 shape the five percent tools took in #3613).
+    ///
+    /// <para>Until this record existed the tool summed the rows it had fetched and published the sums as
+    /// <c>total_temp_files</c> / <c>total_temp_bytes</c> / <c>total_deadlocks</c>, so at <c>limit = 2</c> on a
+    /// cluster with five spilling databases the "total" was the top two's. That was carried honestly — a
+    /// <c>limit_reached</c> flag, a note saying the totals covered only the databases returned, and a web tile
+    /// labelled "Databases returned" — as the A7 census's one stated allowance. The window's figures are
+    /// free on the statement the read already runs (a window aggregate over the grouped result, evaluated
+    /// after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>), so the allowance is
+    /// retired rather than relabelled: <c>total_*</c> now means what it says.</para>
+    ///
+    /// <para><c>WindowDatabaseCount</c> is how many databases moved (or were reset) in the window —
+    /// <c>COUNT(*) OVER ()</c> over the same grouped result — which is what a count called
+    /// <c>database_count</c> has to mean beside window totals. <c>WindowTotalBlksHit</c> / <c>WindowTotalBlksRead</c>
+    /// carry the cluster-wide hit ratio's two halves for the same reason: the old payload could only offer
+    /// <c>cache_hit_pct_of_returned</c>, honest by name, because the true ratio would have cost a second
+    /// unfiltered aggregate; on this statement it costs nothing. A page record rather than per-row copies,
+    /// because these are facts about the window and the Viewer's projection census maps every ROW property
+    /// to a display column.</para>
+    ///
+    /// <para><c>WindowResetCount</c> is the number of reset signals (explicit <c>stats_reset</c> moves plus
+    /// counter rewinds) across every database in the window, so the payload's top-level "statistics were
+    /// reset in this window" flag can be true of the WINDOW it now sits beside: a database reset off the page
+    /// makes every window total a lower bound, and a flag computed over the page alone would say otherwise.</para>
+    ///
+    /// <para>Every window figure is 0 when the page is empty (<c>OVER ()</c> over zero rows returns no row to
+    /// read them from), and the tool answers the empty case before it looks at them.</para>
+    /// </summary>
+    public sealed record PgDatabasePage(
+        List<PgDatabaseRow> Rows,
+        int WindowDatabaseCount,
+        long WindowTotalTempFiles,
+        long WindowTotalTempBytes,
+        long WindowTotalDeadlocks,
+        long WindowTotalBlksHit,
+        long WindowTotalBlksRead,
+        int WindowResetCount);
+
+    /// <summary>
     /// Positive-difference-per-interval, summed over the window — the same rule the statement and I/O reads
     /// use, because these are cumulative-since-reset counters and a plain last-minus-first goes negative the
     /// moment <c>pg_stat_reset()</c> runs.
@@ -64,6 +104,17 @@ public static class DarlingPgDatabaseReader
     /// NULL name for shared-relation activity; <c>PARTITION BY</c> and <c>GROUP BY</c> both treat NULLs as
     /// one group (grouping semantics, not <c>=</c>), so it differences correctly without a sentinel and the
     /// tool labels it.</para>
+    ///
+    /// <para><b>The window's totals ride on the same statement as the rows</b> (#3653, after #3541 A7).
+    /// <c>SUM(coalesce(SUM(d_temp_files), 0)) OVER ()</c> is a window aggregate over the GROUPED result:
+    /// PostgreSQL evaluates it after <c>GROUP BY</c> / <c>HAVING</c> and before <c>ORDER BY</c> / <c>LIMIT</c>,
+    /// so it sums every database the window holds rather than the rows the cap admits, cannot drift from
+    /// them (a collection landing between two statements is impossible on one), and costs one pass over a
+    /// result the query has already grouped and is about to sort. The same <c>HAVING</c> bounds both: a
+    /// database that neither moved nor was reset is in neither the rows nor the totals, which is the
+    /// definition of "activity in the window" this read has always used. <c>COUNT(*) OVER ()</c> is the
+    /// window's database count under the same rule. The six window columns are identical on every row
+    /// (no partition) and the reader takes them off the last row it reads.</para>
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
@@ -139,7 +190,17 @@ public static class DarlingPgDatabaseReader
             MAX(stats_reset)                                  AS stats_reset,
             CAST(count(*) AS integer)                         AS sample_count,
             MIN(collection_time)                              AS first_sample_at,
-            MAX(collection_time)                              AS last_sample_at
+            MAX(collection_time)                              AS last_sample_at,
+            /* The WINDOW's figures, on every row: over the grouped result, after the group filter below
+               and before the cap - the same population the rows are drawn from (#3653). */
+            CAST(COUNT(*) OVER () AS integer)                              AS window_database_count,
+            CAST(SUM(coalesce(SUM(d_temp_files), 0)) OVER () AS bigint)   AS window_total_temp_files,
+            CAST(SUM(coalesce(SUM(d_temp_bytes), 0)) OVER () AS bigint)   AS window_total_temp_bytes,
+            CAST(SUM(coalesce(SUM(d_deadlocks), 0)) OVER () AS bigint)    AS window_total_deadlocks,
+            CAST(SUM(coalesce(SUM(d_blks_hit), 0)) OVER () AS bigint)     AS window_total_blks_hit,
+            CAST(SUM(coalesce(SUM(d_blks_read), 0)) OVER () AS bigint)    AS window_total_blks_read,
+            CAST(SUM(count(*) FILTER (WHERE reset_here) + count(*) FILTER (WHERE rewound_here)) OVER () AS integer)
+                                                              AS window_reset_count
         FROM differenced
         GROUP BY database_name
         /* Anything that moved, OR anything whose counters were reset. The reset clause is not decoration:
@@ -157,11 +218,24 @@ public static class DarlingPgDatabaseReader
         LIMIT $4
         """;
 
+    /// <summary>The rows alone — the Viewer's grid read, which has no total tiles and keeps its signature. The
+    /// MCP tool goes through <see cref="GetPgDatabaseStatsPageAsync"/> for the window figures.</summary>
     public static async Task<List<PgDatabaseRow>> GetPgDatabaseStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        (await GetPgDatabaseStatsPageAsync(postgres, serverId, startUtc, endUtc, limit, cancellationToken)).Rows;
+
+    /// <summary>Runs <see cref="PgDatabaseSql"/>: the page's rows plus the window's totals off the same
+    /// statement. <paramref name="limit"/> is bound as-is — the tool passes <c>limit + 1</c> and observes
+    /// truncation from the extra row, the A3 dialect.</summary>
+    public static async Task<PgDatabasePage> GetPgDatabaseStatsPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgDatabaseRow>();
+        var windowDatabaseCount = 0;
+        var windowResetCount = 0;
+        long windowTempFiles = 0, windowTempBytes = 0, windowDeadlocks = 0, windowBlksHit = 0, windowBlksRead = 0;
         await using var command = postgres.CreateCommand(PgDatabaseSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -190,9 +264,18 @@ public static class DarlingPgDatabaseReader
                 reader.GetInt32(11),
                 reader.IsDBNull(12) ? null : reader.GetDateTime(12),
                 reader.IsDBNull(13) ? null : reader.GetDateTime(13)));
+
+            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+            windowDatabaseCount = reader.GetInt32(14);
+            windowTempFiles = reader.GetInt64(15);
+            windowTempBytes = reader.GetInt64(16);
+            windowDeadlocks = reader.GetInt64(17);
+            windowBlksHit = reader.GetInt64(18);
+            windowBlksRead = reader.GetInt64(19);
+            windowResetCount = reader.GetInt32(20);
         }
 
-        return rows;
+        return new PgDatabasePage(rows, windowDatabaseCount, windowTempFiles, windowTempBytes, windowDeadlocks, windowBlksHit, windowBlksRead, windowResetCount);
     }
 
     /// <summary>

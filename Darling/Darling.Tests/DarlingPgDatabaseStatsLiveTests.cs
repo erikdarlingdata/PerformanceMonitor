@@ -162,6 +162,13 @@ public sealed class DarlingPgDatabaseStatsLiveTests
             await SeedAsync(connection, ct, t0, null, 0, 0, 100, 1_000, 0, 0, 0, null);
             await SeedAsync(connection, ct, t1, null, 0, 0, 200, 3_000, 0, 0, 0, null);
 
+            /* #3653: a SECOND spiller, smaller than spilldb, so that a page cut at one row leaves temp files
+               and a deadlock OFF the page - which is the only way a window total and a page sum can disagree
+               under an ordering by spilled bytes. 3 files / 3 MB / 1 deadlock, no reset, and 400 block hits
+               against 0 reads so the cluster hit ratio moves too. */
+            await SeedAsync(connection, ct, t0, "smallspill", 0, 0, 0, 0, 0, 0, 0, null);
+            await SeedAsync(connection, ct, t1, "smallspill", 0, 0, 0, 400, 3, 3_000_000, 1, null);
+
             var hit = JsonDocument.Parse(
                 await DarlingMcpPgDatabaseTools.GetPgDatabaseStats(dataSource, ServerName, 4)).RootElement;
             Assert.Equal("database_activity", hit.GetProperty("status").GetString());
@@ -268,28 +275,68 @@ public sealed class DarlingPgDatabaseStatsLiveTests
             Assert.Equal(5d / 305 * 100, spill.GetProperty("rollback_pct").GetDouble(), 2);
             Assert.Equal(90_000_000 / 9, spill.GetProperty("avg_temp_file_bytes").GetInt64());
 
-            /* ── the totals are scoped to the rows the LIMIT let through, and the payload says so ──
+            /* ── the totals are the WINDOW's, the page is the page, and the payload says which is which (#3653) ──
 
-               Every total is a sum over the returned rows, so on a cluster with more active databases than
-               `limit` the hit ratio is a top-N figure and not the instance's. That is why the field is
-               cache_hit_pct_of_returned rather than cluster_*: a `cluster_` name is one a caller could
-               change by raising the limit. Asserted by TRUNCATING deliberately — with four databases
-               active and a limit of two, the read must disclose the cut rather than quietly presenting a
-               partial sum as the whole. */
-            var truncated = JsonDocument.Parse(
+               Until #3653 every total was a sum over the returned rows and the payload disclosed it
+               (limit_reached, "covers only the databases returned", a ratio spelled _of_returned) - the A7
+               census's one stated allowance. The window's figures now ride on the same statement as the rows,
+               above the LIMIT, so the totals cannot move when the cap does. Asserted by TRUNCATING
+               deliberately: five databases moved in this window (spilldb, smallspill, the shared row,
+               quietreset, firstreset - idledb did not), two of them spilled, and a page cut at ONE row must
+               still report both spillers' files, bytes and deadlocks as the total while the page's own
+               figures say what the one row holds. */
+            var window = new
+            {
+                TempFiles = 9L + 3, TempBytes = 90_000_000L + 3_000_000, Deadlocks = 2L + 1,
+                BlksHit = 20_000L + 2_000 + 400, BlksRead = 100L + 100,
+            };
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgDatabaseTools.GetPgDatabaseStats(dataSource, ServerName, 4, 1)).RootElement;
+
+            Assert.Equal(1, cut.GetProperty("databases_returned").GetInt32());
+            Assert.Equal(1, cut.GetProperty("databases").GetArrayLength());
+            Assert.Equal(5, cut.GetProperty("database_count").GetInt32());
+            Assert.True(cut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(window.TempFiles, cut.GetProperty("total_temp_files").GetInt64());
+            Assert.Equal(window.TempBytes, cut.GetProperty("total_temp_bytes").GetInt64());
+            Assert.Equal(window.Deadlocks, cut.GetProperty("total_deadlocks").GetInt64());
+            Assert.Equal(9, cut.GetProperty("returned_temp_files").GetInt64());
+            Assert.Equal(90_000_000, cut.GetProperty("returned_temp_bytes").GetInt64());
+            Assert.Equal(2, cut.GetProperty("returned_deadlocks").GetInt64());
+            Assert.Equal((double)window.BlksHit / (window.BlksHit + window.BlksRead) * 100, cut.GetProperty("cache_hit_pct").GetDouble(), 2);
+            Assert.Equal(20_000d / 20_100 * 100, cut.GetProperty("cache_hit_pct_of_returned").GetDouble(), 2);
+            Assert.Equal("spilldb", cut.GetProperty("top_spiller").GetString());
+            Assert.Contains("row limit of 1 was REACHED", cut.GetProperty("note").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("TOTALS ARE OF THE WINDOW, NOT OF THE PAGE", cut.GetProperty("note").GetString()!, StringComparison.Ordinal);
+
+            /* At limit = 2 both spillers are on the page, so returned_* meets total_* - the case where the old
+               and the new arithmetic agree, kept so the pair above is read as a pair. Truncated still: three
+               more databases moved. */
+            var two = JsonDocument.Parse(
                 await DarlingMcpPgDatabaseTools.GetPgDatabaseStats(dataSource, ServerName, 4, 2)).RootElement;
-
-            Assert.Equal(2, truncated.GetProperty("database_count").GetInt32());
-            Assert.True(truncated.GetProperty("limit_reached").GetBoolean());
-            Assert.Contains("row limit of 2 was REACHED", truncated.GetProperty("note").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(2, two.GetProperty("databases_returned").GetInt32());
+            Assert.Equal(5, two.GetProperty("database_count").GetInt32());
+            Assert.True(two.GetProperty("truncated").GetBoolean());
+            Assert.Equal(window.TempFiles, two.GetProperty("total_temp_files").GetInt64());
+            Assert.Equal(window.TempFiles, two.GetProperty("returned_temp_files").GetInt64());
 
             /* The unlimited call must NOT claim truncation — the flag has to discriminate, or it is
-               decoration that would read as a permanent caveat on every answer. */
-            Assert.False(hit.GetProperty("limit_reached").GetBoolean());
+               decoration that would read as a permanent caveat on every answer - and on it the page IS the
+               window, so every returned_* equals its total_* and the two ratios coincide. */
+            Assert.False(hit.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, hit.GetProperty("databases_returned").GetInt32());
+            Assert.Equal(5, hit.GetProperty("database_count").GetInt32());
+            Assert.Equal(window.TempFiles, hit.GetProperty("total_temp_files").GetInt64());
+            Assert.Equal(window.TempFiles, hit.GetProperty("returned_temp_files").GetInt64());
+            Assert.Equal(window.Deadlocks, hit.GetProperty("returned_deadlocks").GetInt64());
+            Assert.Equal(hit.GetProperty("cache_hit_pct").GetDouble(), hit.GetProperty("cache_hit_pct_of_returned").GetDouble());
             Assert.DoesNotContain("was REACHED", hit.GetProperty("note").GetString()!, StringComparison.Ordinal);
 
-            /* The name itself, pinned: a rename back to cluster_* would restore exactly the overclaim this
-               replaced, and no arithmetic assertion could see it. */
+            /* The names, pinned: the inferred limit_reached is gone for the observed truncated (#3594's class),
+               a cluster_* spelling never appears, and the page's ratio keeps the _of_returned spelling #3613
+               named as the house rule's other honest arm. */
+            Assert.False(hit.TryGetProperty("limit_reached", out _));
             Assert.False(hit.TryGetProperty("cluster_cache_hit_pct", out _));
             Assert.True(hit.TryGetProperty("cache_hit_pct_of_returned", out _));
 
