@@ -252,6 +252,253 @@ public sealed class RobustBaselineTests
         Assert.True(over.FallbackExceedance >= 1.0);
     }
 
+    /* ── #3653 (A8, first slice): the gate judges the window PEAK AND the window MEAN ──
+
+       The pre-#3653 gate tested the window MAX against a per-SAMPLE hour×dow distribution, so its null
+       expectation rose with the number of samples in the window and one hot sample read as a fired
+       anomaly. The pair gate fires only when both statistics clear the EXISTING cutoffs: z on both when
+       the baseline is trustworthy (floor on the peak, as today); the absolute-fallback bar on the peak
+       AND the magnitude floor on the mean when it is not. The reported Sigma stays the peak's. */
+
+    /// <summary>A trustworthy classical bucket (no robust stats) — mean 10, stddev 2 — in CPU units so the
+    /// 50% floor and 90% fallback bar carry their shipped meaning.</summary>
+    private static BaselineBucket TrustedCpuBaseline() => new()
+    {
+        Tier = BaselineTier.Full, HourOfDay = 14, DayOfWeek = 2,
+        Mean = 10, StdDev = 2, Median = 0, Mad = 0,
+        SampleCount = 60, DistinctDays = 5, AbsStdDevFloor = 0,
+    };
+
+    private static AnomalyGate.ZDecision CpuPair(BaselineBucket bucket, double peak, double windowMean) =>
+        AnomalyGate.EvaluateZScore(
+            bucket, peak, windowMean,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.CpuFloorPct, AnomalyThresholds.CpuFallbackPct,
+            AnomalyThresholds.SigmaDisplayCap);
+
+    private static AnomalyGate.ZDecision CpuPeakOnly(BaselineBucket bucket, double peak) =>
+        AnomalyGate.EvaluateZScore(
+            bucket, peak,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.CpuFloorPct, AnomalyThresholds.CpuFallbackPct,
+            AnomalyThresholds.SigmaDisplayCap);
+
+    [Fact]
+    public void PairGate_Trustworthy_OneHotSample_PeakClearsMeanDoesNot_NoFire_WherePeakAloneFired()
+    {
+        /* THE A8 shape: a 90% sample in a window that otherwise idled at the 10% baseline. The peak is
+           40σ out and over the 50% floor — the peak-only gate fires (that is the bias being fixed) — but
+           the window mean of 12% is 1σ, under the 2.0 cutoff, so the pair gate stays quiet. */
+        var bucket = TrustedCpuBaseline();
+        Assert.True(bucket.IsTrustworthy);
+        Assert.Equal(0, bucket.EffectiveRobustSigma); // classical frame
+
+        Assert.True(CpuPeakOnly(bucket, 90).Fire, "red-first: the peak-only verdict is the pre-#3653 fire");
+
+        var pair = CpuPair(bucket, peak: 90, windowMean: 12);
+        Assert.False(pair.Fire);
+        Assert.False(pair.LowQualityBaseline);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pair.Sigma); // the peak's, capped — still reported
+        Assert.Equal(1.0, pair.MeanSigma!.Value, precision: 6);      // (12 - 10) / 2
+    }
+
+    [Fact]
+    public void PairGate_Trustworthy_MeanClearsButPeakUnderTheFloor_NoFire()
+    {
+        /* The peak side of the AND: for a consistent pair (mean <= peak) the mean's z clearing implies the
+           peak's z clears too, so the only way the PEAK fails on this path is the #1486 magnitude floor —
+           a window running 10σ sustained (mean 30%) with a 45% peak is a real shift on a trivial value,
+           and the floor keeps it out exactly as it did before the pair. */
+        var bucket = TrustedCpuBaseline();
+        var pair = CpuPair(bucket, peak: 45, windowMean: 30);
+        Assert.False(pair.Fire);
+        Assert.Equal(10.0, pair.MeanSigma!.Value, precision: 6); // the mean cleared; the peak did not
+    }
+
+    [Fact]
+    public void PairGate_Trustworthy_BothClear_Fires_SigmaIsThePeaks_MeanSigmaRidesBeside()
+    {
+        /* A sustained shift: peak 90% (40σ, capped to 25 for display), window mean 30% (10σ). Both clear
+           the 2.0 cutoff, the peak clears the floor — fire, and the two deviations are carried separately
+           so the story can say "peak 25σ, mean 10σ" instead of letting one number stand for the window. */
+        var bucket = TrustedCpuBaseline();
+        var pair = CpuPair(bucket, peak: 90, windowMean: 30);
+        Assert.True(pair.Fire);
+        Assert.False(pair.LowQualityBaseline);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pair.Sigma);
+        Assert.Equal(10.0, pair.MeanSigma!.Value, precision: 6);
+        Assert.Equal(0.0, pair.FallbackExceedance);
+        Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, pair.ThresholdUsed);
+    }
+
+    [Fact]
+    public void PairGate_Trustworthy_MeanExactlyAtTheCutoff_Fires_TheCutoffIsInclusiveLikeThePeaks()
+    {
+        /* The existing peak rule is >= threshold; the mean's must be the SAME rule, not a stricter one. */
+        var bucket = TrustedCpuBaseline();
+        Assert.True(CpuPair(bucket, peak: 90, windowMean: 14).Fire);   // (14 - 10) / 2 = 2.0 exactly
+        Assert.False(CpuPair(bucket, peak: 90, windowMean: 13.9).Fire);
+    }
+
+    [Fact]
+    public void PairGate_Untrustworthy_TwoBars_PeakOverTheFallbackBar_AndMeanOverTheFloor()
+    {
+        /* The untrustworthy path trusts no z on either statistic, so the mean gets the one absolute
+           instrument the path has — the magnitude FLOOR (50%), deliberately not the 90% fallback bar,
+           which is sized for a peak on a young store and would demand a window pegged the whole way
+           through. Three windows over the same thin baseline: */
+        var thin = new BaselineBucket
+        {
+            Tier = BaselineTier.Full, HourOfDay = 14, DayOfWeek = 2,
+            Mean = 10, StdDev = 2, Median = 0, Mad = 0,
+            SampleCount = 16, DistinctDays = 2, AbsStdDevFloor = 0, // under the Full-tier 3-day floor
+        };
+        Assert.False(thin.IsTrustworthy);
+
+        /* Peak 95 over the 90 bar, mean 60 over the 50 floor → fire; the exceedance stays the PEAK's. */
+        var both = CpuPair(thin, peak: 95, windowMean: 60);
+        Assert.True(both.Fire);
+        Assert.True(both.LowQualityBaseline);
+        Assert.Equal(95.0 / 90.0, both.FallbackExceedance, precision: 6);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, both.Sigma);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, both.MeanSigma!.Value); // (60 - 10) / 2 = 25, at the cap
+
+        /* Peak 95 over the bar, mean 12 UNDER the floor → one hot sample on a young store: no fire. The
+           peak-only gate fired here — the pre-#3653 verdict. */
+        Assert.True(CpuPeakOnly(thin, 95).Fire);
+        var hotSample = CpuPair(thin, peak: 95, windowMean: 12);
+        Assert.False(hotSample.Fire);
+        Assert.True(hotSample.LowQualityBaseline);
+        Assert.Equal(95.0 / 90.0, hotSample.FallbackExceedance, precision: 6); // still stamped; the scorer never sees a non-fire
+
+        /* Peak 80 UNDER the bar, mean 60 over the floor → the mean clears but the peak does not: no fire
+           (the fallback bar on the peak is unchanged by the pair). */
+        Assert.False(CpuPair(thin, peak: 80, windowMean: 60).Fire);
+
+        /* Mean exactly AT the floor clears it — inclusive, like every other bar in the gate. */
+        Assert.True(CpuPair(thin, peak: 95, windowMean: 50).Fire);
+    }
+
+    [Fact]
+    public void PairGate_RobustFrame_JudgesTheMeanAsAModifiedZ_AgainstMedianAndMad()
+    {
+        /* The Darling01 calibration bucket (median 64, MAD 11 → robust sigma 16.3): the HammerDB window's
+           real 1682/sec average as BOTH statistics is 99σ modified on each — fire, MeanSigma capped like
+           Sigma. The same 1682 peak over a window that averaged 70/sec (0.37σ modified) is one burst in an
+           idle window — no fire, and the peak-only verdict fired. */
+        var baseline = Darling01BatchBaseline();
+        Assert.True(baseline.EffectiveRobustSigma > 0);
+
+        var sustained = AnomalyGate.EvaluateZScore(
+            baseline, 1682, 1682,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.BatchRequestFloor, AnomalyThresholds.BatchRequestFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(sustained.Fire);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, sustained.Sigma);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, sustained.MeanSigma!.Value);
+        Assert.Equal(AnomalyThresholds.ModifiedZThreshold, sustained.ThresholdUsed);
+
+        var burst = AnomalyGate.EvaluateZScore(
+            baseline, 1682, 70,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.BatchRequestFloor, AnomalyThresholds.BatchRequestFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.False(burst.Fire);
+        Assert.InRange(burst.MeanSigma!.Value, 0.3, 0.45); // (70 - 64) / (11 / 0.6745) = 0.37
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, burst.Sigma); // the peak's 99σ, capped, still reported
+
+        var peakOnly = AnomalyGate.EvaluateZScore(
+            baseline, 1682,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.BatchRequestFloor, AnomalyThresholds.BatchRequestFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(peakOnly.Fire, "red-first: the peak-only robust verdict is the pre-#3653 fire");
+    }
+
+    [Fact]
+    public void PairGate_RobustlessBucket_DegradesToTheClassicalPairGate_Exactly()
+    {
+        /* Mirror of RobustlessBucket_DegradesToTheClassicalGate_NeverMisfires for the pair: a bucket with
+           zeroed robust fields must hand the pair to the classical pair gate, verdict for verdict. */
+        var bucket = TrustedCpuBaseline();
+        var viaBucket = CpuPair(bucket, peak: 90, windowMean: 30);
+        var classical = AnomalyGate.EvaluateZScore(
+            bucket.Mean, bucket.EffectiveStdDev, bucket.IsTrustworthy, 90, 30,
+            AnomalyThresholds.DefaultDeviationThreshold,
+            AnomalyThresholds.CpuFloorPct, AnomalyThresholds.CpuFallbackPct,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.Equal(classical, viaBucket);
+        Assert.True(viaBucket.Fire);
+    }
+
+    [Fact]
+    public void PeakOnlyOverloads_ReturnTodaysVerdict_WithNoMeanSigma_TheTransitionalContract()
+    {
+        /* The PostgreSQL-target detectors reach the gate through the peak-only overloads until their
+           content lanes pass a mean: those overloads must be BYTE-FOR-BYTE the pre-#3653 verdict — which
+           is the pair verdict with the mean clauses vacuous — and must say so with a null MeanSigma
+           rather than a 0 that would read as "the mean sat at baseline". */
+        var bucket = TrustedCpuBaseline();
+        var peakOnly = CpuPeakOnly(bucket, 90);
+        Assert.Null(peakOnly.MeanSigma);
+        Assert.True(peakOnly.Fire);
+
+        /* A pair whose mean equals its peak has nothing for the mean clause to add: identical verdict. */
+        var degeneratePair = CpuPair(bucket, peak: 90, windowMean: 90);
+        Assert.Equal(peakOnly with { MeanSigma = degeneratePair.MeanSigma }, degeneratePair);
+
+        var thin = new BaselineBucket
+        {
+            Tier = BaselineTier.Full, HourOfDay = 14, DayOfWeek = 2,
+            Mean = 10, StdDev = 2, SampleCount = 16, DistinctDays = 2, AbsStdDevFloor = 0,
+        };
+        var thinPeakOnly = CpuPeakOnly(thin, 95);
+        Assert.Null(thinPeakOnly.MeanSigma);
+        Assert.True(thinPeakOnly.Fire);
+        Assert.Equal(thinPeakOnly with { MeanSigma = null }, CpuPair(thin, 95, 95) with { MeanSigma = null });
+    }
+
+    [Fact]
+    public void PairGate_TheStoryCarriesBothDeviations_AndTheScorerStillGradesThePeaks()
+    {
+        /* The composed story says "peak Nσ … the window's mean Mσ" when the fact carries the pair; a fact
+           from before the pair (no mean sigma) keeps the single-deviation sentence verbatim. And the
+           scorer — FactScorer.ScoreAnomalyFact, unchanged by #3653 — grades off deviation_sigma exactly as
+           before: the mean's sigma is display, not severity. */
+        static Fact Cpu(bool withMean) => new()
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_CPU_SPIKE",
+            Value = 90,
+            Metadata = withMean
+                ? new Dictionary<string, double>
+                {
+                    ["peak_cpu"] = 90, ["avg_cpu_in_window"] = 30, ["baseline_mean"] = 10, ["baseline_samples"] = 60,
+                    ["deviation_sigma"] = 16.0, ["mean_deviation_sigma"] = 4.0, ["fire_threshold"] = 2.0, ["confidence"] = 1.0,
+                }
+                : new Dictionary<string, double>
+                {
+                    ["peak_cpu"] = 90, ["avg_cpu_in_window"] = 30, ["baseline_mean"] = 10, ["baseline_samples"] = 60,
+                    ["deviation_sigma"] = 16.0, ["fire_threshold"] = 2.0, ["confidence"] = 1.0,
+                },
+        };
+
+        var paired = Cpu(withMean: true);
+        var composed = FactAdvice.Compose("ANOMALY_CPU_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_CPU_SPIKE"] = paired })!;
+        Assert.Contains("16σ above its 10% baseline", composed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the window's mean of 30% sat 4σ above it", composed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("16σ above its baseline", composed.Headline, StringComparison.Ordinal); // the headline stays the peak's
+
+        var legacy = Cpu(withMean: false);
+        var legacyComposed = FactAdvice.Compose("ANOMALY_CPU_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_CPU_SPIKE"] = legacy })!;
+        Assert.DoesNotContain("window's mean", legacyComposed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("16σ above its 10% baseline", legacyComposed.Investigation, StringComparison.Ordinal);
+
+        Assert.Equal(Score(legacy), Score(paired));
+        Assert.Equal(1.0, Score(paired), precision: 3); // 16σ against a 2.0 anchor saturates — the peak's grade, as before
+    }
+
     /* ── tier selection over exact (GROUPING SETS) sentinel buckets ── */
 
     [Fact]

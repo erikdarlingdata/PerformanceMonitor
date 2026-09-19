@@ -212,12 +212,12 @@ public static class FactAdvice
             ConfigChangeAttribution.FactKey => ComposeConfigChanged(factsByKey),
             // Anomaly facts: state the observed value, how many σ above the hour-of-week baseline, and
             // the baseline itself — "X is Nσ above its M baseline for this time of week".
-            "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees."),
-            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does."),
-            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does."),
-            "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week."),
-            "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm."),
-            "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does."),
+            "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees.", "avg_cpu_in_window"),
+            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week.", "avg_batch_requests"),
+            "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm.", "avg_connections"),
+            "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
             "ANOMALY_MEMORY_PRESSURE" => ComposeAnomalyMemoryPressure(factsByKey),
             "ANOMALY_WAIT_PROFILE" => ComposeAnomalyWaitProfile(factsByKey),
             "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event"),
@@ -1499,8 +1499,15 @@ public static class FactAdvice
     /// <paramref name="observedKey"/> is the metadata key holding the observed peak/current value;
     /// <paramref name="fmt"/> renders both it and the baseline in the metric's unit. Falls back to the
     /// static block when the deviation/baseline metadata is absent.
+    /// <para>
+    /// #3653 (A8): when the fact carries the window MEAN (<paramref name="windowMeanKey"/>) and its
+    /// deviation (<c>mean_deviation_sigma</c>) — every fact the pair-gated detectors emit — the sentence
+    /// carries both deviations ("peak 6.1σ … the window mean 2.4σ"), because the gate now fired on both
+    /// and an operator reading one number would take a peak-sized σ for the whole window's. A fact from
+    /// before the pair (no mean sigma) keeps the single-deviation sentence verbatim.
+    /// </para>
     /// </summary>
-    private static AdviceBlock ComposeAnomaly(IReadOnlyDictionary<string, Fact> facts, string key, string observedKey, string noun, Func<double, string> fmt, string meaning)
+    private static AdviceBlock ComposeAnomaly(IReadOnlyDictionary<string, Fact> facts, string key, string observedKey, string noun, Func<double, string> fmt, string meaning, string? windowMeanKey = null)
     {
         var fallback = _byKey[key];
         var observed = FactMeta(facts, key, observedKey);
@@ -1513,6 +1520,10 @@ public static class FactAdvice
         var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {sigma.Value:0.#}σ above its {fmt(mean.Value)} baseline for this hour-of-week");
         if (samples is > 0)
             inv.Append($" (over {samples.Value:N0} baseline samples)");
+        var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
+        var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
+        if (windowMean is not null && meanSigma is not null)
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {meanSigma.Value:0.#}σ above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -1649,7 +1660,7 @@ public static class FactAdvice
     private static AdviceBlock ComposeAnomalyMemoryPressure(IReadOnlyDictionary<string, Fact> facts)
     {
         var a = ComposeAnomaly(facts, "ANOMALY_MEMORY_PRESSURE", "peak_memory_pressure_pct", "Memory pressure", Pct,
-            "Total server memory fell relative to its target — the OS may be reclaiming memory from SQL Server, or the buffer pool grew unusually fast.");
+            "Total server memory fell relative to its target — the OS may be reclaiming memory from SQL Server, or the buffer pool grew unusually fast.", "avg_memory_pressure_pct");
         var mem = MaxMemorySentence(facts);
         return mem.Length == 0 ? a : a with { Remediation = a.Remediation + " " + mem };
     }

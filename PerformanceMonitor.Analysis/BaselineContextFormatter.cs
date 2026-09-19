@@ -36,6 +36,11 @@ public static class BaselineContextFormatter
         if (metadata.TryGetValue("deviation_sigma", out var sigma))
             result["deviation"] = $"{sigma:F1}σ";
 
+        /* #3653 (A8): the window MEAN's deviation beside the peak's, so the MCP baseline_context and the
+           notification formatter carry the pair the gate now fires on. Absent on a pre-pair fact. */
+        if (metadata.TryGetValue("mean_deviation_sigma", out var meanSigma))
+            result["window_mean_deviation"] = $"{meanSigma:F1}σ";
+
         if (metadata.TryGetValue("ratio", out var ratio))
             result["ratio"] = $"{ratio:F1}x";
 
