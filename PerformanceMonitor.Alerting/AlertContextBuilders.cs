@@ -945,6 +945,48 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>The <c>Fired By</c> label on the Blocking Wait Time gate item (#3653 A5) — the one field a
+    /// renderer or an MCP reader of <c>get_alert_history</c>'s <c>context_json</c> looks up to learn which arm
+    /// admitted the delivery. A constant so the engine, the tests and any reader spell it once.</summary>
+    public const string BlockingWaitFiredByLabel = "Fired By";
+
+    /// <summary>
+    /// The Blocking Wait Time fire's GATE item (#3653 A5, ruling Q4): the arm that admitted this delivery and
+    /// the numbers it was judged on, prepended by the engine ahead of the blocked-process detail. The
+    /// blocked-process rows are the count gate's evidence and may be absent altogether for a DMV-only
+    /// episode; this item is the wait gate's own evidence and is present on every fire from that arm.
+    ///
+    /// <para><c>Fired By</c> carries the machine token (<c>AlertEngine.BlockingWaitFiredBySingleSnapshot</c>
+    /// / <c>BlockingWaitFiredByConsecutive</c>) rather than prose, because its reader is as likely to be a
+    /// tool as a person: a Slack card renders it as-is and still reads, and <c>get_alert_history</c> hands it
+    /// through <c>context_json</c> untouched. The single-snapshot bar is stated beside the configured one so a
+    /// reader can see WHY a one-snapshot page was admitted without knowing the multiplier — the same reason
+    /// the tempdb item states its denominator.</para>
+    /// </summary>
+    /// <param name="current">The fresh snapshot the fire was judged on.</param>
+    /// <param name="thresholdSeconds">The configured <c>BlockingWaitSecondsThreshold</c>.</param>
+    /// <param name="firedBy">The arm token — see the engine's two <c>BlockingWaitFiredBy*</c> members.</param>
+    public static AlertDetailItem BuildBlockingWaitGateItem(CurrentBlockingWaitResult current, int thresholdSeconds, string firedBy)
+    {
+        if (current is null) throw new ArgumentNullException(nameof(current));
+
+        return new AlertDetailItem
+        {
+            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
+            Fields = new()
+            {
+                (BlockingWaitFiredByLabel, firedBy),
+                ("Total Blocked Wait", $"{current.TotalWaitSeconds:F0}s"),
+                ("Threshold", $"{thresholdSeconds}s"),
+                ("Single-Snapshot Bar", $"{thresholdSeconds * AlertEngine.BlockingWaitSingleSnapshotMultiplier}s ({AlertEngine.BlockingWaitSingleSnapshotMultiplier}× threshold; below it, {AlertEngine.BlockingWaitBreachSamples} consecutive collections)"),
+                /* The snapshot's collection_time is stored naive-UTC (both adapters compare it against
+                   DateTime.UtcNow for freshness), so it renders through the UTC marker — #3422's rule that
+                   every timestamp an alert body carries declares its clock. */
+                ("Snapshot", AlertTimestamp.Utc(current.SnapshotTime))
+            }
+        };
+    }
+
     public static AlertContext? BuildAnomalousJobContext(
         string serverName, List<AnomalousJobInfo> jobs,
         Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)

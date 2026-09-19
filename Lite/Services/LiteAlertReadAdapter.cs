@@ -83,8 +83,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
 
         var cadence = ResolveCadence(_blockingSnapshotCadenceMinutes, serverId, "dmv_blocking_snapshot");
         bool isFresh = DateTime.UtcNow - snapshot.Value.SnapshotTime <= CurrentBlockingWaitResult.MaxSnapshotAge(cadence);
+        /* #3653 (A5): the cadence rides along so the engine's persistence gate can tell a skipped quiet
+           collection from an adjacent one — the same resolved number the freshness bound was taken at. */
         return new CurrentBlockingWaitResult(
-            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh);
+            snapshot.Value.SnapshotTime, snapshot.Value.TotalWaitMs, snapshot.Value.BlockedSessionCount, isFresh, cadence);
     }
 
     public async Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(

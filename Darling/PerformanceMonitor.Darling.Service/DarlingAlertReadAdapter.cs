@@ -298,7 +298,9 @@ GROUP BY collection_time";
         var cadence = ResolveCadence(_blockingSnapshotCadenceMinutes, serverId, "dmv_blocking_snapshot");
         bool isFresh = DateTime.UtcNow - snapshotTime <= CurrentBlockingWaitResult.MaxSnapshotAge(cadence);
 
-        return new CurrentBlockingWaitResult(snapshotTime, totalWaitMs, blockedSessions, isFresh);
+        /* #3653 (A5): the cadence rides along so the engine's persistence gate can tell a skipped quiet
+           collection from an adjacent one — the same resolved number the freshness bound was taken at. */
+        return new CurrentBlockingWaitResult(snapshotTime, totalWaitMs, blockedSessions, isFresh, cadence);
     }
 
     /* ---------------- deadlocks ---------------- */
