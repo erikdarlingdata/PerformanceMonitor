@@ -357,7 +357,7 @@ public sealed class PgCpuCapacityHeadroomTests
     /// CPU reading also carries the capacity figure and the source.
     ///
     /// <para>This is the check that would have caught the defect above.
-    /// <see cref="FleetCardPostgresCpuTests.TheOnlyTwoSurfacesThatBandCpu_BothReachTheSharedDecision"/>
+    /// <see cref="FleetCardPostgresCpuTests.TheOnlySurfacesThatBandCpu_AllReachTheSharedDecision"/>
     /// censuses FILES, and both missed construction sites sat in the two files that census already
     /// approved — so a per-file scan reported a clean tree while half the sites in it were wrong. The unit
     /// of the invariant is the INITIALIZER.</para>

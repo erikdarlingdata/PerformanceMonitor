@@ -113,6 +113,10 @@ public sealed class RepoFileAdoptionTests
         "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
+        /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
+           that follows it, so the CODE spelling is told apart from the same words inside the arms' own
+           comments, which continue on the same line. */
+        "DarlingPgOperationalAlertTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
