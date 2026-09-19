@@ -59,7 +59,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <see cref="AnalysisContext.ObservedDurationMs"/> (the coverage witness's observed time, #3538 A7), never the
 /// nominal window, so a 24-hour read and a 4-hour read of the same server say the same rate.</para>
 /// </summary>
-public sealed class PgTargetAnomalyDetector : IAnomalyDetector
+public sealed partial class PgTargetAnomalyDetector : IAnomalyDetector
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly PgTargetBaselineProvider _baselineProvider;
@@ -228,9 +228,23 @@ LIMIT 6";
         await DetectCpuAnomalies(context, anomalies);
         await DetectDeadlockRateAnomalies(context, anomalies);
         await DetectWaitProfileAnomalies(context, anomalies);
+        /* v2 (#3691): the three new detectors, each in its own partial file (PgTargetAnomalyDetector.{Io,
+           Replication,Wal}.cs) so the lanes that fill them (11 / 12 / 15) never edit this one. Reachable and
+           inert until then: each stub returns without a read or a fact. */
+        await DetectIoAnomalies(context, anomalies);
+        await DetectReplicationAnomalies(context, anomalies);
+        await DetectWalVolumeAnomalies(context, anomalies);
 
         return anomalies;
     }
+
+    /* v2 (#3691) detector partials — declared here in emission order, stubbed in their own files. A filled
+       body copies the five above: its own try / catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(
+       ex, context.CancellationToken)) fence, its bucket through Baselines.GetBaselineAsync, its window read a
+       public const string …Sql over the collector table, and AnomalyGate's metadata on the fact. */
+    private partial Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectReplicationAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectWalVolumeAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;

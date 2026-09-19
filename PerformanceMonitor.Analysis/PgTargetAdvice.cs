@@ -70,6 +70,15 @@ public static partial class PgTargetAdvice
                 => ComposeDatabase(rootFactKey, factsByKey),
             PgTargetFactKeys.CpuPercent
                 => ComposeCpu(rootFactKey, factsByKey),
+            /* v2 (#3691): the measured keys of the three new families, one arm each. Their anomalies
+               (ANOMALY_PG_IO_LATENCY, ANOMALY_PG_REPLICATION_LAG, ANOMALY_PG_WAL_VOLUME) take the ANOMALY_PG_
+               prefix arm above into ComposeAnomaly, as every PostgreSQL anomaly does. */
+            PgTargetFactKeys.IoReadLatencyMs or PgTargetFactKeys.IoWriteLatencyMs
+                => ComposeIo(rootFactKey, factsByKey),
+            PgTargetFactKeys.ReplicationLag or PgTargetFactKeys.SlotRetention or PgTargetFactKeys.SlotXmin
+                => ComposeReplication(rootFactKey, factsByKey),
+            PgTargetFactKeys.BloatTrend or PgTargetFactKeys.IndexBloatTrend
+                => ComposeBloat(rootFactKey, factsByKey),
             _ when rootFactKey.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)
                 => ComposeConfig(rootFactKey, factsByKey),
             _ => null,
@@ -105,4 +114,9 @@ public static partial class PgTargetAdvice
     private static partial AdviceBlock? ComposeDatabase(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeCpu(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeAnomaly(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+
+    /* v2 (#3691) families — stubbed to null in their own files, filled by lanes 11 / 12 / 13. */
+    private static partial AdviceBlock? ComposeIo(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeReplication(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeBloat(string key, IReadOnlyDictionary<string, Fact> factsByKey);
 }

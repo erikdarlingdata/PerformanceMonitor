@@ -102,6 +102,48 @@ public sealed class PgTargetAnomalyTests
         Assert.Empty(typeof(PgTargetBaselineProvider).GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly));
     }
 
+    /// <summary>
+    /// #3691 v2 plumbing: the three v2 baselines and detectors exist as REACHABLE, INERT stubs — the metric names
+    /// are declared and pg_-prefixed, the SQL Server provider has no arm for them, the PostgreSQL provider's arm
+    /// answers null until its lane lands (the same answer as "no arm", so the shared reader reports no baseline
+    /// rather than a bucket built from nothing), the root detector awaits each stub after the five v1 detectors,
+    /// and every stub file carries the exact marker the content briefs quote. The wave-2 name has no arm at all.
+    /// </summary>
+    [Fact]
+    public void TheV2BaselinesAndDetectors_AreReachableInertStubs_EachNamingItsLane()
+    {
+        foreach (var metric in new[] { MetricNames.PgIoReadLatency, MetricNames.PgReplayLagBytes, MetricNames.PgWalBytesPerSec, MetricNames.PgAutovacuumWorkers })
+        {
+            Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
+            Assert.DoesNotContain(metric, s_pgMetricNames);
+            Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
+            Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
+        }
+
+        var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.cs");
+        Assert.Contains("MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),", provider, StringComparison.Ordinal);
+        Assert.Contains("MetricNames.PgReplayLagBytes => ReplayLagBaselineQuery(),", provider, StringComparison.Ordinal);
+        Assert.Contains("MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),", provider, StringComparison.Ordinal);
+        Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
+
+        var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
+        var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
+        Assert.True(lastV1 > 0);
+        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);" })
+            Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
+
+        foreach (var (file, lane) in new[]
+        {
+            ("PgTargetAnomalyDetector.Io.cs", 11), ("PgTargetAnomalyDetector.Replication.cs", 12), ("PgTargetAnomalyDetector.Wal.cs", 15),
+            ("PgTargetBaselineProvider.Io.cs", 11), ("PgTargetBaselineProvider.Replication.cs", 12), ("PgTargetBaselineProvider.Wal.cs", 15),
+        })
+        {
+            var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file);
+            Assert.Contains($"/* filled by lane {lane}", text, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void EachCleanCte_ReadsItsCollectorTable_AndOnlyCollectorTablesOrCtes()
     {
@@ -282,7 +324,9 @@ public sealed class PgTargetAnomalyTests
             .Select(f => (string)f.GetRawConstantValue()!)
             .Where(PgTargetFactKeys.IsPgAnomalyKey)
             .ToList();
-        Assert.Equal(5, anomalyKeys.Count);
+        /* Five v1 anomalies (lane 9) plus the three v2 ones the plumbing registered by shape (#3691: I/O latency,
+           replication lag, WAL volume — all z-score, all deviation-scored). */
+        Assert.Equal(8, anomalyKeys.Count);
 
         foreach (var key in anomalyKeys)
         {
@@ -296,6 +340,9 @@ public sealed class PgTargetAnomalyTests
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyCpuSpike));
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalyDeadlockRate));
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalyWaitProfile));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyIoLatency));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyReplicationLag));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyWalVolume));
         Assert.False(PgTargetScorer.IsPgRatioAnomalyKey("ANOMALY_WAIT_PROFILE"));
         Assert.False(PgTargetScorer.IsDeviationScoredAnomalyKey(null));
         Assert.False(PgTargetScorer.IsPgRatioAnomalyKey(null));
@@ -411,8 +458,16 @@ public sealed class PgTargetAnomalyTests
         Assert.Equal(1.6, young.Severity, precision: 9);
     }
 
+    /// <summary>
+    /// #3691 (v1 residue, #3689 §5): the wait profile now ESCAPES the 1.49 cap on its own evidence, through the
+    /// same three readings its SQL Server twin has — 3× the heavy-tail cutoff on a robust bucket (15σ), 3× its OWN
+    /// ratio anchor otherwise (9×), never on <c>is_new</c>. v1 pinned 1.49 here for the same fact set and called it
+    /// "by design tonight"; a Lock-storm profile at 40σ with every corroborator lit sat one hundredth under the
+    /// page line. The deadlock-rate ratio family stays capped (it has no amplifier arm and reaches CRITICAL through
+    /// its never-capped parent), and the SQL Server profile's arm is untouched.
+    /// </summary>
     [Fact]
-    public void TheRatioFamilies_NeverEscapeTheCap_AndTheDeadlockRate_HasNoAmplifierArm()
+    public void TheWaitProfile_EscapesTheCapWhenExtreme_TheDeadlockRate_NeverDoes_AndHasNoAmplifierArm()
     {
         var profile = Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("modified_z", 40.0), ("ratio", 60.0));
         var lockWait = new Fact { Source = PgTargetSources.WaitsSource, Key = PgTargetFactKeys.WaitKey("Lock", "relation"), Value = 0.5, Metadata = { ["wait_fraction"] = 0.5, ["is_standout"] = 1 } };
@@ -425,7 +480,30 @@ public sealed class PgTargetAnomalyTests
         new FactScorer().ScoreAll(set);
         Assert.Equal(1.0, profile.BaseSeverity, precision: 9);
         Assert.True(profile.AmplifierResults.Count(r => r.Matched) >= 2, "the wait profile's load and named-wait corroborators did not fire");
-        Assert.Equal(1.49, profile.Severity, precision: 9);
+        Assert.True(profile.Severity > 1.49, $"an extreme, corroborated wait profile must leave the tuning-class cap; scored {profile.Severity}");
+
+        /* The escape's three readings, off the metadata the ramp grades from — and the bar is the PostgreSQL
+           profile's own anchors: 15σ robust (3 × HeavyTailModifiedZThreshold), 9× ratio (3 × PgRatioAnomalyThreshold),
+           where the SQL Server arm would read 12× (3 × its 4.0 floor). */
+        Assert.True(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("modified_z", 15.0)), 3.0));
+        Assert.False(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("modified_z", 14.9)), 3.0));
+        Assert.True(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("ratio", 9.0)), 3.0));
+        Assert.False(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("ratio", 8.9)), 3.0));
+        Assert.False(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("modified_z", 40.0), ("is_new", 1)), 3.0));
+        Assert.False(PgTargetScorer.IsExtremeWaitProfileAnomaly(Anomaly(PgTargetFactKeys.AnomalyDeadlockRate, ("ratio", 60.0)), 3.0));
+
+        /* An un-extreme, corroborated profile is still capped: the escape is the ONLY way past 1.49. */
+        var modest = Anomaly(PgTargetFactKeys.AnomalyWaitProfile, ("modified_z", 14.0));
+        var modestSet = new List<Fact>
+        {
+            modest,
+            new Fact { Source = PgTargetSources.WaitsSource, Key = PgTargetFactKeys.WaitKey("Lock", "relation"), Value = 0.5, Metadata = { ["wait_fraction"] = 0.5, ["is_standout"] = 1 } },
+            Anomaly(PgTargetFactKeys.AnomalySessionSpike, ("deviation_sigma", 4.0), ("fire_threshold", 3.5)),
+            Anomaly(PgTargetFactKeys.AnomalyTps, ("deviation_sigma", 4.0), ("fire_threshold", 3.5)),
+        };
+        new FactScorer().ScoreAll(modestSet);
+        Assert.True(modest.AmplifierResults.Count(r => r.Matched) >= 2);
+        Assert.Equal(1.49, modest.Severity, precision: 9);
 
         var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.Empty((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyDeadlockRate])!);

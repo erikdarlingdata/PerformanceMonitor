@@ -43,4 +43,16 @@ public static class MetricNames
     public const string PgWaitMsPerSec = "pg_wait_ms_per_sec";
     /// <summary>Instance CPU as percent of the configured capacity ceiling — <c>pg_cpu_utilization.acu_utilization_percent</c> (Aurora only).</summary>
     public const string PgCpu = "pg_cpu";
+
+    /* #3691 v2 plumbing: the four v2 PostgreSQL-target baselines. Names only — the CTE behind each is the
+       content lane's (PgTargetBaselineProvider.{Io,Replication,Wal}.cs), and the provider's arm for a name
+       whose lane has not landed answers null, which the shared reader treats as "no baseline for this metric". */
+    /// <summary>Mean data-file read latency (ms per read) — the reset-aware <c>pg_io_stats</c> difference per collection. Lane 11.</summary>
+    public const string PgIoReadLatency = "pg_io_read_latency";
+    /// <summary>Replay lag in bytes on the worst standby — <c>pg_replication_stats</c> per collection. Lane 12.</summary>
+    public const string PgReplayLagBytes = "pg_replay_lag_bytes";
+    /// <summary>WAL bytes per second — the reset-aware <c>pg_write_stats</c> WAL counter difference over the interval. Lane 15.</summary>
+    public const string PgWalBytesPerSec = "pg_wal_bytes_per_sec";
+    /// <summary>Autovacuum workers busy per capture — declared for wave 2; no provider arm yet.</summary>
+    public const string PgAutovacuumWorkers = "pg_autovacuum_workers";
 }

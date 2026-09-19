@@ -52,7 +52,14 @@ public static partial class PgTargetScorer
     public static bool IsDeviationScoredAnomalyKey(string? key) =>
         key is PgTargetFactKeys.AnomalyTps
             or PgTargetFactKeys.AnomalySessionSpike
-            or PgTargetFactKeys.AnomalyCpuSpike;
+            or PgTargetFactKeys.AnomalyCpuSpike
+            /* #3691 v2 plumbing: registered by detector SHAPE ahead of their lanes (11, 12, 15) — each is a
+               peak-vs-own-baseline z-score on one series (read latency ms, replay lag bytes, WAL bytes/sec),
+               so the shared deviation ramp and the extremity escape grade them off AnomalyGate's metadata
+               the day their detector lands. Membership is vocabulary, not a bar; the lanes write no ramp. */
+            or PgTargetFactKeys.AnomalyIoLatency
+            or PgTargetFactKeys.AnomalyReplicationLag
+            or PgTargetFactKeys.AnomalyWalVolume;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>
@@ -76,6 +83,32 @@ public static partial class PgTargetScorer
     /// pg_wait_stats peaks before the next release; the fact carries threshold_lineage = 0.
     /// </summary>
     public const double WaitProfileModifiedZSpan = 10.0;
+
+    /// <summary>
+    /// #3691 (v1 residue, #3689 §5): whether an <see cref="PgTargetFactKeys.AnomalyWaitProfile"/> fact's deviation
+    /// is extreme enough to leave the Layer-3 tuning-class cap on its own evidence — the PostgreSQL arm of
+    /// <c>FactScorer.IsExtremeAnomaly</c>, routed off the SAME metadata <see cref="ScoreRatioAnomaly"/> grades
+    /// from, so the fact can never be extreme on one statistic while scored on another. Never for <c>is_new</c>
+    /// (a first occurrence has no baseline to be extreme against). Robust bucket (<c>modified_z &gt; 0</c>):
+    /// <paramref name="extremeMultiple"/> × <see cref="AnomalyThresholds.HeavyTailModifiedZThreshold"/> — the SQL
+    /// Server profile's own bar, 15σ at the shipped 3×. Ratio trigger otherwise: <paramref name="extremeMultiple"/> ×
+    /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/> — the PostgreSQL profile's OWN firing multiple
+    /// (3× → 9×), where the SQL Server arm reads 3 × its 4.0 ratio floor; the multiple is the caller's so the
+    /// two engines share one "extreme" and differ only in the anchor each fired at. In v1 this family could
+    /// never leave the 1.49 cap however far the profile moved ("by design tonight" in #3689) — so a Lock-storm
+    /// profile at 40σ with every corroborator lit sat one hundredth under the page line.
+    /// </summary>
+    public static bool IsExtremeWaitProfileAnomaly(Fact fact, double extremeMultiple)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        if (fact.Key != PgTargetFactKeys.AnomalyWaitProfile) return false;
+        if (fact.Metadata.GetValueOrDefault("is_new") > 0) return false;
+
+        var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
+        if (modifiedZ > 0)
+            return modifiedZ >= extremeMultiple * AnomalyThresholds.HeavyTailModifiedZThreshold;
+        return fact.Metadata.GetValueOrDefault("ratio") >= extremeMultiple * AnomalyThresholds.PgRatioAnomalyThreshold;
+    }
 
     /// <summary>
     /// A first-occurrence (<c>is_new</c>) ratio anomaly's ramp: <c>fallback_exceedance</c> of 1.0 (AT the absolute

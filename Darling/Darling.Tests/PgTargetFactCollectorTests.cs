@@ -53,18 +53,23 @@ public sealed class PgTargetFactCollectorTests
     private static readonly int YoungServerId = ServerIdHelper.GetDeterministicHashCode(YoungServerName);
 
     /// <summary>
-    /// The v1 collect surface, ordinal-sorted: the two plumbing methods (coverage witness, registry metadata)
-    /// and the ten family stubs the content lanes fill in place. Adding a family is a deliberate edit here.
+    /// The collect surface, ordinal-sorted: the two plumbing methods (coverage witness, registry metadata),
+    /// the ten v1 family partials, and (#3691 v2 plumbing) the three v2 family stubs — I/O (lane 11),
+    /// replication (lane 12), bloat (lane 13) — which the content lanes fill in place. Adding a family is a
+    /// deliberate edit here.
     /// </summary>
-    private static readonly string[] V1CollectSurface =
+    private static readonly string[] CollectSurface =
     {
+        "CollectBloatFactsAsync",
         "CollectBufferFactsAsync",
         "CollectConfigFactsAsync",
         "CollectCpuFactsAsync",
         "CollectDatabaseFactsAsync",
+        "CollectIoFactsAsync",
         "CollectObservedCoverageAsync",
         "CollectPostureFactsAsync",
         "CollectQueryFactsAsync",
+        "CollectReplicationFactsAsync",
         "CollectServerMetadataFactsAsync",
         "CollectSessionFactsAsync",
         "CollectVacuumFactsAsync",
@@ -75,7 +80,7 @@ public sealed class PgTargetFactCollectorTests
     /* ---------------- ungated: census, SQL inventory, dialect ---------------- */
 
     [Fact]
-    public void ImplementsTheSharedSeam_WithExactlyTheDeclaredV1CollectSurface()
+    public void ImplementsTheSharedSeam_WithExactlyTheDeclaredCollectSurface()
     {
         Assert.True(typeof(IFactCollector).IsAssignableFrom(typeof(PgTargetFactCollector)));
 
@@ -86,11 +91,11 @@ public sealed class PgTargetFactCollectorTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(V1CollectSurface, declared);
+        Assert.Equal(CollectSurface, declared);
 
         /* One partial file per family, named for it, and every stub names the lane that fills it. */
         var files = Directory.GetFiles(AnalysisDirectory(), "PgTargetFactCollector.*.cs").Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
-        foreach (var method in V1CollectSurface)
+        foreach (var method in CollectSurface)
         {
             var family = method["Collect".Length..^"FactsAsync".Length];
             var file = method switch
@@ -106,11 +111,20 @@ public sealed class PgTargetFactCollectorTests
         }
 
         var stubs = files.Where(f => f is not ("PgTargetFactCollector.Coverage.cs" or "PgTargetFactCollector.Metadata.cs")).ToList();
-        Assert.Equal(10, stubs.Count);
+        /* Ten v1 families plus the three v2 families (#3691). Every family file names its lane — two digits now
+           that v2's lanes are 11–13, which \d alone would have matched on their first digit and told no one. */
+        Assert.Equal(13, stubs.Count);
         foreach (var stub in stubs)
         {
             var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), stub!));
-            Assert.Matches(new Regex(@"filled by lane \d"), text);
+            Assert.Matches(new Regex(@"filled by lane \d+\b"), text);
+        }
+
+        /* The v2 files carry the exact marker the content briefs quote (a filled family keeps it, as v1's did). */
+        foreach (var (file, lane) in new[] { ("PgTargetFactCollector.Io.cs", 11), ("PgTargetFactCollector.Replication.cs", 12), ("PgTargetFactCollector.Bloat.cs", 13) })
+        {
+            var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), file));
+            Assert.Contains($"/* filled by lane {lane}", text, StringComparison.Ordinal);
         }
     }
 
@@ -188,6 +202,25 @@ public sealed class PgTargetFactCollectorTests
            because "how many minutes of the window did the collector actually observe" is a question only the log
            answers. Not a v_ view, not a SQL Server table by another name; nothing else is admitted. */
         tables.Add("collection_log");
+
+        /* #3691 v2 plumbing: the tables the v2 lanes read are collector tables already — the catalog admits them
+           with no edit here — but a lane building on that must not discover otherwise at CI, so each is pinned
+           by name with the lane that reads it. A table leaving CollectorCatalog fails here, not in the lane. */
+        foreach (var (table, lane) in new[]
+        {
+            ("pg_io_stats", "lane 11 — I/O latency"),
+            ("pg_replication_stats", "lane 12 — replication lag"),
+            ("pg_replication_slot_stats", "lane 12 — slot retention / slot xmin"),
+            ("pg_table_bloat_stats", "lane 13 — table bloat trend (hourly)"),
+            ("pg_index_bloat", "lane 13 — index bloat trend (daily)"),
+            ("pg_deadlocks", "lane 16 — deadlock drill-down"),
+            ("pg_blocking_edges", "lane 16 — deadlock / blocking drill-down"),
+            ("pg_lock_stats", "lane 14 — idle-in-transaction lock holders"),
+            ("pg_wait_sampling", "lane 15 / lane 5 residue — the stock sampled wait estimate"),
+        })
+        {
+            Assert.True(tables.Contains(table), $"{table} ({lane}) is not a CollectorCatalog target table; the v2 lane that reads it would fail the FROM/JOIN census");
+        }
 
         foreach (var sql in PgTargetFactCollector.AllSql)
         {
