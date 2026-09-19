@@ -52,7 +52,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// contract, so create_hypertable emits an advisory use-TIMESTAMPTZ WARNING — expected and
 /// accepted (validated live on TimescaleDB 2.28.1).
 /// </summary>
-public static class TimescaleSupport
+public static partial class TimescaleSupport
 {
     /// <summary>
     /// Compress chunks older than this many days — hardcoded (defaults over speculative config).
