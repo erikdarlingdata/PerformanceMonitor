@@ -550,6 +550,11 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
         Assert.Equal(0, jobs.Value); // running_long_count = 0
         // Value=0 means downstream scorer gives it 0 severity — that's fine
         // but it means the fact exists with no signal, consuming scorer cycles
+
+        /* #3653: nothing ran long, so there is no job to name — the FILTERed aggregate is NULL and the
+           slot stays null (not empty, not the longest merely-running job). The advice composer keys its
+           unnamed sentence on exactly this. */
+        Assert.Null(jobs.ObjectName);
     }
 
     /* ═══════════════════════════════════════════════════════════════════

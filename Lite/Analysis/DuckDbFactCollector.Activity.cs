@@ -180,7 +180,8 @@ AND   collection_time <= $3";
     }
 
     /// <summary>
-    /// Collects running job facts: jobs currently running long vs historical averages.
+    /// Collects running job facts: jobs currently running long vs historical averages, and (#3653) the
+    /// name of the one furthest past its own history, carried on the fact's ObjectName.
     /// </summary>
     private async Task CollectRunningJobFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -191,12 +192,30 @@ AND   collection_time <= $3";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #3653 (A9): the fifth column names the job. The four aggregates say how MANY jobs overran and
+               by how much; they cannot say WHICH, so the story, the advice card and the persisted finding
+               all read "1 Agent job running long" and sent the operator to the Running Jobs tab to learn the
+               name. One name, chosen among the rows that were running long (the FILTER — a job merely
+               present in the window is not the subject), by percent_of_average first because "running
+               long" is defined against the job's OWN history and the furthest past its own average is the
+               story's subject; current_duration_seconds breaks a tie the way the collector's own ORDER BY
+               does; job_name last so two rows equal on both still yield the same answer on every pass — the
+               composed advice is frozen into the finding's StoryText, and a pick that flipped between
+               passes would rewrite the finding's text over an unchanged window. A job running long across
+               several collection ticks appears in several rows; that is harmless here (the same name sorts
+               first each time) and is deliberately not de-duplicated for the counts, which keep their
+               existing per-row semantics. ARRAY_AGG … FILTER … [1] rather than a second scan or a subquery:
+               one round trip, one row, and the clause is the PostgreSQL twin's verbatim (DuckDB lists are
+               1-based, FILTER and ordered aggregates are supported at the pinned 1.5.x). NULL when nothing
+               ran long — the fact still emits (running_count > 0) and the advice keeps its unnamed sentence. */
             cmd.CommandText = @"
 SELECT
     COUNT(*) AS running_count,
     COUNT(CASE WHEN is_running_long THEN 1 END) AS running_long_count,
     MAX(percent_of_average) AS max_percent_of_avg,
-    MAX(current_duration_seconds) AS max_duration_seconds
+    MAX(current_duration_seconds) AS max_duration_seconds,
+    (ARRAY_AGG(job_name ORDER BY percent_of_average DESC NULLS LAST, current_duration_seconds DESC, job_name)
+        FILTER (WHERE is_running_long))[1] AS worst_long_job_name
 FROM v_running_jobs
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -215,6 +234,9 @@ AND   collection_time <= $3";
             var runningLong = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
             var maxPctAvg = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
             var maxDuration = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            /* #3653: NULL (no row was running long) stays null — the composer's "present" test is
+               IsNullOrEmpty, and an empty string would read as a job with no name. */
+            var worstLongJobName = reader.IsDBNull(4) ? null : reader.GetString(4);
 
             facts.Add(new Fact
             {
@@ -222,6 +244,13 @@ AND   collection_time <= $3";
                 Key = "RUNNING_JOBS",
                 Value = runningLong,
                 ServerId = context.ServerId,
+                /* #3653: the job's NAME rides in ObjectName — the string slot the object-scoped facts
+                   use for what their source query selected — and never in Metadata, which is
+                   Dictionary<string, double> by contract: every reader (scorer, advice, MCP, the finding
+                   stores' JSON) treats a metadata value as a number, so an identifier there is either a
+                   compile error or a NaN. The counts and maxima below keep their existing meaning over
+                   ALL rows in the window; the name alone is scoped to the running-long rows. */
+                ObjectName = worstLongJobName,
                 Metadata = new Dictionary<string, double>
                 {
                     ["running_count"] = runningCount,

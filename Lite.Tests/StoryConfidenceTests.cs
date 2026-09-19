@@ -363,6 +363,66 @@ public sealed class StoryConfidenceTests
         Assert.DoesNotContain("RUNNING_JOBS fired", FactAdvice.Compose("WRITELOG", quiet.ToFactLookup())!.Remediation, StringComparison.Ordinal);
     }
 
+    /* ── #3653: the job card names the job ── */
+
+    /// <summary>
+    /// #3653: when the collectors put the worst job's name on the fact's ObjectName, the RUNNING_JOBS card
+    /// names it in the headline, the first sentence and the remediation — with "and N others" when more
+    /// than one ran long, and as the single subject when exactly one did. The overrun figures stay
+    /// attributed to "the worst", never to the named job (they are window maxima over every running row).
+    /// </summary>
+    [Fact]
+    public void RunningJobsAdvice_NamesTheJob_WhenTheFactCarriesOne()
+    {
+        var several = RebuildFacts(runningLong: 3, worstJob: "Nightly Index Maintenance");
+        new FactScorer().ScoreAll(several);
+        var card = FactAdvice.Compose("RUNNING_JOBS", several.ToFactLookup());
+        Assert.NotNull(card);
+        Assert.Equal("Agent job `Nightly Index Maintenance` and 2 others running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.StartsWith("3 Agent jobs ran well past normal duration this window, `Nightly Index Maintenance` the furthest past its own history (the Running Jobs view lists the 2 others)", card.Investigation, StringComparison.Ordinal);
+        Assert.Contains(", the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Check `Nightly Index Maintenance` in Agent history first, then the others:", card.Remediation, StringComparison.Ordinal);
+        /* The reverse link to the co-fired symptoms is unchanged by the name. */
+        Assert.Contains("SCH_M (schema-modification lock waits", card.Investigation, StringComparison.Ordinal);
+
+        var one = RebuildFacts(runningLong: 1, worstJob: "Weekly CHECKDB");
+        new FactScorer().ScoreAll(one);
+        var single = FactAdvice.Compose("RUNNING_JOBS", one.ToFactLookup());
+        Assert.Equal("Agent job `Weekly CHECKDB` running well past normal — likely stuck, not busy", single!.Headline);
+        Assert.StartsWith("Agent job `Weekly CHECKDB` ran well past normal duration this window, the worst at", single.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("other", single.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Check `Weekly CHECKDB` in Agent history first: a job at several times", single.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653: without a name — a finding persisted before the collectors carried one, or a window where jobs
+    /// ran and none ran long — every sentence is the pre-#3653 one, so old findings' frozen text and the
+    /// nothing-long case read exactly as they did. And a name beside a ZERO running-long count is refused:
+    /// the collectors cannot produce that pairing (the FILTERed aggregate is NULL when nothing ran long),
+    /// so if it ever arrives it is a bug upstream, and naming a job that did not run long is the lie this
+    /// card exists to stop.
+    /// </summary>
+    [Fact]
+    public void RunningJobsAdvice_KeepsTheUnnamedSentence_WithoutAName_AndRefusesANameOnAZeroCount()
+    {
+        var unnamed = RebuildFacts(runningLong: 3);
+        new FactScorer().ScoreAll(unnamed);
+        var card = FactAdvice.Compose("RUNNING_JOBS", unnamed.ToFactLookup());
+        Assert.Equal("3 Agent jobs running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.StartsWith("3 Agent jobs ran well past normal duration this window, the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Check the long-running jobs in Agent history:", card.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("`", card.Headline, StringComparison.Ordinal);
+
+        var contradictory = RebuildFacts(runningLong: 0, worstJob: "Should Not Appear");
+        new FactScorer().ScoreAll(contradictory);
+        var refused = FactAdvice.Compose("RUNNING_JOBS", contradictory.ToFactLookup());
+        Assert.NotNull(refused);
+        Assert.DoesNotContain("Should Not Appear", refused!.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("Should Not Appear", refused.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Should Not Appear", refused.Remediation, StringComparison.Ordinal);
+        Assert.Equal("0 Agent jobs running well past normal — likely stuck, not busy", refused.Headline);
+    }
+
     /* ── Helpers ── */
 
     /// <summary>
@@ -373,7 +433,7 @@ public sealed class StoryConfidenceTests
     /// Wait facts carry the metadata the advice composers read (wait_time_ms), the I/O fact the average
     /// its composer reads, and the job fact the counts its sentence states.
     /// </summary>
-    private static List<Fact> RebuildFacts(int runningLong) =>
+    private static List<Fact> RebuildFacts(int runningLong, string? worstJob = null) =>
     [
         Wait("SCH_M", 0.05),
         Wait("WRITELOG", 0.30),
@@ -385,6 +445,8 @@ public sealed class StoryConfidenceTests
         new()
         {
             Source = "jobs", Key = "RUNNING_JOBS", Value = runningLong,
+            /* #3653: the collectors' one job name, on the string slot (null = pre-#3653 row / nothing long). */
+            ObjectName = worstJob,
             Metadata = new()
             {
                 ["running_count"] = 5, ["running_long_count"] = runningLong,

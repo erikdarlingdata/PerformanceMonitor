@@ -484,6 +484,47 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         var jobs = facts["RUNNING_JOBS"];
         Assert.Equal("jobs", jobs.Source);
         Assert.Equal(3, jobs.Value); // 3 running long
+
+        /* #3653: the scenario's three long rows are IDENTICAL on percent_of_average (400) and on
+           current_duration_seconds (10,800), so the name can only come from the final job_name tie-break —
+           the ordinal-first of "Test Job 0/1/2". A collector that dropped that tie-break would pick
+           whichever row the aggregate happened to see first, and this pin would flicker; the composed
+           advice is frozen into the persisted finding, so a flickering pick rewrites findings. */
+        Assert.Equal("Test Job 0", jobs.ObjectName);
+    }
+
+    /// <summary>
+    /// #3653: the RUNNING_JOBS fact names the job furthest past its OWN history, chosen among the rows
+    /// that were running long and by percent_of_average before duration. Three rows, planted so each
+    /// ordering mistake picks a different name: the not-long row has the highest duration AND the
+    /// highest percent (a FILTER dropped names it); the long row with the LONGER runtime has the lower
+    /// percent (duration-first names it); the right answer is the long row at 400%. The counts and the
+    /// window maxima keep their pre-#3653 per-row meaning over every running row — asserted so the
+    /// change is provably the one column and not a quiet re-scoping of the figures beside it.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_NamesTheJobFurthestPastItsOwnHistory_AmongTheLongRowsOnly()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobRowsAsync(
+                ("Weekly CHECKDB", currentDurationSeconds: 9_000, isRunningLong: true, percentOfAverage: 250),
+                ("Nightly Index Maintenance", currentDurationSeconds: 7_200, isRunningLong: true, percentOfAverage: 400),
+                ("Long Steady ETL", currentDurationSeconds: 99_999, isRunningLong: false, percentOfAverage: 900));
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(3, jobs.Metadata["running_count"]);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(900, jobs.Metadata["max_percent_of_average"]);
+        Assert.Equal(99_999, jobs.Metadata["max_duration_seconds"]);
+
+        /* The name is a string in the string slot; Metadata stays doubles-only (the lane-7 #3542 lesson). */
+        Assert.DoesNotContain(jobs.Metadata.Keys, k => k.Contains("name", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
