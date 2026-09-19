@@ -78,12 +78,21 @@ public class AgedDatabaseMigrationTests : IDisposable
 
         /* The real assertion: a permission-free collector row (NULL hardware columns) must actually be
            insertable now. Before the fix, the dependency error silently left the NOT NULL constraint in
-           place, so this insert would throw — the exact failure mode #2748's v48 fix exists to prevent. */
-        await ExecAsync(verify, "INSERT INTO server_properties VALUES (2, current_timestamp, NULL, NULL, NULL)");
+           place, so this insert would throw — the exact failure mode #2748's v48 fix exists to prevent.
+           The columns are NAMED because later rungs widen this table on the same climb (v63 appended
+           time_zone_id, #3653 item 13), and a positional VALUES list would be testing the width rather than
+           the constraint. */
+        await ExecAsync(verify, "INSERT INTO server_properties (server_id, collection_time, cpu_count, hyperthread_ratio, physical_memory_mb) VALUES (2, current_timestamp, NULL, NULL, NULL)");
 
         using var countCmd = verify.CreateCommand();
         countCmd.CommandText = "SELECT COUNT(*) FROM server_properties WHERE server_id = 2 AND cpu_count IS NULL";
         Assert.Equal(1L, Convert.ToInt64(await countCmd.ExecuteScalarAsync()));
+
+        /* And the climb went all the way: the v63 column landed on this aged table too, nullable, so the
+           appender's positional write has a slot for it. */
+        using var zoneCmd = verify.CreateCommand();
+        zoneCmd.CommandText = "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'server_properties' AND column_name = 'time_zone_id'";
+        Assert.Equal("YES", await zoneCmd.ExecuteScalarAsync());
     }
 
     /// <summary>

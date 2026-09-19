@@ -701,8 +701,10 @@ public sealed class ServerEpochTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")));
 
+        /* Four payload ordinals since V134 / v63 (#3653 item 13): the UTC twin rides last, and the identity
+           set is still the SECOND result set after it. */
         using var reader = FakeCollectorDataReader.WithResultSets(
-            new object[][] { new object[] { Pass.AddSeconds(-30), 12, 3 } },
+            new object[][] { new object[] { Pass.AddSeconds(-30), 12, 3, Pass.AddSeconds(-30) } },
             new object[][] { new object[] { T1, "SRV02" } });
         var rows = await CpuUtilizationCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
@@ -725,7 +727,7 @@ public sealed class ServerEpochTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")));
 
-        using var reader = new FakeCollectorDataReader(new object[] { Pass.AddSeconds(-30), 12, 3 });
+        using var reader = new FakeCollectorDataReader(new object[] { Pass.AddSeconds(-30), 12, 3, Pass.AddSeconds(-30) });
         var rows = await CpuUtilizationCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Single(rows);
@@ -745,7 +747,7 @@ public sealed class ServerEpochTests
         var context = Context(deltas, StateWith(ServerEpoch.IdentityStateKey, new ServerEpoch.Stamp(T0, "SRV01")), isAzureSqlDb: true);
 
         using var reader = FakeCollectorDataReader.WithResultSets(
-            new object[][] { new object[] { Pass.AddSeconds(-30), 12, 0 } },
+            new object[][] { new object[] { Pass.AddSeconds(-30), 12, 0, Pass.AddSeconds(-30) } },
             new object[][] { new object[] { T1, "SRV02" } });
         await CpuUtilizationCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 

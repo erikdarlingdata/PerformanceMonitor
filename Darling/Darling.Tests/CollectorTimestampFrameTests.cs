@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
@@ -37,6 +38,12 @@ namespace Darling.Tests;
 /// <para>The first cut of this pin asserted a store-wide "all naive timestamps are UTC" rule and would have
 /// forbidden the CPU collector's intentional local clock. Reviewing the CONSUMERS is what corrected it,
 /// which is why each fact here names the read path it protects rather than the function it matches.</para>
+///
+/// <para><b>Since V134 (#3653 item 13) the CPU collector carries BOTH clocks, one per column.</b>
+/// <c>sample_time</c> keeps <c>SYSDATETIME()</c> for the reasons above; <c>sample_time_utc</c> is the same
+/// instant off <c>SYSUTCDATETIME()</c>, written beside it so the readers that window against UTC can stop
+/// deriving the offset. The pin below therefore no longer says "no UTC clock in this file" — it says which
+/// column each clock feeds, which is the only statement that is true of the file now.</para>
 /// </summary>
 public sealed class CollectorTimestampFrameTests
 {
@@ -85,6 +92,41 @@ public sealed class CollectorTimestampFrameTests
             + "ServerTimeHelper.UtcOffsetMinutes. Converting it to UTC breaks Lite's CPU chart on both the "
             + "window and the plotted position, while Darling stays green because the per-batch de-skew "
             + "self-calibrates to zero - a regression visible on one app only.");
+    }
+
+    /// <summary>
+    /// V134 (#3653 item 13, Q7): the UTC twin. The local clock feeds <c>sample_time</c> and ONLY
+    /// <c>sample_time</c>; the UTC clock feeds <c>sample_time_utc</c> and ONLY <c>sample_time_utc</c>; and the
+    /// twin is derived by the identical age arithmetic, not by re-deriving an offset from the local column.
+    /// Stated per column because a file-level "has a UTC clock" would be satisfied by the exact regression the
+    /// sibling pin above forbids — the local column silently converted — and a file-level "has a local clock"
+    /// is satisfied even when the twin was never written. The two assignments are read off the SOURCE with
+    /// comments stripped, because the collector's own reasoning names both functions.
+    /// </summary>
+    [Fact]
+    public void CpuUtilization_WritesTheUtcTwin_OffTheUtcClock_AndOnlyThere()
+    {
+        var sql = QueryTextOf("CpuUtilizationCollector.cs").Replace("\r\n", "\n");
+
+        var local = Regex.Match(sql, @"(?<![\w.@])sample_time\s*=\s*DATEADD\((?:.|\n)*?SYSDATETIME\(\)\)\),");
+        var utc = Regex.Match(sql, @"(?<![\w.@])sample_time_utc\s*=\s*DATEADD\((?:.|\n)*?SYSUTCDATETIME\(\)\)\)");
+
+        Assert.True(local.Success, "sample_time must still be the two-step DATEADD off SYSDATETIME()");
+        Assert.True(utc.Success, "sample_time_utc must be the two-step DATEADD off SYSUTCDATETIME()");
+        Assert.DoesNotContain("SYSUTCDATETIME", local.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYSDATETIME()", utc.Value.Replace("SYSUTCDATETIME()", string.Empty), StringComparison.Ordinal);
+
+        /* The same age arithmetic on both: strip the clock and the column name and the two expressions are
+           identical, so the pair differs by exactly the server's offset and by nothing else. */
+        static string Arithmetic(string assignment) => Regex.Replace(
+            Regex.Replace(assignment, @"^sample_time(_utc)?\s*=\s*", string.Empty), @"SYS(UTC)?DATETIME\(\)", "CLOCK").TrimEnd(',');
+        Assert.Equal(Arithmetic(local.Value), Arithmetic(utc.Value));
+
+        /* One of each clock in the code, so neither column was converted and no minute-quantised DATEDIFF
+           was introduced between them. */
+        Assert.Single(s_localClock.Matches(sql));
+        Assert.Single(s_utcClock.Matches(sql));
+        Assert.DoesNotContain("DATEDIFF", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

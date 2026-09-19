@@ -42,6 +42,31 @@ namespace PerformanceMonitor.Collectors;
 /// identity and only catches its persisted pair up (<see cref="ServerEpoch"/>, "two carriers, one forget").
 /// It is kept because <c>wait_stats</c> can be disabled by an operator on either host, and a carrier that
 /// can be switched off must not be the only one.</para>
+///
+/// <para><b>Two clocks per row since Darling V134 / Lite v63 (#3653 item 13, Q7 — the "time honesty"
+/// rung).</b> <c>sample_time</c> is, and stays, the MONITORED SERVER'S LOCAL wall clock: on the ring-buffer
+/// arm it is <c>SYSDATETIME()</c> minus the entry's age, and every reader that windows or plots it in the
+/// server's own frame (Lite's CPU chart, Lite's <c>GetTimeRangeServerLocal</c> window, the viewer's
+/// Server-time mode) wants exactly that value; it is also this collector's WATERMARK, and a watermark that
+/// changed frame mid-series would re-ingest or skip one UTC offset's worth of samples on the first poll
+/// after the upgrade. <c>sample_time_utc</c> is the SAME instant in UTC, written beside it by the same
+/// arithmetic off <c>SYSUTCDATETIME()</c> (the two clock functions are runtime constants folded once per
+/// statement, so the pair differs by the server's offset to within the nanoseconds between two clock
+/// reads — not by a minute-quantised DATEDIFF that could straddle a boundary). Readers that compare the
+/// sample against a UTC window prefer it — <c>COALESCE(sample_time_utc, …)</c> with the pre-rung derivation
+/// as the fallback — because the derivations were the lie this column retires: Darling's #1262 per-batch
+/// de-skew recovers the offset from <c>MAX(sample_time) - collection_time</c> rounded to 15 minutes, and
+/// Lite shifts the window by the one <c>utc_offset_minutes</c> the store holds NOW, so every sample on the
+/// far side of a DST transition from the offset in force was placed an hour wrong, silently and in the
+/// plausible direction. A stored UTC instant needs no offset at all. Pre-rung rows carry NULL and keep
+/// the derivation; nothing is backfilled, because the offset a row's server HAD at its sample time is the
+/// very thing the store never recorded (<c>PgMigrations</c> V134 says why in full).</para>
+///
+/// <para>On the Azure SQL DB arm the two columns hold the same value, and that is a fact rather than a
+/// shortcut: <c>sys.dm_db_resource_stats.end_time</c> is documented UTC, and Azure SQL Database's server
+/// clock IS UTC (<c>GETDATE()</c> there returns UTC, so <c>utc_offset_minutes</c> collects as 0), so
+/// "server-local" and UTC coincide and neither column is wrong. The ring-buffer arm is where the frames
+/// differ, and it is the arm every on-premises, Managed Instance and RDS target runs.</para>
 /// </summary>
 public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtilizationCollector.Row>
 {
@@ -51,15 +76,27 @@ public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtiliza
     {
     }
 
-    public readonly record struct Row(DateTime SampleTime, int SqlServerCpuUtilization, int? OtherProcessCpuUtilization);
+    /// <summary>
+    /// One CPU sample. <paramref name="SampleTime"/> is the monitored server's LOCAL wall clock (the
+    /// watermark; unchanged since the collector was extracted). <paramref name="SampleTimeUtc"/> is the same
+    /// instant in UTC (#3653 item 13, Q7) — non-null on every row this collector reads today, nullable
+    /// because the STORED column is (pre-rung rows never recorded it) and because the writer's contract is
+    /// "one value per declared column", NULL included. No default, so every constructor site states it.
+    /// </summary>
+    public readonly record struct Row(DateTime SampleTime, int SqlServerCpuUtilization, int? OtherProcessCpuUtilization, DateTime? SampleTimeUtc);
 
+    /* Both Azure arms project sample_time_utc = drs.end_time, the same column sample_time already reads:
+       end_time is documented UTC, and Azure SQL Database's own clock is UTC, so the local frame and the UTC
+       frame are one value there. Projected LAST, after the three pre-rung columns, so the reader's ordinals
+       and the positional writer's payload order (sample_time_utc appended last in PayloadColumns) agree. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT TOP (60)
     sample_time = drs.end_time,
     sqlserver_cpu_utilization = CONVERT(integer, drs.avg_cpu_percent),
-    other_process_cpu_utilization = 0
+    other_process_cpu_utilization = 0,
+    sample_time_utc = drs.end_time
 FROM sys.dm_db_resource_stats AS drs
 ORDER BY
     drs.end_time DESC
@@ -71,7 +108,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT
     sample_time = drs.end_time,
     sqlserver_cpu_utilization = CONVERT(integer, drs.avg_cpu_percent),
-    other_process_cpu_utilization = 0
+    other_process_cpu_utilization = 0,
+    sample_time_utc = drs.end_time
 FROM sys.dm_db_resource_stats AS drs
 WHERE drs.end_time > @last_sample_time
 ORDER BY
@@ -135,7 +173,17 @@ SELECT TOP (60)
             WHEN (100 - x.system_idle - x.process_utilization) < 0
             THEN 0
             ELSE 100 - x.system_idle - x.process_utilization
-        END
+        END,
+    /* #3653 item 13 (Q7): the SAME instant as sample_time, in UTC — the identical two-step DATEADD (the
+       #2749 millisecond precision and the #2755 overflow split both apply, because the age arithmetic is
+       the same) anchored on SYSUTCDATETIME() instead of SYSDATETIME(). Both clock functions are runtime
+       constants, folded once per statement, so the two columns differ by exactly the server's UTC offset
+       at the moment of the poll. sample_time itself is deliberately NOT changed to UTC: it is the
+       watermark and the server-local display value (see the class remarks); readers that want the UTC
+       frame take this column and fall back to their pre-rung derivation where it is NULL. */
+    sample_time_utc = DATEADD(
+        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
+        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME()))
 FROM
 (
     SELECT
@@ -191,6 +239,11 @@ SELECT
         new CollectorColumn("sample_time", CollectorColumnType.Timestamp),
         new CollectorColumn("sqlserver_cpu_utilization", CollectorColumnType.Integer),
         new CollectorColumn("other_process_cpu_utilization", CollectorColumnType.Integer),
+        /* Appended (never inserted) so a fresh generated store and an ALTER-migrated one (Darling V134 /
+           Lite v63, #3653 item 13) keep an identical physical column order for the positional writers
+           (Lite DuckDB appender / Darling binary COPY). The same instant as sample_time, in UTC; NULL on
+           every row written before the rung. */
+        new CollectorColumn("sample_time_utc", CollectorColumnType.Timestamp),
     };
 
     public override CollectorQuery BuildQuery(CollectorContext context)
@@ -226,7 +279,11 @@ SELECT
                 sampleTime,
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 /* NULL = host/other CPU not derivable (SystemIdle reported 0, Issue #1048) */
-                reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)));
+                reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2),
+                /* The UTC twin (#3653 item 13). Every arm projects it non-null; the guard is for the
+                   store's nullable column and the writer's one-value-per-column contract, not for a case
+                   the queries above produce. */
+                reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)));
         }
 
         /* #3653 A5: the batch's SECOND result set — the instance identity. Read off the payload and after
@@ -255,8 +312,9 @@ SELECT
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         writer
-            .Value(row.SampleTime)                  /* sample_time TIMESTAMP */
+            .Value(row.SampleTime)                  /* sample_time TIMESTAMP (server-local; the watermark) */
             .Value(row.SqlServerCpuUtilization)     /* sqlserver_cpu_utilization INTEGER */
-            .Value(row.OtherProcessCpuUtilization); /* other_process_cpu_utilization INTEGER (nullable) */
+            .Value(row.OtherProcessCpuUtilization)  /* other_process_cpu_utilization INTEGER (nullable) */
+            .Value(row.SampleTimeUtc);              /* sample_time_utc TIMESTAMP (nullable; the same instant in UTC, #3653 item 13) */
     }
 }

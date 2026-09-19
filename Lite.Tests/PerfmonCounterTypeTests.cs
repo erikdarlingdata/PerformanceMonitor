@@ -356,7 +356,9 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
     /// <c>cntr_type</c> dropped and its version stamped back to 61 — the shape every existing Lite database has
     /// the morning of the upgrade — re-initialized. The column comes back as a nullable INTEGER at the tail, the
     /// pre-rung rows read NULL through the <c>v_perfmon_stats</c> view, a post-rung row lands, and the version
-    /// reads 62.
+    /// reads the CURRENT schema: the climb from 61 runs this rung and every later one (v63's ALTERs no-op over
+    /// columns this database already has), so the pin is stated against <c>CurrentSchemaVersion</c> rather than
+    /// as 62, which was only true while this was the top.
     /// </summary>
     [Fact]
     public async Task AV61Database_ClimbsToV62_AndItsOldRowsReadANullType()
@@ -408,7 +410,7 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await conn.OpenAsync();
-            Assert.Equal(62L, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
+            Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(conn, "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'perfmon_stats'")));
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(conn, "SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'v_perfmon_stats'")));
 

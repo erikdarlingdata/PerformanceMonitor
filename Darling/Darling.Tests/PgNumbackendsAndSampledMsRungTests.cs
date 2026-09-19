@@ -30,10 +30,10 @@ namespace Darling.Tests;
 /// which a rate read over the interval understates that arm ~10×. Both are written by their collectors from this
 /// rung on and READ BY NOTHING yet; the consumers are follow-on lanes.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>PerfmonCounterTypeRungTests</c> (V132)
-/// when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current. When the next rung lands, those claims move on
-/// and what stays is everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this class carried moved to <c>TimeHonestyRungTests</c> (V134) when that
+/// rung landed, the same handoff this class received from <c>PerfmonCounterTypeRungTests</c> (V132). What stays
+/// here is the one-rung-behind half: a store carrying this and not V134 maps to 133, which is the honest answer
+/// for it and what makes the upgrade banner correct in both directions.</para>
 ///
 /// <para>The collectors' write shapes (the tenth slot of a <c>pg_database_stats</c> row is the level or NULL,
 /// never 0; the sampler arm's seventh slot is snapshots × period and the extension arm's is NULL) are pinned
@@ -45,7 +45,9 @@ public sealed class PgNumbackendsAndSampledMsRungTests
     private const int RungVersion = 133;
     private const int PreviousVersion = 132;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V134 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later rung
+    /// appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 108;
 
     private const string DatabaseStatsTable = "pg_database_stats";
@@ -58,14 +60,16 @@ public sealed class PgNumbackendsAndSampledMsRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("pg-numbackends-and-sampled-ms", V133.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V134 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to TimeHonestyRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V133 is expected to sit below the ladder's top now that V134 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -162,16 +166,16 @@ public sealed class PgNumbackendsAndSampledMsRungTests
         Assert.Equal(CollectorTargetEngine.PostgreSql, PgWaitSamplingCollector.Instance.TargetEngine);
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites, one rung behind the top) -------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
-    /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// The viewer probe's three sites carry this rung's sentinel, and the map has an arm for it one rung behind
+    /// the top. The probe asks the question, the caller reads the answer, the map has the parameter — a sentinel
+    /// present at only some of them shifts every LATER ordinal onto the wrong column, and a missing arm maps a
+    /// store that stopped here one rung short.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"table_name = '{DatabaseStatsTable}'\n                                                     AND   column_name = '{DatabaseStatsColumn}'",
@@ -179,7 +183,6 @@ public sealed class PgNumbackendsAndSampledMsRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgNumbackendsAndSampledMs", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -187,9 +190,12 @@ public sealed class PgNumbackendsAndSampledMsRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V134 has appended its own; the
+           "is the last argument" claim moved to TimeHonestyRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V133's sentinel is expected to sit below the top rung's now that V134 has landed");
 
+        /* Every sentinel true = a fully-migrated store, which must map to exactly the ladder's top. Stated
+           against StorageVersion rather than this rung's number, so it survives every later rung. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
@@ -200,14 +206,14 @@ public sealed class PgNumbackendsAndSampledMsRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns THIS rung's version. */
         var thisArm = viewer.IndexOf("if (hasPgNumbackendsAndSampledMs)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf(PreviousArmSource, StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V133 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V133 sentinel arm — a store that stopped here would map to 132");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V133 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V133 arm sits below the previous rung's, so a store that stopped here maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
@@ -249,7 +255,7 @@ public sealed class PgNumbackendsAndSampledMsRungTests
 
 /// <summary>
 /// The rung against a real PostgreSQL + TimescaleDB store (<c>DARLING_TEST_PG</c>): both columns present, nullable,
-/// default-less and LAST after <c>MigrateAsync</c>; a simulated 132 → 133 climb applying exactly one rung; then one
+/// default-less and LAST after <c>MigrateAsync</c>; a simulated climb from 132 through this rung and every later one; then one
 /// row per table with the new column populated and one with NULL through each collector's real
 /// <c>WritePayload</c> over a real binary COPY — <c>DarlingCollectorRunner</c>'s loop in shape — read back
 /// verbatim. Serialized against every other live class because it shares the store.
@@ -279,18 +285,22 @@ public sealed class PgNumbackendsAndSampledMsLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* A store that stopped one rung short: both columns gone, the stamp gone. MigrateAsync must apply
-               EXACTLY this rung — the idempotence half of the ladder test — and put both back. Both tables are
-               hypertables here (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
+            /* A store that stopped one rung short of THIS one: both columns gone, the stamp for this rung and
+               every later one gone. MigrateAsync runs every rung above MAX(version), so the climb goes from 132
+               through this rung AND every rung that has landed since (their ADD COLUMN IF NOT EXISTS no-op over
+               columns the store still has) — the count is stated against the ladder rather than as 1, which was
+               only true while this was the top; the exact single-rung climb belongs to the top rung's own test
+               (TimeHonestyRungTests today). This rung's two columns must come back. Both tables are hypertables
+               here (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_database_stats DROP COLUMN IF EXISTS numbackends");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_wait_sampling DROP COLUMN IF EXISTS sampled_ms");
-            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version = 133");
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 133");
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 133), await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
             {
-                Assert.Equal(133, Convert.ToInt32(await version.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+                Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
             }
 
             await AssertColumnAsync(connection, ct, "pg_database_stats", "numbackends");

@@ -72,11 +72,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /* Floors, so a broken walk cannot report a clean bill of health. Measured on dev at cb208f6a4:
        66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
-       PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql. Pinned exactly
+       PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql; V134 (#3653
+       item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer. Pinned exactly
        rather than as a floor because the whole point is a closed census — a floor would let a column
        vanish. */
-    private const int TimestampColumnCount = 67;
-    private const int SqlServerTimestampColumnCount = 49;
+    private const int TimestampColumnCount = 68;
+    private const int SqlServerTimestampColumnCount = 50;
     private const int PostgresTimestampColumnCount = 18;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
@@ -265,7 +266,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     private const int NonTsqlProvenanceCount = 9;
     private const int TsqlServerLocalCount = 28;
-    private const int TsqlUtcCount = 12;
+    /* 12 until V134 (#3653 item 13): cpu_utilization_stats.sample_time_utc is read as Utc off its own
+       SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
+       the sibling sample_time stays ServerLocal beside it rather than flipping. */
+    private const int TsqlUtcCount = 13;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
@@ -293,6 +297,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "agent_status.next_scheduled_run=ServerLocal",
         "blocked_process_reports.event_time=Utc",
         "cpu_utilization_stats.sample_time=ServerLocal",
+        /* V134 (#3653 item 13): the same instant in UTC beside the local stamp, derived by the same DATEADD
+           off SYSUTCDATETIME() — so the classifier reads the two columns of one row in two frames, which is
+           the honest answer and the whole point of the rung. */
+        "cpu_utilization_stats.sample_time_utc=Utc",
         "deadlocks.deadlock_time=Utc",
         "default_trace_events.end_time=ServerLocal",
         "default_trace_events.event_time=ServerLocal",

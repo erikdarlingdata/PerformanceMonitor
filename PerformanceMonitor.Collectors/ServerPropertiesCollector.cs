@@ -22,6 +22,24 @@ namespace PerformanceMonitor.Collectors;
 /// compute node's cores on Azure, not the per-database allocation), and the WS5 server-health
 /// probe (LPIM / IFI / memory-dump count) as a best-effort SUPPLEMENTAL query — its failure can
 /// never fail the properties row, mirroring install/53_collect_server_properties.sql.
+///
+/// <para><b>The zone beside the offset (Darling V134 / Lite v63, #3653 item 13, Q8).</b>
+/// <c>utc_offset_minutes</c> is <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — the offset IN FORCE at
+/// collection, which is exact only for a stored instant on the same side of a DST transition as the
+/// collection was. Every de-skew that subtracts it from a column that can outlive a transition
+/// (<c>get_index_usage</c>'s <c>last_user_access</c>, the PVS cleaner stamps, #3231) is an hour wrong for
+/// the far side, and an offset cannot say which side a given instant was on; a ZONE can. <c>time_zone_id</c>
+/// is <c>CURRENT_TIMEZONE_ID()</c>, the engine's own zone name (a Windows zone id such as
+/// <c>Eastern Standard Time</c>, the key <c>AT TIME ZONE</c> takes), stored verbatim beside the offset the
+/// ruling keeps alongside it. NULL where the engine cannot say: the function exists on SQL Server 2022+
+/// and on Azure SQL Database / Managed Instance only, and on an older engine it is not a missing OBJECT
+/// but a missing built-in, so the batch that names it fails to COMPILE — an <c>OBJECT_ID</c> guard has
+/// nothing to test and a <c>CASE</c> cannot help, because the whole statement is rejected before any
+/// branch runs. The read therefore sits in its own <c>sp_executesql</c> batch, behind a version / edition
+/// gate so a pre-2022 engine never even attempts it, and inside <c>TRY … CATCH</c> so an engine the gate
+/// admits but that still lacks the function (or refuses it) leaves NULL rather than losing the row —
+/// the same isolation the hardware read has for a missing grant (#1591). A NULL zone id means "pre-2022
+/// engine: only the offset is known", and the MCP <c>get_server_properties</c> payload says so.</para>
 /// </summary>
 public sealed class ServerPropertiesCollector : CollectorDefinitionBase<ServerPropertiesCollector.Row>
 {
@@ -55,7 +73,10 @@ public sealed class ServerPropertiesCollector : CollectorDefinitionBase<ServerPr
         DateTime? SqlServerStartTime,
         string? HostOsVersion,
         string? AgReplicaRole,
-        int? UtcOffsetMinutes);
+        int? UtcOffsetMinutes,
+        /* #3653 item 13 (Q8): CURRENT_TIMEZONE_ID() on SQL Server 2022+ / Azure SQL DB / Managed Instance;
+           NULL on every older engine, where only the offset is known. */
+        string? TimeZoneId);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -122,6 +143,31 @@ BEGIN CATCH
     /* Permission denied (or the DMV is unavailable): leave every hardware value NULL. */
 END CATCH;
 
+/* #3653 item 13 (Q8): the engine's own time-zone id, beside the offset the projection below computes.
+   CURRENT_TIMEZONE_ID() is a BUILT-IN, not an object: on SQL Server 2019 and earlier the function does not
+   exist and a batch that names it fails to compile as a whole, so it cannot sit in the main SELECT behind
+   a CASE and OBJECT_ID() has nothing to test — this is the one column here that needs a version gate,
+   and the gate is stated as such rather than dressed up as the deferred-object-ref pattern the two guards
+   above use. ProductMajorVersion 16 = SQL Server 2022, the first box release with the function; Azure SQL
+   Database (EngineEdition 5) and Managed Instance (8) report a low ProductMajorVersion yet ship it, the
+   same shape QueryStatsCollector's gate notes for its DMV. The dynamic batch compiles at EXEC time, one
+   level down, so a compile error there IS catchable by this TRY/CATCH — belt and braces for an edition the
+   gate admits that still refuses the call. NULL means the engine cannot say, never a guessed zone. */
+DECLARE @time_zone_id nvarchar(128) = NULL;
+
+IF CONVERT(integer, SERVERPROPERTY(N'ProductMajorVersion')) >= 16
+OR CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) IN (5, 8)
+BEGIN
+    BEGIN TRY
+        EXEC sys.sp_executesql
+            N'SELECT @tz = CURRENT_TIMEZONE_ID();',
+            N'@tz nvarchar(128) OUTPUT', @tz = @time_zone_id OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SET @time_zone_id = NULL;
+    END CATCH;
+END;
+
 SELECT
     server_name =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ServerName')),
@@ -175,9 +221,15 @@ SELECT
         @ag_role,
     /* The monitored server's UTC offset in minutes — the same live derivation Lite computes at
        connect (ServerManager). Collected so the headless viewer, which cannot query the target
-       live, can render timestamps in the server's own local time (Server-time display mode). */
+       live, can render timestamps in the server's own local time (Server-time display mode). This is
+       the offset IN FORCE at collection — exact for an instant on the same side of a DST transition,
+       an hour wrong for one on the other side (#3231); the zone id beside it is what can tell the two
+       apart, and it stays alongside rather than replacing this because the zone is NULL pre-2022. */
     utc_offset_minutes =
-        DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())
+        DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()),
+    /* #3653 item 13 (Q8): the gated CURRENT_TIMEZONE_ID() read above; NULL where the engine cannot say. */
+    time_zone_id =
+        @time_zone_id
 OPTION(RECOMPILE);";
 
     private const string ServerHealthQueryText = @"
@@ -296,6 +348,10 @@ SELECT
            physical column order for the positional writers. The monitored server's UTC offset in
            minutes — the viewer's Server-time display mode reads it (UTC + offset = server local). */
         new CollectorColumn("utc_offset_minutes", CollectorColumnType.Integer),
+        /* Appended (never inserted), Darling V134 / Lite v63 (#3653 item 13, Q8): the engine's time-zone
+           id from CURRENT_TIMEZONE_ID(), beside the offset it disambiguates across DST; NULL on a pre-2022
+           engine, where only the offset is known. */
+        new CollectorColumn("time_zone_id", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -315,8 +371,10 @@ SELECT
         var hostOsVersion = reader.IsDBNull(15) ? null : reader.GetString(15);
         var agReplicaRole = reader.IsDBNull(16) ? null : reader.GetString(16);
         /* utc_offset_minutes (17): DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) — always non-null in
-           practice, guarded anyway for a defensive read. */
+           practice, guarded anyway for a defensive read. time_zone_id (18): the gated
+           CURRENT_TIMEZONE_ID() local — NULL is the expected value on a pre-2022 engine (#3653 item 13). */
         var utcOffsetMinutes = reader.IsDBNull(17) ? (int?)null : reader.GetInt32(17);
+        var timeZoneId = reader.IsDBNull(18) ? null : reader.GetString(18);
 
         /* For Azure SQL DB, sys.dm_os_sys_info.cpu_count returns the compute node's total cores,
            not the per-database vCore allocation. Parse the actual vCore count from the service
@@ -348,7 +406,8 @@ SELECT
             SqlServerStartTime: sqlServerStartTime,
             HostOsVersion: hostOsVersion,
             AgReplicaRole: agReplicaRole,
-            UtcOffsetMinutes: utcOffsetMinutes));
+            UtcOffsetMinutes: utcOffsetMinutes,
+            TimeZoneId: timeZoneId));
 
         return rows;
     }
@@ -392,7 +451,8 @@ SELECT
             .Value(row.SqlServerStartTime)
             .Value(row.HostOsVersion)
             .Value(row.AgReplicaRole)
-            .Value(row.UtcOffsetMinutes);
+            .Value(row.UtcOffsetMinutes)
+            .Value(row.TimeZoneId);      /* time_zone_id — NULL pre-2022, where only the offset is known (#3653 item 13) */
     }
 
     /// <summary>

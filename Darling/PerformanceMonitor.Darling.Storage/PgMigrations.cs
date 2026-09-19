@@ -213,6 +213,7 @@ public static class PgMigrations
         new Migration(131, "notification-routes", V131Sql),
         new Migration(132, "perfmon-counter-type", V132Sql),
         new Migration(133, "pg-numbackends-and-sampled-ms", V133Sql),
+        new Migration(134, "time-honesty", V134Sql),
     };
 
     /// <summary>
@@ -1222,6 +1223,120 @@ ALTER TABLE collect.pg_database_stats
 
 ALTER TABLE collect.pg_wait_sampling
     ADD COLUMN IF NOT EXISTS sampled_ms integer;";
+
+    /// <summary>
+    /// V134 — the "time honesty" rung (#3653 item 13, rulings Q7 and Q8): two nullable columns that let the store
+    /// say, for the first time, WHICH clock two of its values are in. <c>sample_time_utc</c> on
+    /// <c>collect.cpu_utilization_stats</c> — the same instant <c>sample_time</c> records, in UTC — and
+    /// <c>time_zone_id</c> on <c>collect.server_properties</c> — the monitored engine's own time-zone name,
+    /// beside the <c>utc_offset_minutes</c> V16 added. Pinned by <c>TimeHonestyRungTests</c>; the Lite twin is
+    /// schema v63 (<c>DuckDbInitializer</c>).
+    ///
+    /// <para><b>The two lies this rung retires, stated plainly.</b> First: <c>cpu_utilization_stats.sample_time</c>
+    /// is the MONITORED SERVER'S LOCAL wall clock (<c>SYSDATETIME()</c> minus each ring-buffer entry's age) in a
+    /// store whose every other timestamp is naive UTC. That was a documented convention rather than an
+    /// accident — Lite plots it in the server's own frame and it is the collector's watermark — but every
+    /// reader that windows or aligns it against UTC had to DERIVE the UTC value: Darling's #1262 de-skew recovers
+    /// the offset per batch as <c>MAX(sample_time) OVER (batch) - collection_time</c> rounded to fifteen minutes,
+    /// and Lite shifts its whole window by the single <c>utc_offset_minutes</c> the store holds now. Both
+    /// derivations assume one offset per batch or per server, and across a DST transition that is false for
+    /// exactly the rows nearest the change: the batch that straddles it rounds to one side, the Lite window
+    /// applies today's offset to yesterday's samples, and the misplacement is one hour, silent, and in the
+    /// plausible direction. Second: <c>server_properties.utc_offset_minutes</c> is
+    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — an OFFSET, the one in force at collection — and #3231
+    /// already documented that subtracting it from a stored instant that can outlive a transition
+    /// (<c>get_index_usage</c>'s <c>last_user_access</c>, the PVS cleaner stamps) is exact on one side and an
+    /// hour wrong on the other, with nothing in the store able to say which side a given instant was on. An
+    /// offset cannot; a ZONE can, because <c>AT TIME ZONE</c> applies the rule that was in force at that
+    /// instant. The ruling: add the UTC twin as a column and store the zone id, both nullable, the offset kept
+    /// alongside — "readers prefer the new column when present".</para>
+    ///
+    /// <para><b><c>sample_time_utc</c> — what it is and what it is not.</b> Written by <c>CpuUtilizationCollector</c>
+    /// from this rung on, on every row, beside an UNCHANGED <c>sample_time</c>: on the ring-buffer arm it is
+    /// the identical two-step <c>DATEADD</c> anchored on <c>SYSUTCDATETIME()</c> instead of <c>SYSDATETIME()</c>
+    /// (both are runtime constants folded once per statement, so the pair differs by exactly the server's
+    /// offset at the poll); on the Azure SQL DB arm it is <c>drs.end_time</c>, which is documented UTC and
+    /// which <c>sample_time</c> already reads — Azure SQL Database's clock IS UTC, so the two frames coincide
+    /// there and neither column lies. <c>sample_time</c> is NOT converted to UTC, deliberately and for two
+    /// reasons the ruling names: existing rows would be indistinguishable from converted ones (a column that
+    /// is local before some instant and UTC after it is worse than either), and it is the watermark — a
+    /// watermark that changed frame would re-ingest or skip one offset's worth of samples on the first poll
+    /// after the upgrade. The readers that compare the sample against a UTC window — the viewer's raw CPU read
+    /// and the MCP <c>get_cpu_utilization</c> read on this side, the Lite CPU window on the other — now take
+    /// <c>COALESCE(sample_time_utc, …)</c> with their pre-rung derivation as the fallback, so a post-rung row
+    /// is placed by a stored UTC instant and a pre-rung row renders exactly as it did. The readers that want
+    /// the server's frame (Lite's chart x-axis, the viewer's Server-time mode) keep <c>sample_time</c>; the
+    /// latest-row reads that ORDER BY it as a within-batch tiebreak (<c>DarlingWorker.LatestCpuSql</c> and its
+    /// three siblings) keep it too, because an ORDER BY carries no clock frame and — the load-bearing
+    /// reason — that read's <c>sample_time</c> is the CPU alert gate's observation identity, compared only
+    /// against the value the same read stored last sweep: switching it to the UTC column would make the first
+    /// post-upgrade sample read OLDER than the last pre-upgrade one on every server east of UTC, and freeze
+    /// the gate for one offset's worth of hours (#3282 named that trap when it left the value
+    /// <c>Kind=Unspecified</c>).</para>
+    ///
+    /// <para><b><c>time_zone_id</c> — what it is and where it is.</b> <c>CURRENT_TIMEZONE_ID()</c>, the engine's
+    /// own zone name (a Windows zone id such as <c>Eastern Standard Time</c>, the key <c>AT TIME ZONE</c> and
+    /// <c>sys.time_zone_info</c> use), collected by <c>ServerPropertiesCollector</c> beside the offset. It lives on
+    /// <c>server_properties</c> because THAT is where the offset lives (V16) and the ruling says the offset
+    /// stays alongside; the brief that dispatched this lane said "server registry", and this rung says
+    /// <c>server_properties</c> so the next reader does not go looking at <c>servers</c>. NULL is a REAL value
+    /// here and the common one on an older fleet: the function exists on SQL Server 2022+ and Azure SQL
+    /// Database / Managed Instance only, and on an older engine it is not a missing object but a missing
+    /// built-in — a batch that names it fails to compile as a whole — so the collector reads it in its own
+    /// <c>sp_executesql</c> batch behind a version / edition gate and inside <c>TRY … CATCH</c>, and writes NULL
+    /// where the engine cannot say. Readers publish NULL as "pre-2022 engine: only the offset is known";
+    /// nothing in this rung converts through the zone yet (an <c>AT TIME ZONE</c> read boundary for the #3231
+    /// fields is the consumer lane this column exists for), which is why the offset is kept rather than
+    /// replaced: every de-skew in the tree still runs on it.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, matching V127, V128, V132 and V133 and every
+    /// column-adding rung on a collector table — and here the no-backfill is not merely the safe choice but
+    /// the ONLY honest one. A pre-rung <c>sample_time</c> could be converted to UTC only by subtracting the
+    /// offset its server had AT THAT SAMPLE'S INSTANT, and the store never recorded that offset: it holds the
+    /// offset at each <c>server_properties</c> collection (a sparse, on-load series) and the per-batch estimate
+    /// #1262 derives, both of which are exactly the DST-blind derivations this column replaces. A backfilled
+    /// value would be the old lie written into the new column, where a reader could no longer tell it from a
+    /// measurement. NULL says "not recorded", the readers fall back to what they always did, and the column
+    /// decides the moment a row carries one. Likewise no zone can be backfilled from an offset — several zones
+    /// share every offset. Both tables are compressed hypertables on the fleet (one-day chunks, segmented by
+    /// <c>server_id</c>; <c>cpu_utilization_stats</c> carries the 30-day service-side retention V115's
+    /// neighbour describes) and a nullable, default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL;
+    /// TimescaleDB accepts it on a compressed hypertable with a compression policy attached — the shape V127,
+    /// V128, V132 and V133 used, verified live on 2.28.1 each time. A DEFAULT would be the trap: TimescaleDB has
+    /// to rewrite compressed segments to honour one.</para>
+    ///
+    /// <para><b>One view refreshed, one not.</b> <c>cpu_utilization_stats</c> HAS a <c>v_</c> passthrough (V4's
+    /// <c>v_cpu_utilization_stats</c>, which the viewer's latest-CPU read, the fleet read, the analysis facts and
+    /// the daily summary all read), and Postgres freezes a view's <c>SELECT *</c> column list at CREATE, so
+    /// without the <c>CREATE OR REPLACE VIEW</c> here every one of those readers would never see the column
+    /// — the V14 lesson, restated by V80, V81, V127, V128 and V132. Appending is the one alteration
+    /// <c>CREATE OR REPLACE VIEW</c> permits, which is exactly what an <c>ADD COLUMN</c> produces.
+    /// <c>server_properties</c> has no passthrough (V16 says so; <c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees), so its ALTER stands alone. A fresh store gets both columns from the generated CREATE TABLE at
+    /// V1 (each collector definition carries its column, appended LAST so the positional COPY writer and an
+    /// upgraded store's ALTER agree on where it sits) and the ALTERs no-op there; the view refresh is
+    /// idempotent either way.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not convert <c>sample_time</c>, rename it,
+    /// or move the watermark off it. It does not backfill either column. It does not touch the Compose
+    /// catalog's CPU measures (they bucket on <c>collection_time</c>, the collector prefix, and never read
+    /// <c>sample_time</c>), the analysis windows (likewise <c>collection_time</c>-bounded), or any of the
+    /// #3231 de-skews — the zone is stored so that a later lane can apply <c>AT TIME ZONE</c> at those read
+    /// boundaries, and until then the offset does what it did. It does not publish the zone anywhere but
+    /// <c>get_server_properties</c> (both SKUs), and it does not add a viewer surface for it.</para>
+    /// </summary>
+    private const string V134Sql = @"
+ALTER TABLE collect.cpu_utilization_stats
+    ADD COLUMN IF NOT EXISTS sample_time_utc timestamp;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V134 column list forever — the V14 lesson, restated by V80, V81, V127, V128 and V132. Appending is
+   the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_cpu_utilization_stats AS SELECT * FROM collect.cpu_utilization_stats;
+
+/* server_properties has no v_ passthrough (V16), so this ALTER stands alone. */
+ALTER TABLE collect.server_properties
+    ADD COLUMN IF NOT EXISTS time_zone_id text;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

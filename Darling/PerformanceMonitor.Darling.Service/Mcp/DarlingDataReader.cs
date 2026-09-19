@@ -44,7 +44,7 @@ internal static class DarlingDataReader
 {
     /* ─────────────────────────── result records ─────────────────────────── */
 
-    /// <summary>One raw CPU ring-buffer sample: sample_time (de-skewed to naive UTC) + the SQL and
+    /// <summary>One raw CPU ring-buffer sample: sample_time (naive UTC — the stored UTC twin since V134, else de-skewed) + the SQL and
     /// other-process CPU percentages. The tool buckets these to 1-minute averages.</summary>
     public sealed record CpuSample(DateTime SampleTime, int SqlServerCpu, int OtherProcessCpu);
 
@@ -246,29 +246,44 @@ internal static class DarlingDataReader
         string? EngineKind = null,
         int? PostgresMajorVersion = null);
 
-    /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).</summary>
+    /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
+    /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
+    /// and <paramref name="TimeZoneId"/> the engine's own zone name beside it (V134, #3653 item 13, Q8) — null
+    /// where the engine cannot say, which is every SQL Server before 2022 and a real, common value rather than
+    /// a miss.</summary>
     public sealed record ServerPropertiesReadRow(
         DateTime CollectionTime, string Edition, string ProductVersion, string ProductLevel, string? ProductUpdateLevel,
         int EngineEdition, int CpuCount, int HyperthreadRatio, long PhysicalMemoryMb, int SocketCount, int CoresPerSocket,
-        bool IsHadrEnabled, bool IsClustered, string? EnterpriseFeatures, string? ServiceObjective);
+        bool IsHadrEnabled, bool IsClustered, string? EnterpriseFeatures, string? ServiceObjective,
+        int? UtcOffsetMinutes = null, string? TimeZoneId = null);
 
     /* ─────────────────────────── CPU ─────────────────────────── */
 
     /// <summary>
     /// Raw per-sample CPU (the viewer's <c>CpuUtilizationSql</c>): every ring-buffer sample since the
-    /// window start, with <c>sample_time</c> de-skewed from the monitored server's LOCAL wall clock to
-    /// naive UTC by subtracting the per-batch UTC offset (#1262). Windows on <c>collection_time</c> (the
-    /// reliable naive-UTC clock, not the server-local sample_time). Reads the base
-    /// <c>cpu_utilization_stats</c> table (the de-skew window function needs collection_time alongside
-    /// sample_time). $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// window start, its instant in naive UTC — the stored <c>sample_time_utc</c> where the row carries one
+    /// (V134, #3653 item 13, Q7: the collector writes the same instant in UTC beside the unchanged local
+    /// stamp), else <c>sample_time</c> de-skewed from the monitored server's LOCAL wall clock by subtracting
+    /// the per-batch UTC offset (#1262). The COALESCE order is the ruling ("readers prefer the new column
+    /// when present"): a post-rung row is placed by a measured UTC instant, exact across a DST transition;
+    /// a pre-rung row keeps the derivation, which rounds a straddling batch to one side and is the hour-wrong
+    /// placement the column retires — nothing is backfilled, because the offset a server had at a past
+    /// sample's instant is what the store never recorded. Windows on <c>collection_time</c> (the reliable
+    /// naive-UTC clock, not the server-local sample_time). Reads the base <c>cpu_utilization_stats</c> table
+    /// (the de-skew window function needs collection_time alongside sample_time). The output alias stays
+    /// <c>sample_time</c>, so <c>ORDER BY sample_time</c> orders on the projected UTC value and the payload
+    /// field keeps its name while its value is UTC either way. $1 server_id, $2 window start, $3 window end
+    /// (naive UTC).
     /// </summary>
     public const string CpuUtilizationSql = """
         SELECT
-            sample_time
-                - INTERVAL '15 minutes'
-                  * ROUND(EXTRACT(EPOCH FROM (
-                        MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time
-                    )) / 900.0)::double precision AS sample_time,
+            COALESCE(
+                sample_time_utc,
+                sample_time
+                    - INTERVAL '15 minutes'
+                      * ROUND(EXTRACT(EPOCH FROM (
+                            MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time
+                        )) / 900.0)::double precision) AS sample_time,
             sqlserver_cpu_utilization,
             other_process_cpu_utilization
         FROM cpu_utilization_stats
@@ -1633,7 +1648,9 @@ internal static class DarlingDataReader
             is_hadr_enabled,
             is_clustered,
             enterprise_features,
-            service_objective
+            service_objective,
+            utc_offset_minutes,
+            time_zone_id
         FROM server_properties
         WHERE server_id = $1
         ORDER BY collection_time DESC
@@ -1667,7 +1684,11 @@ internal static class DarlingDataReader
             !reader.IsDBNull(11) && reader.GetBoolean(11),
             !reader.IsDBNull(12) && reader.GetBoolean(12),
             reader.IsDBNull(13) ? null : reader.GetString(13),
-            reader.IsDBNull(14) ? null : reader.GetString(14));
+            reader.IsDBNull(14) ? null : reader.GetString(14),
+            /* V16 / V134 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
+               would claim UTC of a row that never recorded one, and an empty zone would claim a name. */
+            reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            reader.IsDBNull(16) ? null : reader.GetString(16));
     }
 
     /* ─────────────────────────── parameter helpers ─────────────────────────── */
