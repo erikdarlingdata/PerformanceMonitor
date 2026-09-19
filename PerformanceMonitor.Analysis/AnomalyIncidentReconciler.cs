@@ -312,8 +312,10 @@ public static class AnomalyIncidentReconciler
         /* #3691 (v1 residue): the PostgreSQL wait profile gets the SQL Server profile's treatment above —
            resolved per story from its dominant contributor, not from a static map — with the resolution
            living beside the PostgreSQL vocabulary (WaitKey is the only thing that knows how a contributor
-           name becomes a PG_WAIT_* key). One arm here, so the wait family's shape stays in its own file. */
-        if (string.Equals(anomaly.RootFactKey, PgTargetFactKeys.AnomalyWaitProfile, StringComparison.Ordinal))
+           name becomes a PG_WAIT_* key). One arm here, so the wait family's shape stays in its own file; the
+           predicate (lane 24) admits both instruments — the Aurora profile and the stock SAMPLED one — which stamp
+           the same contributor metadata and fold onto the same PG_WAIT_* cards. */
+        if (PgTargetFactKeys.IsWaitProfileAnomaly(anomaly.RootFactKey))
             return PgTargetFactKeys.WaitProfileFamilies(anomaly.RootFactMetadata);
 
         if (AnomalyToFamilies.TryGetValue(anomaly.RootFactKey, out var families))

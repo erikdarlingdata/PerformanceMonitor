@@ -67,7 +67,10 @@ public static partial class PgTargetScorer
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>
         key is PgTargetFactKeys.AnomalyDeadlockRate
-            or PgTargetFactKeys.AnomalyWaitProfile;
+            or PgTargetFactKeys.AnomalyWaitProfile
+            /* lane 24 (#3691): the stock SAMPLED wait profile — the Aurora profile's shape (modified z when robust,
+               ratio otherwise) on another instrument, so it is a ratio family and never deviation-scored. */
+            or PgTargetFactKeys.AnomalySampledWaitProfile;
 
     /// <summary>
     /// The ratio at which a PostgreSQL ratio-family anomaly saturates at 1.0 — three times the firing multiple
@@ -99,12 +102,14 @@ public static partial class PgTargetScorer
     /// (3× → 9×), where the SQL Server arm reads 3 × its 4.0 ratio floor; the multiple is the caller's so the
     /// two engines share one "extreme" and differ only in the anchor each fired at. In v1 this family could
     /// never leave the 1.49 cap however far the profile moved ("by design tonight" in #3689) — so a Lock-storm
-    /// profile at 40σ with every corroborator lit sat one hundredth under the page line.
+    /// profile at 40σ with every corroborator lit sat one hundredth under the page line. Since lane 24 the stock
+    /// SAMPLED profile (<see cref="PgTargetFactKeys.AnomalySampledWaitProfile"/>) takes the same door on the same
+    /// statistic — <see cref="PgTargetFactKeys.IsWaitProfileAnomaly"/> is the key check.
     /// </summary>
     public static bool IsExtremeWaitProfileAnomaly(Fact fact, double extremeMultiple)
     {
         ArgumentNullException.ThrowIfNull(fact);
-        if (fact.Key != PgTargetFactKeys.AnomalyWaitProfile) return false;
+        if (!PgTargetFactKeys.IsWaitProfileAnomaly(fact.Key)) return false;
         if (fact.Metadata.GetValueOrDefault("is_new") > 0) return false;
 
         var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
@@ -136,7 +141,7 @@ public static partial class PgTargetScorer
     /// wrote so a fact can never be extreme on one statistic while scored on another:
     /// <list type="bullet">
     /// <item><description><c>is_new</c>: the first-occurrence ramp off <c>fallback_exceedance</c>.</description></item>
-    /// <item><description>Wait profile with a robust bucket (<c>modified_z &gt; 0</c>): the modified-z ramp.</description></item>
+    /// <item><description>Either wait profile (Aurora or sampled) with a robust bucket (<c>modified_z &gt; 0</c>): the modified-z ramp.</description></item>
     /// <item><description>Otherwise: the ratio ramp, 0.5 at <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>
     /// and 1.0 at <see cref="RatioAnomalySaturation"/>.</description></item>
     /// </list>
@@ -160,7 +165,7 @@ public static partial class PgTargetScorer
             return Math.Max(0.5, 0.5 + 0.5 * Math.Min((exceedance - 1.0) / FirstOccurrenceExceedanceSpan, 1.0));
         }
 
-        if (fact.Key == PgTargetFactKeys.AnomalyWaitProfile)
+        if (PgTargetFactKeys.IsWaitProfileAnomaly(fact.Key))
         {
             var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
             if (modifiedZ > 0)
@@ -196,7 +201,9 @@ public static partial class PgTargetScorer
         if (key is PgTargetFactKeys.AnomalyTps or PgTargetFactKeys.AnomalySessionSpike or PgTargetFactKeys.AnomalyCpuSpike)
             return LoadAnomalyAmplifiers(key);
 
-        if (key == PgTargetFactKeys.AnomalyWaitProfile)
+        /* Both wait profiles (Aurora exact; lane 24's stock sampled) take the load arms plus the named-standout arm:
+           on stock the CPU confirmer is inert (no PG_CPU_PERCENT fact) and the standout arm reads sampled facts. */
+        if (PgTargetFactKeys.IsWaitProfileAnomaly(key))
         {
             var amplifiers = LoadAnomalyAmplifiers(key);
             amplifiers.Add(new()

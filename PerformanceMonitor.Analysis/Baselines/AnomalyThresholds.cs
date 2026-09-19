@@ -212,9 +212,24 @@ public static class AnomalyThresholds
     /// the bar sits between the median cluster's tail and the fleet-p90 cluster's, so a young store fires only on
     /// a rate the majority of the fleet never reaches in its worst percent of buckets. Aurora population (the engine's measured
     /// wait deltas). Stock PostgreSQL's SAMPLED
-    /// estimate has no arm in v1 (its resolution floor and per-backend-sample unit give it a different noise
-    /// distribution), so there is deliberately no sampled twin of this bar yet.</summary>
+    /// estimate is another instrument with its own arm and its own bar since lane 24 —
+    /// <see cref="PgSampledWaitProfileFallbackMsPerSec"/> below, the same figure stated on its own lineage.</summary>
     public const double PgWaitProfileFallbackMsPerSec = 500.0;   // ms of waiting per second of observed time
+
+    // lane 24 (#3691): the stock SAMPLED wait-profile detector's magnitude floor and fallback bar (PgTargetAnomalyDetector.WaitsSampled.cs).
+
+    /// <summary>The stock sampled wait-profile detector's magnitude floor AND absolute-fallback bar, one number on
+    /// both paths like its Aurora sibling: sampled wait milliseconds per second the sampler was WATCHING
+    /// (<c>Δsamples × profile_period_ms</c> over <c>sampled_ms</c>, V133; NULL = the whole interval), CPU/Running
+    /// excluded — 500 is half of one backend continuously seen waiting. The same figure as
+    /// <see cref="PgWaitProfileFallbackMsPerSec"/> and deliberately NOT an alias of it: the two instruments must
+    /// stay free to calibrate apart. unmeasured: chosen, not measured — the 2026-09-19 calibration read only the
+    /// Aurora population's exact deltas (<c>pg_wait_stats</c>); the stock fleet's <c>pg_wait_sampling</c> rate at
+    /// the honest <c>sampled_ms</c> denominator has no distribution yet (every pre-V133 row is NULL there), so
+    /// calibrate against the per-server per-collection sampled rate over <c>pg_wait_sampling</c> before the next
+    /// release. Lane 9 left this constant undeclared while nothing read it; the detector that reads it is lane
+    /// 24's, and its facts carry <c>threshold_lineage = 0</c>.</summary>
+    public const double PgSampledWaitProfileFallbackMsPerSec = 500.0;   // sampled ms of waiting per second the sampler watched
 
     /// <summary>The deadlock-rate ratio detector's magnitude floor, a RATE per observed hour (#3538 A7: never a
     /// count over the window, which would scale with hours_back) — under one deadlock an hour the ratio is the

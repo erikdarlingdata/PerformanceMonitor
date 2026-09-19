@@ -248,6 +248,26 @@ public static class PgTargetFactKeys
     public const string AnomalyDeadlockRate = "ANOMALY_PG_DEADLOCK_RATE";
     public const string AnomalyWaitProfile = "ANOMALY_PG_WAIT_PROFILE";
 
+    /* ── Lane 24 (#3691) — stock PostgreSQL's SAMPLED wait profile, the sibling of the Aurora one above. ── */
+
+    /// <summary>The stock wait profile — the <c>pg_wait_sampling</c> ESTIMATE, rated per second the sampler was
+    /// actually watching (<c>sampled_ms</c>, V133) — against its own baseline (<c>pg_sampled_wait_ms_per_sec</c>).
+    /// Its OWN key, metric and bar, never <see cref="AnomalyWaitProfile"/>'s: a per-backend-sample count quantised
+    /// at the sampling period has a different noise distribution from a measured microsecond sum, and a bucket that
+    /// mixed the two would be the unit error #3689 §5 refused. Not a STATIC <see cref="AnomalyToFamilies"/> entry: it
+    /// folds per story onto its dominant contributor through <see cref="WaitProfileFamilies"/>, exactly as the Aurora
+    /// one does (<see cref="IsWaitProfileAnomaly"/> is what the reconciler and the scorer route on). Lane 24.</summary>
+    public const string AnomalySampledWaitProfile = "ANOMALY_PG_SAMPLED_WAIT_PROFILE";
+
+    /// <summary>Whether <paramref name="key"/> is one of the two wait-profile anomalies — the Aurora
+    /// <see cref="AnomalyWaitProfile"/> or the stock <see cref="AnomalySampledWaitProfile"/>. The two share one
+    /// SHAPE (a ratio / modified-z family with <c>contrib_Type:event</c> metadata, folding onto the dominant wait,
+    /// the extremity escape on the same statistic) and differ in instrument, metric name and bar; the shared
+    /// switches that route on the shape ask this predicate so a third profile instrument would join here and
+    /// nowhere else.</summary>
+    public static bool IsWaitProfileAnomaly(string? key) =>
+        key is AnomalyWaitProfile or AnomalySampledWaitProfile;
+
     /* ── v2 (#3691) vocabulary, declared once by the v2 plumbing lane so lanes 11–16 reference constants and
        never edit this file. The comment beside each key names the lane that fills its collector / scorer /
        advice and the table it reads; a key declared for a later wave says so and has no stub. ── */
@@ -405,8 +425,9 @@ public static class PgTargetFactKeys
     /// The PostgreSQL arm of <c>AnomalyIncidentReconciler.AnomalyToFamilies</c>: which REGULAR fact family
     /// an <c>ANOMALY_PG_*</c> story folds into when a same-run parent exists, in priority order. An anomaly
     /// absent from this map stays a solo card — <see cref="AnomalyTps"/> has no regular twin (throughput is
-    /// context, not a symptom) and <see cref="AnomalyWaitProfile"/> is not a STATIC entry: it resolves per
-    /// story from its dominant contributor through <see cref="WaitProfileFamilies"/>.
+    /// context, not a symptom) and neither wait profile (<see cref="AnomalyWaitProfile"/>, and since lane 24 the
+    /// stock <see cref="AnomalySampledWaitProfile"/>) is a STATIC entry: each resolves per story from its
+    /// dominant contributor through <see cref="WaitProfileFamilies"/>, routed by <see cref="IsWaitProfileAnomaly"/>.
     ///
     /// <para>v2 (#3691): <see cref="AnomalyIoLatency"/> folds onto the read-latency fact it deviates from;
     /// <see cref="AnomalyReplicationLag"/> onto the lag fact; <see cref="AnomalyWalVolume"/> onto
@@ -434,7 +455,8 @@ public static class PgTargetFactKeys
     internal const string WaitContributorMetadataPrefix = "contrib_";
 
     /// <summary>
-    /// The regular wait fact(s) an <see cref="AnomalyWaitProfile"/> story folds into, in priority order, resolved
+    /// The regular wait fact(s) a wait-profile anomaly story (<see cref="AnomalyWaitProfile"/>, or the sampled
+    /// <see cref="AnomalySampledWaitProfile"/> — both stamp <c>contrib_Type:event</c>) folds into, in priority order, resolved
     /// per story from the anomaly's own metadata — the PostgreSQL arm of what
     /// <c>AnomalyIncidentReconciler.ResolveFamilies</c> does for the literal <c>ANOMALY_WAIT_PROFILE</c>
     /// (its dominant <c>contrib_TYPE</c> mapped through <c>WaitFamilyKey</c>). Here the dominant

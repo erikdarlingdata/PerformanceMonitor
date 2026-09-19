@@ -40,7 +40,12 @@ namespace PerformanceMonitor.Analysis;
 /// <c>pg_wait_sampling</c> estimate) grades on the SAME fractions as an Aurora fact — the estimate is stated
 /// on the fact (<see cref="WaitEstimateResolutionMsKey"/>) and in the advice, not hidden in a second table
 /// — with one guard: below <see cref="WaitSampledMinimumSamples"/> samples the estimate has no resolution and
-/// scores 0 (adversarial item A.3).</para>
+/// scores 0 (adversarial item A.3). Since lane 24 (#3691, V133) the sampled fraction is over the time the
+/// sampler was WATCHING (<c>sampled_ms</c>), not the wall interval, so on the service-sampler arm it reads
+/// ~10× what lane 5's arithmetic read for the same rows; the four rollup bars were measured on Aurora's exact
+/// deltas, and the sampled rate on stock is the same UNIT (backend-seconds waiting per second observed) from a
+/// different INSTRUMENT on a population the calibration did not read — unmeasured for stock, which is why
+/// every sampled fact keeps <c>threshold_lineage = 0</c> and its advice says "estimated from sampling".</para>
 ///
 /// <para><b>"Fired" means at or past the concerning bar.</b> Below it the fact scores 0, not the shared
 /// formula's sub-0.5 ramp — the convention lane 2 set for every PostgreSQL family, so that a graph edge or an
@@ -102,6 +107,9 @@ public static partial class PgTargetScorer
     /// <summary>Metadata key: collections whose every row carried the stored-interval 0 (a restart / first
     /// sighting) — excluded from the sample count and the sums.</summary>
     public const string WaitRestartCollectionsKey = "restart_collections";
+    /// <summary>Metadata key (lane 24): 1 when <c>pg_wait_sampling</c> ALSO wrote this window and the sampled
+    /// profile was therefore not emitted — the exact source wins, and says so; 0 when the sampler was silent.</summary>
+    public const string WaitSampledSuppressedByExactKey = "sampled_suppressed_by_exact";
 
     /* ── sampled only (stock pg_wait_sampling) ── */
 
@@ -116,6 +124,16 @@ public static partial class PgTargetScorer
     public const string WaitPeakBackendsKey = "peak_backends";
     /// <summary>Metadata key: profile resets seen inside the window (a counter that went backwards).</summary>
     public const string WaitCounterResetsKey = "counter_resets";
+    /// <summary>Metadata key (lane 24, V133): the WALL time between the countable collections, in ms — stated beside
+    /// <see cref="WaitSourceObservedMsKey"/>, which on a sampled fact is the time the sampler was WATCHING (Σ
+    /// <c>sampled_ms</c>; the #3604 service sampler watches 30 s of each 300 s cycle). The ratio of the two is the
+    /// duty cycle the estimate was made at; equal when every collection was read as its whole interval.</summary>
+    public const string WaitSourceIntervalMsKey = "wait_source_interval_ms";
+    /// <summary>Metadata key (lane 24, V133): 1 when every countable collection carried <c>sampled_ms</c>, so the
+    /// denominator is the sampler's disclosed watching time; 0 when at least one collection (a pre-V133 row, or
+    /// the extension arm) carried NULL and was read as its whole interval — lane 5's arithmetic, which on the
+    /// service-sampler arm understates the rate by the duty cycle, roughly 10×. Never guessed.</summary>
+    public const string WaitSampledMsKnownKey = "sampled_ms_known";
 
     /* ── the bars ── */
 
@@ -132,8 +150,9 @@ public static partial class PgTargetScorer
        the engine's measured wait deltas). Per-server p50 median 0.012, p99 median 0.062, fleet p90 of p99 0.82,
        maximum 10.7; buckets at or above 0.20: median cluster 0, fleet p75 2.8 %, worst 41 % (a chronically
        waiting cluster); at or above 1.0: fleet p90 0.5 %, worst 15.7 %. Per type, ipc p99 0.35 (max 7.8), lock
-       p99 0.034 (max 2.0), lwlock negligible. Aurora population; a stock pg_wait_sampling estimate is unmeasured.
-       The argument for the shape, stated once for all eight: the fraction is backend-seconds waiting per wall
+       p99 0.034 (max 2.0), lwlock negligible. Aurora population, measured on Aurora's exact deltas; the sampled rate
+       on stock (pg_wait_sampling over sampled_ms, lane 24) is the same unit from a different instrument — unmeasured
+       for stock, and a sampled fact says threshold_lineage = 0. The argument for the shape, stated once for all eight: the fraction is backend-seconds waiting per wall
        second, so 1.0 is ONE backend waiting on this
        thing continuously for the whole window — the natural critical line for a rollup and for the standouts
        that are its dominant members. Concerning is a fifth of a backend (0.20) for the rollups: PostgreSQL
@@ -148,7 +167,8 @@ public static partial class PgTargetScorer
     /* measured: 0.40 ≈ p99 and 2.0 ≈ p99.9 of 5-minute buckets of IO-type waiting (ms waited per second observed)
        over 7 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 — io p50 0.012, p90 0.077,
        p99 0.46, maximum 3.9; buckets at or above 0.40: fleet p90 2.4 %, worst 24 %. Aurora population (Aurora
-       storage; a stock local-disk server is a different population and its sampled estimate is unmeasured). IO is
+       storage; a stock local-disk server is a different population and its sampled rate over sampled_ms is the
+       same unit from a different instrument — unmeasured for stock). IO is
        the one type a healthy server legitimately spends time in (reading is what a database does), so its
        concerning bar sits at twice the others (0.40) and its critical at two full backends (2.0): a server
        that keeps two backends' worth of time in I/O waits continuously is I/O-bound by any definition. */

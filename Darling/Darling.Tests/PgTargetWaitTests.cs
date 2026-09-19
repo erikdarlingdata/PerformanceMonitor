@@ -115,7 +115,7 @@ public sealed class PgTargetWaitTests
         var facts = new List<Fact>();
 
         PgTargetFactCollector.EmitWaitFacts(context, facts, rows, observedSec: 13_800, sampleCount: 230, collectionCount: 240,
-            sampled: null, extra: (PgTargetScorer.WaitRestartCollectionsKey, 1));
+            sampled: null, extra: [(PgTargetScorer.WaitRestartCollectionsKey, 1), (PgTargetScorer.WaitSampledSuppressedByExactKey, 0)]);
 
         Assert.Equal(8, facts.Count);
         Assert.All(facts, f => Assert.Equal(PgTargetSources.WaitsSource, f.Source));
@@ -184,8 +184,10 @@ public sealed class PgTargetWaitTests
         };
         var facts = new List<Fact>();
 
+        /* The extension arm (or pre-V133 rows): every collection read as its whole interval, so the watched time IS
+           the wall time, and the fact says the sampler's own figure was not known (never a guessed 30 s). */
         PgTargetFactCollector.EmitWaitFacts(context, facts, rows, observedSec: 14_400, sampleCount: 48, collectionCount: 49,
-            sampled: (PeriodMs: 10, Resets: 1), extra: null);
+            sampled: (PeriodMs: 10, Resets: 1, IntervalSec: 14_400, SampledMsKnown: false), extra: null);
 
         /* Lock, Lock:relation, IO, IO:DataFileRead — the two types present and their standouts. */
         Assert.Equal(4, facts.Count);
@@ -196,6 +198,10 @@ public sealed class PgTargetWaitTests
             Assert.Equal(1, fact.Metadata[PgTargetScorer.WaitCounterResetsKey]);
             Assert.True(fact.Metadata.ContainsKey(PgTargetScorer.WaitDeltaSamplesKey), fact.Key);
             Assert.False(fact.Metadata.ContainsKey(PgTargetScorer.WaitRestartCollectionsKey), fact.Key);
+            Assert.False(fact.Metadata.ContainsKey(PgTargetScorer.WaitSampledSuppressedByExactKey), fact.Key);
+            Assert.Equal(0, fact.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
+            Assert.Equal(14_400_000, fact.Metadata[PgTargetScorer.WaitSourceIntervalMsKey], precision: 6);
+            Assert.Equal(14_400_000, fact.Metadata[PgTargetScorer.WaitSourceObservedMsKey], precision: 6);
         }
 
         var relation = facts.Single(f => f.Key == LockRelation);
@@ -212,6 +218,91 @@ public sealed class PgTargetWaitTests
         Assert.Equal(9, facts.Single(f => f.Key == Lock).Metadata[PgTargetScorer.WaitPeakBackendsKey]);
         Assert.Equal(2, facts.Single(f => f.Key == DataFileRead).Metadata[PgTargetScorer.WaitPeakBackendsKey]);
         Assert.Equal(2, facts.Single(f => f.Key == Io).Metadata[PgTargetScorer.WaitPeakBackendsKey]);
+    }
+
+    /* ── lane 24 (#3691): the honest denominator, sampled_ms ── */
+
+    /// <summary>The same rows the service-side sampler writes read TEN TIMES higher once <c>sampled_ms</c> is the
+    /// denominator: 48 five-minute cycles of which the sampler watched 30 s each = 1,440 s watched against 14,400 s of
+    /// wall clock; 1,440 backend-samples × 1,000 ms = 1,440 s of sampled waiting = 1.0 of a backend continuously
+    /// while watching, where lane 5's arithmetic over the interval read 0.10. Both figures are on the fact.</summary>
+    [Fact]
+    public void WithSampledMsKnown_TheFractionIsPerSecondWatched_TenTimesTheIntervalArithmetic_AndBothAreStated()
+    {
+        var context = Context(observedMs: 14_400_000);
+        var rows = new List<PgTargetFactCollector.WaitProfileRow>
+        {
+            new("lock", "relation", 1_440 * 1_000, 1_440, PeakBackends: 7),
+            new("cpu", "running", 40_000 * 1_000, 40_000, PeakBackends: 40),
+        };
+        var facts = new List<Fact>();
+
+        PgTargetFactCollector.EmitWaitFacts(context, facts, rows, observedSec: 48 * 30, sampleCount: 48, collectionCount: 49,
+            sampled: (PeriodMs: 1_000, Resets: 0, IntervalSec: 14_400, SampledMsKnown: true), extra: null);
+
+        var relation = facts.Single(f => f.Key == LockRelation);
+        Assert.Equal(1.0, relation.Value, precision: 9);
+        Assert.Equal(1_440_000, relation.Metadata[PgTargetScorer.WaitSourceObservedMsKey], precision: 6);
+        Assert.Equal(14_400_000, relation.Metadata[PgTargetScorer.WaitSourceIntervalMsKey], precision: 6);
+        Assert.Equal(1, relation.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
+        Assert.Equal(1, relation.Metadata[PgTargetScorer.WaitIsSampledKey]);
+        /* The witness fraction is still over the pass's observed 4 h — the old figure, kept beside the honest one. */
+        Assert.Equal(0.10, relation.Metadata[PgTargetScorer.WaitWitnessFractionKey], precision: 9);
+
+        /* The same rows with sampled_ms unknown (pre-V133 NULL): lane 5's arithmetic, flagged, never 30 s guessed. */
+        var old = new List<Fact>();
+        PgTargetFactCollector.EmitWaitFacts(context, old, rows, observedSec: 14_400, sampleCount: 48, collectionCount: 49,
+            sampled: (PeriodMs: 1_000, Resets: 0, IntervalSec: 14_400, SampledMsKnown: false), extra: null);
+        var blind = old.Single(f => f.Key == LockRelation);
+        Assert.Equal(0.10, blind.Value, precision: 9);
+        Assert.Equal(0, blind.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
+        Assert.Equal(relation.Value, blind.Value * 10, precision: 9);
+
+        /* The advice states the duty cycle on the honest fact and the caveat on the blind one. */
+        var honest = PgTargetAdvice.Compose(LockRelation, Lookup(relation))!.Investigation;
+        Assert.Contains("the sampler was watching", honest, StringComparison.Ordinal);
+        Assert.Contains("spanning 4 h of wall clock", honest, StringComparison.Ordinal);
+        Assert.Contains("per second watched", honest, StringComparison.Ordinal);
+        Assert.Contains("estimated from sampling", honest, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not record how long the sampler watched", honest, StringComparison.Ordinal);
+        Assert.DoesNotContain("coverage witness", honest, StringComparison.Ordinal);   /* wall 4 h == witness 4 h */
+        var caveat = PgTargetAdvice.Compose(LockRelation, Lookup(blind))!.Investigation;
+        Assert.Contains("did not record how long the sampler watched", caveat, StringComparison.Ordinal);
+        Assert.Contains("about a tenth of the true rate", caveat, StringComparison.Ordinal);
+        Assert.DoesNotContain("spanning", caveat, StringComparison.Ordinal);
+    }
+
+    /// <summary>Both sources in one window: the exact facts carry the suppression flag the collector stamps, and
+    /// the two reads' SQL carries the cross-count each decides on (<c>sampled_collections</c> on the Aurora header;
+    /// the sampled detector's <c>exact_collections</c>) plus the V133 denominator.</summary>
+    [Fact]
+    public void BothSources_TheExactFactsSaySampledWasSuppressed_AndTheReadsCarryTheCrossCountAndSampledMs()
+    {
+        var context = Context(observedMs: 14_400_000);
+        var facts = new List<Fact>();
+        PgTargetFactCollector.EmitWaitFacts(context, facts, [new("lock", "relation", 2_880_000, 1_500)], observedSec: 14_400, sampleCount: 239, collectionCount: 240,
+            sampled: null, extra: [(PgTargetScorer.WaitRestartCollectionsKey, 1), (PgTargetScorer.WaitSampledSuppressedByExactKey, 1)]);
+        Assert.All(facts, f => Assert.Equal(1, f.Metadata[PgTargetScorer.WaitSampledSuppressedByExactKey]));
+        Assert.All(facts, f => Assert.False(f.Metadata.ContainsKey(PgTargetScorer.WaitIsSampledKey)));
+
+        var aurora = PgTargetFactCollector.PgWaitStatsSql;
+        Assert.Contains("FROM pg_wait_sampling AS s", aurora, StringComparison.Ordinal);
+        Assert.Contains("AS sampled_collections", aurora, StringComparison.Ordinal);
+
+        var sampling = PgTargetFactCollector.PgWaitSamplingSql;
+        Assert.Contains("MAX(sampled_ms) AS sampled_ms", sampling, StringComparison.Ordinal);
+        Assert.Contains("coalesce(sampled_ms / 1000.0, interval_sec)", sampling, StringComparison.Ordinal);
+        Assert.Contains("AS interval_sec_total", sampling, StringComparison.Ordinal);
+        Assert.Contains("FILTER (WHERE interval_sec > 0 AND sampled_ms IS NULL) AS integer)           AS unknown_sampled_collections", sampling, StringComparison.Ordinal);
+        /* Never a guessed 30 s: no literal 30000 / 30 s anywhere in either read. */
+        Assert.DoesNotContain("30000", sampling, StringComparison.Ordinal);
+        Assert.DoesNotContain("30_000", sampling, StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetFactCollector.Waits.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        Assert.DoesNotContain("30000", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("30_000", code, StringComparison.Ordinal);
+        Assert.Contains("sampledCollections > 0 ? 1 : 0", code, StringComparison.Ordinal);
     }
 
     [Fact]

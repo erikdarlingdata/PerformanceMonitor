@@ -79,7 +79,10 @@ public static class DarlingRetentionHorizons
     /// name), so the next arm without a floor fails there rather than starving quietly. Lane 17 (wave 3) added
     /// <c>pg_blocking</c> — the COLLECTOR name, which is what the purge resolves by, for the table
     /// <c>pg_blocking_edges</c> its <c>pg_blocked_sessions</c> arm reads; the one member whose schedule name and
-    /// table name differ, so the test maps the derived table back to its collector through the catalog.</para>
+    /// table name differ, so the test maps the derived table back to its collector through the catalog. Lane 24
+    /// added <c>pg_wait_sampling</c>, read directly by the stock <c>pg_sampled_wait_ms_per_sec</c> arm (its
+    /// <c>sampled_ms</c> denominator, V133) — the same silent-starvation shape for <c>ANOMALY_PG_SAMPLED_WAIT_PROFILE</c>
+    /// without it.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -88,6 +91,7 @@ public static class DarlingRetentionHorizons
             "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
             "pg_replication_stats", "pg_io_stats", "pg_write_stats",
             "pg_blocking",
+            "pg_wait_sampling",
         };
 
     /// <summary>
