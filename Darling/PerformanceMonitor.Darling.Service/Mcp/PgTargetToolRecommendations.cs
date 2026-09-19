@@ -106,6 +106,13 @@ internal static class PgTargetToolRecommendations
             new("get_pg_autovacuum_health", "Per-table dead tuples against each table's own threshold, and when autovacuum last ran"),
             new("get_pg_table_bloat", "How much space the backlog has already cost"),
         ],
+        /* #3691 step 22: the per-table reloption card reads the same two tools as the backlog it sits beside — the
+           per-table list (disabled tables first, so the operator sees the rest of the set) and what it has cost. */
+        [PgTargetFactKeys.ConfigAutovacuumDisabled] =
+        [
+            new("get_pg_autovacuum_health", "Every disabled table past its own line, with dead tuples, threshold and when autovacuum last ran"),
+            new("get_pg_table_bloat", "How much space the unvacuumed table has already cost"),
+        ],
         [PgTargetFactKeys.WraparoundTrend] =
         [
             new("get_pg_wraparound_risk", "XID and MultiXact age per database against autovacuum_freeze_max_age"),

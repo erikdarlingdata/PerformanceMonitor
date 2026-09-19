@@ -253,6 +253,161 @@ public sealed class PgTargetVacuumLiveTests
         }
     }
 
+    /// <summary>
+    /// #3691 step 22 (design §3.1), the exit criterion: one table with <c>autovacuum_enabled = off</c> four times
+    /// past its own line for six hours, one disabled table that is quiet, one ENABLED table twice past its line
+    /// → exactly one <c>CONFIG_PG_AUTOVACUUM_DISABLED</c> fact naming the first (the quiet one is not a finding;
+    /// the enabled one is the backlog fact's business), and through the REAL <c>analyze_server</c> ONE story,
+    /// <c>PG_AUTOVACUUM_BACKLOG → CONFIG_PG_AUTOVACUUM_DISABLED</c> — the backlog leads (its reloption
+    /// amplifier lifts it past the card's flat 0.9) and the same-table edge carries the walk to the named cause.
+    /// </summary>
+    [Fact]
+    public async Task ADisabledTablePastItsLine_IsItsOwnCard_AndJoinsTheBacklogsStoryThroughAnalyzeServer()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the disabled-table e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 18, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-6);
+
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 6 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            /* ── pg_autovacuum_stats, hourly, seven samples spanning six hours:
+               frozen — autovacuum_enabled = off, 4,200 dead against a 1,050 line (4×) at every sample, never vacuumed.
+               quiet  — autovacuum_enabled = off, 100 dead against 1,050: disabled and under its line → not a finding.
+               hot    — enabled, 2,100 dead against 1,050 (2×): a backlog, but not this card's. */
+            for (var h = 0; h <= 6; h++)
+            {
+                var at = windowStart.AddHours(h);
+                await PlantAutovacuumAsync(connection, at, "public", "frozen", live: 10_000, dead: 4_200, vacuumThreshold: 1_050,
+                    inserts: 0, insertThreshold: -1, disabled: true, lastAutovacuum: null, autovacuumCount: 0, ct);
+                await PlantAutovacuumAsync(connection, at, "public", "quiet", live: 10_000, dead: 100, vacuumThreshold: 1_050,
+                    inserts: 0, insertThreshold: -1, disabled: true, lastAutovacuum: null, autovacuumCount: 0, ct);
+                await PlantAutovacuumAsync(connection, at, "public", "hot", live: 10_000, dead: 2_100, vacuumThreshold: 1_050,
+                    inserts: 0, insertThreshold: -1, disabled: false, lastAutovacuum: at.AddMinutes(-20), autovacuumCount: 10, ct);
+            }
+
+            var collector = new PgTargetFactCollector(postgres);
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var facts = await collector.CollectFactsAsync(context);
+            Assert.False(context.Coverage!.IsPartial);
+
+            /* Exactly one disabled card, naming frozen; quiet is absent everywhere. */
+            var disabled = Assert.Single(facts, f => f.Key == PgTargetFactKeys.ConfigAutovacuumDisabled);
+            Assert.Equal(PgTargetSources.VacuumSource, disabled.Source);
+            Assert.Equal("appdb", disabled.DatabaseName);
+            Assert.Equal("public.frozen", disabled.ObjectName);
+            Assert.Equal(4.0, disabled.Value, precision: 6);
+            Assert.Equal(4.0, disabled.Metadata[PgTargetScorer.BacklogRatioKey], precision: 6);
+            Assert.Equal(0, disabled.Metadata[PgTargetScorer.BacklogArmIsInsertKey]);
+            Assert.Equal(7, disabled.Metadata[PgTargetScorer.BacklogTrailingSamplesKey]);
+            Assert.Equal(7, disabled.Metadata[PgTargetScorer.BacklogSamplesInWindowKey]);
+            Assert.Equal(6.0, disabled.Metadata[PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal(4_200, disabled.Metadata[PgTargetScorer.BacklogDeadTuplesKey]);
+            Assert.Equal(1_050, disabled.Metadata[PgTargetScorer.BacklogVacuumThresholdKey]);
+            Assert.Equal(10_000, disabled.Metadata[PgTargetScorer.BacklogLiveTuplesKey]);
+            Assert.Equal(1, disabled.Metadata[PgTargetScorer.BacklogTableAutovacuumDisabledKey]);
+            Assert.Equal(1, disabled.Metadata[PgTargetScorer.AutovacuumDisabledTablesKey]);
+            Assert.Equal(0, disabled.Metadata[PgTargetScorer.AutovacuumDisabledServerOffKey]);
+            Assert.False(disabled.Metadata.ContainsKey(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey));
+            Assert.False(disabled.Metadata.ContainsKey(PgTargetScorer.AutovacuumDisabledRankRatioKey(2)));
+            Assert.DoesNotContain(facts, f => f.ObjectName == "public.quiet");
+
+            /* The backlog fact ranks disabled tables first, so it names frozen too, and counts hot beside it. */
+            var backlog = Assert.Single(facts, f => f.Key == PgTargetFactKeys.AutovacuumBacklog);
+            Assert.Equal("public.frozen", backlog.ObjectName);
+            Assert.Equal(1, backlog.Metadata[PgTargetScorer.BacklogTableAutovacuumDisabledKey]);
+            Assert.Equal(2, backlog.Metadata[PgTargetScorer.BacklogTablesKey]);
+
+            /* Scored: the card at its flat band with lineage 1; the backlog at 4× (0.67) lifted by the reloption
+               boost past it, so the backlog leads. */
+            new FactScorer().ScoreAll(facts);
+            Assert.Equal(PgTargetScorer.AutovacuumDisabledBaseSeverity, disabled.BaseSeverity);
+            Assert.Equal(disabled.BaseSeverity, disabled.Severity);
+            Assert.Equal(1, disabled.Metadata["threshold_lineage"]);
+            Assert.InRange(backlog.BaseSeverity, 0.66, 0.67);
+            Assert.Contains(backlog.AmplifierResults, a => a.Matched && a.Description.Contains("autovacuum_enabled is OFF", StringComparison.Ordinal));
+            Assert.True(backlog.Severity > disabled.Severity);
+
+            var cardAdvice = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, facts.ToFactLookup())!;
+            Assert.Equal("public.frozen in appdb has autovacuum_enabled = off and sits at 4× its own autovacuum trigger line for 6 hours", cardAdvice.Headline);
+            Assert.Contains("never run on this table", cardAdvice.Investigation, StringComparison.Ordinal);
+            Assert.Contains("ALTER TABLE public.frozen SET (autovacuum_enabled = true);", cardAdvice.Remediation, StringComparison.Ordinal);
+
+            /* ── THE EXIT CRITERION: the real analyze_server, one story, backlog → disabled card, no second root. */
+            var service = new DarlingAnalysisService(postgres);
+            var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 6);
+            using (var doc = JsonDocument.Parse(analysis))
+            {
+                var root = doc.RootElement;
+                Assert.Equal("findings", root.GetProperty("status").GetString());
+                var findings = root.GetProperty("findings").EnumerateArray().ToList();
+                var chain = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.AutovacuumBacklog);
+                Assert.Equal(
+                    $"{PgTargetFactKeys.AutovacuumBacklog} → {PgTargetFactKeys.ConfigAutovacuumDisabled}",
+                    chain.GetProperty("story_path").GetString());
+                Assert.Equal(2, chain.GetProperty("fact_count").GetInt32());
+                Assert.Equal(PgTargetFactKeys.ConfigAutovacuumDisabled, chain.GetProperty("leaf_fact").GetProperty("key").GetString());
+                Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConfigAutovacuumDisabled);
+
+                var advice = chain.GetProperty("advice");
+                /* The tool anchors its six hours at NOW, so the first planted sample (a minute before now − 6 h) falls
+                   outside it: six samples in the tool's window, seven in the collector context above. */
+                Assert.Equal("public.frozen in appdb carries 4,200 dead tuples, 4× its own autovacuum trigger line, for 6 consecutive hourly samples", advice.GetProperty("headline").GetString());
+                Assert.Contains("ALTER TABLE public.frozen SET (autovacuum_enabled = true);", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
+
+                var tools = chain.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
+                Assert.Contains("get_pg_autovacuum_health", tools);
+                Assert.Contains("get_pg_table_bloat", tools);
+                Assert.All(tools, t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));
+            }
+
+            /* The facts read: the registry fact plus these two under pg_vacuum — the quiet table is nowhere. */
+            var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 6, PgTargetSources.VacuumSource);
+            using (var doc = JsonDocument.Parse(factsJson))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(3, root.GetProperty("total_facts").GetInt32());
+                Assert.Equal(2, root.GetProperty("shown").GetInt32());
+                var shown = root.GetProperty("facts").EnumerateArray().ToList();
+                var card = Assert.Single(shown, f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigAutovacuumDisabled);
+                Assert.Equal(4.0, card.GetProperty("value").GetDouble(), precision: 6);
+                Assert.Equal(PgTargetScorer.AutovacuumDisabledBaseSeverity, card.GetProperty("base_severity").GetDouble(), precision: 4);
+                Assert.Equal(1, card.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, card.GetProperty("metadata").GetProperty(PgTargetScorer.AutovacuumDisabledTablesKey).GetDouble());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static DateTime TruncateToMinutes(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
