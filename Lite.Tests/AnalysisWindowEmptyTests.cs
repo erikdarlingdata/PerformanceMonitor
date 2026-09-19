@@ -27,6 +27,11 @@ namespace PerformanceMonitorLite.Tests;
 /// zero-facts pass used to return a bare <c>[]</c> that the tool rendered as a true-negative
 /// all-clear. Both sides of the distinction are asserted, on the REAL 24h gate rather than a zeroed
 /// one, because the bug lives precisely in the gap between "enough history" and "an empty window".
+///
+/// <para>#3653 adds the third kind of nothing, which the first fix got wrong once every collector stamped
+/// coverage (#3592): a window the collector WAS up for, over which nothing rose to a fact. That is a
+/// measurement, and it must not wear the dead-collector envelope. The unobserved-window-with-point-in-time-
+/// facts arm lives in <see cref="AnalysisCoverageTests"/>.</para>
 /// </summary>
 public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -132,6 +137,61 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
         Assert.InRange(
             doc.RootElement.GetProperty("hints").GetProperty("coverage").GetProperty("observed_fraction").GetDouble(),
             0.99, 1.0);
+    }
+
+    /// <summary>
+    /// #3653: the collector was UP for the whole window — a reading every fifteen minutes, so the coverage
+    /// witness finds intervals inside it — but every reading carries ZERO accrued wait time, so no wait
+    /// fact is emitted (<c>delta_wait_time_ms &gt; 0</c> is the wait read's filter) and no other family has
+    /// a row for this server to read: an observed window that produced no fact at all. Until #3653 the
+    /// service's rule was <c>facts.Count == 0 || ObservedDurationMs &lt;= 0</c>, and the first half made
+    /// this window wear the dead-collector envelope above — "collection appears to have stopped or broken
+    /// … NOT an all-clear", rendered <c>unavailable</c> with a pointer at collection health — for a
+    /// collector the witness proves was running. It is <c>empty</c>: an all-clear that rests on the
+    /// coverage the payload states, with none of the dead-collector prose.
+    ///
+    /// <para>The fact count is asserted directly through <c>CollectAndScoreFactsAsync</c> so this arm is
+    /// known to exercise the zero-facts path and not merely "facts but no findings", which
+    /// <see cref="AWindowWithFactsButNoFindings_KeepsTheAllClear"/> already covers.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnObservedWindowWithNoFacts_IsAnAllClearAtItsCoverage_NotADeadCollector()
+    {
+        await PlantWaitAsync(DateTime.UtcNow.AddHours(-30), StaleWait, 60_000L);
+
+        var now = DateTime.UtcNow;
+        for (var minutesAgo = 240; minutesAgo >= 0; minutesAgo -= 15)
+            await PlantWaitAsync(now.AddMinutes(-minutesAgo), BenignWait, 0L);
+
+        var service = new AnalysisService(_duckDb);
+
+        /* The precondition this arm exists for: observed time, zero facts. */
+        var (facts, coverage) = await service.CollectAndScoreFactsAsync(_serverId, "TestServer");
+        Assert.Empty(facts);
+        Assert.NotNull(coverage);
+        Assert.True(coverage!.IsObserved);
+        Assert.False(coverage.IsPartial);
+
+        var result = await McpAnalysisTools.AnalyzeServer(service, _serverManager);
+
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.DoesNotContain("NOT an all-clear", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("appears to have stopped", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_collection_health", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARTIAL", result, StringComparison.Ordinal);
+
+        /* The all-clear says which coverage it rests on. */
+        var payloadCoverage = doc.RootElement.GetProperty("hints").GetProperty("coverage");
+        Assert.False(payloadCoverage.GetProperty("unobserved").GetBoolean());
+        Assert.False(payloadCoverage.GetProperty("partial").GetBoolean());
+        Assert.InRange(payloadCoverage.GetProperty("observed_fraction").GetDouble(), 0.99, 1.0);
+
+        /* Neither miss message is set: this pass ran, and the worker-side marker would clear. */
+        Assert.Null(service.WindowEmptyMessage);
+        Assert.Null(service.InsufficientDataMessage);
+        Assert.NotNull(service.LastWindowCoverage);
+        Assert.True(service.LastWindowCoverage!.IsObserved);
     }
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
