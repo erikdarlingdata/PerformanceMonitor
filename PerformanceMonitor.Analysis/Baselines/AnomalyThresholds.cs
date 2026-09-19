@@ -265,4 +265,24 @@ public static class AnomalyThresholds
     /// twice at the warning line. measured: derived from the two §B1 bars named, 14 days × 50 Aurora PostgreSQL
     /// clusters of the dogfood fleet, 2026-09-19; <c>PgTargetIoTests</c> pins it strictly between them.</summary>
     public const double PgIoLatencyFallbackMs = 20.0;          // ms per data-file read
+
+    // lane 15 (#3691 step 15): the WAL-volume z-detector's floor and fallback (PgTargetAnomalyDetector.Wal.cs).
+
+    /// <summary>Magnitude floor for the WAL-volume z-detector, in WAL bytes per second per collection: below one
+    /// mebibyte a second a deviation is a quiet server's write ripple however many sigmas it reads — a 30 KB/s
+    /// server tripling to 90 KB/s is not a workload event. unmeasured: chosen, not measured — and NOT calibratable
+    /// on the current fleet: every PostgreSQL target the product monitors today is Aurora, and Aurora does not
+    /// populate <c>pg_stat_wal</c> (fifty clusters, fourteen days, <c>wal_bytes</c> = 0 throughout — #3691
+    /// calibration §A7), so the detector never reaches this bar there. Calibrate against the per-collection
+    /// <c>pg_write_stats</c> WAL rate of a stock population before the next release that monitors one; the
+    /// detector stamps <c>threshold_lineage = 0</c> until then.</summary>
+    public const double PgWalBytesFloorPerSec = 1024.0 * 1024.0;          // 1 MiB of WAL per second
+
+    /// <summary>Absolute-fallback bar for WAL volume on an untrustworthy baseline: sixteen times the floor, so a
+    /// young store fires only on a rate that is large on any PostgreSQL — 16 MiB/s fills the shipped 1 GB
+    /// <c>max_wal_size</c> in about a minute, a fifth of the default <c>checkpoint_timeout</c>, so it is the rate
+    /// at which a default-configured server is already checkpointing on volume. unmeasured: chosen, not
+    /// measured — the same un-calibratable population as the floor (§A7); calibrate against a stock
+    /// population's upper tail before the next release that monitors one.</summary>
+    public const double PgWalBytesFallbackPerSec = 16.0 * 1024.0 * 1024.0;  // 16 MiB of WAL per second
 }

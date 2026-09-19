@@ -28,6 +28,25 @@ namespace PerformanceMonitor.Analysis;
 /// <c>max_wal_size</c> must hold it with headroom for the checkpoint to spread (<c>checkpoint_completion_target</c>)
 /// — a judgment, labelled as one. Counter-objectives named: disk footprint under <c>pg_wal</c>, crash-recovery
 /// replay length, and (for <c>wal_compression</c>) CPU.</para>
+///
+/// <para><b>Aurora says what Aurora does instead (lane 15 — #3691 §A4).</b> A pressure or knob fact the collector
+/// stamped <c>not_applicable</c> composes ONE sentence: Aurora's storage layer owns checkpointing, the
+/// checkpointer counters are synthetic (sixty timed an hour, requested share 0 — the shape the fact carries),
+/// and where to look instead. No sizing arithmetic, no remediation: there is no knob to turn. These facts are
+/// base 0 and never root a card, so the block is reached through <c>get_analysis_facts</c>' key lookup and
+/// through <see cref="Static"/>; it exists so that the honest answer is on the key, not only in a comment.</para>
+///
+/// <para><b>WAL volume (lane 15, design §3.11): the context fact states, the anomaly grades.</b>
+/// <c>PG_WAL_VOLUME_SHIFT</c>'s block states the window's mean and peak bytes per second, or — where WAL is not
+/// reported — which reason (<c>pg_stat_wal</c> not implemented on Aurora; absent below PG 14) and where the
+/// per-statement WAL figures still live. <c>ANOMALY_PG_WAL_VOLUME</c>'s block is the deviation family's shape
+/// (<c>ComposeDeviation</c>: peak, sigmas, the hour-of-week centre, sample count; first-occurrence wording on a
+/// thin bucket) plus the ratio to the routine rate and the deployment-correlation framing: WAL volume is the
+/// leading edge of checkpoint pressure and slot retention, so the first question is what changed. Levers with
+/// their counter-objectives: <c>wal_compression</c> trades CPU for bytes; <c>max_wal_size</c> absorbs volume at
+/// the cost of <c>pg_wal</c> footprint and recovery time; batch sizing is the application's. <c>full_page_writes</c>
+/// is POSTURE and is never advised off here or anywhere (D6) — it is not a lever on WAL volume, it is
+/// crash-safety.</para>
 /// </summary>
 public static partial class PgTargetAdvice
 {
@@ -37,15 +56,39 @@ public static partial class PgTargetAdvice
         {
             PgTargetFactKeys.CheckpointPressure => ComposeCheckpointPressure(factsByKey),
             PgTargetFactKeys.ConfigMaxWalSize => ComposeMaxWalSize(factsByKey),
-            PgTargetFactKeys.WalVolumeShift => ComposeWalVolumeShiftPlaceholder(),
+            PgTargetFactKeys.WalVolumeShift => ComposeWalVolumeShift(factsByKey),
             _ => null,
         };
+    }
+
+    /// <summary>The one Aurora sentence, shared by both <c>not_applicable</c> facts; the pressure fact's shape
+    /// (<c>timed_per_hour</c>, <c>requested_share</c>) is stated when it is in hand.</summary>
+    private static AdviceBlock ComposeAuroraNotApplicable(string headline, Fact? pressure)
+    {
+        var shape = pressure is not null && KnobMeta(pressure, "timed_per_hour") is { } timedPerHour
+            ? $" This window the counters reported {KnobNum(timedPerHour)} timed checkpoints an hour at a requested share of {KnobPct(pressure.Value)} — the synthetic one-a-minute rhythm, not a checkpoint schedule anyone set."
+            : string.Empty;
+
+        return new AdviceBlock(
+            Headline: headline,
+            Investigation:
+                "On Aurora PostgreSQL the storage layer owns checkpointing: the checkpointer counters the engine surfaces are " +
+                "synthetic (a timed checkpoint every minute, a requested share of zero, on every measured cluster), max_wal_size " +
+                "does not govern when dirty pages reach storage, and nothing in the parameter group moves this ratio. The " +
+                "finding is therefore not applicable here and is not graded." + shape,
+            Remediation:
+                "Read write pressure where Aurora reports it — the cluster's storage and I/O metrics (get_pg_io_stats, and " +
+                "the instance CPU and wait findings) — rather than these counters; get_pg_write_stats shows the synthetic " +
+                "checkpointer series beside the background-writer figures Aurora does supply.");
     }
 
     private static AdviceBlock ComposeCheckpointPressure(IReadOnlyDictionary<string, Fact> facts)
     {
         var pressure = KnobFact(facts, PgTargetFactKeys.CheckpointPressure);
         var knob = KnobFact(facts, PgTargetFactKeys.ConfigMaxWalSize);
+
+        if (pressure is not null && (KnobMeta(pressure, "not_applicable") ?? 0) > 0)
+            return ComposeAuroraNotApplicable("Checkpoint pressure is not applicable on Aurora — the storage layer owns checkpointing", pressure);
 
         if (pressure is null)
         {
@@ -107,6 +150,9 @@ public static partial class PgTargetAdvice
     {
         var knob = KnobFact(facts, PgTargetFactKeys.ConfigMaxWalSize);
         var pressure = KnobFact(facts, PgTargetFactKeys.CheckpointPressure);
+
+        if (knob is not null && (KnobMeta(knob, "not_applicable") ?? 0) > 0)
+            return ComposeAuroraNotApplicable($"max_wal_size is {KnobMb(knob.Value)} — not a finding on Aurora, where the engine does not consult it", pressure);
 
         var stated = knob is null
             ? "at the shipped default of 1 GB"
@@ -221,15 +267,119 @@ public static partial class PgTargetAdvice
         return sb.ToString();
     }
 
-    /// <summary>v2 fact — no collector emits it yet; the block exists so the key never renders as bare text.</summary>
-    private static AdviceBlock ComposeWalVolumeShiftPlaceholder() =>
-        new(
-            Headline: "WAL volume moved against its own baseline",
-            Investigation:
-                "WAL bytes per second departed from this server's hour-of-week baseline — the leading edge of both checkpoint " +
-                "pressure and replication-slot retention. The deviation and its baseline are stated by the fact that fired.",
-            Remediation:
-                "Correlate with deployments and batch schedules; if checkpoint pressure co-fired, its card carries the sizing " +
-                "arithmetic. Counter-objective: WAL volume is the write workload — reducing it means changing what is written, " +
-                "not a setting.");
+    /// <summary>The levers and their counter-objectives, stated once for the context fact and the anomaly alike.
+    /// <c>full_page_writes</c> is deliberately absent: posture, never a performance lever (D6).</summary>
+    private const string WalVolumeLevers =
+        "Correlate first: WAL volume is the write workload, so a shift is a deployment, a batch schedule, a bulk load or a " +
+        "reindex before it is a setting — find what changed. Then the levers, each with its cost: wal_compression trades CPU " +
+        "for fewer full-page-image bytes; a larger max_wal_size absorbs the volume between checkpoints at the cost of pg_wal " +
+        "footprint and crash-recovery replay time (the checkpoint-pressure card carries the arithmetic when it co-fired); and " +
+        "batch sizing — fewer, larger transactions write fewer full-page images than many small ones touching the same pages " +
+        "across checkpoints — is the application's to change. Downstream, a replication slot retains every byte of this " +
+        "until its consumer reads it.";
+
+    /// <summary>
+    /// <c>PG_WAL_VOLUME_SHIFT</c> (lane 15): the context fact's own block — the mean and peak WAL bytes per second
+    /// the window measured, read off the fact and never assumed; or, in the <c>unavailable</c> shape, which reason
+    /// and where per-statement WAL still is. Base 0, so this roots no card; reached by key through
+    /// <c>get_analysis_facts</c> and <see cref="Static"/>.
+    /// </summary>
+    private static AdviceBlock ComposeWalVolumeShift(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var shift = KnobFact(facts, PgTargetFactKeys.WalVolumeShift);
+
+        if (shift is not null && (KnobMeta(shift, "unavailable") ?? 0) > 0)
+        {
+            var reason = (KnobMeta(shift, "reason_pg_stat_wal_absent") ?? 0) > 0
+                ? "this server's registry major is below 14, and pg_stat_wal does not exist there"
+                : "pg_stat_wal is not implemented on Aurora — pg_stat_get_wal() raises 0A000 — so the collector types the WAL columns NULL";
+            return new AdviceBlock(
+                Headline: "WAL volume is not reported by this engine",
+                Investigation:
+                    $"Cluster-wide WAL volume (wal_bytes / wal_records in pg_write_stats) is not available on this server: {reason}. " +
+                    "No rate is stated and nothing is graded — an absent counter is not a zero. Per-statement WAL volume is still " +
+                    "collected from pg_stat_statements (wal_bytes per statement) and read by get_pg_top_queries.",
+                Remediation:
+                    "Read write volume where this engine reports it: get_pg_top_queries for the statements generating WAL, and on " +
+                    "Aurora the cluster's storage and I/O metrics for the volume the storage layer absorbed.");
+        }
+
+        if (shift is null || KnobMeta(shift, "avg_wal_bytes_per_sec") is not { } mean)
+        {
+            return new AdviceBlock(
+                Headline: "WAL volume this window, in the unit its anomaly is judged in",
+                Investigation:
+                    "The mean and peak WAL bytes per second across the window's collections (wal_bytes from pg_write_stats, " +
+                    "differenced per collection with wal_stats_reset honoured). Context, not a finding: WAL volume is a " +
+                    "server-relative quantity with no absolute bar — it is graded only by ANOMALY_PG_WAL_VOLUME against this " +
+                    "server's own hour-of-week baseline, and that anomaly folds onto the checkpoint-pressure incident it leads.",
+                Remediation: WalVolumeLevers);
+        }
+
+        var peak = KnobMeta(shift, "peak_wal_bytes_per_sec") ?? mean;
+        var total = KnobMeta(shift, "wal_bytes") ?? 0;
+        var resets = KnobMeta(shift, "wal_reset_count") ?? 0;
+        var sb = new StringBuilder(480);
+        sb.Append("Over the observed window this server wrote ").Append(KnobBytes(total)).Append(" of WAL — a mean of ")
+          .Append(KnobBytes(mean)).Append("/s across ").Append(KnobNum(KnobMeta(shift, "rated_samples") ?? 0))
+          .Append(" rated collections, peaking at ").Append(KnobBytes(peak)).Append("/s in one collection interval. ");
+        if (resets > 0)
+            sb.Append("WAL statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so the total is a floor. ");
+        sb.Append("Context, not a finding: WAL volume has no absolute bar — the same rate is routine on one server and a " +
+                  "regression on another — so it is graded only by ANOMALY_PG_WAL_VOLUME against this server's own hour-of-week " +
+                  "baseline, and that anomaly folds onto the checkpoint-pressure incident it leads.");
+
+        return new AdviceBlock(
+            Headline: $"WAL volume: {KnobBytes(mean)}/s mean, {KnobBytes(peak)}/s peak this window",
+            Investigation: sb.ToString(),
+            Remediation: WalVolumeLevers);
+    }
+
+    /// <summary>The static block for <c>ANOMALY_PG_WAL_VOLUME</c> — the source sentence the composed block keeps.
+    /// Built on first use, NOT as a <c>static readonly</c> initializer: it concatenates <c>s_anomalyHedge</c>, which
+    /// is declared in another partial file, and C# leaves the initialization order of static fields across
+    /// partial files unspecified — an initializer here could read the hedge as null and silently drop it (the
+    /// aliasing trap the wave-2 brief records). One instance, so <c>ReferenceEquals</c> still tells "the composer
+    /// fell back" from "the composer composed".</summary>
+    private static AdviceBlock WalVolumeStatic => s_walVolumeStatic ??= new(
+        Headline: "WAL volume ran well above this server's normal for this time of week",
+        Investigation:
+            "The window's peak WAL bytes per second (wal_bytes from pg_write_stats, differenced per collection over its own " +
+            "gap with wal_stats_reset honoured) was judged against this server's hour-of-week baseline of the same rate over " +
+            "the last 30 days. WAL volume is the leading edge of checkpoint pressure and of replication-slot retention: when " +
+            "it moves, the checkpointer and every slot consumer feel it next." + s_anomalyHedge,
+        Remediation: WalVolumeLevers);
+
+    private static AdviceBlock? s_walVolumeStatic;
+
+    /// <summary>
+    /// <c>ANOMALY_PG_WAL_VOLUME</c> (lane 15): the deviation family's composed block (peak, sigmas, centre, sample
+    /// count — or first-occurrence wording on a thin bucket), plus the ratio to the routine rate when the bucket had
+    /// a mean to divide by ("9.2 MB/s against a 1.1 MB/s routine for this hour"), plus the deployment-correlation
+    /// framing and the levers with their costs. Delegated to from <c>ComposeAnomaly</c>'s switch.
+    /// </summary>
+    private static AdviceBlock ComposeWalVolumeAnomaly(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = WalVolumeStatic;
+        if (!facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var fact))
+            return fallback;
+
+        var block = ComposeDeviation(fact, fallback, "WAL volume", "peak_wal_bytes_per_sec", v => KnobBytes(v) + "/s");
+        if (ReferenceEquals(block, fallback)) return block;
+
+        /* The centre the detector divided by: the robust median when the bucket had one, else the mean — the same
+           choice ComposeDeviation's prose makes, so the two numbers in one paragraph are one number. */
+        var ratio = KnobMeta(fact, "baseline_ratio");
+        var median = KnobMeta(fact, "baseline_median");
+        var centre = median is > 0 ? median : KnobMeta(fact, "baseline_mean");
+        var against = ratio is > 0 && centre is > 0
+            ? $" That is {KnobNum(ratio.Value)}× the {KnobBytes(centre.Value)}/s this server routinely writes at this hour of the week."
+            : string.Empty;
+        var checkpoint = KnobFact(facts, PgTargetFactKeys.CheckpointPressure);
+        var pressure = checkpoint is not null && checkpoint.BaseSeverity > 0
+            ? " Checkpoint pressure co-fired this window — the volume has already reached max_wal_size ahead of the timer; that card carries the sizing arithmetic."
+            : " Checkpoints were not yet forced this window: this is the leading edge, before the checkpointer or a slot consumer shows it.";
+
+        return block with { Investigation = block.Investigation + against + pressure };
+    }
 }

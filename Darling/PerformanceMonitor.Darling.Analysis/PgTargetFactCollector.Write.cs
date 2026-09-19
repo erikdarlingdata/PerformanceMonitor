@@ -80,6 +80,60 @@ SELECT
 FROM sampled";
 
     /// <summary>
+    /// The WAL volume of <c>pg_write_stats</c> rated PER COLLECTION (lane 15 — #3691 step 15, design §3.11):
+    /// Δ<c>wal_bytes</c> over each collection's own gap, so the window's peak and mean are in the unit the
+    /// <c>pg_wal_bytes_per_sec</c> baseline arm buckets (<c>PgTargetBaselineProvider.Wal.cs</c>) and the anomaly
+    /// detector's window read is THIS text by alias (<c>PgTargetAnomalyDetector.WalVolumeWindowSql</c>) — one
+    /// differencing, three readers, none re-derived. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window.
+    ///
+    /// <para><b>The differencing is <see cref="PgTargetCheckpointSql"/>'s WAL family</b> — per-sample <c>LAG</c>,
+    /// <c>GREATEST(raw, 0)</c>, the reset as <c>ROW_NUMBER() OVER series &gt; 1 AND wal_stats_reset IS DISTINCT
+    /// FROM LAG(wal_stats_reset)</c> — with the gap taken from the series itself (<c>LAG(collection_time)</c>,
+    /// second-truncated, the <c>pg_tps</c> arm's rule) so the first in-window row, having no predecessor, rates
+    /// nothing rather than a rate over an unknown interval. <c>rated</c> keeps only rows with a non-NULL
+    /// difference and a positive gap, exactly as the baseline's <c>clean</c> does.</para>
+    ///
+    /// <para><b>Trackedness is read three ways, because the store has three ways of saying "not reported".</b>
+    /// <c>wal_tracked</c> is <c>bool_or(wal_bytes IS NOT NULL)</c>: the collector types the WAL columns NULL on
+    /// Aurora (<c>pg_stat_wal</c> raises <c>0A000</c> there) and below PG 14 (no view), so an all-NULL window is
+    /// the flavour or major saying so. <c>wal_records</c> rides beside <c>wal_bytes</c> so a window in which BOTH
+    /// summed to zero across every sample can be told from a merely idle server: a live <c>pg_stat_wal</c> writes
+    /// a record for every commit, and a PostgreSQL that ran checkpoints (the sibling read proves it did) while
+    /// writing zero WAL records is a counter that is not being populated, not a quiet one. The fact says which.</para>
+    /// </summary>
+    public const string PgTargetWalVolumeSql = @"
+WITH sampled AS (
+    SELECT
+        collection_time,
+        wal_bytes   - LAG(wal_bytes)   OVER series AS raw_wal_bytes,
+        wal_records - LAG(wal_records) OVER series AS raw_wal_records,
+        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER series))) AS interval_sec,
+        (ROW_NUMBER() OVER series > 1
+         AND wal_stats_reset IS DISTINCT FROM LAG(wal_stats_reset) OVER series) AS wal_reset_here,
+        (wal_bytes IS NOT NULL) AS wal_tracked
+    FROM pg_write_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    WINDOW series AS (ORDER BY collection_time)
+),
+rated AS (
+    SELECT collection_time, GREATEST(raw_wal_bytes, 0)::DOUBLE PRECISION / interval_sec AS bytes_per_sec
+    FROM sampled
+    WHERE raw_wal_bytes IS NOT NULL
+    AND   interval_sec > 0
+)
+SELECT
+    (SELECT MAX(bytes_per_sec) FROM rated)                                                            AS peak_wal_bytes_per_sec,
+    (SELECT AVG(bytes_per_sec) FROM rated)                                                            AS avg_wal_bytes_per_sec,
+    (SELECT CAST(count(*) AS integer) FROM rated)                                                     AS rated_samples,
+    (SELECT coalesce(SUM(GREATEST(raw_wal_bytes, 0)), 0) FROM sampled)                                AS wal_bytes,
+    (SELECT CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint) FROM sampled)              AS wal_records,
+    (SELECT CAST(count(*) FILTER (WHERE wal_reset_here) AS integer) FROM sampled)                     AS wal_reset_count,
+    (SELECT coalesce(bool_or(wal_tracked), false) FROM sampled)                                       AS wal_tracked,
+    (SELECT CAST(count(*) AS integer) FROM sampled)                                                   AS sample_count";
+
+    /// <summary>
     /// <c>PG_CHECKPOINT_PRESSURE</c> from <c>pg_write_stats</c> (filled by lane 2 — #3542 step 2, design §3.7):
     /// the engine's own <c>max_wal_size</c>-exhaustion report. A checkpoint is TIMED when
     /// <c>checkpoint_timeout</c> elapsed and REQUESTED when WAL reached <c>max_wal_size</c> first (or
@@ -103,92 +157,50 @@ FROM sampled";
     /// there (below PG 14 the collector does not apply) and a fact would be a claim about nothing. WAL
     /// per-checkpoint and per-second figures are stamped only when <c>wal_tracked</c>; on Aurora they are
     /// absent, not zero.</para>
+    ///
+    /// <para><b>On <c>aurora-postgres</c> the fact is emitted and marked <c>not_applicable</c> (lane 15 — #3691
+    /// calibration §A4).</b> Fifty Aurora clusters over fourteen days reported sixty timed "checkpoints" an hour
+    /// on every one of them — one a minute, a requested share whose p99 was 0 — because Aurora's storage layer
+    /// owns checkpointing and the checkpointer counters it surfaces are synthetic: <c>max_wal_size</c> does not
+    /// govern them, and nothing an operator sets will move the share. So the fact is a permanent, measured 0
+    /// that means nothing, and the honest thing is to SAY so rather than grade it: the fact is still emitted
+    /// (with the shape the operator can see — <c>timed_per_hour</c>, <c>requested_share</c> — so
+    /// <c>get_analysis_facts</c> shows WHY) and carries <c>not_applicable = 1</c>, <c>not_applicable_on_aurora =
+    /// 1</c> and the reason flag <c>reason_aurora_storage_checkpointing = 1</c>; <c>PgTargetScorer.Write.cs</c>
+    /// scores it 0 off the flag, so it roots nothing, opens no edge and arms no knob. The same metadata idiom as
+    /// the buffer composite's <c>hit_ratio_suppressed</c> — <see cref="Fact.Metadata"/> is numeric, so "status"
+    /// and "reason" are flag KEYS rather than strings; there is no parallel status vocabulary to invent. Engine
+    /// is read off the registry fact's <c>is_aurora</c> (<see cref="MonitoredEngineKind"/>, never a column's
+    /// presence — #2530), the same read the buffer partial takes.</para>
+    ///
+    /// <para><b><c>PG_WAL_VOLUME_SHIFT</c> (lane 15, the second read).</b> A CONTEXT fact, base 0, stating the
+    /// window's WAL volume in the unit the anomaly is judged in — <see cref="Fact.Value"/> the MEAN bytes per
+    /// second across the window's rated collections, the PEAK beside it — so an operator reading
+    /// <c>get_analysis_facts</c> sees the volume the server wrote whether or not anything fired. It is graded ONLY
+    /// through <c>ANOMALY_PG_WAL_VOLUME</c> (peak against the server's own hour-of-week bucket; the detector in
+    /// <c>PgTargetAnomalyDetector.Wal.cs</c>): WAL volume is a server-relative quantity — 9 MiB/s is routine on
+    /// one server and a deployment gone wrong on another — so there is deliberately no absolute bar and the fact
+    /// carries <c>threshold_lineage = 1</c>: not "measured", but "no bar was chosen to have a lineage". Where WAL
+    /// is NOT reported the fact is still emitted, as <c>unavailable = 1</c> with the reason flag: an all-NULL or
+    /// all-zero <c>wal_bytes</c> AND <c>wal_records</c> window is <c>reason_wal_stats_not_reported</c> (Aurora —
+    /// §A7: fifty clusters, fourteen days, zero bytes on every one); a registry major below 14 with no rows at all
+    /// is <c>reason_pg_stat_wal_absent</c> (the view does not exist there). On a stock PostgreSQL 14+ with no rows
+    /// the collector has not run and nothing is emitted — the coverage witness already describes that gap.</para>
     /// </summary>
     private async partial Task CollectWriteFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         if (context.ObservedDurationMs <= 0) return;
 
+        var registry = facts.Find(f => f.Key == PgTargetFactKeys.ServerMajorVersion);
+        var isAurora = registry is not null && registry.Metadata.GetValueOrDefault("is_aurora") > 0;
+        var major = registry is null ? 0 : (int)registry.Value;
+
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PgTargetCheckpointSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var sampleCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
-            if (sampleCount < 2) return;
-
-            var requested = ToInt64(reader.GetValue(0));
-            var timed = ToInt64(reader.GetValue(1));
-            var total = requested + timed;
-            if (total <= 0) return;
-
-            var writeMs = Convert.ToDouble(reader.GetValue(2));
-            var syncMs = Convert.ToDouble(reader.GetValue(3));
-            var buffersWritten = ToInt64(reader.GetValue(4));
-            var walBytes = Convert.ToDouble(reader.GetValue(5));
-            var walFpi = ToInt64(reader.GetValue(6));
-            var checkpointerResets = Convert.ToInt32(reader.GetValue(7));
-            var walResets = Convert.ToInt32(reader.GetValue(8));
-            var walTracked = !reader.IsDBNull(9) && reader.GetBoolean(9);
-
-            var observedSeconds = context.ObservedDurationMs / 1000.0;
-            var observedHours = observedSeconds / 3600.0;
-
-            var fact = new Fact
-            {
-                Source = PgTargetSources.WriteSource,
-                Key = PgTargetFactKeys.CheckpointPressure,
-                Value = requested / (double)total,
-                ServerId = context.ServerId,
-                Metadata =
-                {
-                    ["checkpoints_requested"] = requested,
-                    ["checkpoints_timed"] = timed,
-                    ["checkpoints_total"] = total,
-                    ["requested_share"] = requested / (double)total,
-                    ["checkpoints_per_hour"] = total / observedHours,
-                    ["requested_per_hour"] = requested / observedHours,
-                    ["checkpoint_write_ms"] = writeMs,
-                    ["checkpoint_sync_ms"] = syncMs,
-                    ["checkpoint_buffers_written"] = buffersWritten,
-                    ["checkpointer_reset_count"] = checkpointerResets,
-                    ["wal_reset_count"] = walResets,
-                    ["wal_tracked"] = walTracked ? 1 : 0,
-                    ["sample_count"] = sampleCount,
-                    ["observed_ms"] = context.ObservedDurationMs,
-                },
-            };
-
-            if (walTracked)
-            {
-                fact.Metadata["wal_bytes"] = walBytes;
-                fact.Metadata["wal_fpi"] = walFpi;
-                fact.Metadata["wal_bytes_per_sec"] = walBytes / observedSeconds;
-                fact.Metadata["wal_bytes_per_checkpoint"] = walBytes / total;
-            }
-
-            /* The checkpoint rhythm and the ceiling, off the knob fact emitted a moment ago (emission order:
-               Config before Write). Absent when the config snapshot has not been collected — the advice then
-               says so rather than assuming 5 min / 1 GB. */
-            var maxWalSize = facts.Find(f => f.Key == PgTargetFactKeys.ConfigMaxWalSize);
-            if (maxWalSize is not null)
-            {
-                if (maxWalSize.Metadata.TryGetValue("bytes", out var maxWalBytes))
-                    fact.Metadata["max_wal_size_bytes"] = maxWalBytes;
-                if (maxWalSize.Metadata.TryGetValue("checkpoint_timeout_s", out var timeoutSeconds) && timeoutSeconds > 0)
-                {
-                    fact.Metadata["checkpoint_timeout_s"] = timeoutSeconds;
-                    fact.Metadata["expected_timed_checkpoints"] = observedSeconds / timeoutSeconds;
-                }
-            }
-
-            facts.Add(fact);
+            await ReadCheckpointPressureAsync(context, facts, connection, isAurora);
+            await ReadWalVolumeAsync(context, facts, connection, major);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -197,4 +209,186 @@ FROM sampled";
             ReportCollectionFailure(ex, context);
         }
     }
+
+    /// <summary>The checkpoint read and the <c>PG_CHECKPOINT_PRESSURE</c> fact — the body documented on
+    /// <see cref="CollectWriteFactsAsync"/>, with the Aurora <c>not_applicable</c> stamp at the end.</summary>
+    private async Task ReadCheckpointPressureAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, bool isAurora)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetCheckpointSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken)) return;
+
+        var sampleCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
+        if (sampleCount < 2) return;
+
+        var requested = ToInt64(reader.GetValue(0));
+        var timed = ToInt64(reader.GetValue(1));
+        var total = requested + timed;
+        if (total <= 0) return;
+
+        var writeMs = Convert.ToDouble(reader.GetValue(2));
+        var syncMs = Convert.ToDouble(reader.GetValue(3));
+        var buffersWritten = ToInt64(reader.GetValue(4));
+        var walBytes = Convert.ToDouble(reader.GetValue(5));
+        var walFpi = ToInt64(reader.GetValue(6));
+        var checkpointerResets = Convert.ToInt32(reader.GetValue(7));
+        var walResets = Convert.ToInt32(reader.GetValue(8));
+        var walTracked = !reader.IsDBNull(9) && reader.GetBoolean(9);
+
+        var observedSeconds = context.ObservedDurationMs / 1000.0;
+        var observedHours = observedSeconds / 3600.0;
+
+        var fact = new Fact
+        {
+            Source = PgTargetSources.WriteSource,
+            Key = PgTargetFactKeys.CheckpointPressure,
+            Value = requested / (double)total,
+            ServerId = context.ServerId,
+            Metadata =
+            {
+                ["checkpoints_requested"] = requested,
+                ["checkpoints_timed"] = timed,
+                ["checkpoints_total"] = total,
+                ["requested_share"] = requested / (double)total,
+                ["checkpoints_per_hour"] = total / observedHours,
+                ["requested_per_hour"] = requested / observedHours,
+                ["checkpoint_write_ms"] = writeMs,
+                ["checkpoint_sync_ms"] = syncMs,
+                ["checkpoint_buffers_written"] = buffersWritten,
+                ["checkpointer_reset_count"] = checkpointerResets,
+                ["wal_reset_count"] = walResets,
+                ["wal_tracked"] = walTracked ? 1 : 0,
+                ["sample_count"] = sampleCount,
+                ["observed_ms"] = context.ObservedDurationMs,
+            },
+        };
+
+        if (walTracked)
+        {
+            fact.Metadata["wal_bytes"] = walBytes;
+            fact.Metadata["wal_fpi"] = walFpi;
+            fact.Metadata["wal_bytes_per_sec"] = walBytes / observedSeconds;
+            fact.Metadata["wal_bytes_per_checkpoint"] = walBytes / total;
+        }
+
+        /* The checkpoint rhythm and the ceiling, off the knob fact emitted a moment ago (emission order:
+           Config before Write). Absent when the config snapshot has not been collected — the advice then
+           says so rather than assuming 5 min / 1 GB. */
+        var maxWalSize = facts.Find(f => f.Key == PgTargetFactKeys.ConfigMaxWalSize);
+        if (maxWalSize is not null)
+        {
+            if (maxWalSize.Metadata.TryGetValue("bytes", out var maxWalBytes))
+                fact.Metadata["max_wal_size_bytes"] = maxWalBytes;
+            if (maxWalSize.Metadata.TryGetValue("checkpoint_timeout_s", out var timeoutSeconds) && timeoutSeconds > 0)
+            {
+                fact.Metadata["checkpoint_timeout_s"] = timeoutSeconds;
+                fact.Metadata["expected_timed_checkpoints"] = observedSeconds / timeoutSeconds;
+            }
+        }
+
+        if (isAurora)
+        {
+            /* #3691 §A4: Aurora storage owns checkpointing; the counters are synthetic (sixty timed an hour,
+               requested share 0, on all fifty measured clusters). Stamped, not dropped — the operator sees
+               the shape and the reason; the scorer reads the flag and grades nothing. */
+            fact.Metadata["not_applicable"] = 1;
+            fact.Metadata["not_applicable_on_aurora"] = 1;
+            fact.Metadata["reason_aurora_storage_checkpointing"] = 1;
+            fact.Metadata["timed_per_hour"] = timed / observedHours;
+        }
+
+        facts.Add(fact);
+    }
+
+    /// <summary>The WAL-volume read and the <c>PG_WAL_VOLUME_SHIFT</c> context fact — the body documented on
+    /// <see cref="CollectWriteFactsAsync"/>: tracked, or <c>unavailable</c> with the reason flag.</summary>
+    private async Task ReadWalVolumeAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, int major)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetWalVolumeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken)) return;
+
+        var sampleCount = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7));
+
+        /* No rows on a major without the view: the honest "absent", not a fabricated zero. A known major of 14+
+           with no rows is a collector that has not run — the coverage witness describes that; nothing here. */
+        if (sampleCount == 0)
+        {
+            if (major is > 0 and < 14)
+                facts.Add(UnavailableWalVolume(context, "reason_pg_stat_wal_absent", sampleCount));
+            return;
+        }
+        if (sampleCount < 2) return;
+
+        var walTracked = !reader.IsDBNull(6) && reader.GetBoolean(6);
+        var walBytes = Convert.ToDouble(reader.GetValue(3));
+        var walRecords = ToInt64(reader.GetValue(4));
+
+        /* Typed NULL (Aurora, the collector's own gate) or a live-looking series that wrote zero bytes AND zero
+           records across every sample while checkpoints ran: both are "not reported", and the fact says so. */
+        if (!walTracked || (walBytes <= 0 && walRecords <= 0))
+        {
+            facts.Add(UnavailableWalVolume(context, "reason_wal_stats_not_reported", sampleCount));
+            return;
+        }
+
+        var ratedSamples = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
+        if (ratedSamples == 0) return;
+
+        var peak = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+        var mean = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+        var walResets = Convert.ToInt32(reader.GetValue(5));
+
+        facts.Add(new Fact
+        {
+            Source = PgTargetSources.WriteSource,
+            Key = PgTargetFactKeys.WalVolumeShift,
+            Value = mean,
+            ServerId = context.ServerId,
+            Metadata =
+            {
+                ["wal_tracked"] = 1,
+                ["avg_wal_bytes_per_sec"] = mean,
+                ["peak_wal_bytes_per_sec"] = peak,
+                ["wal_bytes"] = walBytes,
+                ["wal_records"] = walRecords,
+                ["wal_reset_count"] = walResets,
+                ["rated_samples"] = ratedSamples,
+                ["sample_count"] = sampleCount,
+                ["observed_ms"] = context.ObservedDurationMs,
+                /* 1, not 0: no bar was chosen for this fact (it is graded only through its anomaly, against the
+                   server's own baseline), so there is no unmeasured number for the flag to disclose. */
+                ["threshold_lineage"] = 1,
+            },
+        });
+    }
+
+    /// <summary>The <c>PG_WAL_VOLUME_SHIFT</c> fact in its <c>unavailable</c> shape: value 0, <c>wal_tracked = 0</c>,
+    /// <c>unavailable = 1</c> and exactly one reason flag (<paramref name="reason"/>, a metadata KEY — the
+    /// numeric-metadata idiom). The scorer grades nothing off it; the advice reads the reason and says which.</summary>
+    private static Fact UnavailableWalVolume(AnalysisContext context, string reason, int sampleCount) =>
+        new()
+        {
+            Source = PgTargetSources.WriteSource,
+            Key = PgTargetFactKeys.WalVolumeShift,
+            Value = 0,
+            ServerId = context.ServerId,
+            Metadata =
+            {
+                ["wal_tracked"] = 0,
+                ["unavailable"] = 1,
+                [reason] = 1,
+                ["sample_count"] = sampleCount,
+                ["observed_ms"] = context.ObservedDurationMs,
+                ["threshold_lineage"] = 1,
+            },
+        };
 }

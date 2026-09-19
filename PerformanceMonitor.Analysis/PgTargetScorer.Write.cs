@@ -21,6 +21,24 @@ namespace PerformanceMonitor.Analysis;
 /// (30 s: the engine logs when requested checkpoints come closer together than this), is a spacing the
 /// one-minute counters cannot resolve, so it is not borrowed as a bar; the expected-timed count the
 /// collector stamps is the engine-defined sentence the advice states instead.</para>
+///
+/// <para><b>Aurora (lane 15 — #3691 calibration §A4).</b> A pressure fact stamped <c>not_applicable</c> by the
+/// collector (Aurora storage owns checkpointing; the counters are synthetic — sixty timed an hour and a
+/// requested share of 0 on every one of fifty measured clusters) scores 0 before any bar is consulted and
+/// takes no lineage stamp: there is nothing to grade, so there is no bar whose lineage the fact should
+/// disclose. Base 0 is what makes the rest follow without a second gate anywhere: the graph's edges read
+/// <c>BaseSeverity &gt; 0</c> on this fact, the knob's co-fire amplifier reads the same, and
+/// <c>InferenceEngine</c> roots nothing at 0 — so the checkpoint → <c>max_wal_size</c> story cannot form on
+/// Aurora even from planted requested-dominant counters (pinned).</para>
+///
+/// <para><b><c>PG_WAL_VOLUME_SHIFT</c> is context, graded only through its anomaly (lane 15, design §3.11).</b>
+/// WAL volume is a server-relative quantity — the same 9 MiB/s is routine on one server and a deployment gone
+/// wrong on another — so this file draws NO bar for it: the fact scores 0 here always and carries
+/// <c>threshold_lineage = 1</c> from the collector (no bar was chosen to have a lineage). The grading is
+/// <c>ANOMALY_PG_WAL_VOLUME</c>'s — the window's peak against the server's own hour-of-week bucket through the
+/// shared deviation ramp — and that anomaly is what the checkpoint fact's trigger amplifier below reads, since
+/// the anomaly, not the context fact, is the thing that can have FIRED. The <c>unavailable</c> shape (Aurora,
+/// PG &lt; 14) scores 0 by the same rule.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
@@ -45,6 +63,9 @@ public static partial class PgTargetScorer
     {
         if (fact.Key != PgTargetFactKeys.CheckpointPressure) return 0.0;
 
+        /* Lane 15 (#3691 §A4): not_applicable on Aurora — nothing to grade, no lineage to stamp (class summary). */
+        if (fact.Metadata.GetValueOrDefault("not_applicable") > 0) return 0.0;
+
         /* unmeasured: the minimum-count gate, CheckpointShareMinimumCheckpoints (see the constant). */
         var total = fact.Metadata.GetValueOrDefault("checkpoints_total");
         if (total < CheckpointShareMinimumCheckpoints) return 0.0;
@@ -65,9 +86,9 @@ public static partial class PgTargetScorer
     public const double KnobCoFireBoost = 0.25;
 
     /* unmeasured: chosen, not measured — calibrate against pg_write_stats before the next release. The
-       pressure fact's corroborations: the knob at its default names the cause (0.3), a WAL-volume shift (v2)
-       names the trigger (0.2). Neither alone lifts a 0.5 base to the 1.5 notify line — corroboration, not a
-       page. */
+       pressure fact's corroborations: the knob at its default names the cause (0.3), the WAL-volume anomaly
+       (lane 15) names the trigger (0.2). Neither alone lifts a 0.5 base to the 1.5 notify line — corroboration,
+       not a page. */
     public const double CheckpointCauseBoost = 0.3;
     public const double CheckpointTriggerBoost = 0.2;
 
@@ -76,8 +97,12 @@ public static partial class PgTargetScorer
     /// <c>PG_CHECKPOINT_PRESSURE</c> firing (<c>BaseSeverity &gt; 0</c>, never mere presence — the collector
     /// emits the fact whenever checkpoints ran, and a quiet server's 0 %-requested fact must not arm the
     /// knob). <c>PG_CHECKPOINT_PRESSURE</c> is corroborated by the knob at its default and by
-    /// <c>PG_WAL_VOLUME_SHIFT</c> (inert until v2 emits it). <c>PG_WAL_VOLUME_SHIFT</c> itself has no
-    /// amplifier here.
+    /// <c>ANOMALY_PG_WAL_VOLUME</c> having fired (lane 15): the anomaly is the graded instrument behind the
+    /// context fact <c>PG_WAL_VOLUME_SHIFT</c>, and the <c>anomaly</c> source is in <c>FactScorer.ScoreAll</c>'s
+    /// lookup, so its <c>BaseSeverity &gt; 0</c> is readable here exactly as a regular fact's. Never on Aurora: the
+    /// pressure fact there is base 0 (<c>not_applicable</c>), so the amplifier pass skips it entirely, and the
+    /// detector emits no WAL anomaly where WAL is not reported. <c>PG_WAL_VOLUME_SHIFT</c> itself has no
+    /// amplifier here (base 0 — amplifiers never run on it).
     /// </summary>
     private static partial List<AmplifierDefinition> WriteAmplifiers(string key)
     {
@@ -107,10 +132,10 @@ public static partial class PgTargetScorer
                     },
                     new AmplifierDefinition
                     {
-                        Description = "PG_WAL_VOLUME_SHIFT fired — WAL volume moved against its own baseline this window",
+                        Description = "ANOMALY_PG_WAL_VOLUME fired — WAL volume moved against this server's own hour-of-week baseline this window: the leading edge of the pressure",
                         /* unmeasured: CheckpointTriggerBoost (see the constant). */
                         Boost = CheckpointTriggerBoost,
-                        Predicate = facts => facts.TryGetValue(PgTargetFactKeys.WalVolumeShift, out var shift) && shift.BaseSeverity > 0,
+                        Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var shift) && shift.BaseSeverity > 0,
                     },
                 ];
 
