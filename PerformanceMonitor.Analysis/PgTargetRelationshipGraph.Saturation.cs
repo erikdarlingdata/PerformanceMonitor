@@ -16,7 +16,10 @@ namespace PerformanceMonitor.Analysis;
 /// saturation ↔ <c>PG_IDLE_IN_TRANSACTION</c> — the v2 hook lane 3 left as a comment — is live since lane 14 of
 /// #3691 emitted the fact (design §3.10: "the app-defect leaf of three chains — blocking, xmin, saturation"),
 /// and this file declares the idle fact's edges into all three chains; see the body for why the vacuum-side
-/// edge is declared here and not in <c>PgTargetRelationshipGraph.Vacuum.cs</c>.
+/// edge is declared here and not in <c>PgTargetRelationshipGraph.Vacuum.cs</c>. Since lane 17 of #3691 the Lock
+/// waits and the idle fact also walk INTO <c>PG_BLOCKING_CHAIN</c> (the sampled chain that names the head) —
+/// declared here because this file owns those two source nodes' edges; the chain's own edges are
+/// <c>PgTargetRelationshipGraph.Blocking.cs</c>.
 ///
 /// <para><b>Lane 3 added no edge of its own, deliberately.</b> Both destinations the chain names were facts other
 /// lanes emit — the <c>PG_WAIT_LOCK*</c> family is lane 5's and <c>PG_IDLE_IN_TRANSACTION</c> was v2 — and an edge
@@ -114,6 +117,32 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.IdleInTransaction, "connection_saturation",
             "A long idle-in-transaction holder fired alongside these Lock waits — the waiters are queued behind a parked transaction's locks",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
+
+        /* The sampled chain, symptom → the reading that names the root (#3691 lane 17, design §2a). A Lock wait is the
+           MEASURED time sessions spent waiting on locks; PG_BLOCKING_CHAIN is the SAMPLE of who was behind whom, with
+           the head attributed. When both fired the wait's story walks to the chain (and from there to the idle holder
+           or the long runner the chain names by state and pid). Declared here because this file owns a Lock wait's
+           edges (one source node's edges in one place); the chain's own edges are PgTargetRelationshipGraph.Blocking.cs
+           and it declares none back into the waits (that file says why). Predicate reads the chain's verdict. A Lock
+           wait with no chain in the set keeps exactly its previous edges — the pins in PgTargetWaitTests moved from
+           two destinations to three, deliberately. */
+        AddEdge(PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.BlockingChain, "blocking",
+            "A sampled blocking chain fired alongside these Lock:relation waits — the chain names the head the wait cannot",
+            facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
+        AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.BlockingChain, "blocking",
+            "A sampled blocking chain fired alongside these Lock waits — the chain names the head the wait cannot",
+            facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
+
+        /* The idle holder → the chain it heads (#3691 lane 17): when the idle fact outranks the chain (a 15-minute
+           parked transaction is CRITICAL on its own bar; a 40-second chain is WARNING) the idle root must still walk
+           to the chain or the two are two cards for one parked transaction — lane 5's one-direction lesson. Gated on
+           the CHAIN's head state (its head was idle in transaction) and the chain's verdict; an unrelated parked
+           holder and a chain under an active head stay two findings. The idle fact's edges are declared here
+           because lane 14 declared them here; the reverse edge is the chain file's. */
+        AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.BlockingChain, "blocking",
+            "PG_BLOCKING_CHAIN fired with an idle-in-transaction head — the sessions queued behind this parked transaction's locks",
+            facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0
+                && chain.Metadata.GetValueOrDefault(PgTargetScorer.BlockingHeadIsIdleInTransactionKey) > 0);
 
         /* The xmin chain, symptom → cause: PG_XMIN_HOLD (lane 4, the vacuum family) names the CLASS of holder —
            when it is a session and the idle fact's longest holder pins the horizon (horizon_age > 0, never the -1

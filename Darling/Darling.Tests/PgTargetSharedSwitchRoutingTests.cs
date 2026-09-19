@@ -392,13 +392,17 @@ public sealed class PgTargetSharedSwitchRoutingTests
            in the lookup), and the delegation equality above proves the shared entry points answer that block. */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));          /* lane 13 */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.IndexBloatTrend));     /* lane 13 */
-        /* Wave 3 (#3691 between waves) stubs: null IS the delegation — the equality above proves the shared entry points
-           answer what PgTargetAdvice.Blocking.cs answers, and the anomaly's ComposeAnomaly arm delegates to the same file
-           (never the SQL Server "Anomalous spike" composer, which the equality would expose). Lane 17 moves these to NotNull. */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.BlockingChain));          /* lane 17 */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.LockWaitEvents));         /* lane 17 */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.LongRunningQuery));       /* lane 17 */
-        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyBlocking));     /* lane 17 — the arm exists, the composer is a stub */
+        /* Wave 3 (#3691): lane 17 filled the blocking family — the three keys compose their own block (the static shape
+           when no fact is in the lookup), the delegation equality above proves the shared entry points answer that
+           block, and the anomaly's ComposeAnomaly arm delegates to the same file (never the SQL Server "Anomalous
+           spike" composer, which the equality would expose). Moved from Null, as the stub comment said it would be. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BlockingChain));       /* lane 17 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.LockWaitEvents));      /* lane 17 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.LongRunningQuery));    /* lane 17 */
+        var pgBlockingAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyBlocking);   /* lane 17: the anomaly too, lane 11's shape */
+        Assert.NotNull(pgBlockingAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyBlocking), pgBlockingAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgBlockingAnomaly!.Headline, StringComparison.Ordinal);
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from

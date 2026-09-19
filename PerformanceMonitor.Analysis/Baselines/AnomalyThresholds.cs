@@ -285,4 +285,24 @@ public static class AnomalyThresholds
     /// measured — the same un-calibratable population as the floor (§A7); calibrate against a stock
     /// population's upper tail before the next release that monitors one.</summary>
     public const double PgWalBytesFallbackPerSec = 16.0 * 1024.0 * 1024.0;  // 16 MiB of WAL per second
+
+    // lane 17 (#3691, wave 3): the blocked-sessions z-detector's floor and fallback (PgTargetAnomalyDetector.Blocking.cs).
+
+    /// <summary>Magnitude floor for the blocked-sessions z-detector, a COUNT of distinct blocked sessions in one
+    /// <c>pg_blocking</c> capture. The baseline is zero-heavy by construction (every capture the collection log says
+    /// ran and found no edge is a zero sample), so its dispersion collapses toward the bucket's absolute floor and
+    /// ONE blocked session on a server that never blocks would read as many sigmas; under three sessions queued at
+    /// once a deviation is one lock handoff caught mid-flight, whatever the arithmetic says. unmeasured: chosen, not
+    /// measured — the 2026-09-19 calibration took no distribution over pg_blocking_edges (its approximate row count
+    /// read 0, the unanalysed-table trap); calibrate against COUNT(DISTINCT blocked_pid) per capture in
+    /// pg_blocking_edges before the next release. The detector stamps <c>threshold_lineage = 0</c>.</summary>
+    public const double PgBlockedSessionsFloor = 3.0;                     // distinct blocked sessions in one capture
+
+    /// <summary>Absolute-fallback bar for blocked sessions on an untrustworthy baseline — a server whose 30 days
+    /// hold no blocking at all has a zero-activity bucket (mean 0, stddev 0) and takes THIS path, so the bar decides
+    /// what a young or never-blocking server's first blocking storm must look like to fire: ten sessions queued at
+    /// once is a storm on any PostgreSQL, and a smaller chain is PG_BLOCKING_CHAIN's to grade on its duration.
+    /// unmeasured: chosen, not measured — same unread table as the floor; calibrate against pg_blocking_edges before
+    /// the next release.</summary>
+    public const double PgBlockedSessionsFallback = 10.0;                 // distinct blocked sessions in one capture
 }
