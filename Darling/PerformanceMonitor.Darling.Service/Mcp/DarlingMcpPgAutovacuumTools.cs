@@ -84,7 +84,7 @@ public sealed class DarlingMcpPgAutovacuumTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the dead-tuple growth comparison. Default 24.")] int hours_back = 24,
-        [Description("Maximum tables to return, worst first. Default 20.")] int limit = 20,
+        [Description("Maximum tables to return, worst first. Default 20. This is what bounds the page - read truncated to know whether the server held more tables with pending work than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -98,8 +98,14 @@ public sealed class DarlingMcpPgAutovacuumTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit);
+            /* #3653 (one vocabulary): the page cut is OBSERVED, not inferred. The reader is asked for one row
+               past the cap and McpHelpers.BoundPage turns that into (page, truncated) — the #3594 dialect every
+               honest page in the repository speaks. This replaced `limit_reached = tables.Count >= limit`, which
+               read a server with exactly `limit` tables behind on vacuum as a cut page and told the caller to
+               raise a limit that had nothing more to give. */
+            var fetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -127,10 +133,13 @@ public sealed class DarlingMcpPgAutovacuumTools
             /* #3603: the cost half, read once for every table on the page and attached per table below. The
                relation key is the parser's `schema.table`; the database rides along because one relation
                name can exist in several databases and the log names the database on every run. */
+            /* One past RunsReadPerTable per relation, for the same reason as the page above: RecentRuns binds
+               each table's runs to the cap and OBSERVES whether the log held more, instead of inferring it from
+               a history that happened to be exactly RunsReadPerTable long. */
             var runs = await DarlingPgLogEventReader.GetAutovacuumRunsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now,
                 rows.Select(r => $"{r.SchemaName}.{r.TableName}").Distinct(StringComparer.Ordinal).ToList(),
-                RunsReadPerTable);
+                RunsReadPerTable + 1);
             var runsByTable = runs
                 .GroupBy(r => (Database: r.DatabaseName, Relation: r.RelationName))
                 .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.OccurredAtUtc).ToList());
@@ -224,15 +233,17 @@ public sealed class DarlingMcpPgAutovacuumTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "tables_with_pending_maintenance",
-                table_count = tables.Count,
+                /* The page's count under the page's name (#3594: a page count is never a total, and it is
+                   spelled *_returned so a reader can tell it from one). */
+                tables_returned = tables.Count,
                 /* Page-scoped counts: each is computed over the rows the read's LIMIT let through, not
-                   the server. limit_reached is the discriminator that makes that caveat actionable — when
-                   it bit, the caller knows these are top-N figures and can raise the limit (the
+                   the server. truncated is the discriminator that makes that caveat actionable — when it is
+                   true, the caller knows these are top-N figures and can raise the limit (the
                    get_pg_database_stats pattern). */
                 autovacuum_disabled_count = tables.Count(t => t.autovacuum_disabled),
                 past_threshold_count = tables.Count(t => t.threshold_ratio >= 1 || t.insert_threshold_ratio >= 1),
                 growing_count = tables.Count(t => t.dead_tuples_growing == true),
-                limit_reached = tables.Count >= limit,
+                truncated,
                 worst_table = tables[0].table_name,
                 worst_severity = tables[0].severity,
                 /* #3603: how much of the page the cost half could speak for, and — when it is none — the
@@ -289,16 +300,26 @@ public sealed class DarlingMcpPgAutovacuumTools
             return any ? total : null;
         }
 
+        /* #3653 (one vocabulary): the caller hands in up to RunsReadPerTable + 1 runs (the tool reads one past
+           the cap per relation); the cap is applied HERE and the cut observed — `truncated` is true exactly when
+           the log held a run this block did not count. This replaced `history_capped = runs.Count >=
+           RunsReadPerTable`, the same `>= cap` inference #3594 named on the page tools, one layer down and
+           against a collector constant rather than the caller's limit: a table with exactly 25 logged runs read
+           as capped. Every aggregate below is over the bound page, so the denominator is still RunsReadPerTable
+           at most. */
+        var (page, truncated) = McpHelpers.BoundPage(runs, RunsReadPerTable);
+        runs = page;
+
         var durations = runs.Where(r => r.DurationMs is not null).Select(r => r.DurationMs!.Value).ToList();
         var totalMisses = Sum(runs.Select(r => r.BufferMisses));
         var totalDirtied = Sum(runs.Select(r => r.BufferDirtied));
 
         return new
         {
-            /* The denominator of every aggregate here — capped at RunsReadPerTable, and history_capped says
-               when the cap bit, so "25 runs" on a table that ran 200 times reads as a sample, not a count. */
+            /* The denominator of every aggregate here — capped at RunsReadPerTable, and truncated says when
+               the cap bit, so "25 runs" on a table that ran 200 times reads as a sample, not a count. */
             runs_counted = runs.Count,
-            history_capped = runs.Count >= RunsReadPerTable,
+            truncated,
             vacuum_runs = runs.Count(r => !r.IsAnalyze),
             analyze_runs = runs.Count(r => r.IsAnalyze),
             newest_run_at = runs[0].OccurredAtUtc,

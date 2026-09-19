@@ -253,7 +253,8 @@ public sealed class McpFilterSemanticsLivePostgresTests
             Assert.Equal(1, ghost.GetProperty("collection_runs").GetInt64());
             Assert.Equal("purged", ghost.GetProperty("data_state").GetString());
             Assert.Equal("NoData", ghost.GetProperty("health_band").GetString());
-            Assert.Equal("No Data", ghost.GetProperty("overall_health").GetString());
+            /* #3653: one band, one spelling \u2014 overall_health carries the same token health_band does. */
+            Assert.Equal("NoData", ghost.GetProperty("overall_health").GetString());
             Assert.Contains("PURGED", ghost.GetProperty("data_note").GetString(), StringComparison.Ordinal);
             Assert.Contains(expectedHorizon.ToString("yyyy-MM-dd"), ghost.GetProperty("data_note").GetString(), StringComparison.Ordinal);
 
@@ -296,7 +297,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             /* The single-day read of a past-horizon day is a DATA payload (the rows are there), not unavailable. */
             var singlePast = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName, ghostDay.ToString("yyyy-MM-dd"))).RootElement;
             Assert.Equal("past_horizon", singlePast.GetProperty("data_state").GetString());
-            Assert.Equal("No Data", singlePast.GetProperty("overall_health").GetString());
+            Assert.Equal("NoData", singlePast.GetProperty("overall_health").GetString());
             await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM deadlocks WHERE server_id = {ServerId}");
 
             /* The horizon is the store's EFFECTIVE retention: a fleet-wide override shortening one signal

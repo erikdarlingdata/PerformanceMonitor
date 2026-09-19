@@ -381,7 +381,7 @@ public sealed class PgLogEventMetricsParserTests
             BufferHits: 10, BufferMisses: 128, BufferDirtied: 64, WalRecords: 5, WalBytes: 1024)).ToList();
         var block = JsonSerializer.Serialize(DarlingMcpPgAutovacuumTools.RecentRuns(runs), McpHelpers.JsonOptions);
         JsonAssert.Contains("\"runs_counted\": 7", block);
-        JsonAssert.Contains("\"history_capped\": false", block);
+        JsonAssert.Contains("\"truncated\": false", block);
         JsonAssert.Contains("\"vacuum_runs\": 5", block);
         JsonAssert.Contains("\"analyze_runs\": 2", block);
         JsonAssert.Contains("\"total_duration_ms\": 28000", block);
@@ -395,9 +395,19 @@ public sealed class PgLogEventMetricsParserTests
         Assert.Null(DarlingMcpPgAutovacuumTools.RecentRuns(null));
         Assert.Null(DarlingMcpPgAutovacuumTools.RecentRuns(Array.Empty<DarlingPgLogEventReader.PgAutovacuumRunRow>()));
 
-        /* Twenty-five read means "capped": the aggregates are a sample and say so. */
-        var many = Enumerable.Range(0, DarlingMcpPgAutovacuumTools.RunsReadPerTable).Select(i => runs[0] with { OccurredAtUtc = at.AddMinutes(-i) }).ToList();
-        JsonAssert.Contains("\"history_capped\": true", JsonSerializer.Serialize(DarlingMcpPgAutovacuumTools.RecentRuns(many), McpHelpers.JsonOptions));
+        /* #3653: the cut is OBSERVED, not inferred. Exactly RunsReadPerTable runs is a COMPLETE history (the old
+           `>= RunsReadPerTable` read it as capped); one more is the signal, and the aggregates then cover the
+           bound page of RunsReadPerTable, never the 26th row. */
+        var exactlyTheCap = Enumerable.Range(0, DarlingMcpPgAutovacuumTools.RunsReadPerTable).Select(i => runs[0] with { OccurredAtUtc = at.AddMinutes(-i) }).ToList();
+        var complete = JsonSerializer.Serialize(DarlingMcpPgAutovacuumTools.RecentRuns(exactlyTheCap), McpHelpers.JsonOptions);
+        JsonAssert.Contains("\"truncated\": false", complete);
+        JsonAssert.Contains($"\"runs_counted\": {DarlingMcpPgAutovacuumTools.RunsReadPerTable}", complete);
+        var onePast = Enumerable.Range(0, DarlingMcpPgAutovacuumTools.RunsReadPerTable + 1).Select(i => runs[0] with { OccurredAtUtc = at.AddMinutes(-i) }).ToList();
+        var capped = JsonSerializer.Serialize(DarlingMcpPgAutovacuumTools.RecentRuns(onePast), McpHelpers.JsonOptions);
+        JsonAssert.Contains("\"truncated\": true", capped);
+        JsonAssert.Contains($"\"runs_counted\": {DarlingMcpPgAutovacuumTools.RunsReadPerTable}", capped);
+        /* The oldest counted run is the 25th newest, not the 26th: the page is the newest RunsReadPerTable. */
+        JsonAssert.Contains("\"oldest_counted_run_at\": \"" + at.AddMinutes(-(DarlingMcpPgAutovacuumTools.RunsReadPerTable - 1)).ToString("yyyy-MM-dd'T'HH:mm:ss"), capped);
     }
 
     [Fact]

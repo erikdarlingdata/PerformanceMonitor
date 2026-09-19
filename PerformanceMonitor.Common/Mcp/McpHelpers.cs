@@ -84,6 +84,27 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// Validates a <c>days_back</c> parameter against the ceiling its tool declares. Returns null if valid, an
+    /// error message if invalid — the day-grained twin of <see cref="ValidateHoursBack"/>, in the same sentence
+    /// shape, so a caller who has seen one refusal recognises the other.
+    ///
+    /// <para><b>Why the ceiling is a parameter (#3653, one vocabulary).</b> Five tools took <c>days_back</c> and
+    /// each refused it INLINE with its own copy of this sentence, because no shared validator existed for a
+    /// day-grained span and their ceilings differ for real reasons: the daily-summary range reads a year
+    /// (<see cref="MaxDailySummaryDaysBack"/>, shared across both SKUs), the stall-probe samples keep 60 days,
+    /// the collector-cost series 90, the store-metrics daily series 400 — each the retention of the series it
+    /// reads, which is the only honest bound on a history read. One validator with the ceiling handed in keeps
+    /// the refusal one sentence on the wire while leaving each tool's bound where its lineage is documented.
+    /// Refuses, never clamps: a span the tool cannot honour is an error, not a quietly different question.</para>
+    /// </summary>
+    public static string? ValidateDaysBack(int daysBack, int maxDaysBack)
+    {
+        if (daysBack <= 0 || daysBack > maxDaysBack)
+            return $"Invalid days_back value '{daysBack}'. Must be a positive integer (1-{maxDaysBack}).";
+        return null;
+    }
+
+    /// <summary>
     /// Validates a windowed read's two time knobs together and hands back the window's END — the single call
     /// every windowed read makes in place of a bare <see cref="ValidateHoursBack"/>.
     ///

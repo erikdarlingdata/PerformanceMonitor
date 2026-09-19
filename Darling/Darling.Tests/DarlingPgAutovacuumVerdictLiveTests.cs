@@ -123,12 +123,18 @@ public sealed class DarlingPgAutovacuumVerdictLiveTests
                undersized call discloses its page scope (the get_pg_database_stats pattern). */
             Assert.Equal(3, payload.GetProperty("past_threshold_count").GetInt32());
             Assert.Equal(1, payload.GetProperty("growing_count").GetInt32());
-            Assert.False(payload.GetProperty("limit_reached").GetBoolean());
+            Assert.False(payload.GetProperty("truncated").GetBoolean());
 
+            /* #3653: the cut is OBSERVED off a limit + 1 fetch (#3594), so a limit of exactly the population
+               is complete and one below it is truncated with the page under its *_returned name. */
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(dataSource, ServerName, 4, tables.Length)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(tables.Length, whole.GetProperty("tables_returned").GetInt32());
             var truncated = JsonDocument.Parse(
                 await DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(dataSource, ServerName, 4, 2)).RootElement;
-            Assert.Equal(2, truncated.GetProperty("table_count").GetInt32());
-            Assert.True(truncated.GetProperty("limit_reached").GetBoolean());
+            Assert.Equal(2, truncated.GetProperty("tables_returned").GetInt32());
+            Assert.True(truncated.GetProperty("truncated").GetBoolean());
 
             bodySucceeded = true;
         }

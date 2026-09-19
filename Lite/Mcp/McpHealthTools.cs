@@ -63,7 +63,7 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; No Data, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
     public static async Task<string> GetDailySummary(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -92,7 +92,7 @@ public sealed class McpHealthTools
                     new
                     {
                         summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
-                        overall_health = row.OverallHealth,
+                        overall_health = row.HealthBand.ToString(),
                         data_state = DailySummaryRetention.Label(row.DataState),
                         retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
                         collection_runs = row.CollectionRuns,
@@ -105,14 +105,22 @@ public sealed class McpHealthTools
                 return McpHelpers.Status(
                     "empty",
                     $"No data collected for {resolved.ServerName} on {missDate:yyyy-MM-dd}.",
-                    new { summary_date = missDate.ToString("yyyy-MM-dd"), overall_health = row?.OverallHealth });
+                    new { summary_date = missDate.ToString("yyyy-MM-dd"), overall_health = row?.HealthBand.ToString() });
             }
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
-                overall_health = row.OverallHealth,
+                /* #3653 (A15/A16, one vocabulary): overall_health and health_band are the SAME band and now
+                   carry the SAME spelling — the enum token (Healthy / Warning / Critical / NoData), which is
+                   what every other band on the wire is spelled as (HealthSeverity, FleetHealthBand) and what
+                   the Darling web client builds its CSS classes from. overall_health used to publish the
+                   calculator's human LABEL, and the two differed on exactly one value: "No Data" beside
+                   "NoData" in one object. The label stays on the row type for the viewer's tooltip; the wire
+                   gets the token. overall_health is kept as a key because it is the older of the two (the
+                   Dashboard's daily-summary column name) — removing it is a wire-shape change, not a spelling. */
+                overall_health = row.HealthBand.ToString(),
                 health_band = row.HealthBand.ToString(),
                 /* #3541 A9: collected, past_horizon or no_run_record here (purged returned above); the note
                    says what the zeros are on a non-collected day, null on a collected one. */
@@ -166,8 +174,8 @@ public sealed class McpHealthTools
         if (error != null) return error;
 
         /* The ceiling is SHARED with Darling so the two SKUs cannot accept different spans. */
-        if (days_back <= 0 || days_back > McpHelpers.MaxDailySummaryDaysBack)
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{McpHelpers.MaxDailySummaryDaysBack}).";
+        var daysError = McpHelpers.ValidateDaysBack(days_back, McpHelpers.MaxDailySummaryDaysBack);
+        if (daysError != null) return daysError;
 
         /* The anchor is the ONLY source of "now" in this body — see AsOfWindowAnchorTests, which fails a
            tool that advertises as_of and then reads the process clock anyway. (That check is a source scan
@@ -234,7 +242,8 @@ public sealed class McpHealthTools
                 days = rows.Select(row => new
                 {
                     summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
-                    overall_health = row.OverallHealth,
+                    /* #3653: one spelling for one band — see get_daily_summary. */
+                    overall_health = row.HealthBand.ToString(),
                     health_band = row.HealthBand.ToString(),
                     data_state = DailySummaryRetention.Label(row.DataState),
                     data_note = row.RetentionHorizon is { } rowHorizon ? DailySummaryRetention.Note(row.DataState, rowHorizon, row.SignalSourcesPresent) : null,

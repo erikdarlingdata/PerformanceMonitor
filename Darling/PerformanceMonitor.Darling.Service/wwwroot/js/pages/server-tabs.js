@@ -3185,7 +3185,7 @@ const PG_SLOT_STATS = [
 ];
 
 const PG_AUTOVACUUM_STATS = [
-  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "tables_returned", label: "Tables returned", format: "int" },
   { key: "past_threshold_count", label: "Past threshold (of those)", format: "int" },
   { key: "growing_count", label: "Still growing (of those)", format: "int" },
   { key: "autovacuum_disabled_count", label: "Autovacuum off (of those)", format: "int" },
@@ -3230,12 +3230,12 @@ const PG_DATABASE_STATS = [
    `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
    whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
 const PG_BLOAT_STATS = [
-  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "tables_returned", label: "Tables returned", format: "int" },
   { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mb" },
   { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
   { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
   { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
 /* The capture tiles lead, and they are not decoration on this read: it is an EXCEPTION surface sampled once
@@ -3250,23 +3250,23 @@ const PG_BLOAT_STATS = [
 const PG_SESSION_STATE_STATS = [
   { key: "captures_in_window", label: "Captures", format: "int" },
   { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
-  { key: "session_count", label: "Sessions returned", format: "int" },
+  { key: "sessions_returned", label: "Sessions returned", format: "int" },
   { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
   { key: "idle_in_transaction_pinning_nothing", label: "Idle in xact, pinning NOTHING", format: "int" },
   { key: "redacted_row_count", label: "Redacted rows", format: "int" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
 /* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
    the field name survived review for saying what it is, and a label that renamed it would undo that where a
    reader actually looks. */
 const PG_INDEX_USAGE_STATS = [
-  { key: "index_count", label: "Indexes returned", format: "int" },
+  { key: "indexes_returned", label: "Indexes returned", format: "int" },
   { key: "unscanned_without_a_structural_blocker", label: "Unscanned, nothing blocking a drop", format: "int" },
   { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mb" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
-  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  { key: "truncated", label: "Truncated", format: "bool" },
 ];
 
 /* `total_reads` / `total_read_time_ms` are the WINDOW's (#3613); the combination count is the PAGE's and is

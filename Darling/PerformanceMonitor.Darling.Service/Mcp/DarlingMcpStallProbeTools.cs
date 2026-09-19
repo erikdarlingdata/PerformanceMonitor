@@ -52,9 +52,12 @@ public sealed class DarlingMcpStallProbeTools
         [Description("Days of history. Default 7; max 60 (the samples' own retention).")] int days_back = 7,
         [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit)
     {
-        if (days_back <= 0 || days_back > MaxDaysBack)
+        /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
+           tool's (the samples' own retention). */
+        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        if (daysError != null)
         {
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{MaxDaysBack}).";
+            return daysError;
         }
 
         var validation = McpHelpers.ValidateTop(limit);

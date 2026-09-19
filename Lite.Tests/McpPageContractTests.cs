@@ -539,7 +539,8 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal(1, ghost.GetProperty("collection_runs").GetInt64());
         Assert.Equal("purged", ghost.GetProperty("data_state").GetString());
         Assert.Equal("NoData", ghost.GetProperty("health_band").GetString());
-        Assert.Equal("No Data", ghost.GetProperty("overall_health").GetString());
+        /* #3653: one band, one spelling \u2014 overall_health carries the same token health_band does. */
+        Assert.Equal("NoData", ghost.GetProperty("overall_health").GetString());
         Assert.StartsWith("PURGED", ghost.GetProperty("data_note").GetString(), StringComparison.Ordinal);
 
         /* Inside retention with signal rows and no run record: a disclosure, not a withheld verdict — the day

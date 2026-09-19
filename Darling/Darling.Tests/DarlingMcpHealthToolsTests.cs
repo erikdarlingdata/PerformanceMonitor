@@ -450,7 +450,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             Assert.Contains("\"deadlock_count\":1", onItsOwnDay, StringComparison.Ordinal);
             var judged = JsonDocument.Parse(onItsOwnDay).RootElement;
             Assert.Equal("past_horizon", judged.GetProperty("data_state").GetString());
-            Assert.Equal("No Data", judged.GetProperty("overall_health").GetString());
+            /* #3653: one band, one spelling — overall_health carries the token health_band does ("NoData", not the
+               viewer label "No Data"). */
+            Assert.Equal("NoData", judged.GetProperty("overall_health").GetString());
+            Assert.Equal("NoData", judged.GetProperty("health_band").GetString());
             Assert.Contains("1 of 7 signal sources", judged.GetProperty("data_note").GetString(), StringComparison.Ordinal);
             Assert.DoesNotContain("Healthy", onItsOwnDay, StringComparison.Ordinal);
             Assert.Contains("2026-07-20", onItsOwnDay, StringComparison.Ordinal);

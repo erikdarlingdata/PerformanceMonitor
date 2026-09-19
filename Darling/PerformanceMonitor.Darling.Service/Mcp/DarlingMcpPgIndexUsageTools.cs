@@ -219,7 +219,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days). Widen this to the longest interval any scheduled job runs on before calling an index unused.")] int hours_back = 168,
-        [Description("Maximum indexes to return, biggest unscanned first. Default 25.")] int limit = 25,
+        [Description("Maximum indexes to return, biggest unscanned first. Default 25. This is what bounds the page - read truncated to know whether the server held more indexes than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -234,8 +234,13 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
-            var rows = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
-                postgres, resolved.ServerId, start, end, limit);
+            /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
+               (the #3594 dialect), replacing `limit_reached = indexes.Count >= limit` — which read a server with
+               exactly `limit` reportable indexes as a cut page. Bound BEFORE the aggregates below, so every count
+               is a count of the page. */
+            var fetched = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
+                postgres, resolved.ServerId, start, end, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -315,7 +320,8 @@ public sealed class DarlingMcpPgIndexUsageTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "index_usage",
-                index_count = indexes.Count,
+                /* The page's count under the page's name (#3594). */
+                indexes_returned = indexes.Count,
                 /* Deliberately NOT called "droppable". These are the indexes with no scans in the window
                    and no structural blocker - which is a shortlist to investigate, not a work queue. The
                    field name has to survive being read by something that will act on it. */
@@ -326,7 +332,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 statistics_were_reset_in_window = resetSeen,
                 /* Same discipline as get_pg_database_stats: every total above covers the rows the LIMIT let
                    through, and the caller has to be able to tell when the cut bit. */
-                limit_reached = indexes.Count >= limit,
+                truncated,
                 note = "An index with no scans is a CANDIDATE, never a conclusion. Three things this data "
                      + "cannot see, in the order they bite: an index backing a constraint enforces it "
                      + "without ever registering a scan; a query that runs less often than "
@@ -345,9 +351,9 @@ public sealed class DarlingMcpPgIndexUsageTools
                          + "failed CREATE INDEX CONCURRENTLY leftovers, maintained by writes and used by "
                          + "nobody."
                          : string.Empty)
-                     + (indexes.Count >= limit
-                         ? $" The row limit of {limit} was REACHED, so the totals cover only the indexes "
-                         + "returned. Raise limit for the full picture."
+                     + (truncated
+                         ? $" TRUNCATED: the server held more indexes than the {limit} returned, so the totals "
+                         + "cover only the indexes returned. Raise limit for the full picture."
                          : string.Empty),
                 indexes,
             }, McpHelpers.JsonOptions);

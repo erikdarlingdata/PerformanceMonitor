@@ -234,7 +234,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25.")] int limit = 25,
+        [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -249,8 +249,12 @@ public sealed class DarlingMcpPgSessionStatesTools
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
-            var rows = await DarlingPgSessionStatesReader.GetPgSessionStatesAsync(
-                postgres, resolved.ServerId, start, end, limit);
+            /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
+               (the #3594 dialect), replacing `limit_reached = sessions.Count >= limit` — which read a window of
+               exactly `limit` sessions as a cut page. */
+            var fetched = await DarlingPgSessionStatesReader.GetPgSessionStatesAsync(
+                postgres, resolved.ServerId, start, end, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Fetched whether or not there are rows. On a surface where zero rows is the healthy answer, the
                denominator is not an error path - it is what makes a healthy answer believable. */
@@ -268,7 +272,9 @@ public sealed class DarlingMcpPgSessionStatesTools
             var idleWithoutHorizon = rows.Count(r => r.IdleInTransactionSamples > 0 && r.PeakHorizonAge < 0
                                                      && !r.StateWasRedacted);
             var redacted = rows.Count(r => r.StateWasRedacted);
-            var truncated = rows.Any(r => r.CaptureWasTruncated);
+            /* The collector's per-capture cap, a SOURCE-side fact carried per row as capture_was_truncated — a
+               different cut from the page's `truncated` above, and named apart from it on purpose. */
+            var captureWasTruncated = rows.Any(r => r.CaptureWasTruncated);
 
             var sessions = rows.Select(r => new
             {
@@ -336,7 +342,8 @@ public sealed class DarlingMcpPgSessionStatesTools
                 server = resolved.ServerName,
                 hours_back,
                 status = "session_states",
-                session_count = sessions.Count,
+                /* The page's count under the page's name (#3594). */
+                sessions_returned = sessions.Count,
                 horizon_holder_count = holders,
                 idle_in_transaction_holder_count = idleHolders,
                 /* Reported as its own number because it is the correction this tool exists to make: these
@@ -348,7 +355,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                 first_capture_at = captures.FirstCaptureAt?.ToString("o"),
                 last_capture_at = captures.LastCaptureAt?.ToString("o"),
                 redacted_row_count = redacted,
-                limit_reached = sessions.Count >= limit,
+                truncated,
                 note = "This is a SAMPLE taken every collection cycle, not an event log. PostgreSQL records "
                      + "nothing about session state unless something asks it, so a transaction that opened "
                      + "and closed between two samples left no trace - "
@@ -367,14 +374,14 @@ public sealed class DarlingMcpPgSessionStatesTools
                          + "than refusing the read. Those rows say nothing about session state and their "
                          + "severity is reported as unknown."
                          : string.Empty)
-                     + (truncated
+                     + (captureWasTruncated
                          ? " At least one capture hit the collector's per-capture row cap, so the stored "
                          + "rows for it are a worst-first sample of a larger set - compare "
                          + "reportable_sessions_on_instance against the rows returned."
                          : string.Empty)
-                     + (sessions.Count >= limit
-                         ? $" The row limit of {limit} was REACHED, so the counts above cover only the "
-                         + "sessions returned. Raise limit for the full picture."
+                     + (truncated
+                         ? $" TRUNCATED: the window held more sessions than the {limit} returned, so the counts "
+                         + "above cover only the sessions returned. Raise limit for the full picture."
                          : string.Empty),
                 sessions,
             }, McpHelpers.JsonOptions);

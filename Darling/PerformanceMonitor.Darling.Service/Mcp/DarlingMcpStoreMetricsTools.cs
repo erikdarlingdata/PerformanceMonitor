@@ -46,9 +46,12 @@ public sealed class DarlingMcpStoreMetricsTools
         NpgsqlDataSource postgres,
         [Description("Days of daily-series history. Default 30; max 400 (the series' own retention).")] int days_back = 30)
     {
-        if (days_back <= 0 || days_back > MaxDaysBack)
+        /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
+           tool's (the daily series' own retention). */
+        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        if (daysError != null)
         {
-            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{MaxDaysBack}).";
+            return daysError;
         }
 
         try
