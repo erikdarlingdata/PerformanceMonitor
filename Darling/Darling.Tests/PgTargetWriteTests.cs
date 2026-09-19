@@ -56,6 +56,8 @@ public sealed class PgTargetWriteTests
     private static readonly int AuroraServerId = ServerIdHelper.GetDeterministicHashCode(AuroraServerName);
     private const string StockServerName = "darling-pg-target-write-stock";
     private static readonly int StockServerId = ServerIdHelper.GetDeterministicHashCode(StockServerName);
+    private const string ZeroWalServerName = "darling-pg-target-write-zero-wal";
+    private static readonly int ZeroWalServerId = ServerIdHelper.GetDeterministicHashCode(ZeroWalServerName);
 
     private const double MiB = 1024.0 * 1024.0;
 
@@ -233,6 +235,42 @@ public sealed class PgTargetWriteTests
         Assert.True(above.Fire);
         Assert.True(above.LowQualityBaseline);
         Assert.Equal(1.0, above.FallbackExceedance, precision: 9);
+    }
+
+    /* ───────────────────────── one definition of "WAL tracked" (#3691 exit check) ───────────────────────── */
+
+    /// <summary>
+    /// The one predicate both write reads apply. The real shapes: all-NULL <c>wal_bytes</c> (Aurora, pre-14) is
+    /// untracked whatever the sums coalesced to; bytes moving is tracked; records moving alone is tracked (either
+    /// counter moving is the counter being populated). The exit check's fixture shape — 0-not-NULL bytes AND zero
+    /// records over a window in which checkpoints ran — is untracked, where lane 15's checkpoint read said
+    /// <c>wal_tracked 1, wal_bytes 0</c> beside a shift fact saying <c>unavailable</c>.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 0.0, 0L, false)]
+    [InlineData(false, 1e9, 1_000_000L, false)]
+    [InlineData(true, 0.0, 0L, false)]
+    [InlineData(true, 1e9, 0L, true)]
+    [InlineData(true, 0.0, 12L, true)]
+    [InlineData(true, 1e9, 1_000_000L, true)]
+    public void WalIsTracked_IsOneDecision_NullnessAndBothSums(bool anyNonNull, double bytes, long records, bool expected)
+        => Assert.Equal(expected, PgTargetFactCollector.WalIsTracked(anyNonNull, bytes, records));
+
+    /// <summary>The checkpoint read now returns the record sum the predicate needs, APPENDED after <c>sample_count</c> so
+    /// the ten ordinals lane 2 and lane 15 read did not move; the differencing is the WAL read's, verbatim.</summary>
+    [Fact]
+    public void TheCheckpointRead_CarriesTheWalRecordSum_AsItsLastColumn_ForTheSharedPredicate()
+    {
+        var sql = PgTargetFactCollector.PgTargetCheckpointSql;
+        Assert.Contains("wal_records                - LAG(wal_records)                OVER series AS raw_wal_records", sql, StringComparison.Ordinal);
+        Assert.Contains("(wal_bytes IS NOT NULL) AS wal_tracked", sql, StringComparison.Ordinal);
+        var outerSelect = sql[sql.LastIndexOf("SELECT", StringComparison.Ordinal)..sql.LastIndexOf("FROM sampled", StringComparison.Ordinal)];
+        var aliases = System.Text.RegularExpressions.Regex.Matches(outerSelect, @"\s+AS\s+(\w+)\s*(,|$)", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value).ToList();
+        Assert.Equal(12, aliases.Count);
+        Assert.Equal("sample_count", aliases[10]);
+        Assert.Equal("wal_records", aliases[11]);
+        Assert.Contains("CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint)  AS wal_records", outerSelect, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── the SQL: one differencing, three readers ───────────────────────── */
@@ -457,6 +495,76 @@ public sealed class PgTargetWriteTests
                 var sharedBuffers = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
                 Assert.Equal(0.4, sharedBuffers.GetProperty("base_severity").GetDouble(), precision: 6);
             }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The exit check's fixture shape, live: a stock-stamped server whose <c>wal_bytes</c> is 0-not-NULL (constant,
+    /// non-NULL) and whose <c>wal_records</c> never move, with a checkpoint a minute. Lane 15's two reads disagreed here
+    /// — pressure <c>wal_tracked 1, wal_bytes 0, wal_bytes_per_sec 0</c>, shift <c>unavailable</c>. Through the one
+    /// predicate both facts now say untracked: the pressure fact's WAL figures are ABSENT (not zero), the shift is
+    /// <c>unavailable</c> / <c>reason_wal_stats_not_reported</c>. Unreachable from the real collector (it types the
+    /// columns NULL where <c>pg_stat_wal</c> is not reported) — pinned because a read that can contradict its sibling on
+    /// any input is two definitions. The stock e2e below is the tracked shape's pin (bytes moving ⇒ both tracked).
+    /// </summary>
+    [Fact]
+    public async Task AZeroNotNullWalSeries_ReadsUntracked_OnBothWriteFacts_ThroughTheOnePredicate()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the write-family trackedness e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ZeroWalServerId, ZeroWalServerName, MonitoredEngineKind.Postgres, 18, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+
+            /* The coverage witness over the window (the collector stamps observed time from pg_database_stats FIRST and
+               the write read returns on zero observed time), then the write series: one timed checkpoint a minute; a
+               zero per-minute WAL increment plants wal_bytes CONSTANT and non-NULL and wal_records at 0 on every row —
+               the 0-not-NULL shape. */
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ZeroWalServerId, ZeroWalServerName, windowStart.AddMinutes(minute - 1), ct);
+            await PlantWriteSeriesAsync(connection, ZeroWalServerId, ZeroWalServerName, windowStart.AddMinutes(-1), minutes: 4 * 60 + 1,
+                requestedPerMinute: 0, timedPerMinute: 1, walBytesPerMinuteBase: 0L, walBytesPerMinuteSpike: 0L, spikeFromMinute: int.MaxValue, ct);
+
+            var facts = await new PgTargetFactCollector(postgres).CollectFactsAsync(new AnalysisContext
+            {
+                ServerId = ZeroWalServerId, ServerName = ZeroWalServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+            });
+
+            var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+            Assert.Equal(240, pressure.Metadata["checkpoints_timed"]);
+            Assert.Equal(0, pressure.Metadata["wal_tracked"]);
+            Assert.False(pressure.Metadata.ContainsKey("wal_bytes"));
+            Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_sec"));
+            Assert.False(pressure.Metadata.ContainsKey("wal_bytes_per_checkpoint"));
+            Assert.False(pressure.Metadata.ContainsKey("not_applicable"));   // stock: graded, just without WAL figures
+
+            var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+            Assert.Equal(0, shift.Value);
+            Assert.Equal(0, shift.Metadata["wal_tracked"]);
+            Assert.Equal(1, shift.Metadata["unavailable"]);
+            Assert.Equal(1, shift.Metadata["reason_wal_stats_not_reported"]);
+            Assert.False(shift.Metadata.ContainsKey("peak_wal_bytes_per_sec"));  // and so ComparisonBanding withholds it
 
             bodySucceeded = true;
         }
@@ -797,12 +905,12 @@ FROM s", connection) { CommandTimeout = 120 };
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM pg_database_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}); " +
-            $"DELETE FROM pg_write_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}); " +
-            $"DELETE FROM pg_server_config WHERE server_id IN ({AuroraServerId}, {StockServerId}); " +
-            $"DELETE FROM analysis_findings WHERE server_id IN ({AuroraServerId}, {StockServerId}); " +
-            $"DELETE FROM analysis_muted WHERE server_id IN ({AuroraServerId}, {StockServerId}); " +
-            $"DELETE FROM servers WHERE server_id IN ({AuroraServerId}, {StockServerId});", connection);
+            $"DELETE FROM pg_database_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
+            $"DELETE FROM pg_write_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
+            $"DELETE FROM pg_server_config WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
+            $"DELETE FROM analysis_findings WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
+            $"DELETE FROM analysis_muted WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
+            $"DELETE FROM servers WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
