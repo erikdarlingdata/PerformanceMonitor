@@ -239,6 +239,8 @@ LIMIT 6";
         await DetectIoAnomalies(context, anomalies);
         await DetectReplicationAnomalies(context, anomalies);
         await DetectWalVolumeAnomalies(context, anomalies);
+        /* wave 3 (#3691, between waves): the blocking detector (PgTargetAnomalyDetector.Blocking.cs), inert until lane 17. */
+        await DetectBlockingAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -250,6 +252,7 @@ LIMIT 6";
     private partial Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectReplicationAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectWalVolumeAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;

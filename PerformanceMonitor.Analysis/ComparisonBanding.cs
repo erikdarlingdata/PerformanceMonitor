@@ -142,7 +142,7 @@ public static class ComparisonBanding
     /// </summary>
     public static object BandRulesPayload => new
     {
-        baseline = $"delta_sigma is the value delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric.",
+        baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric.",
         absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {MinimumRelativeMove:P0} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position) — a move between two values the scorer grades as negligible is not a verdict.",
         presence = $"a key present in one window only is a new or resolved issue only when its base severity reaches {MinimumLadderPosition:0.##}; a noise-level appearance or disappearance is stable. BAD_ACTOR_* keys never take this path: their appearance is plan-cache identity churn, reported under plan_cache_churn and excluded from new_issues / resolved_issues."
     };

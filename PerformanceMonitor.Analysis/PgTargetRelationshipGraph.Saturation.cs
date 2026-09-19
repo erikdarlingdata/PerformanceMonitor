@@ -75,11 +75,10 @@ public sealed partial class PgTargetRelationshipGraph
            The v1 residue note said this mesh was safe only while saturation had no other leaf; this IS the other
            leaf, so the traversal is stated: from a saturation root the engine follows ONE edge — the higher-severity
            of the fired Lock wait and the fired idle fact — then continues from there. Idle → Lock edges below keep
-           saturation → idle → Lock one story; the reverse hop (a Lock wait chosen first, then on to idle) has no
-           edge because a Lock wait's edges are lane 5's and pinned Single in PgTargetWaitTests — in that ordering
-           the idle fact roots its own card, whose advice still names the co-fired chains. Reported as out-of-lane
-           (Lock → idle, the direct blocking leaf) rather than moved here. A saturation finding with NO idle fact in
-           the set sees no active edge from any of this and is byte-identical to lane 5's mesh (pinned). */
+           saturation → idle → Lock one story, and since the #3691 between-waves batch the reverse hop exists too
+           (Lock → idle, the blocking leaf, declared below): whichever of the three fires hardest roots, the other
+           two are reached, one story. A saturation finding with NO idle fact in the set sees no active edge from
+           any of this and is byte-identical to lane 5's mesh (pinned). */
         AddEdge(PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction, "connection_saturation",
             "Long idle-in-transaction sessions are a quarter or more of the peak pool — parked transactions are holding the slots the pool is short of",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0
@@ -98,6 +97,23 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.WaitKey("Lock", null), "connection_saturation",
             "Lock waits fired while a transaction sat idle holding its locks — the waiters are queued behind work that is not being done",
             facts => facts.TryGetValue(PgTargetFactKeys.WaitKey("Lock", null), out var lockWait) && lockWait.BaseSeverity > 0);
+
+        /* The blocking chain, symptom → cause (#3691 between waves; lane 14 reported it out-of-lane because a Lock
+           wait's edges were lane 5's, pinned Single in PgTargetWaitTests — that pin moved with this edit, deliberately).
+           Design §3.10 names the idle transaction as the blocking leaf: when Lock waits fired AND a long idle-in-
+           transaction holder is in the set, the waiters are queued behind that holder's locks, so a Lock-wait root
+           walks to the parked transaction rather than ending on the wait. Declared from the Lock waits' OWN partial
+           (this file owns their edges — lane 5 wrote the saturation mesh here, and one source node's edges live in
+           one place so the traversal from it can be read in one place). Not gated on the saturation share: the pool
+           does not have to be full for a parked holder to be what the waiters are behind. Predicate reads the idle
+           fact's verdict (BaseSeverity), the file's rule. A Lock wait with no idle fact in the set keeps exactly its
+           previous single active edge (saturation), byte-identical to lane 5's mesh — pinned. */
+        AddEdge(PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.IdleInTransaction, "connection_saturation",
+            "A long idle-in-transaction holder fired alongside these Lock:relation waits — the waiters are queued behind a parked transaction's locks",
+            facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
+        AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.IdleInTransaction, "connection_saturation",
+            "A long idle-in-transaction holder fired alongside these Lock waits — the waiters are queued behind a parked transaction's locks",
+            facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
 
         /* The xmin chain, symptom → cause: PG_XMIN_HOLD (lane 4, the vacuum family) names the CLASS of holder —
            when it is a session and the idle fact's longest holder pins the horizon (horizon_age > 0, never the -1

@@ -242,7 +242,7 @@ public static partial class PgTargetAdvice
     }
 
     /// <summary>The anomaly's composed block (called from <c>ComposeAnomaly</c>'s <c>ANOMALY_PG_IO_LATENCY</c> arm):
-    /// the peak hourly ms per read, sigmas above the hour-of-week baseline, the baseline itself — or the
+    /// the peak quarter-hour ms per read, sigmas above the hour-of-week baseline, the baseline itself — or the
     /// first-occurrence rendering with no sigma on a low-quality bucket. The static block claims no figure.</summary>
     private static AdviceBlock ComposeIoLatencyAnomaly(IReadOnlyDictionary<string, Fact> factsByKey)
     {
@@ -258,8 +258,8 @@ public static partial class PgTargetAdvice
     private static AdviceBlock IoAnomalyStatic() => new(
         Headline: "Data-file reads were far slower per operation than this server's normal for this time of week",
         Investigation:
-            "The window's peak HOURLY milliseconds per data-file read (read_time ÷ reads from pg_stat_io, differenced " +
-            "per backend type and context with stats_reset honoured, hours under the 1,000-read floor not rated) was " +
+            "The window's peak QUARTER-HOUR milliseconds per data-file read (read_time ÷ reads from pg_stat_io, differenced " +
+            "per backend type and context with stats_reset honoured, quarter-hours under the 250-read floor not rated) was " +
             "judged against this server's hour-of-week baseline of the same quantity over the last 30 days. A latency " +
             "anomaly says the storage answered this server far more slowly than it usually does at this hour — on Aurora " +
             "that is the storage tier, on stock PostgreSQL the volume or a noisy neighbour on it — and the regular " +

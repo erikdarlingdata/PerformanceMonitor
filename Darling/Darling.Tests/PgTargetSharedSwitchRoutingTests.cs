@@ -36,8 +36,9 @@ public sealed class PgTargetSharedSwitchRoutingTests
     [Fact]
     public void EverySource_IsPgPrefixed_LowercaseSnakeCase_SortedOnce_AndNamedForTheRegistrySweep()
     {
-        /* Eleven v1 sources (#3542) plus the three v2 families (#3691: pg_io, pg_replication, pg_bloat). */
-        Assert.Equal(14, PgTargetSources.All.Count);
+        /* Eleven v1 sources (#3542) plus the three v2 families (#3691: pg_io, pg_replication, pg_bloat) plus the wave-3
+           blocking family's source, declared with its stubs by the between-waves batch (pg_blocking). */
+        Assert.Equal(15, PgTargetSources.All.Count);
         Assert.Contains(PgTargetSources.IoSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.ReplicationSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.BloatSource, PgTargetSources.All);
@@ -159,6 +160,8 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.Equal(new[] { PgTargetFactKeys.IoReadLatencyMs }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyIoLatency]);
         Assert.Equal(new[] { PgTargetFactKeys.ReplicationLag }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyReplicationLag]);
         Assert.Equal(new[] { PgTargetFactKeys.CheckpointPressure }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyWalVolume]);
+        /* wave 3 (#3691 between waves): the blocking anomaly folds onto the chain fact, declared with the stubs. */
+        Assert.Equal(new[] { PgTargetFactKeys.BlockingChain }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBlocking]);
         /* The wait profile is resolved per story, never statically. */
         Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyWaitProfile));
     }
@@ -389,6 +392,13 @@ public sealed class PgTargetSharedSwitchRoutingTests
            in the lookup), and the delegation equality above proves the shared entry points answer that block. */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BloatTrend));          /* lane 13 */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.IndexBloatTrend));     /* lane 13 */
+        /* Wave 3 (#3691 between waves) stubs: null IS the delegation — the equality above proves the shared entry points
+           answer what PgTargetAdvice.Blocking.cs answers, and the anomaly's ComposeAnomaly arm delegates to the same file
+           (never the SQL Server "Anomalous spike" composer, which the equality would expose). Lane 17 moves these to NotNull. */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.BlockingChain));          /* lane 17 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.LockWaitEvents));         /* lane 17 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.LongRunningQuery));       /* lane 17 */
+        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyBlocking));     /* lane 17 — the arm exists, the composer is a stub */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from
@@ -472,6 +482,131 @@ public sealed class PgTargetSharedSwitchRoutingTests
         IncidentId = incidentId,
         DatabaseName = database,
     };
+
+    /* ── The routing census (#3691 between waves, item 7) ── */
+
+    /// <summary>
+    /// Every declared <see cref="PgTargetFactKeys"/> key is ROUTED by every root dispatcher that must know it by name
+    /// — or is excluded here, by name, with the reason. Lane 14 of #3691 found <c>PG_IDLE_IN_TRANSACTION</c> declared
+    /// in v1 and never named by <c>PgTargetScorer.Amplifiers</c> or <c>PgTargetAdvice.Compose</c>: the fact scored,
+    /// rooted a card, and had no amplifier and no advice, because both switches fell to their defaults and nothing
+    /// said so. Lanes 12 and 15 each found their anomaly's <c>ComposeAnomaly</c> arm missing the same way. This
+    /// census makes the next such miss a compile-time-adjacent failure: declare a key, and the four dispatchers
+    /// (the amplifier switch, the advice switch, the anomaly composer's switch, the source switch) must name it —
+    /// or this file must say why not.
+    ///
+    /// <para>Read as SOURCE, not behaviour: a switch that falls to <c>_ =&gt; []</c> answers the same empty list a
+    /// stub does, so only the text can tell "routed to a family" from "nobody wrote the arm". The prefix-routed
+    /// families (<c>PG_WAIT_*</c>, <c>PG_BAD_ACTOR_*</c>, <c>CONFIG_PG_*</c>, <c>ANOMALY_PG_*</c>) are routed by their
+    /// prefix arms, which are pinned by exact text below; the anomalies additionally need a per-key case in
+    /// <c>ComposeAnomaly</c>, which is pinned per key.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDeclaredPgKey_IsRoutedByEveryRootDispatcher_OrExcludedHereByName()
+    {
+        var scorerRoot = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.cs"));
+        var adviceRoot = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetAdvice.cs"));
+        var anomalyAdvice = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetAdvice.Anomaly.cs"));
+
+        static string Between(string code, string start, string end)
+        {
+            var a = code.IndexOf(start, StringComparison.Ordinal);
+            Assert.True(a >= 0, start + " has moved");
+            var b = code.IndexOf(end, a, StringComparison.Ordinal);
+            Assert.True(b > a, end + " has moved");
+            return code[a..b];
+        }
+        var amplifiers = Between(scorerRoot, "internal static List<AmplifierDefinition> Amplifiers(string key)", "private static partial double ScoreConfigFact");
+        var scoreBase = Between(scorerRoot, "fact.Source switch", "};");
+        var compose = Between(adviceRoot, "public static AdviceBlock? Compose(string rootFactKey", "public static AdviceBlock? Static(");
+        var composeAnomaly = Between(anomalyAdvice, "private static partial AdviceBlock? ComposeAnomaly(string key", "private static AdviceBlock ComposeDeviation(");
+
+        /* The prefix arms, by exact text — the four families that route without a per-key name. */
+        Assert.Contains("_ when key.StartsWith(PgTargetFactKeys.WaitKeyPrefix, StringComparison.Ordinal) => WaitAmplifiers(key),", amplifiers, StringComparison.Ordinal);
+        Assert.Contains("_ when key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal) => QueriesAmplifiers(key),", amplifiers, StringComparison.Ordinal);
+        Assert.Contains("_ when key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) => ConfigAmplifiers(key),", amplifiers, StringComparison.Ordinal);
+        Assert.Contains("if (PgTargetFactKeys.IsPgAnomalyKey(key))", amplifiers, StringComparison.Ordinal);
+        Assert.Contains("if (PgTargetFactKeys.IsPgAnomalyKey(rootFactKey))", compose, StringComparison.Ordinal);
+        Assert.Contains("if (rootFactKey.StartsWith(PgTargetFactKeys.WaitKeyPrefix, StringComparison.Ordinal))", compose, StringComparison.Ordinal);
+        Assert.Contains("if (rootFactKey.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))", compose, StringComparison.Ordinal);
+        Assert.Contains("_ when rootFactKey.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)", compose, StringComparison.Ordinal);
+
+        /* Every declared source has a ScoreBase arm — a source without one scores every fact 0 through the default. */
+        foreach (var source in typeof(PgTargetSources).GetFields(BindingFlags.Public | BindingFlags.Static)
+                     .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Source", StringComparison.Ordinal)))
+        {
+            Assert.Contains($"PgTargetSources.{source.Name} => Score", scoreBase, StringComparison.Ordinal);
+        }
+
+        /* Keys that are NOT routed by name, each with its reason. Adding to this list is the deliberate act. */
+        var noAmplifierArm = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [nameof(PgTargetFactKeys.ServerMajorVersion)] = "registry context fact (base 0, never roots); the D6 flavour disclosure hangs on it, nothing amplifies it",
+            [nameof(PgTargetFactKeys.Tps)] = "database family: context (base 0) — throughput is a denominator, not a symptom; no amplifier family",
+            [nameof(PgTargetFactKeys.HitRatio)] = "database family: context under the buffer family's pressure fact; no amplifier family",
+            [nameof(PgTargetFactKeys.DeadlockRate)] = "database family: graded on its own bar, corroborated through the anomaly that folds INTO it; no amplifier arm of its own (PgTargetAnomalyTests pins the deadlock rate never escapes the cap)",
+            [nameof(PgTargetFactKeys.MonitoringPermissions)] = "sessions family: a visibility fact about the monitoring role, never amplified by workload",
+            [nameof(PgTargetFactKeys.PostureFsync)] = "posture: no amplifier may touch fsync / synchronous_commit / full_page_writes (PgTargetPostureIsolationTests)",
+            [nameof(PgTargetFactKeys.PostureFullPageWrites)] = "posture (same rule)",
+            [nameof(PgTargetFactKeys.PostureSynchronousCommit)] = "posture (same rule)",
+            [nameof(PgTargetFactKeys.CpuPercent)] = "cpu family: graded on the capacity bar, corroborated through ANOMALY_PG_CPU_SPIKE folding into it; no amplifier arm",
+            [nameof(PgTargetFactKeys.MaintenanceShapeShift)] = "wave 2, deprioritised to v3 by the calibration read (§B6): declared, no stub, no lane, nothing emits it",
+        };
+        var noComposeArm = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [nameof(PgTargetFactKeys.ServerMajorVersion)] = "registry context fact; never a story root, so no card to compose",
+            [nameof(PgTargetFactKeys.MaintenanceShapeShift)] = "wave 2, deprioritised to v3 (§B6): nothing emits it",
+        };
+        var neverAKey = new HashSet<string>(StringComparer.Ordinal)
+        {
+            nameof(PgTargetFactKeys.BadActorFamily),   /* the graph alias — resolved to a PG_BAD_ACTOR_<id> before any path is built */
+        };
+
+        var measured = new List<string>();
+        var config = new List<string>();
+        var anomalies = new List<string>();
+        foreach (var field in typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
+                     .Where(f => f.IsLiteral && f.FieldType == typeof(string) && !f.Name.EndsWith("Prefix", StringComparison.Ordinal)))
+        {
+            var value = (string)field.GetRawConstantValue()!;
+            if (!PgTargetFactKeys.IsPgKey(value) || neverAKey.Contains(field.Name)) continue;
+            if (PgTargetFactKeys.IsPgAnomalyKey(value)) anomalies.Add(field.Name);
+            else if (value.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)) config.Add(field.Name);
+            else measured.Add(field.Name);
+        }
+        Assert.True(measured.Count >= 25 && config.Count >= 12 && anomalies.Count >= 9, $"the sweep found {measured.Count} / {config.Count} / {anomalies.Count} keys; the vocabulary has moved");
+
+        /* Measured PG_ keys: named in the amplifier switch and the advice switch, or excluded above. */
+        foreach (var name in measured)
+        {
+            var token = $"PgTargetFactKeys.{name}";
+            if (!noAmplifierArm.ContainsKey(name))
+                Assert.True(amplifiers.Contains(token, StringComparison.Ordinal), $"{name} is a declared measured key that PgTargetScorer.Amplifiers never names — route it to its family's partial, or exclude it here with the reason");
+            if (!noComposeArm.ContainsKey(name))
+                Assert.True(compose.Contains(token, StringComparison.Ordinal), $"{name} is a declared measured key that PgTargetAdvice.Compose never names — a story rooted on it would carry no advice");
+        }
+        /* An exclusion that IS routed is stale: the reason no longer holds, and the list must shrink. */
+        foreach (var name in noAmplifierArm.Keys)
+            Assert.False(amplifiers.Contains($"PgTargetFactKeys.{name}", StringComparison.Ordinal), $"{name} is excluded from the amplifier census but the switch names it — drop the exclusion");
+        foreach (var name in noComposeArm.Keys)
+            Assert.False(compose.Contains($"PgTargetFactKeys.{name}", StringComparison.Ordinal), $"{name} is excluded from the compose census but the switch names it — drop the exclusion");
+
+        /* CONFIG_PG_ keys route by prefix (pinned above); the ones a family claims by name are a subset, never a requirement. */
+        Assert.Contains(nameof(PgTargetFactKeys.ConfigSharedBuffers), config);
+
+        /* ANOMALY_PG_ keys: the prefix arms carry them to AnomalyAmplifiers / ComposeAnomaly, and ComposeAnomaly's
+           switch must then name EACH one — the v2 lanes' miss. A stub arm (wave 3's AnomalyBlocking) counts: it is named. */
+        foreach (var name in anomalies)
+            Assert.True(composeAnomaly.Contains($"case PgTargetFactKeys.{name}:", StringComparison.Ordinal), $"{name} has no case in PgTargetAdvice.ComposeAnomaly — its card would compose null (or, without the prefix arm, the SQL Server \"Anomalous spike\" block)");
+
+        /* Every key has next reads: PgTargetMcpSurfaceTests.EveryPgRecommendation_NamesARegisteredTool_AndOnlyPgOrAnalysisReads
+           is the full census (registered tool names, get_pg_ only); this is the routing half — a row exists. */
+        foreach (var name in measured.Concat(config).Concat(anomalies))
+        {
+            var value = (string)typeof(PgTargetFactKeys).GetField(name)!.GetRawConstantValue()!;
+            Assert.NotNull(PerformanceMonitor.Darling.Service.Mcp.PgTargetToolRecommendations.GetForKey(value));
+        }
+    }
 
     private static int Count(string haystack, string needle)
     {

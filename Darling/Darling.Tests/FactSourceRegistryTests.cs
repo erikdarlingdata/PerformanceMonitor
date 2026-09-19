@@ -76,9 +76,10 @@ public sealed class FactSourceRegistryTests
         Assert.All(FactScorer.KnownSources, s => Assert.Matches("^[a-z_]+$", s));
         /* The count the campaign wrote down was fourteen; coverage (#3538) made fifteen; the eleven pg_
            sources of the PostgreSQL-target vocabulary (#3542 D2) made twenty-six; the three v2 families (#3691:
-           pg_io, pg_replication, pg_bloat) made twenty-nine. A moved count is a moved contract, and the
-           description on both SKUs spells the list out. */
-        Assert.Equal(29, FactScorer.KnownSources.Count);
+           pg_io, pg_replication, pg_bloat) made twenty-nine; the wave-3 blocking family's stub source (#3691
+           between waves: pg_blocking) made thirty. A moved count is a moved contract, and the description on
+           both SKUs spells the list out. */
+        Assert.Equal(30, FactScorer.KnownSources.Count);
 
         /* And the pg_ members are exactly PgTargetSources.All — declared once, registered once. */
         Assert.Equal(

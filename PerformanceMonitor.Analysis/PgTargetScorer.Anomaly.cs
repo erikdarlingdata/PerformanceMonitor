@@ -59,7 +59,10 @@ public static partial class PgTargetScorer
                the day their detector lands. Membership is vocabulary, not a bar; the lanes write no ramp. */
             or PgTargetFactKeys.AnomalyIoLatency
             or PgTargetFactKeys.AnomalyReplicationLag
-            or PgTargetFactKeys.AnomalyWalVolume;
+            or PgTargetFactKeys.AnomalyWalVolume
+            /* #3691 wave-3 plumbing (between waves): the blocking anomaly is a peak-vs-own-baseline z-score on one
+               series (blocked sessions per capture) — registered by shape ahead of lane 17, as the v2 three were. */
+            or PgTargetFactKeys.AnomalyBlocking;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>

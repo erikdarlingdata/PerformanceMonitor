@@ -421,11 +421,18 @@ public sealed class PgTargetWaitTests
         var quiet = new List<Fact> { Aurora(LockRelation, 0.6), Saturation(fired: false) };
         new FactScorer().ScoreAll(quiet);
         Assert.Empty(graph.GetActiveEdges(LockRelation, quiet.ToFactLookup()));
-        Assert.Single(graph.GetAllEdges(LockRelation));
-        Assert.Single(graph.GetAllEdges(Lock));
+        /* A Lock wait's own edges: saturation (lane 5) and, since the #3691 between-waves batch, the direct
+           PG_IDLE_IN_TRANSACTION blocking leaf lane 14 reported out-of-lane (the Single pin this replaces, moved
+           deliberately; PgTargetBetweenWavesV2Tests drives the traversal). With no idle fact in the set the second edge
+           is inactive and the wait's story is byte-identical to lane 5's — the Single path assertion below still holds. */
+        Assert.Equal(
+            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
+            graph.GetAllEdges(LockRelation).Select(e => e.Destination).Order(StringComparer.Ordinal));
+        Assert.Equal(
+            new[] { PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
+            graph.GetAllEdges(Lock).Select(e => e.Destination).Order(StringComparer.Ordinal));
         /* Both directions of the mesh are declared from saturation too — plus, since lane 14 of #3691, the
-           PG_IDLE_IN_TRANSACTION leaf (gated on the saturation fact's own parked share; PgTargetSessionsTests pins
-           it). A Lock wait's own edges stay Single: the direct Lock → idle leaf is not declared. */
+           PG_IDLE_IN_TRANSACTION leaf (gated on the saturation fact's own parked share; PgTargetSessionsTests pins it). */
         Assert.Equal(
             new[] { Lock, LockRelation, PgTargetFactKeys.IdleInTransaction }.Order(StringComparer.Ordinal),
             graph.GetAllEdges(PgTargetFactKeys.ConnectionSaturation).Select(e => e.Destination).Order(StringComparer.Ordinal));

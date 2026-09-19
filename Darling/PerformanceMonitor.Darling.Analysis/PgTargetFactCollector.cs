@@ -145,6 +145,9 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectIoFactsAsync(context, facts);
         await CollectReplicationFactsAsync(context, facts);
         await CollectBloatFactsAsync(context, facts);
+        /* wave 3 (#3691, between waves): the blocking family, last — its chain fact reads the idle-in-transaction and
+           Lock-wait facts already in the list to attribute a root by name. Stub until lane 17 lands. */
+        await CollectBlockingFactsAsync(context, facts);
 
         return facts;
     }
@@ -196,4 +199,5 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     private partial Task CollectIoFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectReplicationFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectBloatFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts);
 }

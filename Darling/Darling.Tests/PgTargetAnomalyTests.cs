@@ -128,7 +128,7 @@ public sealed class PgTargetAnomalyTests
     {
         /* Lanes 11, 12 and 15 filled pg_io_read_latency, pg_replay_lag_bytes and pg_wal_bytes_per_sec (each arm pinned in
            its own family's tests; the served ones also in s_pgMetricNames above); the wave-2 name still answers null. */
-        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers })
+        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers, MetricNames.PgBlockedSessions })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
@@ -142,19 +142,23 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.Contains("MetricNames.PgReplayLagBytes => ReplayLagBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.Contains("MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),", provider, StringComparison.Ordinal);
+        /* wave 3 (#3691 between waves): the blocking arm is reachable and null — a stub, not "no arm" — so lane 17 fills a partial. */
+        Assert.Contains("MetricNames.PgBlockedSessions => BlockedSessionsBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
 
         var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
         var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
         Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);" })
+        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);" })
             Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
 
         foreach (var (file, lane) in new[]
         {
             ("PgTargetAnomalyDetector.Io.cs", 11), ("PgTargetAnomalyDetector.Replication.cs", 12), ("PgTargetAnomalyDetector.Wal.cs", 15),
             ("PgTargetBaselineProvider.Io.cs", 11), ("PgTargetBaselineProvider.Replication.cs", 12), ("PgTargetBaselineProvider.Wal.cs", 15),
+            /* wave 3 (#3691 between waves): the blocking family's two Darling-side stubs. */
+            ("PgTargetAnomalyDetector.Blocking.cs", 17), ("PgTargetBaselineProvider.Blocking.cs", 17),
         })
         {
             var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file);
@@ -306,8 +310,15 @@ public sealed class PgTargetAnomalyTests
         Assert.DoesNotContain("pg_wait_sampling", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every FILLED detector is fenced and reads its bucket: the five v1 detectors in the root file, and (since the
+    /// #3691 between-waves batch re-pinned this from "five") the three v2 detectors in their own partials — I/O (lane
+    /// 11), replication (lane 12), WAL volume (lane 15). Eight. The wave-3 blocking detector is a stub
+    /// (<c>Task.CompletedTask</c>, no read to fence) and is named as the one exemption; lane 17 adds it to the list
+    /// the day it fills the body.
+    /// </summary>
     [Fact]
-    public void TheDetector_FencesEachOfFiveDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
+    public void TheDetector_FencesEachOfEightFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
@@ -321,6 +332,19 @@ public sealed class PgTargetAnomalyTests
             Assert.Contains("catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))", body, StringComparison.Ordinal);
             Assert.Contains("_baselineProvider.GetBaselineAsync(", body, StringComparison.Ordinal);
         }
+
+        /* The three filled v2 partials: one detector per file, the same fence and the same bucket read. */
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies") })
+        {
+            var partialCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
+            Assert.Contains("private async partial Task " + detector + "(", partialCode, StringComparison.Ordinal);
+            Assert.Contains("catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))", partialCode, StringComparison.Ordinal);
+            Assert.Contains("_baselineProvider.GetBaselineAsync(", partialCode, StringComparison.Ordinal);
+            Assert.DoesNotContain("DateTime.UtcNow", partialCode, StringComparison.Ordinal);
+        }
+        /* The one exemption, by name: the wave-3 stub has no body to fence. */
+        var blockingStub = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Blocking.cs"));
+        Assert.Contains("DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies) => Task.CompletedTask;", blockingStub, StringComparison.Ordinal);
 
         /* #3538 A7: the deadlock rate is per OBSERVED hour, never per nominal window. */
         var deadlock = code[code.IndexOf("DetectDeadlockRateAnomalies(AnalysisContext", StringComparison.Ordinal)..];
@@ -353,8 +377,10 @@ public sealed class PgTargetAnomalyTests
             .Where(PgTargetFactKeys.IsPgAnomalyKey)
             .ToList();
         /* Five v1 anomalies (lane 9) plus the three v2 ones the plumbing registered by shape (#3691: I/O latency,
-           replication lag, WAL volume — all z-score, all deviation-scored). */
-        Assert.Equal(8, anomalyKeys.Count);
+           replication lag, WAL volume — all z-score, all deviation-scored) plus the wave-3 blocking anomaly the
+           between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored). */
+        Assert.Equal(9, anomalyKeys.Count);
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
 
         foreach (var key in anomalyKeys)
         {

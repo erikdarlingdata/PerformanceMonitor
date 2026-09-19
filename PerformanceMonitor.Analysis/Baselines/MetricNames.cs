@@ -55,4 +55,10 @@ public static class MetricNames
     public const string PgWalBytesPerSec = "pg_wal_bytes_per_sec";
     /// <summary>Autovacuum workers busy per capture — declared for wave 2; no provider arm yet.</summary>
     public const string PgAutovacuumWorkers = "pg_autovacuum_workers";
+
+    /* #3691 wave-3 plumbing (the between-waves batch): the blocking family's baseline. Name only, the v2 shape — the
+       CTE is lane 17's (PgTargetBaselineProvider.Blocking.cs) and the arm answers null until it lands. */
+    /// <summary>Sessions blocked per capture — the count of <c>pg_blocking_edges</c> waiters in each collection, a
+    /// point series (no differencing). Lane 17.</summary>
+    public const string PgBlockedSessions = "pg_blocked_sessions";
 }

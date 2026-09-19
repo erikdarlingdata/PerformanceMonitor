@@ -28,16 +28,19 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// ever enrolled in the 4-day-raw CAGG tiering, PostgreSQL baseline CAGGs become a prerequisite and this
 /// comment is where that dependency is written down.</para>
 ///
-/// <para><b>The retention dependency, stated (D10).</b> Every table below is purged service-side at
-/// <c>CollectorScheduleDefaults.All[table].RetentionDays</c> = 30 (<c>pg_database_stats</c>, <c>pg_session_states</c>,
-/// <c>pg_wait_stats</c>, <c>pg_cpu_utilization</c>) and NONE is in <c>TimescaleSupport.RawTierCoverage</c>, the
-/// 4-day raw tier that #1757 found under the SQL Server baselines — <c>PgTargetAnomalyTests</c> pins both halves.
-/// So the supply is exactly the window: a 30-day question over 30 days of rows, with the purge grain eating the
-/// oldest sliver. Two things this does NOT cover, and where they go: retention is user-editable per collector,
-/// and <c>DarlingRetention.BaselineServingRawCollectors</c> floors the purge horizon at the baseline window only
-/// for the SQL Server raw-reading arms (<c>cpu_utilization</c>, <c>file_io_stats</c>) — the PostgreSQL tables
-/// need the same floor (out of this lane's files; reported); and if these tables are ever tiered to 4-day raw,
-/// PostgreSQL baseline CAGGs become a prerequisite and this comment is where that is written down.</para>
+/// <para><b>The retention dependency, stated (D10).</b> Every table the arms read is purged service-side at
+/// <c>CollectorScheduleDefaults.All[table].RetentionDays</c> — the v1 four (<c>pg_database_stats</c>,
+/// <c>pg_session_states</c>, <c>pg_wait_stats</c>, <c>pg_cpu_utilization</c>) and the v2 three (<c>pg_io_stats</c>,
+/// lane 11; <c>pg_replication_stats</c>, lane 12; <c>pg_write_stats</c>, lane 15) — and NONE is in
+/// <c>TimescaleSupport.RawTierCoverage</c>, the 4-day raw tier that #1757 found under the SQL Server baselines —
+/// <c>PgTargetAnomalyTests</c> pins both halves. So the supply is exactly the window: a 30-day question over 30
+/// days of rows, with the purge grain eating the oldest sliver. Retention is user-editable per collector, and
+/// <c>DarlingRetentionHorizons.BaselineServingRawCollectors</c> floors the purge horizon at the baseline window
+/// for every one of these seven exactly as it does for the SQL Server raw-reading arms (<c>cpu_utilization</c>,
+/// <c>file_io_stats</c>) — the v1 four since #3711, lane 12's table with its lane, lanes 11 and 15's with the
+/// #3691 between-waves batch; <c>BaselineSupplyTests</c> derives the floored set from the arms' own query text,
+/// so an arm added here without a floor fails there. If these tables are ever tiered to 4-day raw, PostgreSQL
+/// baseline CAGGs become a prerequisite and this comment is where that is written down.</para>
 ///
 /// <para><b>What each metric is, in one line</b> (the arms below carry the rest): <c>pg_tps</c> — transactions
 /// per second per collection, the reset-aware per-database difference the <c>PG_TPS</c> fact takes, summed and
@@ -197,6 +200,8 @@ WITH clean AS (
         MetricNames.PgIoReadLatency => IoReadLatencyBaselineQuery(),
         MetricNames.PgReplayLagBytes => ReplayLagBaselineQuery(),
         MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),
+        /* wave 3 (#3691, between waves): the blocking family's arm, null until lane 17 fills its partial. */
+        MetricNames.PgBlockedSessions => BlockedSessionsBaselineQuery(),
 
         _ => null,
     };
@@ -204,6 +209,7 @@ WITH clean AS (
     private static partial string? IoReadLatencyBaselineQuery();
     private static partial string? ReplayLagBaselineQuery();
     private static partial string? WalBytesPerSecBaselineQuery();
+    private static partial string? BlockedSessionsBaselineQuery();
 
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
 }

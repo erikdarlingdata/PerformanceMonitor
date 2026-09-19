@@ -69,17 +69,21 @@ public static class DarlingRetentionHorizons
     /// window; the provider binds <c>analysisTime − BaselineWindowDays</c>) without a word said. Same mechanism,
     /// same constant: the purge floors these at <c>BaselineMath.BaselineWindowDays</c>, the detector's own
     /// minimum-history gate. The set is engine-agnostic on purpose — a store purges its shared tables once for
-    /// the whole fleet, so the floor cannot depend on which engine a given server is. The v2 lanes add a member
-    /// the day their baseline arm reads a table directly (<c>pg_replication_stats</c>, lane 12's replay-lag point
-    /// series) — <c>BaselineSupplyTests</c> pins membership against the provider's arms so an arm without a floor
-    /// fails there rather than starving quietly.</para>
+    /// the whole fleet, so the floor cannot depend on which engine a given server is. A v2 lane's table joins the
+    /// set the day its baseline arm reads it directly: <c>pg_replication_stats</c> (lane 12's replay-lag point
+    /// series, added by that lane), and — the #3691 between-waves batch, because lanes 11 and 15 reported theirs
+    /// as out of their files — <c>pg_io_stats</c> (lane 11's <c>pg_io_read_latency</c>) and <c>pg_write_stats</c>
+    /// (lane 15's <c>pg_wal_bytes_per_sec</c>). Until then a 7-day PostgreSQL retention would have starved
+    /// <c>ANOMALY_PG_IO_LATENCY</c> and <c>ANOMALY_PG_WAL_VOLUME</c> the same silent way. <c>BaselineSupplyTests</c>
+    /// now DERIVES the expected membership from the provider's own query text (every <c>FROM pg_*</c> the arms
+    /// name), so the next arm without a floor fails there rather than starving quietly.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "cpu_utilization", "file_io_stats",
             "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
-            "pg_replication_stats",
+            "pg_replication_stats", "pg_io_stats", "pg_write_stats",
         };
 
     /// <summary>

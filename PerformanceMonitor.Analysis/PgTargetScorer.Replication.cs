@@ -402,6 +402,14 @@ public static partial class PgTargetScorer
     /// chosen, not measured; calibrate against the dogfood PostgreSQL fleet's co-fire rates before the next
     /// release. Every predicate reads the sibling's <see cref="Fact.BaseSeverity"/>, never its
     /// <see cref="Fact.Severity"/> (the vacuum family's emission-order lesson).
+    ///
+    /// <para><b>The WAL-volume co-fire reads the ANOMALY, not the shift (#3691 between waves, lane 15's report).</b>
+    /// Lane 12 wrote both WAL predicates against <c>PG_WAL_VOLUME_SHIFT</c>; lane 15 shipped that key as a CONTEXT
+    /// fact — base severity 0 by design, the numbers for the advice to state — and put the judgment in
+    /// <c>ANOMALY_PG_WAL_VOLUME</c>, so <c>BaseSeverity &gt; 0</c> on the shift was never true and both amplifiers
+    /// were inert. They now read the anomaly's base severity, the shape lane 15 used for the checkpoint family's
+    /// trigger amplifier (<c>PgTargetScorer.Write.cs</c>; <c>PgTargetWriteTests.TheCheckpointTriggerAmplifier_ReadsTheAnomaly_NotTheContextFact</c>),
+    /// and the graph's dead shift → slot edge is gone with them (<c>PgTargetRelationshipGraph.Replication.cs</c>).</para>
     /// </summary>
     private static partial List<AmplifierDefinition> ReplicationAmplifiers(string key) => key switch
     {
@@ -437,10 +445,10 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "PG_WAL_VOLUME_SHIFT co-fired — the primary is writing more WAL than its baseline; the standby is being offered more than it can apply",
+            Description = "ANOMALY_PG_WAL_VOLUME co-fired — the primary is writing more WAL than its own hour-of-week baseline; the standby is being offered more than it can apply",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue(PgTargetFactKeys.WalVolumeShift, out var f) && f.BaseSeverity > 0,
+            Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var f) && f.BaseSeverity > 0,
         },
     ];
 
@@ -462,10 +470,10 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "PG_WAL_VOLUME_SHIFT co-fired — the primary is writing more WAL than its baseline, so the pile behind this slot grows faster than its history says",
+            Description = "ANOMALY_PG_WAL_VOLUME co-fired — the primary is writing more WAL than its own hour-of-week baseline, so the pile behind this slot grows faster than its history says",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue(PgTargetFactKeys.WalVolumeShift, out var f) && f.BaseSeverity > 0,
+            Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var f) && f.BaseSeverity > 0,
         },
     ];
 

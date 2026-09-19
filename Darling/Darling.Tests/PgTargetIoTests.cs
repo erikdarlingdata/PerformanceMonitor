@@ -38,7 +38,7 @@ namespace Darling.Tests;
 /// <c>unavailable</c> for a different reason, and a window under the operations floor is stated and not graded.
 /// The bars are MEASURED (§B1) and the facts carry <c>threshold_lineage = 1</c> with the population named.
 /// The anomaly's floor / fallback sit inside the regular fact's bars in the stated order. The literal operations
-/// floor in the two hourly SQL texts equals the scorer's constant.</para>
+/// floor in the two quarter-hour SQL texts equals the scorer's constant.</para>
 ///
 /// <para><b>Every number asserted here was executed on this machine</b> through a net10.0 harness over the built
 /// assemblies, and the SQL against a throwaway PostgreSQL 18 / TimescaleDB store, before the first CI run.</para>
@@ -176,7 +176,7 @@ public sealed class PgTargetIoTests
     /* ───────────────────────── the constants ───────────────────────── */
 
     [Fact]
-    public void TheBars_AreOrderedFloorWarningFallbackCritical_TheMajorIsSixteen_AndTheOperationsFloorIsTheOneInBothHourlyReads()
+    public void TheBars_AreOrderedFloorWarningFallbackCritical_TheMajorIsSixteen_AndTheSampleFloorIsTheOneInBothQuarterHourReads()
     {
         Assert.Equal(2.0, AnomalyThresholds.PgIoLatencyFloorMs);
         Assert.Equal(10.0, PgTargetScorer.IoReadLatencyWarningMs);
@@ -187,11 +187,24 @@ public sealed class PgTargetIoTests
         Assert.True(AnomalyThresholds.PgIoLatencyFallbackMs < PgTargetScorer.IoReadLatencyCriticalMs);
         Assert.Equal(16, PgTargetScorer.IoStatIoMinimumMajor);
         Assert.Equal(1000.0, PgTargetScorer.IoMinimumOps);
+        /* #3691 between waves: the baseline and detector moved to the quarter-hour grain, and the per-sample reads
+           floor is a quarter-hour's share of the hourly one — the collector keeps IoMinimumOps over its WINDOW total. */
+        Assert.Equal(250.0, PgTargetScorer.IoBaselineBucketMinimumReads);
+        Assert.Equal(PgTargetScorer.IoMinimumOps / 4, PgTargetScorer.IoBaselineBucketMinimumReads);
 
-        /* The literal in the two hourly texts is the scorer's constant — a const string cannot splice a double. */
-        var floor = $"reads >= {PgTargetScorer.IoMinimumOps.ToString("0", CultureInfo.InvariantCulture)} /* PgTargetScorer.IoMinimumOps";
+        /* The literal in the two quarter-hour texts is the scorer's constant — a const string cannot splice a double. */
+        var floor = $"reads >= {PgTargetScorer.IoBaselineBucketMinimumReads.ToString("0", CultureInfo.InvariantCulture)} /* PgTargetScorer.IoBaselineBucketMinimumReads";
         Assert.Contains(floor, PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!, StringComparison.Ordinal);
         Assert.Contains(floor, PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
+        /* Neither quarter-hour read carries the hourly floor any more; the collector's window read never carried either. */
+        Assert.DoesNotContain("reads >= 1000", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("reads >= 1000", PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
+        /* The admission floor is stated with its lineage on the constant (unmeasured — §B1 distributed reads per hour, not per quarter-hour). */
+        var scorerText = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Io.cs");
+        var floorDoc = scorerText[..scorerText.IndexOf("public const double IoBaselineBucketMinimumReads", StringComparison.Ordinal)];
+        var floorSummary = floorDoc[floorDoc.LastIndexOf("/// <summary>", StringComparison.Ordinal)..];
+        Assert.Contains("unmeasured", floorSummary, StringComparison.Ordinal);
+        Assert.Contains("sample-ADMISSION floor, not a grading bar", floorSummary, StringComparison.Ordinal);
 
         /* Measured, and the scorer says so where the lineage census reads it; the population is named. */
         var scorer = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Io.cs");
@@ -239,17 +252,19 @@ public sealed class PgTargetIoTests
     }
 
     [Fact]
-    public void TheBaselineArm_IsHourly_PerIdentity_UnderTheFloor_AndEndsInTheOneScaffold()
+    public void TheBaselineArm_IsQuarterHourly_PerIdentity_UnderTheFloor_AndEndsInTheOneScaffold()
     {
         var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!;
         Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgIoReadLatency));
         Assert.EndsWith(PgBaselineProvider.RobustTierScaffold, sql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_io_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', collection_time) AS hour_start", sql, StringComparison.Ordinal);
-        Assert.Contains("PARTITION BY backend_type, context ORDER BY hour_start", sql, StringComparison.Ordinal);
+        /* #3691 between waves: the quarter-hour grain, on a fixed quarter-hour origin, so every server's samples are :00/:15/:30/:45. */
+        Assert.Contains("date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01') AS sample_start", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("date_trunc('hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("PARTITION BY backend_type, context ORDER BY sample_start", sql, StringComparison.Ordinal);
         Assert.Contains("object_type = 'relation'", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(raw_reads, 0))::DOUBLE PRECISION", sql, StringComparison.Ordinal);
-        Assert.Contains("SELECT hour_start AS collection_time, read_ms / reads AS v", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT sample_start AS collection_time, read_ms / reads AS v", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1 AND collection_time >= $2 AND collection_time < $3", sql, StringComparison.Ordinal);
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.Io.cs");
@@ -257,16 +272,17 @@ public sealed class PgTargetIoTests
     }
 
     [Fact]
-    public void TheDetectorRead_TakesTheSameHourlyQuantity_AndTheDetector_IsFencedAndStampsAMeasuredLineage()
+    public void TheDetectorRead_TakesTheSameQuarterHourQuantity_AndTheDetector_IsFencedAndStampsAMeasuredLineage()
     {
         var sql = PgTargetAnomalyDetector.IoLatencyWindowSql;
         Assert.Contains("FROM pg_io_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', collection_time) AS hour_start", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01') AS sample_start", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(ms_per_read) AS peak_ms_per_read", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*)         AS rated_samples", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1 AND collection_time >= $2 AND collection_time <= $3", sql, StringComparison.Ordinal);
-        /* The baseline and the window differ only in the closed upper bound — same CTEs, same floor. */
+        /* The baseline and the window differ only in the closed upper bound — same CTEs, same grain, same floor. */
         var baseline = PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!;
-        foreach (var shared in new[] { "hourly AS (", "deltas AS (", "per_hour AS (", "WHERE raw_reads IS NOT NULL", "read_ms / reads" })
+        foreach (var shared in new[] { "sampled AS (", "date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01')", "deltas AS (", "per_sample AS (", "WHERE raw_reads IS NOT NULL", "read_ms / reads", "reads >= 250 /* PgTargetScorer.IoBaselineBucketMinimumReads" })
         {
             Assert.Contains(shared, sql, StringComparison.Ordinal);
             Assert.Contains(shared, baseline, StringComparison.Ordinal);
@@ -280,6 +296,10 @@ public sealed class PgTargetIoTests
         Assert.Contains("MetricNames.PgIoReadLatency", code, StringComparison.Ordinal);
         Assert.Contains("PgIoLatencyFloorMs, PgIoLatencyFallbackMs", code, StringComparison.Ordinal);
         Assert.Contains("metadata[\"threshold_lineage\"] = 1", source, StringComparison.Ordinal);
+        /* The admission floor is published beside the measured bars, from the constant, never a literal. */
+        Assert.Contains("metadata[\"bucket_reads_floor\"] = PgTargetScorer.IoBaselineBucketMinimumReads;", source, StringComparison.Ordinal);
+        Assert.Contains("metadata[\"peak_sample_reads\"]", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("peak_hour_reads", source, StringComparison.Ordinal);
         Assert.DoesNotContain("DateTime.UtcNow", code, StringComparison.Ordinal);
     }
 
@@ -394,7 +414,9 @@ public sealed class PgTargetIoTests
 
         var statik = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyIoLatency)!;
         Assert.DoesNotContain("Anomalous spike", statik.Headline, StringComparison.Ordinal);
-        Assert.Contains("1,000-read floor", statik.Investigation, StringComparison.Ordinal);
+        Assert.Contains("peak QUARTER-HOUR milliseconds", statik.Investigation, StringComparison.Ordinal);
+        Assert.Contains("250-read floor", statik.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("1,000-read floor", statik.Investigation, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── THE EXIT CRITERION (gated) ───────────────────────── */
@@ -544,10 +566,14 @@ FROM generate_series(0, $5) AS n", windowStart, 240, UntimedServerId, UntimedSer
             Assert.True(bucket.IsTrustworthy, "the 30-day read-latency bucket is not trustworthy");
             Assert.InRange(bucket.Median, 1.3, 1.7);
             Assert.True(bucket.EffectiveRobustSigma > 0);
-            /* One hourly row per hour-of-week bucket per week is under RestoreThreshold (15) in 30 days: the arm answers
-               at the hour-of-DAY tier, as its comment states. Pinned so a grain change here is a deliberate one. */
-            Assert.Equal(BaselineTier.HourOnly, bucket.Tier);
-            Assert.Equal(0.85, bucket.Confidence, precision: 9);
+            /* #3691 between waves: four quarter-hour samples an hour put 16–20 in each hour-of-week bucket over 30 days —
+               at or over RestoreThreshold (15) — so the FULL tier is restored where lane 11's hourly arm collapsed to
+               hour-of-day at 0.85 (the pin this replaces, deliberately). Confidence is the Full tier's density
+               (samples / 20, capped at 1): ≥ 0.8 for 16 samples, above the 0.85 the collapse could ever reach only
+               when a bucket holds five weeks. Pinned so the next grain change is a deliberate one too. */
+            Assert.Equal(BaselineTier.Full, bucket.Tier);
+            Assert.True(bucket.SampleCount >= BaselineMath.RestoreThreshold, $"hour-of-week bucket holds {bucket.SampleCount} samples, under the restore threshold");
+            Assert.InRange(bucket.Confidence, 0.8, 1.0);
 
             var anomalies = await new PgTargetAnomalyDetector(postgres, baselines).DetectAnomaliesAsync(Context(ServerId, ServerName, windowStart, end));
             var anomaly = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyIoLatency);
@@ -556,7 +582,9 @@ FROM generate_series(0, $5) AS n", windowStart, 240, UntimedServerId, UntimedSer
             Assert.Equal(AnomalyThresholds.SigmaDisplayCap, anomaly.Metadata["deviation_sigma"]);
             Assert.Equal(0, anomaly.Metadata["baseline_low_quality"]);
             Assert.Equal(1, anomaly.Metadata["threshold_lineage"]);
-            Assert.True(anomaly.Metadata["peak_hour_reads"] >= PgTargetScorer.IoMinimumOps);
+            Assert.True(anomaly.Metadata["peak_sample_reads"] >= PgTargetScorer.IoBaselineBucketMinimumReads);
+            Assert.Equal(PgTargetScorer.IoBaselineBucketMinimumReads, anomaly.Metadata["bucket_reads_floor"]);
+            Assert.True(anomaly.Metadata["peak_sample_ticks"] > 0);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
             var service = new DarlingAnalysisService(postgres);

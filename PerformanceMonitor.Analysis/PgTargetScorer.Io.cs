@@ -104,11 +104,32 @@ public static partial class PgTargetScorer
     /// The operations floor under which a ms-per-op is stated and not graded. measured: servers with 1–17 reads
     /// per hour produced the calibration's p99 noise (a quotient over four reads), and the per-hour ms/read
     /// distribution stabilised above roughly a thousand reads an hour over 14 days × 50 Aurora PostgreSQL clusters
-    /// of the dogfood fleet, 2026-09-19 (§B1). Applied to the WINDOW total by the collector and PER HOUR by the
-    /// baseline and detector — the baseline SQL carries the same literal beside a comment naming this constant,
-    /// and <c>PgTargetIoTests</c> pins the two equal.
+    /// of the dogfood fleet, 2026-09-19 (§B1). Applied to the WINDOW total by the collector; the baseline and the
+    /// detector work at a finer grain and apply <see cref="IoBaselineBucketMinimumReads"/> instead.
     /// </summary>
     public const double IoMinimumOps = 1000.0;
+
+    /// <summary>
+    /// The reads floor a FIFTEEN-MINUTE sample must clear to enter the <c>pg_io_read_latency</c> baseline or to be
+    /// rated by the detector (#3691 between waves, lane 11's own proposal). Why the grain moved: at the hour grain
+    /// one sample per hour-of-week bucket per week is four or five in a 30-day window, under
+    /// <c>BaselineMath.RestoreThreshold</c> (15), so the hour-of-week tier was never restorable and every I/O
+    /// anomaly was judged against the hour-of-day collapse at 0.85 confidence; four samples an hour puts ~17–20 in
+    /// each bucket and the hour-of-week tier is the one the operator reads. The ms-per-read quotient survives
+    /// re-bucketing unchanged (it is a ratio of two sums), and the floor is what keeps the low-reads tail the
+    /// calibration read saw (1–17 reads an hour) from entering as noise at the finer grain — a quarter-hour's
+    /// share of <see cref="IoMinimumOps"/>, so a sample admitted here would have been admitted at the hour grain
+    /// had its hour run at the same rate. Lineage: the RESTORE threshold it serves is engine-defined (the shared
+    /// <c>BaselineMath.RestoreThreshold</c>); the 250 itself is <b>unmeasured</b> — chosen, not measured: the
+    /// calibration read (§B1) distributed reads per HOUR (per-server p50 spanning 1–790 k) and never a per-15-minute
+    /// read count, so calibrate against <c>pg_io_stats</c> at this grain before the next release. It is a
+    /// sample-ADMISSION floor, not a grading bar: the anomaly's fire/no-fire bars (<c>PgIoLatencyFloorMs</c>,
+    /// <c>PgIoLatencyFallbackMs</c>) stay measured and the fact keeps <c>threshold_lineage = 1</c>, and the floor is
+    /// published beside them as <c>bucket_reads_floor</c> so <c>get_analysis_facts</c> shows which reads counted.
+    /// The baseline and detector SQL carry the same literal beside a comment naming this constant;
+    /// <c>PgTargetIoTests</c> pins the two equal.
+    /// </summary>
+    public const double IoBaselineBucketMinimumReads = 250.0;
 
     /// <summary>engine-defined: <c>pg_stat_io</c> arrived in PostgreSQL 16; below it the view does not exist and
     /// the collector never wrote a row. The fact then says "absent", not 0.</summary>

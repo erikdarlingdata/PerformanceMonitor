@@ -148,6 +148,11 @@ public static partial class PgTargetAdvice
             /* v2 (#3691) lane 15: the WAL-volume anomaly's composer lives with its family (PgTargetAdvice.Write.cs). */
             case PgTargetFactKeys.AnomalyWalVolume:
                 return ComposeWalVolumeAnomaly(factsByKey);
+            /* wave 3 (#3691, between waves): the blocking anomaly's arm, declared with the stubs so lane 17 composes in
+               its family file (PgTargetAdvice.Blocking.cs) and never edits this switch. Null until then — which is what
+               the delegation-equality census expects of a stub, and never the SQL Server "Anomalous spike" composer. */
+            case PgTargetFactKeys.AnomalyBlocking:
+                return ComposeBlockingAnomaly(factsByKey);
 
             default:
                 return null;

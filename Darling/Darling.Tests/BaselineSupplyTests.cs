@@ -204,15 +204,20 @@ public class BaselineSupplyTests
     /// membership to the provider's raw-reading arms so neither side can drift alone. Since #3691 the
     /// PostgreSQL-target provider's raw sources are members too (the #1757 shape, PG edition): they have
     /// no rollup at all, so their user-editable schedule default was the only thing covering the window.
-    /// Four v1 sources, plus <c>pg_replication_stats</c> since lane 12's replay-lag arm.
+    /// Four v1 sources, plus the three v2 arms' tables (<c>pg_replication_stats</c> since lane 12; <c>pg_io_stats</c>
+    /// and <c>pg_write_stats</c> since the #3691 between-waves batch, lanes 11 and 15 having reported theirs as out
+    /// of their files). The count is the SQL Server pair plus whatever the provider reads — the PostgreSQL half is
+    /// derived (<see cref="PgTargetBaselineSources"/>), so a new arm moves this pin by itself.
     /// </summary>
     [Fact]
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
-        Assert.Equal(7, DarlingRetention.BaselineServingRawCollectors.Count);
+        var pgSources = PgTargetBaselineSources();
+        Assert.Equal(7, pgSources.Count);   /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats */
+        Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
-        foreach (var table in s_pgTargetBaselineSources)
+        foreach (var table in pgSources)
         {
             Assert.Contains(table, DarlingRetention.BaselineServingRawCollectors);
         }
@@ -226,35 +231,52 @@ public class BaselineSupplyTests
     }
 
     /// <summary>
-    /// The <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly (four v1, plus lane 12's
-    /// <c>pg_replication_stats</c>) — pinned by the PROVIDER's own query text, not by a second list, so a raw source
-    /// added to the provider without a floor entry fails here rather than starving quietly.
+    /// The <c>pg_*</c> hypertables <c>PgTargetBaselineProvider</c> reads directly — DERIVED from the provider's own
+    /// query text for every <c>MetricNames.Pg*</c> constant (reflection over the registry, so a metric declared
+    /// tomorrow is in the sweep the day it is declared), every <c>FROM pg_&lt;table&gt;</c> the arm names. Not a
+    /// hand list: the #3691 between-waves batch found two arms (lanes 11 and 15) whose tables a hand list had
+    /// missed, and the next lane cannot miss one this way — an arm reading a table the floor lacks fails
+    /// <see cref="BaselineServingRawCollectors_MatchTheRawReadingArms"/> by construction. A metric whose arm is
+    /// still a stub (null) contributes nothing, which is right: nothing is read, so nothing needs a floor.
     /// </summary>
-    private static readonly string[] s_pgTargetBaselineSources =
-        ["pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization", "pg_replication_stats"];
-
-    [Fact]
-    public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
+    private static System.Collections.Generic.List<string> PgTargetBaselineSources()
     {
-        var pgNames = new[] { MetricNames.PgTps, MetricNames.PgSessionCount, MetricNames.PgDeadlockRate, MetricNames.PgWaitMsPerSec, MetricNames.PgCpu, MetricNames.PgReplayLagBytes };
+        var pgNames = typeof(MetricNames).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("Pg", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToList();
+        Assert.True(pgNames.Count >= 9, "the MetricNames PostgreSQL registry sweep found too few names");
+
         var tablesRead = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         foreach (var name in pgNames)
         {
             var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(name);
-            Assert.False(string.IsNullOrWhiteSpace(sql), $"{name} has no PostgreSQL-target baseline query");
-            foreach (var table in s_pgTargetBaselineSources.Where(t => sql!.Contains("FROM " + t, StringComparison.Ordinal)))
+            if (sql is null) continue;   /* a stub arm reads nothing */
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(sql, @"\bFROM\s+(pg_\w+)"))
             {
-                tablesRead.Add(table);
+                tablesRead.Add(m.Groups[1].Value);
             }
         }
 
-        Assert.Equal(s_pgTargetBaselineSources.OrderBy(t => t, StringComparer.Ordinal), tablesRead.OrderBy(t => t, StringComparer.Ordinal));
+        return tablesRead.OrderBy(t => t, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The derivation itself, pinned: the seven tables the arms read today, by name, so a table quietly
+    /// leaving an arm (or a regex that stopped matching) is a visible change and not a smaller floor.</summary>
+    [Fact]
+    public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
+    {
+        Assert.Equal(
+            new[] { "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_replication_stats", "pg_session_states", "pg_wait_stats", "pg_write_stats" },
+            PgTargetBaselineSources());
+        /* Every derived table is a real collector table (the regex cannot admit a CTE named pg_something). */
+        Assert.All(PgTargetBaselineSources(), t => Assert.True(CollectorCatalog.All.Any(c => c.TargetTable == t), $"{t} is not a collector table"));
     }
 
     /// <summary>
     /// The purge SEAM, driven the way an operator drives it (#3691): a schedule shortened to 7 days yields the
     /// baseline-window horizon for every baseline-serving collector — the SQL Server pair (#1757) and the
-    /// PostgreSQL four — and yields 7 for a collector that serves no baseline, so the floor is a floor and not a
+    /// PostgreSQL seven the provider's arms read — and yields 7 for a collector that serves no baseline, so the floor is a floor and not a
     /// blanket. A setting ABOVE the window is honoured as given (the floor never shortens), and the destructive
     /// sink's one-day clamp still runs first, so a 0 becomes 1 for an unfloored table and 30 for a floored one.
     /// </summary>
@@ -271,7 +293,7 @@ public class BaselineSupplyTests
             Assert.Equal(90, DarlingRetention.EffectivePurgeRetentionDays(collector, 90));
         }
 
-        foreach (var table in s_pgTargetBaselineSources)
+        foreach (var table in PgTargetBaselineSources())
         {
             Assert.Equal(BaselineMath.BaselineWindowDays, DarlingRetention.EffectivePurgeRetentionDays(table, shortened));
         }

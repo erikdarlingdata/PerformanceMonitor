@@ -57,6 +57,8 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
         BuildIoEdges();
         BuildReplicationEdges();
         BuildBloatEdges();
+        /* wave 3 (#3691, between waves): the blocking chain, an empty stub until lane 17. */
+        BuildBlockingEdges();
     }
 
     private partial void BuildSaturationEdges();
@@ -67,6 +69,7 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
     private partial void BuildIoEdges();
     private partial void BuildReplicationEdges();
     private partial void BuildBloatEdges();
+    private partial void BuildBlockingEdges();
 
     /// <summary>
     /// The shared active-edge read, with the bad-actor alias resolved — see the class summary. Every edge
