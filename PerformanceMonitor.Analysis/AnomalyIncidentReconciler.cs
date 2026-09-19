@@ -52,8 +52,48 @@ namespace PerformanceMonitor.Analysis;
 /// db-scoped <c>ANOMALY_OBJECT_*</c> can therefore never fold into a finding in another database, and
 /// two different databases never share a folded incident.</para>
 ///
-/// <para>Pure and stateless — mutates only <see cref="AnalysisStory.IncidentId"/> on the passed
-/// stories, so it is directly unit-testable without any collector or store.</para>
+/// <para><b>The maintenance arm (#3704).</b> #3538 A9 (PR #3632) gave the graph three edges —
+/// <c>SCH_M</c>, <c>IO_WRITE_LATENCY_MS</c> and <c>WRITELOG</c> onto <c>RUNNING_JOBS</c>, each gated on
+/// the job having FIRED — so a maintenance window's REGULAR cards cluster into one incident. Those
+/// edges are keyed on the regular symptom facts, and an anomaly is exactly the case where the regular
+/// symptom did NOT fire: write latency or log flushes up against the server's own baseline while the
+/// absolute threshold held. So on a server running its own index-maintenance job for two hours, the
+/// engine produced four one-fact <c>ANOMALY_*</c> stories, none with a same-family parent to fold into,
+/// and paged four times without naming the job. The fix is a conditional entry in the FOLD-TARGET set,
+/// not a graph edge (the Round-2 rationale above stands): when an anomaly's resolved family is one of
+/// the three maintenance symptoms (<see cref="MaintenanceFamilies"/>), <c>RUNNING_JOBS</c> joins its
+/// candidate list LAST, so it folds onto the regular story that consumed the job — the job-rooted story,
+/// or a symptom story that reached it through #3632's edge. The fired-gate is structural rather than
+/// re-evaluated: a story carries <c>RUNNING_JOBS</c> in its <see cref="AnalysisStory.Path"/> only when
+/// the fact scored above zero (<see cref="InferenceEngine.BuildStories"/> roots at 0.5 or better, and
+/// the edges' predicate is <c>BaseSeverity &gt; 0</c>), and <c>FactScorer.ScoreJobFact</c> scores the
+/// running-long count on a (1, 3) ramp, so ONE job running long is base 0.5 — which is both "fired" and
+/// "roots a story". A present-but-quiet job (running, not running long) scores 0, drops out of the
+/// working set, roots nothing and is consumed by nothing, so no story carries it and the anomalies stay
+/// exactly as they were. There is therefore no "the job fired but no story carries it" case for the
+/// reconciler to mint an incident for. Anomalies outside the three families (CPU, memory, blocking,
+/// deadlocks, read latency, batch/session/query-duration, the db-scoped object pair) never gain the
+/// job as a target: #3632 declined those edges deliberately — a CPU spike during a rebuild is not the
+/// rebuild's card — and this arm honours the same line.</para>
+///
+/// <para><b>The folded anomaly names the job.</b> The incident's e-mail is led by its highest-severity
+/// member and the viewer/MCP cards render each finding's own frozen <see cref="AnalysisStory.StoryText"/>;
+/// the job story scores 0.5 for one long job while a fired anomaly scores 0.5–1.0 and amplifies from
+/// there, so the anomaly ordinarily leads and the job card may sit under the notify threshold and never
+/// reach the e-mail at all. The name lives on the <c>RUNNING_JOBS</c> fact's <see cref="Fact.ObjectName"/> (#3653,
+/// PR #3693) and reaches the operator only through composed advice frozen into StoryText, so when the
+/// caller passes the run's facts and a maintenance-family anomaly lands on the job's incident, one
+/// sentence naming the job is appended to the anomaly's frozen Investigation (read back with
+/// <see cref="FactAdvice.TryReadStoryText"/>, re-frozen with <see cref="FactAdvice.SerializeForStoryText"/>
+/// — the same <c>{h,i,r}</c> blob every card deserializes, so no renderer changes). The headline is
+/// left alone: it is <c>FactAdvice</c>'s arm and the anomaly's own measurement, and the e-mail's
+/// "Co-fired in this incident" line names the job card whenever it clears the threshold.</para>
+///
+/// <para>Stateless — mutates only <see cref="AnalysisStory.IncidentId"/> and, for the maintenance fold
+/// with facts supplied, <see cref="AnalysisStory.StoryText"/> on the passed stories, so it is directly
+/// unit-testable without any collector or store. The one-argument <c>Reconcile</c> is the pre-#3704
+/// signature, kept for the frozen <c>deprecated/Dashboard</c> twin: it folds by the same rule and
+/// writes no sentence, because the sentence needs the fact.</para>
 /// </summary>
 public static class AnomalyIncidentReconciler
 {
@@ -78,11 +118,48 @@ public static class AnomalyIncidentReconciler
     };
 
     /// <summary>
+    /// #3704: the three REGULAR symptom keys whose graph edge points at <c>RUNNING_JOBS</c>
+    /// (<c>RelationshipGraph.BuildMaintenanceEdges</c>, #3538 A9 / PR #3632) — the schema-lock, write and
+    /// log-flush pressure a long index rebuild, CHECKDB or reload produces. An anomaly whose resolved
+    /// family is one of these gains <see cref="JobKey"/> as its LAST fold-target candidate. A literal list
+    /// rather than a read off the graph because the reconciler is static and graph-less by design; the
+    /// test pins that every member has a "maintenance" edge onto the job and that no other mapped family
+    /// does, so the two cannot drift apart silently.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> MaintenanceFamilies =
+        new HashSet<string>(StringComparer.Ordinal) { "SCH_M", "IO_WRITE_LATENCY_MS", "WRITELOG" };
+
+    /// <summary>The long-running-job fact key — the maintenance edges' destination and this arm's extra fold target.</summary>
+    internal const string JobKey = "RUNNING_JOBS";
+
+    /// <summary>
+    /// A marker every appended job sentence starts with, so the append is idempotent (a second pass over
+    /// the same stories writes nothing) and a test can find the sentence without pinning its whole prose.
+    /// </summary>
+    internal const string JobSentenceMarker = "RUNNING_JOBS fired in the same window";
+
+    /// <summary>
     /// Rewrites the incident id of each <c>ANOMALY_*</c> story that has a same-run, same-database
     /// regular parent onto that parent's incident id. No-op when there are fewer than two
-    /// non-absolution stories or no regular stories to fold into.
+    /// non-absolution stories or no regular stories to fold into. The pre-#3704 signature: folds by every
+    /// rule the two-argument form does (including the maintenance arm, whose gate is structural) but
+    /// cannot name the job, because the name is on the fact and this form is not given the facts. The
+    /// live SKUs call the two-argument form; this one remains for the frozen <c>deprecated/Dashboard</c>.
     /// </summary>
-    public static void Reconcile(IReadOnlyList<AnalysisStory> stories)
+    public static void Reconcile(IReadOnlyList<AnalysisStory> stories) =>
+        Reconcile(stories, facts: null);
+
+    /// <summary>
+    /// Rewrites the incident id of each <c>ANOMALY_*</c> story that has a same-run, same-database
+    /// regular parent onto that parent's incident id, and — for a maintenance-family anomaly that lands
+    /// on the incident carrying the fired <c>RUNNING_JOBS</c> — appends one sentence naming the job to the
+    /// anomaly's frozen StoryText (#3704). <paramref name="facts"/> is the run's FULL scored fact list,
+    /// the same list <see cref="InferenceEngine.ClusterIntoIncidents"/> and <c>FactAdvice.PopulateStoryText</c>
+    /// were given; only the <c>RUNNING_JOBS</c> fact is read from it, for its fired bit and its
+    /// <see cref="Fact.ObjectName"/>. Null skips the sentence and changes nothing else. No-op when there
+    /// are fewer than two non-absolution stories or no regular stories to fold into.
+    /// </summary>
+    public static void Reconcile(IReadOnlyList<AnalysisStory> stories, IReadOnlyList<Fact>? facts)
     {
         if (stories is null)
             return;
@@ -118,13 +195,43 @@ public static class AnomalyIncidentReconciler
         if (regularByKey.Count == 0)
             return;
 
+        // #3704: the incident ids that CARRY the job — every regular story with RUNNING_JOBS on its path
+        // (the job-rooted story, or the symptom story that consumed it through a maintenance edge) and,
+        // through the union ClusterIntoIncidents already performed, every story stamped with the same id
+        // (a lone SCH_M story unions onto the job across its own edge without carrying the key itself).
+        // A maintenance-family anomaly that ends up on one of these ids gets the job sentence below. The
+        // set is empty whenever the job did not fire — a quiet RUNNING_JOBS scores 0, roots nothing and
+        // is consumed by nothing — which is the whole of the fired-gate on this path.
+        var jobIncidentIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var s in incidentStories)
+        {
+            if (!IsAnomaly(s.RootFactKey) && !string.IsNullOrEmpty(s.IncidentId) && FoldKeys(s).Contains(JobKey))
+                jobIncidentIds.Add(s.IncidentId);
+        }
+
+        // The job fact, when the caller passed the run's facts and it FIRED (the #3632 predicate, base
+        // severity above zero — one job running past its own history). Read once; it names the job for
+        // every folded anomaly. Null when the facts were not passed, the fact is absent, or it is quiet —
+        // in the last two cases jobIncidentIds is empty as well, by construction, so nothing is written.
+        var jobFact = facts?.FirstOrDefault(f => f is not null && f.Key == JobKey && f.BaseSeverity > 0);
+
         foreach (var anomaly in incidentStories)
         {
             if (!IsAnomaly(anomaly.RootFactKey))
                 continue;
 
             var db = anomaly.DatabaseName ?? string.Empty;
-            foreach (var family in ResolveFamilies(anomaly))
+            var families = ResolveFamilies(anomaly);
+            var isMaintenance = families.Any(MaintenanceFamilies.Contains);
+
+            // #3704: a maintenance-family anomaly tries its own family FIRST (a fired regular symptom is
+            // the closer parent, and when the job fired that story consumed the job through #3632's edge,
+            // so both routes land on one incident) and the job LAST — the case the live page hit, where
+            // no regular symptom fired and the job story was the only thing in the run that named the
+            // event. Every other anomaly keeps exactly its pre-#3704 candidates.
+            var candidates = isMaintenance ? families.Append(JobKey) : families;
+
+            foreach (var family in candidates)
             {
                 // Fold into the FIRST candidate family that has a real parent in the SAME database
                 // carrying an id. Never overwrite a solo anomaly's id with an empty one (StampClusters
@@ -135,7 +242,39 @@ public static class AnomalyIncidentReconciler
                     break;
                 }
             }
+
+            // #3704: say the job's name on the anomaly that now shares its incident. Only a maintenance-
+            // family anomaly (the CPU spike that happens to union into a wide incident is not the job's
+            // card), only an incident that carries the job, and only when the fact is in hand to name it.
+            if (isMaintenance && jobFact is not null && jobIncidentIds.Contains(anomaly.IncidentId))
+                AppendJobSentence(anomaly, jobFact);
         }
+    }
+
+    /// <summary>
+    /// Appends the one sentence tying a folded maintenance-family anomaly to the fired job, into the
+    /// anomaly's frozen <c>{h,i,r}</c> StoryText Investigation. Named when the fact carries the job's
+    /// name on <see cref="Fact.ObjectName"/> (#3653: the job furthest past its own history, chosen among
+    /// the running-long rows only), unnamed — pointing at the Running Jobs view — when it does not (a
+    /// store whose <c>job_name</c> was NULL). The register is <c>FactAdvice</c>'s <c>LinkedJobClause</c>,
+    /// which the SCH_M / IO_WRITE_LATENCY_MS / WRITELOG cards carry for the same link; this is the
+    /// anomaly-side counterpart, written here because the anomaly composers ran before the fold existed
+    /// and the fold is the only place that knows it happened. Idempotent on the marker. A StoryText that
+    /// is empty or not the frozen blob (a legacy shape no engine-built story has) is left untouched —
+    /// the reconciler does not own that format and will not guess at it.
+    /// </summary>
+    private static void AppendJobSentence(AnalysisStory anomaly, Fact jobFact)
+    {
+        var advice = FactAdvice.TryReadStoryText(anomaly.StoryText);
+        if (advice is null || advice.Investigation.Contains(JobSentenceMarker, StringComparison.Ordinal))
+            return;
+
+        var name = string.IsNullOrEmpty(jobFact.ObjectName) ? null : jobFact.ObjectName;
+        var sentence = name is null
+            ? $" {JobSentenceMarker} — an Agent job was running well past its normal duration (the Running Jobs view names it) — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards."
+            : $" {JobSentenceMarker} — Agent job `{name}` was running well past its normal duration — so this anomaly and that job are ONE incident, not two: a long index rebuild, CHECKDB or reload drives exactly this write, log-flush and schema-lock pressure, and moving or shortening the job is the fix for both cards.";
+
+        anomaly.StoryText = FactAdvice.SerializeForStoryText(advice with { Investigation = advice.Investigation + sentence });
     }
 
     /// <summary>

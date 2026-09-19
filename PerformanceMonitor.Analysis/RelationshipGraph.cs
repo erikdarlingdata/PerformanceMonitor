@@ -475,9 +475,14 @@ public class RelationshipGraph
     /// which key the persisted finding is rooted on, and the clustering needs one direction only.</para>
     ///
     /// <para>What this does NOT do: it does not model the maintenance SCHEDULE (a window that MOVES is
-    /// still undetectable), does not score recurrence (the same incident every night reads as new every
-    /// night), and does not name the job — the RUNNING_JOBS fact carries counts and durations, not a job
-    /// name; <c>get_running_jobs</c> names it. Those are the structural half of A9, deferred.</para>
+    /// still undetectable) and does not score recurrence (the same incident every night reads as new every
+    /// night) — the structural half of A9, deferred. Naming the job is not these edges' doing either, but
+    /// it is done: since #3653 (PR #3693) the collectors put the worst long-running job's name on the
+    /// RUNNING_JOBS fact's <see cref="Fact.ObjectName"/> and the job card states it. These edges reach only
+    /// the REGULAR symptom facts; the sub-threshold ANOMALY_* stories of the same window — the case where
+    /// the regular symptom did not fire — are folded onto the job's incident by
+    /// <see cref="AnomalyIncidentReconciler"/>'s maintenance arm (#3704), which uses the same three source
+    /// keys and the same fired-gate rather than a fourth edge.</para>
     /// </summary>
     private void BuildMaintenanceEdges()
     {
