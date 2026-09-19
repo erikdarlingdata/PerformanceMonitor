@@ -642,6 +642,17 @@ blocking count is distinct roots in a periodic SAMPLE of `pg_stat_activity` (ste
 sample, not an event log). Moving one does not move the other; the `enabled` switch in each pair governs
 both engines; both PostgreSQL keys are inert on a store with no PostgreSQL targets.
 
+**Where they land.** Every alert above goes to every channel configured in the Viewer's Settings →
+Notifications by default. Since V131 (#3598) that is the *parent* channel set, and a sparse routes table
+layered over it (Settings → Notifications → Manage Notification Routes…, read back by
+`get_notification_routes`) can send an alert *family* somewhere else: all eight PostgreSQL alerts are
+`performance` — the pages family — so a route on `performance` moves them together with their SQL Server
+namesakes, an exact-metric route on `PostgreSQL Wraparound Risk` moves that one alone, and an empty
+channel on a route inherits the parent's. The pre-routes workaround — a generic-webhook template branching
+on `{{metric}}` in an external router — still works. The Darling README's
+[notification routes](../Darling/README.md#notification-routes--sending-alert-families-to-different-channels)
+section has the taxonomy and the resolution order.
+
 **Proof on a healthy target is silence**, which is unfalsifiable, so verify the path rather than the
 outcome: confirm the collectors backing it have fresh rows (step 6 — `pg_wraparound_stats`,
 `pg_xmin_horizon`, `pg_replication_slots`, and `pg_deadlocks` / `pg_blocking` / `pg_session_states` for

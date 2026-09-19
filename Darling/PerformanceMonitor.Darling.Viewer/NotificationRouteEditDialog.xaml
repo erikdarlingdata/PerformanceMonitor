@@ -1,0 +1,101 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.NotificationRouteEditDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add Notification Route"
+        SizeToContent="Height" Width="620"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="NoResize"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- #3598: one route — what it matches, and a destination per channel type. MuteRuleEditDialog's shape. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
+                   HorizontalAlignment="Left" Margin="0,0,0,5"/>
+        <TextBlock Grid.Row="1"
+                   Text="Alerts that match go to the destinations below. Leave a channel empty to inherit the Notifications section's setting for it; fill it to send this family there instead (or to enable a channel the parent does not have). An exact metric name wins over its family."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+
+        <TextBlock Grid.Row="2" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <Grid Grid.Row="3" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
+                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery.">
+                <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
+            </ComboBox>
+            <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
+                     ToolTip="The exact metric_name, e.g. Deadlocks Detected or Compression Job Stuck. Case-insensitive."/>
+        </Grid>
+        <TextBlock Grid.Row="4" x:Name="FamilyDescriptionText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                   TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+        <Border Grid.Row="5" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+
+        <TextBlock Grid.Row="6" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+        <Grid Grid.Row="7" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="170"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsUrlBox" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Slack webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackUrlBox" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
+                     ToolTip="Headers, body template and proxy come from the Notifications section — a route redirects the POST, it does not re-author it."/>
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
+                     ToolTip="An Events API v2 integration key — a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
+                     ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
+        </Grid>
+
+        <CheckBox Grid.Row="8" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,12"
+                  ToolTip="A disabled route is skipped as if it did not exist; the alerts it matched fall to the next level."/>
+
+        <StackPanel Grid.Row="9" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+            <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise (#1828/#1859). -->
+            <Button Content="Save" Width="90" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
+            <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

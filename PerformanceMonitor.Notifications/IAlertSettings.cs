@@ -101,4 +101,18 @@ public interface IAlertSettings
     /// NOT a store column and survives store config reloads); Lite serves no web page and always returns empty.
     /// </summary>
     string TriageBaseUrl { get; }
+
+    /// <summary>
+    /// The sparse notification routes layered over the per-channel destinations above (#3598): a family or
+    /// exact-metric match with a destination per channel type, empty meaning "inherit the member above".
+    /// Resolved by <see cref="NotificationRouter.Resolve"/> once per firing, after the cooldown decision, in
+    /// both the email path and the webhook fan-out. A live read like every other member, so a store reload
+    /// that swaps the route list is honored on the next firing with no restart.
+    ///
+    /// <para>Defaulted to EMPTY on the interface rather than declared abstract, deliberately: an empty list
+    /// resolves every channel to the parent default and the fan-out is byte-identical to the pre-routes
+    /// one, so an adapter that does not implement this member has opted out of nothing — Lite has no
+    /// routes table and its adapter takes this default. Only Darling's store-backed adapter overrides it.</para>
+    /// </summary>
+    System.Collections.Generic.IReadOnlyList<NotificationRoute> NotificationRoutes => System.Array.Empty<NotificationRoute>();
 }

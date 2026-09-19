@@ -95,7 +95,18 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                in the double columns (Lite's shape). DetailText in full here whatever the channels
                were handed: this column is what the MCP reader, the triage endpoint and the Viewer's
                detail pane render, and what the mute pre-fill parses. */
-            string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+            /* #3598: where the posts went, on the finding's context exactly as DarlingAlertDeliverer records it
+               for engine alerts — an "Analysis: …" finding is a performance-family alert and routes like one,
+               so its history row must say so too. A finding always carries a context, so nothing is created
+               here; null when no channel reached resolution. */
+            var context = alert.Context;
+            if (result.Route is { } route)
+            {
+                context ??= new AlertContext();
+                context.Route = route.ToDto();
+            }
+
+            string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 alert.ServerId, alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,

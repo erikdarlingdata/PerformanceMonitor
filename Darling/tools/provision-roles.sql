@@ -123,6 +123,14 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
               generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
     ON config.config_notification TO viewer;
+-- V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns under the
+-- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
+-- are deliberately NOT granted. configured_channels is a GENERATED presence column (which channels a route
+-- sets, never their values) that exists so this carve can still answer "what does route 3 configure".
+-- Created by V131, so re-run this script AFTER the service has migrated your store to V131.
+REVOKE SELECT ON config.config_notification_routes FROM viewer;
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
+    ON config.config_notification_routes TO viewer;
 
 -- 3. config writes -- admin only.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;

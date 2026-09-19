@@ -174,6 +174,20 @@ public static class DarlingManagedRoles
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
             }),
+
+        /* V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns
+           under the SAME names, so the same classification applies verbatim — a webhook URL or a PagerDuty
+           routing key is a bearer secret wherever it sits. configured_channels is the GENERATED presence
+           column that exists precisely so a role denied the URLs can still say which channels a route sets
+           (column-level SELECT is per column; the expression runs at write time). smtp_recipients is
+           non-secret here as it is on the parent. */
+        new ViewerSecretTableAcl(
+            "config_notification_routes",
+            NonSecretColumns: new[]
+            {
+                "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at",
+            },
+            SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }),
     };
 
     /// <summary>
@@ -759,6 +773,17 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer}
 -- The BEACON is already covered: config_notification carries trg_bump_notification -> config_bump_version
 -- (SECURITY INVOKER), which UPDATEs config_service.config_version AS mcp, and the column grant above serves it.
 GRANT UPDATE (email_cooldown_minutes) ON {config}.config_notification TO {mcp};
+-- #3598 (V131): notification routes. The parent row's posture is that a network token-holder never READS a
+-- destination and never WRITES one either (the one config_notification write above is the cooldown column),
+-- and a route IS a destination -- pointing a family's Slack at a URL of the caller's choosing would let mcp
+-- redirect alert content (query text, server names) anywhere. So mcp gets exactly the two writes that move no
+-- destination: DELETE (alerts fall back to the parent, which the operator configured) and UPDATE on the
+-- enabled flag plus its modified_at stamp (set_notification_route_enabled / delete_notification_route), the
+-- shape of set_mute_rule_enabled / delete_mute_rule. No INSERT, no destination column. The READ side is the
+-- section-6 carve: route_id, metric_match, enabled, smtp_recipients and the GENERATED configured_channels
+-- presence column, never the URLs. The BEACON is covered: trg_bump_notification_routes -> config_bump_version
+-- (SECURITY INVOKER) UPDATEs config_service.config_version AS mcp, which the two-column grant above serves.
+GRANT UPDATE (enabled, modified_at), DELETE ON {config}.config_notification_routes TO {mcp};
 
 -- 9. Server onboarding (the MCP server-admin write tools): the mcp role's monitored-server writes, mirroring
 --    sections 7/8's model (an EXPLICIT single-table statement, NO ALTER DEFAULT PRIVILEGES). add_servers /

@@ -173,9 +173,13 @@ public sealed class DarlingManagedRolesTests
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
             },
+            /* V131 (#3598): the sparse routes table mirrors the parent's destination columns under the same
+               names, so the four webhook-class destinations are the same bearer secrets they are one table
+               up; smtp_recipients and the GENERATED configured_channels presence column are not. */
+            ["config_notification_routes"] = new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" },
         };
 
-        /* Exactly the three known secret-bearing tables, with the expected secret columns. */
+        /* Exactly the four known secret-bearing tables, with the expected secret columns. */
         Assert.Equal(
             expectedSecrets.Keys.OrderBy(k => k, StringComparer.Ordinal),
             DarlingManagedRoles.ViewerRestrictedConfigTables.Select(a => a.Table).OrderBy(k => k, StringComparer.Ordinal));

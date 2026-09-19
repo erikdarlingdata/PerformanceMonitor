@@ -111,6 +111,11 @@ public sealed class EmailSendCore
         var emailOutcome = AlertChannelOutcome.NotAttempted;
         string? sendError = null;
 
+        /* #3598: the email channel's routing decision, resolved AFTER this path's own cooldown and budget say
+           the alert sends (design point 2) and null otherwise. Recorded on the result so the deliverer can put
+           it on the history row when the webhook fan-out had nothing to say (an SMTP-only store). */
+        NotificationRouteDecision? emailRoute = null;
+
         /* The SMTP gate, hoisted so the same expression both decides whether email is attempted and
            answers "is any channel configured at all". A restatement of it somewhere else would be free to
            drift; a reader of the result needs the answer from the code that consults the settings. */
@@ -165,9 +170,18 @@ public sealed class EmailSendCore
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
                     render.Context, render.Prose, displayName);
 
+                /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
+                   else the parent's list, which is what `smtpConfigured` above already required to be non-empty,
+                   so the fall-through is never blank. Resolved here, after the cooldown and the budget, so a
+                   throttled alert never consults a route; with zero routes the list IS _settings.SmtpRecipients
+                   and the send is the pre-routes one. A route can only REDIRECT email: host, from and
+                   credentials live on the parent, and a recipient list without them is not a configuration. */
+                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+                var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
+
                 try
                 {
-                    await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, render.Context);
+                    await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, render.Context, recipients);
                     emailOutcome = AlertChannelOutcome.Delivered;
                     _cooldown.Stamp(decision);
 
@@ -242,8 +256,12 @@ public sealed class EmailSendCore
                 deliveryMode);
         }
 
+        /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is
+           the firing's routing record; the webhook's is preferred only because it names four channels to
+           email's one. Null when neither reached resolution. */
         return new EmailFanoutResult(
-            emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured);
+            emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured,
+            webhook.Route ?? emailRoute);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -282,7 +300,9 @@ public sealed class EmailSendCore
     /// Shared SMTP send helper with multipart/alternative (HTML + plain text) and an optional
     /// XML attachment (deadlock graph / blocked process report).
     /// </summary>
-    private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null)
+    /// <param name="recipients">#3598: the routed recipient list; null (the test-email path) means the
+    /// parent's <see cref="IAlertSettings.SmtpRecipients"/>.</param>
+    private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null, string? recipients = null)
     {
         using var smtpClient = new SmtpClient(settings.SmtpServer, settings.SmtpPort)
         {
@@ -317,7 +337,7 @@ public sealed class EmailSendCore
             message.Attachments.Add(new Attachment(stream, context.AttachmentFileName, "application/xml"));
         }
 
-        foreach (var recipient in settings.SmtpRecipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (var recipient in (recipients ?? settings.SmtpRecipients).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             message.To.Add(recipient);
         }
@@ -352,12 +372,19 @@ public sealed class EmailSendCore
 /// both of which read <see cref="AlertChannelOutcome.NotAttempted"/> for a muted alert on a fully
 /// configured store.
 /// </param>
+/// <param name="Route">
+/// #3598: where this firing's channels resolved to — the webhook fan-out's decision when it reached
+/// resolution, else the email path's, else null (throttled, folded, muted, or nothing configured). The
+/// deliverer records it on the history row's context. Trailing and defaulted so every existing
+/// construction and pin compiles unchanged.
+/// </param>
 public readonly record struct EmailFanoutResult(
     AlertChannelOutcome EmailOutcome,
     string? SendError,
     AlertChannelOutcome WebhookOutcome,
     string? WebhookSendError,
-    bool AnyChannelConfigured)
+    bool AnyChannelConfigured,
+    NotificationRouteDecision? Route = null)
 {
     /// <summary>Whether an SMTP send was attempted — configured, outside its cooldown, and not folded.</summary>
     public bool EmailAttempted =>

@@ -127,6 +127,8 @@ public partial class SettingsWindow : Window
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
+        /* #3598: so do the notification routes — same store, same reason. */
+        ManageNotificationRoutesButton.IsEnabled = _dataService is not null;
         EditSchedulesButton.IsEnabled = _dataService is not null;
 
         /* Read the authoritative operator config from the store (async), then apply read-only gating. */
@@ -1072,6 +1074,17 @@ public partial class SettingsWindow : Window
         }
 
         var window = new MuteRulesWindow(_dataService) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void ManageNotificationRoutesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var window = new NotificationRoutesWindow(_dataService) { Owner = this };
         window.ShowDialog();
     }
 

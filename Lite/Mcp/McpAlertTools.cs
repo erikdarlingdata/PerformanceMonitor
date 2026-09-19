@@ -102,6 +102,17 @@ public sealed class McpAlertTools
                        shared decision the Alerts History tab colours its rows by. */
                     severity,
                     severity_source = severitySource,
+                    /* #3598: the Darling twin's routing provenance, read through the shared serializer for
+                       parity of shape. This edition has no routes table and its deliverer never writes the
+                       member, so every row here answers null — every alert goes to every configured channel. */
+                    route = AlertContextSerializer.TryReadRoute(r.ContextJson) is { } route
+                        ? new
+                        {
+                            family = route.Family,
+                            route_id = route.RouteId,
+                            destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source }),
+                        }
+                        : null,
                     detail_text = r.DetailText,
                 };
             }).ToList();
@@ -335,6 +346,42 @@ public sealed class McpAlertTools
         catch (Exception ex)
         {
             return Task.FromResult(McpHelpers.FormatError("get_alert_settings", ex));
+        }
+    }
+
+    [McpServerTool(Name = "get_notification_routes"), Description(
+        "Gets the alert FAMILY taxonomy (#3598) — which metric names belong to self-monitor, reports, agent-jobs " +
+        "and performance — and reports that this edition has NO notification routes: every alert goes to every " +
+        "channel configured in Settings. The Darling edition's twin of this tool also lists the sparse routes " +
+        "layered over its central store's channel set; routes_supported is false here, so an agent asked to route " +
+        "a family on this instance should say so rather than look for a route to edit. The taxonomy is the shared " +
+        "one, so an alert seen in get_alert_history classifies identically on both editions.")]
+    public static Task<string> GetNotificationRoutes()
+    {
+        try
+        {
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                families = AlertFamily.All.Select(family => new
+                {
+                    family,
+                    metrics = AlertFamily.MetricFamilies
+                        .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
+                        .Select(kv => kv.Key)
+                        .OrderBy(m => m, StringComparer.Ordinal),
+                    metric_prefixes = AlertFamily.PrefixFamilies.Where(p => p.Family == family).Select(p => p.Prefix + "*"),
+                }),
+                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+                unclassified_metrics_route_as = AlertFamily.Performance,
+                routes_supported = false,
+                route_count = 0,
+                routes = Array.Empty<object>(),
+                note = "This edition delivers every alert to every configured channel; per-family routes are a Darling (central store) feature.",
+            }, McpHelpers.JsonOptions));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(McpHelpers.FormatError("get_notification_routes", ex));
         }
     }
 

@@ -148,9 +148,16 @@ public class WebhookAlertService
     /// Whether any webhook channel is configured, so a caller can tell "no channel is set up" from "a
     /// channel is set up and this alert did not go out". Answers from configuration only — it never
     /// consults a cooldown and never attempts anything.
+    ///
+    /// <para>#3598: a route can configure a channel the parent row does not have (a paging key on the
+    /// <c>performance</c> route alone is how "only pages page" is spelled), so an enabled route carrying any
+    /// webhook destination counts as configured too. Still configuration-only: whether THIS alert's family
+    /// resolves to that route is the fan-out's post-cooldown question, and an alert that resolves to nothing
+    /// reports <see cref="WebhookFanoutResult.NotAttempted"/> from there.</para>
     /// </summary>
     public bool AnyWebhookConfigured =>
-        TeamsConfigured || SlackConfigured || GenericConfigured || PagerDutyConfigured;
+        TeamsConfigured || SlackConfigured || GenericConfigured || PagerDutyConfigured
+        || NotificationRouter.AnyRouteConfiguresAWebhook(_settings.NotificationRoutes);
 
     /// <summary>
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
@@ -293,31 +300,40 @@ public class WebhookAlertService
                 _settings.TriageBaseUrl, serverName, metricName, nowUtc,
                 DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext));
 
-            if (TeamsConfigured)
+            /* #3598: WHERE each channel posts, resolved ONCE for the whole fan-out and AFTER the cooldown and
+               the budget above (design point 2) — so one firing is one delivery decision regardless of where
+               it lands, and a throttled alert never resolves at all. Exact-metric route, then family route,
+               then the parent row's own destination, per channel; with zero routes every destination below
+               IS the settings member the four gates above read, so the fan-out is the pre-routes one byte
+               for byte. A channel that resolves to nothing is not attempted, exactly as an unconfigured one
+               was not. The decision rides the result so the deliverer can record it on the history row. */
+            var route = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+
+            if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record("Teams", await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
-            if (SlackConfigured)
+            if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record("Slack", await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
-            if (GenericConfigured)
+            if (route.Generic.Destination is { } genericUrl)
             {
                 /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record("Generic", await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc));
             }
 
-            if (PagerDutyConfigured)
+            if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                Record("PagerDuty", await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.PagerDutyChannel, await TrySendPagerDutyAlertAsync(pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (sent)
@@ -344,9 +360,9 @@ public class WebhookAlertService
                 _repeatBudget.Release(budget);
             }
 
-            return sent ? WebhookFanoutResult.Delivered
-                : attempted ? WebhookFanoutResult.Failed(firstError)
-                : WebhookFanoutResult.NotAttempted;
+            return sent ? WebhookFanoutResult.Delivered with { Route = route }
+                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route }
+                : WebhookFanoutResult.NotAttempted with { Route = route };
         }
         catch (Exception ex)
         {
@@ -450,8 +466,11 @@ public class WebhookAlertService
 
     /// <summary>Posts to Teams. Returns null when the post succeeded, or the error text when it did not —
     /// a bool loses the reason, and the reason is what the alert log's <c>send_error</c> carries on a
-    /// <see cref="AlertDelivery.ChannelFailed"/> row.</summary>
+    /// <see cref="AlertDelivery.ChannelFailed"/> row. <paramref name="webhookUrl"/> is the ROUTED destination
+    /// (#3598) — the parent's URL when no route touched this firing — while the proxy stays the parent's:
+    /// a route says where a family lands, not how the channel type is reached.</summary>
     private async Task<string?> TrySendTeamsAlertAsync(
+        string webhookUrl,
         string metricName,
         string serverName,
         string currentValue,
@@ -466,7 +485,7 @@ public class WebhookAlertService
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
+            var error = await PostWebhookAsync(webhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
             {
@@ -757,8 +776,9 @@ public class WebhookAlertService
     #region Slack
 
     /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
-    /// <see cref="TrySendTeamsAlertAsync"/>.</summary>
+    /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/>.</summary>
     private async Task<string?> TrySendSlackAlertAsync(
+        string webhookUrl,
         string metricName,
         string serverName,
         string currentValue,
@@ -773,7 +793,7 @@ public class WebhookAlertService
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
+            var error = await PostWebhookAsync(webhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
             {
@@ -1754,6 +1774,7 @@ public class WebhookAlertService
     /// too: an operator config error still delivers nothing, and naming it is the difference between a
     /// fixable row and a bare "failed".</summary>
     private async Task<string?> TrySendGenericAlertAsync(
+        string webhookUrl,
         string metricName,
         string serverName,
         string currentValue,
@@ -1786,8 +1807,10 @@ public class WebhookAlertService
                 return bodyError;
             }
 
+            /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
+               redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                _settings.GenericWebhookUrl, payload, _settings.GenericWebhookProxyAddress, headers);
+                webhookUrl, payload, _settings.GenericWebhookProxyAddress, headers);
 
             if (error != null)
             {
@@ -2257,6 +2280,7 @@ public class WebhookAlertService
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
     /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
     private async Task<string?> TrySendPagerDutyAlertAsync(
+        string routingKey,
         string metricName,
         string serverName,
         string currentValue,
@@ -2275,9 +2299,11 @@ public class WebhookAlertService
                metric+server key when there is no incident. */
             var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context);
 
+            /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
+               proxy stay the parent's. */
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
+                routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
@@ -2663,7 +2689,13 @@ public class WebhookAlertService
 /// <see cref="AlertChannelOutcome.Failed"/>; a throttled or folded fan-out attempted nothing and so has
 /// nothing to report.
 /// </param>
-public readonly record struct WebhookFanoutResult(AlertChannelOutcome Outcome, string? SendError)
+/// <param name="Route">
+/// #3598: where the fan-out resolved each channel to, for the deliverer to record on the history row. Set
+/// only when resolution happened — delivered, failed, or resolved-to-nothing — and null on the outcomes
+/// that never got that far (throttled, folded, nothing configured), which is the ledger's "no destination
+/// was consulted". Trailing and defaulted so every existing construction and pin compiles unchanged.
+/// </param>
+public readonly record struct WebhookFanoutResult(AlertChannelOutcome Outcome, string? SendError, NotificationRouteDecision? Route = null)
 {
     /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
     /// is on its own health counter.</summary>

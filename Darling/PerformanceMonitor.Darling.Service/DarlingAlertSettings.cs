@@ -327,6 +327,13 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool PagerDutyUseEuRegion => _config.Webhooks.PagerDutyUseEuRegion;
     public string PagerDutyProxyAddress => _config.Webhooks.PagerDutyProxy;
 
+    /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
+    /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,
+    /// which the routes table's own trigger bumps, so a route authored in the Viewer lands on the next firing
+    /// with no restart. The ONLY adapter that overrides the interface's empty default: Lite has no routes
+    /// table and resolves every firing to its parent channels.</summary>
+    public IReadOnlyList<NotificationRoute> NotificationRoutes => _config.NotificationRoutes;
+
     /* Scheduled-analysis notifications (AN3): the shared AnalysisNotificationService's severity floor
        + per-finding re-notify cooldown. The severity floor is now a control-plane knob (config Stage
        1) read through the by-reference config seam — a store reload reflects it immediately; clamped

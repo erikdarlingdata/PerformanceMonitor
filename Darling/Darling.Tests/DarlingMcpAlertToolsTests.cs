@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// Pins the alerts MCP slice — the three READS (get_alert_history, get_alert_settings, get_mute_rules) plus the
 /// five Darling-only WRITES (update_alert_settings, create_mute_rule, update_mute_rule, delete_mute_rule,
 /// set_mute_rule_enabled) over the Postgres store.
-/// Ungated: the tool surface is EXACTLY the eight names (all static, on a [McpServerToolType] class, returning
+/// Ungated: the tool surface is EXACTLY the eleven names (all static, on a [McpServerToolType] class, returning
 /// Task&lt;string&gt;); each read param contract matches Lite's (plus the fleet-only optional server_name on
 /// get_alert_history); the write tools require exactly their target (settings_json / rule_id); the read SQL is
 /// Postgres-dialect + positional-param + excludes dismissed rows; the advertised tools/list schema is Gemini-clean
@@ -53,10 +53,16 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     {
         "create_mute_rule",
         "delete_mute_rule",
+        /* #3598 (V131): the notification-routes trio — the read publishes the family taxonomy and the routes
+           (destinations withheld, presence reported); the two writes are the ones that move no destination,
+           the set_mute_rule_enabled / delete_mute_rule shape. */
+        "delete_notification_route",
         "get_alert_history",
         "get_alert_settings",
         "get_mute_rules",
+        "get_notification_routes",
         "set_mute_rule_enabled",
+        "set_notification_route_enabled",
         "update_alert_settings",
         "update_mute_rule",
     };
@@ -67,7 +73,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheEightAlertTools()
+    public void ToolSurface_ExactlyTheElevenAlertTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -98,6 +104,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("delete_mute_rule", "rule_id")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     [InlineData("update_mute_rule", "rule_id,changes_json")]
+    [InlineData("set_notification_route_enabled", "route_id,enabled")]
+    [InlineData("delete_notification_route", "route_id")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -1003,10 +1011,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllEightTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllElevenTools()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(8, tools.Count);
+        Assert.Equal(AlertToolSurface.Length, tools.Count);
         var violations = tools.Values.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }
@@ -1020,6 +1028,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("delete_mute_rule", "rule_id")]
     [InlineData("set_mute_rule_enabled", "enabled,rule_id")]
     [InlineData("update_mute_rule", "changes_json,rule_id")]
+    [InlineData("get_notification_routes", "")]
+    [InlineData("set_notification_route_enabled", "enabled,route_id")]
+    [InlineData("delete_notification_route", "route_id")]
     public void AdvertisedSchema_RequiredParams_MatchTheContract(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Length == 0 ? Array.Empty<string>() : expectedCsv.Split(',');
