@@ -47,10 +47,15 @@ public class PgWaitStatsDeltaSkipTests
         ExcludedDatabases = Array.Empty<string>(),
     };
 
-    /// <summary>One row's worth of reader values in ordinal order (type_id, event_id, type_name, event_name, waits, wait_time_us).</summary>
+    /// <summary>The trailing postmaster_start_time (#3653 A5, ordinal 6). Every context here carries no persisted
+    /// prior, so the observation is a first sighting on each pass: it stages the value and forgets nothing, and
+    /// the skip semantics under test are undisturbed.</summary>
+    private static readonly DateTime Started = new(2026, 8, 29, 22, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>One row's worth of reader values in ordinal order (type_id, event_id, type_name, event_name, waits, wait_time_us, postmaster_start_time).</summary>
     private static object[] Row(long eventId, long waits, long waitTimeMicroseconds, int typeId = 10, string typeName = "IO", string eventName = "DataFileRead") => new object[]
     {
-        typeId, eventId, typeName, eventName, waits, waitTimeMicroseconds,
+        typeId, eventId, typeName, eventName, waits, waitTimeMicroseconds, Started,
     };
 
     private static async Task<List<PgWaitStatsCollector.Row>> ReadAsync(

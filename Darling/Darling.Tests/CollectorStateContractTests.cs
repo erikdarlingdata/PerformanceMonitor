@@ -126,9 +126,17 @@ public sealed class CollectorStateContractTests
            restarted or failed over while the HOST was down: the host's restart seed (#3614) then restores
            baselines read from the old instance, and only a prior that survived the host restart can catch
            that on the first pass. Both write change-only, so the steady state is zero state writes; neither
-           needed host code either. */
+           needed host code either.
+
+           SIX since the two residues #3694 left were closed. wait_stats persists the SAME identity pair under
+           its own name - it is first in both hosts' order, so its observation forgets before any SQL Server
+           delta family subtracts, where the CPU carrier (tenth) let five families fabricate an interval; the
+           CPU carrier stays for the operator who disables wait_stats, each with its own prior because the
+           load is by (server_id, collector_name). pg_wait_stats persists pg_postmaster_start_time(): Aurora's
+           wait counters live in instance memory and stats_reset does not move on a clean restart, so the
+           statements epoch could never speak for them. Same change-only discipline, no host code. */
         Assert.Equal(
-            new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling" },
+            new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

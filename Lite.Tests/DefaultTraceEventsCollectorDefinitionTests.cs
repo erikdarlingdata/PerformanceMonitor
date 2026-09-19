@@ -354,13 +354,21 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            pg_statement_stats persists pg_stat_statements_info.stats_reset -- the pair each compares its next
            observation against to detect an identity epoch (ServerEpoch). A MAX() over their tables cannot
            recover either: neither value is a stored column, and the case that matters most is a target that
-           restarted while the HOST was down, which only a prior that outlived the host's restart can catch. */
+           restarted while the HOST was down, which only a prior that outlived the host's restart can catch.
+
+           SIX since the two residues #3694 left were closed. wait_stats persists the SAME identity pair under
+           its own name -- first in both hosts' order, so its observation forgets before any SQL Server delta
+           family subtracts, where the CPU carrier (tenth) let five families fabricate an interval; the CPU
+           carrier stays for the operator who disables wait_stats, each with its own prior because the load is
+           by (server_id, collector_name). pg_wait_stats persists pg_postmaster_start_time(): Aurora's wait
+           counters live in instance memory and stats_reset does not move on a clean restart, so the statements
+           epoch could never speak for them. Same change-only discipline, no host code. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling" }, declaring);
+        Assert.Equal(new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
     }
 
     [Fact]

@@ -22,17 +22,26 @@ namespace PerformanceMonitor.Collectors;
 /// Azure filters server-side on the watermark while the ring buffer dedups client-side
 /// (its sample_time is computed and cannot be filtered in SQL).
 ///
-/// <para><b>Also the identity-epoch carrier for SQL Server targets (#3653 A5).</b> The ring-buffer batch
-/// already reads <c>sys.dm_os_sys_info</c> on every run for <c>ms_ticks</c> and <c>sqlserver_start_time</c>
-/// (the ring-buffer timestamps are converted off them), so the instance's start time is on the target side
-/// of the wire for free; a second result set hands it back with <c>@@SERVERNAME</c>, and <see cref="ReadAsync"/>
-/// gives the pair to <see cref="ServerEpoch.ObserveInstance"/>, which compares it against the pair persisted
-/// in <c>collector_state</c> under this collector's name and, on a value → different-value change, forgets
-/// every delta baseline for the server, marks the run's note, and persists the new pair. No new DMV, no new
-/// permission (the DMV was already required), no new round trip. The Azure SQL DB path carries no identity:
-/// its batch never touched the DMV (#1535's permission story) and a logical server's failover keeps its
-/// name, so an Azure target simply never observes an epoch here. The declared <see cref="StateKeys"/> are what
-/// makes both hosts load and persist the pair (#1962's generic wiring, CollectorStateContractTests).</para>
+/// <para><b>Also an identity-epoch carrier for SQL Server targets (#3653 A5) — the second one.</b> The
+/// ring-buffer batch already reads <c>sys.dm_os_sys_info</c> on every run for <c>ms_ticks</c> and
+/// <c>sqlserver_start_time</c> (the ring-buffer timestamps are converted off them), so the instance's start
+/// time is on the target side of the wire for free; a second result set hands it back with <c>@@SERVERNAME</c>,
+/// and <see cref="ReadAsync"/> gives the pair to <see cref="ServerEpoch.ObserveInstance"/>, which compares it
+/// against the pair persisted in <c>collector_state</c> under this collector's name and, on a value →
+/// different-value change, forgets every delta baseline for the server, marks the run's note, and persists
+/// the new pair. No new DMV, no new permission (the DMV was already required), no new round trip. The Azure
+/// SQL DB path carries no identity: its batch never touched the DMV (#1535's permission story) and a logical
+/// server's failover keeps its name, so an Azure target simply never observes an epoch here. The declared
+/// <see cref="StateKeys"/> are what makes both hosts load and persist the pair (#1962's generic wiring,
+/// CollectorStateContractTests).</para>
+///
+/// <para>This was the ONLY carrier until the carrier-order residue #3694 named was closed: this collector is
+/// tenth in both hosts' order, so the five delta families before it subtracted once from the dead instance
+/// on every epoch pass. <see cref="WaitStatsCollector"/>, first in the order, now carries the same pair on
+/// its own batch and normally does the forgetting; this carrier finds the calculator already on the new
+/// identity and only catches its persisted pair up (<see cref="ServerEpoch"/>, "two carriers, one forget").
+/// It is kept because <c>wait_stats</c> can be disabled by an operator on either host, and a carrier that
+/// can be switched off must not be the only one.</para>
 /// </summary>
 public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtilizationCollector.Row>
 {
@@ -222,8 +231,10 @@ SELECT
 
         /* #3653 A5: the batch's SECOND result set — the instance identity. Read off the payload and after
            it, because this collector subtracts nothing itself (CPU samples are gauges), so nothing here is
-           ordered before a delta call; the families that DO subtract and run after this collector in the
-           schedule are the ones the forget protects on this pass (see ServerEpoch's remarks on the order).
+           ordered before a delta call. With wait_stats carrying the same pair first in the order, the forget
+           has normally already happened by the time this runs and ObserveInstance only records the
+           observation; when wait_stats is disabled, this is the forget, and the families that subtract
+           after this collector are the ones it protects on the pass itself (see ServerEpoch's remarks).
            The Azure batch has no second set; the explicit engine gate says so rather than leaving it to a
            NextResult that happens to return false. A NULL start time (never on this path today, but the
            column is nullable) observes an unknown, which ServerEpoch treats as no evidence. */

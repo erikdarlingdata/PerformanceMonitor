@@ -25,6 +25,11 @@ public class PgWaitStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    /// <summary>The trailing <c>postmaster_start_time</c> column (#3653 A5, ordinal 6) every reader row carries — the
+    /// same value on every row of a pass, read off the first. The rows here drive contexts with no persisted
+    /// prior, so the observation is a first sighting: it persists and forgets nothing.</summary>
+    private static readonly DateTime Started = new(2026, 8, 1, 6, 30, 0, DateTimeKind.Utc);
+
     private static CollectorContext MakeContext(RecordingCollectorDeltaCalculator? deltas = null)
         => new()
         {
@@ -124,6 +129,26 @@ public class PgWaitStatsCollectorDefinitionTests
     }
 
     /// <summary>
+    /// #3653 A5: the postmaster epoch rides as the TRAILING select item, at ordinal 6, as an uncorrelated scalar
+    /// subquery (one InitPlan per statement, the shape #3694 proved for stats_reset) — after the six payload
+    /// ordinals, so every existing ordinal read holds, and NOT a payload column: PayloadColumns is unchanged
+    /// (its own pin above) and WritePayload never sees it.
+    /// </summary>
+    [Fact]
+    public void Query_CarriesThePostmasterStartTime_AsTheTrailingNonPayloadColumn()
+    {
+        var sql = PgWaitStatsCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        var selectList = sql[..sql.IndexOf("FROM aurora_stat_system_waits()", StringComparison.Ordinal)];
+        var items = selectList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+        Assert.Equal(7, items.Length);
+        Assert.EndsWith("(SELECT pg_postmaster_start_time()) AS postmaster_start_time", items[6], StringComparison.Ordinal);
+
+        Assert.DoesNotContain(PgWaitStatsCollector.Instance.PayloadColumns, c => c.Name.Contains("postmaster", StringComparison.Ordinal));
+        Assert.Equal(new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey }, PgWaitStatsCollector.Instance.StateKeys);
+    }
+
+    /// <summary>
     /// LEFT JOIN, never NATURAL JOIN as the AWS example uses: the documented type list omits type 2,
     /// Limitless adds type 12, and an inner join would silently drop any event whose type is unknown.
     /// </summary>
@@ -158,11 +183,11 @@ public class PgWaitStatsCollectorDefinitionTests
     public async Task ReadAsync_FiltersBackgroundNoiseWaitTypes()
     {
         var reader = new FakeCollectorDataReader(
-            new object[] { 6, 100663296L, "Client", "ClientRead", 3283144470L, 565758023440000L },
-            new object[] { 5, 83886080L, "Activity", "AuroraRuntimeMain", 855576L, 8563569140000L },
-            new object[] { 9, 150994944L, "Timeout", "VacuumDelay", 813456L, 4227680000L },
-            new object[] { 10, 167772160L, "IO", "DataFileRead", 2065211345L, 1523253130000L },
-            new object[] { 3, 50331648L, "Lock", "transactionid", 4395L, 11393070000L });
+            new object[] { 6, 100663296L, "Client", "ClientRead", 3283144470L, 565758023440000L, Started },
+            new object[] { 5, 83886080L, "Activity", "AuroraRuntimeMain", 855576L, 8563569140000L, Started },
+            new object[] { 9, 150994944L, "Timeout", "VacuumDelay", 813456L, 4227680000L, Started },
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 2065211345L, 1523253130000L, Started },
+            new object[] { 3, 50331648L, "Lock", "transactionid", 4395L, 11393070000L, Started });
 
         var rows = await PgWaitStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
@@ -178,7 +203,7 @@ public class PgWaitStatsCollectorDefinitionTests
     public async Task ReadAsync_KeepsWaitsWhoseTypeDidNotDecode()
     {
         var reader = new FakeCollectorDataReader(
-            new object[] { 12, 201326607L, DBNull.Value, DBNull.Value, 10L, 5000L });
+            new object[] { 12, 201326607L, DBNull.Value, DBNull.Value, 10L, 5000L, Started });
 
         var rows = await PgWaitStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
@@ -211,7 +236,7 @@ public class PgWaitStatsCollectorDefinitionTests
         };
 
         var reader = new FakeCollectorDataReader(
-            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L });
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L, Started });
         await PgWaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         /* Every delta call keys on the numeric event id, never on "DataFileRead". */
@@ -263,7 +288,7 @@ public class PgWaitStatsCollectorDefinitionTests
         deltas.IntervalByGroup["pg_wait_stats_time"] = 0;
 
         var reader = new FakeCollectorDataReader(
-            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L });
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L, Started });
         var rows = await PgWaitStatsCollector.Instance.ReadAsync(reader, MakeContext(deltas), CancellationToken.None);
 
         Assert.Equal(0, Assert.Single(rows).SampleIntervalSeconds);
@@ -271,7 +296,7 @@ public class PgWaitStatsCollectorDefinitionTests
         /* And with both groups agreeing, the measured value itself. */
         var steady = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
         var steadyRows = await PgWaitStatsCollector.Instance.ReadAsync(
-            new FakeCollectorDataReader(new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L }),
+            new FakeCollectorDataReader(new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L, Started }),
             MakeContext(steady), CancellationToken.None);
         Assert.Equal(137, Assert.Single(steadyRows).SampleIntervalSeconds);
     }
