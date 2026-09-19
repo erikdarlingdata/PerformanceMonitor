@@ -92,7 +92,10 @@ public sealed class DarlingAnalysisStoreTests
         PgFindingStore.GetMutedHashesSql,
         PgFindingStore.MuteStorySql,
         PgFindingStore.UnmuteStorySql,
-        PgFindingStore.CleanupOldFindingsSql
+        PgFindingStore.CleanupOldFindingsSql,
+        /* #3653 item 3: the recurrence labeler's prior-weeks read joins the dialect census; its own shape and
+           its Lite twin are pinned in RecurrenceLabelStoreReadTests. */
+        PgFindingStore.GetPriorOccurrencesSql
     };
 
     /* ---------------- ungated: V4 migration pins ---------------- */

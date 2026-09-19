@@ -325,6 +325,20 @@ public class AnalysisService
             // in its frozen StoryText — the name is on the fact (#3693), not on any story.
             AnomalyIncidentReconciler.Reconcile(stories, facts);
 
+            // 3.8. Label the chains that keep a weekly schedule (#3653 item 3, ruling Q3: LABEL, not discount).
+            // One store read of the prior three weeks — every chain that fired in this pass's hour×weekday
+            // slot on the target's clock, plus every RUNNING_JOBS card in any slot — then RecurrenceLabeler
+            // appends one sentence to the frozen StoryText of each story whose chain fired in this slot for
+            // three consecutive weeks ("recurring at this hour"), and one to each story tied to a fired job
+            // whose slot MOVED since last week ("maintenance window moved"). Severity is untouched, by ruling.
+            // Here — after the fold has finished rewriting StoryText and before the store copies it onto the
+            // finding — so the label is on the persisted row every card, e-mail and MCP read renders. The
+            // reference instant is the window's end: "now" for a scheduled pass, the anchor for an as-of one,
+            // so an exploratory pass is labelled relative to the instant it explores. A read the store could
+            // not make labels nothing and costs the pass nothing (FindingStore.GetPriorOccurrencesAsync).
+            var priorOccurrences = await _findingStore.GetPriorOccurrencesAsync(context, context.TimeRangeEnd);
+            RecurrenceLabeler.Label(stories, facts, context.TimeRangeEnd, priorOccurrences);
+
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 4. Mute-filter the stories into the surviving findings WITHOUT inserting yet (the
