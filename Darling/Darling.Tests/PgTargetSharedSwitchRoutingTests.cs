@@ -202,12 +202,15 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalyDeadlockRate));
         Assert.False(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyDeadlockRate));
 
-        /* A ratio the SQL Server ANOMALY_DEADLOCK_SPIKE arm would grade at 1.0. The PostgreSQL ramp is lane 9's
-           and is stubbed at 0 — so 0 here is the ROUTING: had the key reached the SQL Server arm it would read 1.0. */
-        var fact = Anomaly(PgTargetFactKeys.AnomalyDeadlockRate, ("ratio", 10.0));
+        /* A ratio the two ramps grade DIFFERENTLY: the SQL Server ANOMALY_DEADLOCK_SPIKE arm (3× → 0.5, 10× → 1.0)
+           reads 6× as 0.5 + 0.5 × 3/7 = 0.714; the PostgreSQL ramp (lane 9: 3× → 0.5, 9× → 1.0) reads it as 0.75 —
+           so 0.75 here is the ROUTING, not a coincidence of two ramps agreeing. */
+        var fact = Anomaly(PgTargetFactKeys.AnomalyDeadlockRate, ("ratio", 6.0));
         new FactScorer().ScoreAll([fact]);
         Assert.Equal(PgTargetScorer.ScoreRatioAnomaly(fact), fact.BaseSeverity);
-        Assert.Equal(0.0, fact.BaseSeverity);
+        Assert.Equal(0.75, fact.BaseSeverity, precision: 9);
+        Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalyWaitProfile));
+        Assert.False(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyWaitProfile));
     }
 
     [Fact]
@@ -327,8 +330,13 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.BadActorKey(7)));
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
-           "Anomalous spike in PG_WAIT_PROFILE" for it. */
-        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyWaitProfile));
+           "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from
+           "null" to "the PostgreSQL block, and not the SQL Server one". */
+        var pgWaitProfile = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyWaitProfile);
+        Assert.NotNull(pgWaitProfile);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyWaitProfile), pgWaitProfile);
+        Assert.DoesNotContain("Anomalous spike", pgWaitProfile!.Headline, StringComparison.Ordinal);
+        Assert.NotEqual(FactAdvice.GetForFactKey("ANOMALY_WAIT_PROFILE"), pgWaitProfile);
 
         /* The SQL Server side is untouched. */
         Assert.NotNull(FactAdvice.GetForFactKey("CXPACKET"));

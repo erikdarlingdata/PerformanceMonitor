@@ -131,4 +131,86 @@ public static class AnomalyThresholds
     public const decimal ObjectGrowthMbThreshold = 100m;   // ignore tables that grew less than 100 MB
     public const double ObjectGrowthPctThreshold = 20.0;   // ...and less than 20% day-over-day
     public const long ObjectLockWaitMsDeltaThreshold = 60000; // 1 minute of new lock waits
+
+    /* ── #3542 lane 9: the PostgreSQL-TARGET detectors' floors and bars (PgTargetAnomalyDetector). ──
+
+       These inherit the SQL Server detectors' METHOD — the #1486 magnitude floor as the z-path's sanity ceiling,
+       the strictly-higher absolute-fallback bar for an untrustworthy baseline, the two never AND-ed into
+       blindness — and NONE of their numbers (#3538 A5 via #3605: "no PostgreSQL bar may be a SQL Server constant
+       reused by value"). 500 requests/sec and 50 connections are SQL Server magnitudes: a PostgreSQL default
+       install caps connections at max_connections = 100, so SessionCountFallback (500) would sit above most
+       ceilings and never fire, and the connection-saturation family would have said everything first.
+
+       Every one of these is UNMEASURED — chosen, not measured — and the detector stamps threshold_lineage = 0 on
+       every fact it fires so get_analysis_facts shows it. The calibrating read for each is named on the constant;
+       all of them are one pass over the dogfood PostgreSQL fleet's 30-day raw series (the V120 method that
+       produced the deadlock tiers). The one exception is the deadlock-rate fallback, which is an alias of a
+       MEASURED bar and says so. */
+
+    /// <summary>Magnitude floor for the TPS z-detector: below fifty transactions a second a deviation is a
+    /// quiet server's noise however many sigmas it reads. unmeasured: chosen, not measured — calibrate against
+    /// the per-server distribution of the pg_database_stats transaction rate before the next release.</summary>
+    public const double PgTpsFloor = 50.0;                    // transactions/sec
+
+    /// <summary>Absolute-fallback bar for TPS on an untrustworthy baseline: ten times the floor, so a young store
+    /// fires only on a rate that is large on any PostgreSQL. unmeasured: chosen, not measured — calibrate against
+    /// pg_database_stats (the same distribution's upper tail) before the next release.</summary>
+    public const double PgTpsFallback = 500.0;                // transactions/sec
+
+    /// <summary>Magnitude floor for the session-count z-detector, a COUNT because a fraction of max_connections is
+    /// meaningless as a constant (the ceiling is per server, and the detector cannot see the config fact — the
+    /// ceiling-aware arm is PG_CONNECTION_SATURATION, into which this anomaly folds). Twenty is a fifth of the
+    /// shipped default ceiling. unmeasured: chosen, not measured — calibrate against the per-capture
+    /// total_sessions distribution in pg_session_states before the next release.</summary>
+    public const double PgSessionCountFloor = 20.0;           // sessions
+
+    /// <summary>Absolute-fallback bar for session count on an untrustworthy baseline: twice the shipped default
+    /// max_connections, so it fires only on a pool that has been raised well past the default — on a default
+    /// ceiling the saturation fact is the never-blind arm and this one stays quiet by design (it would be the
+    /// same finding twice). unmeasured: chosen, not measured — calibrate against pg_session_states before the
+    /// next release.</summary>
+    public const double PgSessionCountFallback = 200.0;       // sessions
+
+    /// <summary>Magnitude floor for the Aurora CPU z-detector, on <c>acu_utilization_percent</c> — percent of
+    /// the CONFIGURED capacity ceiling (#3281), never the percent-of-allocated raw reading. Under forty percent
+    /// of the ceiling the instance has more headroom than it is using, whatever its own history says.
+    /// unmeasured: chosen, not measured — calibrate against pg_cpu_utilization before the next release.</summary>
+    public const double PgCpuFloorPct = 40.0;                 // % of configured capacity
+
+    /// <summary>Absolute-fallback bar for Aurora CPU on an untrustworthy baseline: the fleet card's own Critical
+    /// line on the same quantity (ServerHealthThresholds.CpuCriticalPercent — repeated because this assembly
+    /// references nothing; PgTargetAnomalyTests pins the pair equal), so a young store's CPU anomaly and its card
+    /// cannot disagree about the colour of one minute. unmeasured: that ladder is stated against a quantity, not
+    /// read off a distribution — calibrate against pg_cpu_utilization before the next release.</summary>
+    public const double PgCpuFallbackPct = 95.0;              // % of configured capacity
+
+    /// <summary>The Aurora wait-profile detector's magnitude floor AND absolute-fallback bar (one number on both
+    /// paths, the SQL Server wait profile's shape): all-types wait milliseconds per second, CPU excluded — 500 is
+    /// half of one backend continuously waiting. unmeasured: chosen, not measured — calibrate against the
+    /// per-collection all-types rate in pg_wait_stats before the next release. Stock PostgreSQL's SAMPLED
+    /// estimate has no arm in v1 (its resolution floor and per-backend-sample unit give it a different noise
+    /// distribution), so there is deliberately no sampled twin of this bar yet.</summary>
+    public const double PgWaitProfileFallbackMsPerSec = 500.0;   // ms of waiting per second of observed time
+
+    /// <summary>The deadlock-rate ratio detector's magnitude floor, a RATE per observed hour (#3538 A7: never a
+    /// count over the window, which would scale with hours_back) — under one deadlock an hour the ratio is the
+    /// arithmetic of a near-empty numerator. unmeasured: chosen, not measured — calibrate against the
+    /// pg_database_stats deadlock delta distribution before the next release.</summary>
+    public const double PgDeadlockRateFloorPerHour = 1.0;     // deadlocks per observed hour
+
+    /// <summary>The deadlock-rate detector's absolute-fallback bar on an untrustworthy baseline: the Warning tier
+    /// the PG_DEADLOCK_RATE fact itself grades at, BY REFERENCE — measured (p99.94 of deadlocks per server-hour,
+    /// 14 days × 43 servers, #3368; see PgTargetScorer.DeadlockWarnPerHour). A young store's deadlock anomaly then
+    /// fires exactly when the regular fact does and folds into it, which is the honest reading of "no baseline
+    /// yet": the alert band, not a made-up multiple.</summary>
+    public const double PgDeadlockRateFallbackPerHour = PgTargetScorer.DeadlockWarnPerHour;
+
+    /// <summary>The PostgreSQL ratio families' firing multiple (deadlock rate; the wait profile's classical
+    /// trigger): the window's per-hour or per-second rate over the same hour-of-week's baseline mean. Three is
+    /// the multiple at which a tripled rate against its own history is a workload change rather than the
+    /// bucket's dispersion. unmeasured: chosen, not measured — the SQL Server event-ratio detector happens to
+    /// use the same multiple, and this is NOT an alias of it: the two instruments must stay free to calibrate
+    /// apart, so calibrate this one against the per-server ratio distribution over pg_database_stats and
+    /// pg_wait_stats before the next release.</summary>
+    public const double PgRatioAnomalyThreshold = 3.0;
 }

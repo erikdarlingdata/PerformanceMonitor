@@ -8,6 +8,7 @@
 
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -27,10 +28,27 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// ever enrolled in the 4-day-raw CAGG tiering, PostgreSQL baseline CAGGs become a prerequisite and this
 /// comment is where that dependency is written down.</para>
 ///
-/// <para>Skeleton in the plumbing lane: every metric resolves to null ("no baseline"), so the filled
-/// detectors' <c>AnomalyGate</c> calls take the never-blind absolute-fallback path until lane 9 lands the five
-/// <c>clean</c> CTEs (TPS, session count, deadlock rate, wait ms/sec, CPU) under metric names added to the
-/// shared <c>MetricNames</c>.</para>
+/// <para><b>The retention dependency, stated (D10).</b> Every table below is purged service-side at
+/// <c>CollectorScheduleDefaults.All[table].RetentionDays</c> = 30 (<c>pg_database_stats</c>, <c>pg_session_states</c>,
+/// <c>pg_wait_stats</c>, <c>pg_cpu_utilization</c>) and NONE is in <c>TimescaleSupport.RawTierCoverage</c>, the
+/// 4-day raw tier that #1757 found under the SQL Server baselines — <c>PgTargetAnomalyTests</c> pins both halves.
+/// So the supply is exactly the window: a 30-day question over 30 days of rows, with the purge grain eating the
+/// oldest sliver. Two things this does NOT cover, and where they go: retention is user-editable per collector,
+/// and <c>DarlingRetention.BaselineServingRawCollectors</c> floors the purge horizon at the baseline window only
+/// for the SQL Server raw-reading arms (<c>cpu_utilization</c>, <c>file_io_stats</c>) — the PostgreSQL tables
+/// need the same floor (out of this lane's files; reported); and if these tables are ever tiered to 4-day raw,
+/// PostgreSQL baseline CAGGs become a prerequisite and this comment is where that is written down.</para>
+///
+/// <para><b>What each metric is, in one line</b> (the arms below carry the rest): <c>pg_tps</c> — transactions
+/// per second per collection, the reset-aware per-database difference the <c>PG_TPS</c> fact takes, summed and
+/// rated over the collection's own gap; <c>pg_session_count</c> — the denormalised <c>total_sessions</c> of
+/// each capture; <c>pg_deadlock_rate</c> — deadlocks per HOUR per collection off the same difference;
+/// <c>pg_wait_ms_per_sec</c> — the Aurora all-types wait rate under the three-state interval, CPU excluded;
+/// <c>pg_cpu</c> — percent of the configured capacity ceiling (Aurora only). Stock PostgreSQL's SAMPLED wait
+/// estimate gets NO baseline in v1: a per-backend-sample count quantised at <c>profile_period</c> has a different
+/// noise distribution from a measured microsecond sum, and a bucket that mixed the two (or a threshold tuned on
+/// one applied to the other) would be the unit error adversarial item A names. When a sampled arm arrives it is
+/// its own metric name, never this one.</para>
 /// </summary>
 public sealed class PgTargetBaselineProvider : PgBaselineProvider
 {
@@ -39,13 +57,139 @@ public sealed class PgTargetBaselineProvider : PgBaselineProvider
     {
     }
 
+    /* The per-database difference, verbatim from DarlingPgDatabaseReader.PgDatabaseSql through the PG_TPS fact's
+       read (PgTargetFactCollector.Database.cs) — the sixth site of the shape, and it must agree with the other
+       five or the baseline a rate is judged against is not the rate the fact states. Per-series LAG under
+       PARTITION BY database_name; GREATEST(raw, 0) so a rewound counter adds nothing; the explicit reset recorded
+       as ROW_NUMBER() > 1 AND stats_reset IS DISTINCT FROM its LAG (the NULL → timestamp first-reset trap that
+       read documents, not re-derived here). The interval is the series' own gap — LAG(collection_time) — taken
+       as MAX per collection so every database's row in one collection shares one denominator; a collection
+       whose predecessor is missing (the window's first, or a database's first sighting) has a NULL gap and
+       drops out of clean, so the first row after a collector outage is rated over the whole outage (a correct
+       per-second rate) and the first row of a series is never rated at all. */
+    private const string DatabaseCounterDeltasCte = @"
+WITH sampled AS (
+    SELECT database_name,
+           collection_time,
+           (xact_commit + xact_rollback) - LAG(xact_commit + xact_rollback) OVER series AS raw_xacts,
+           deadlocks - LAG(deadlocks) OVER series AS raw_deadlocks,
+           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER series))) AS interval_sec,
+           (ROW_NUMBER() OVER series > 1
+            AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
+    FROM pg_database_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    WINDOW series AS (
+        PARTITION BY database_name
+        ORDER BY collection_time
+    )
+),
+per_collection AS (
+    SELECT collection_time,
+           SUM(GREATEST(raw_xacts, 0))::DOUBLE PRECISION AS xacts,
+           SUM(GREATEST(raw_deadlocks, 0))::DOUBLE PRECISION AS deadlocks,
+           MAX(interval_sec) AS interval_sec
+    FROM sampled
+    WHERE raw_xacts IS NOT NULL
+    GROUP BY collection_time
+),";
+
     /// <summary>
     /// The PostgreSQL-target metric → SQL map. Internal so Darling.Tests can pin every query's table and shape
-    /// ungated, as <c>PgBaselineProvider.GetBaselineQuery</c> is pinned.
-    /// <para>/* filled by lane 9 — one arm per metric name, each `WITH clean AS (…)," + RobustTierScaffold`. */</para>
+    /// ungated, as <c>PgBaselineProvider.GetBaselineQuery</c> is pinned. One arm per metric name, each a CTE chain
+    /// ending in <c>clean(collection_time, v)</c> followed by the ONE <see cref="PgBaselineProvider.RobustTierScaffold"/>,
+    /// so every PostgreSQL bucket carries the eight robust columns and the sentinel tiers. Window bounds are
+    /// <c>&gt;= $2 AND &lt; $3</c>, the SQL Server arms' half-open shape, and every bound is a parameter — the base
+    /// class binds <c>analysisTime.AddDays(-BaselineWindowDays)</c> and <c>analysisTime</c> naive-UTC, never a bare
+    /// <c>now()</c>, so an anchored pass (#2506) baselines the 30 days before ITS window.
     /// </summary>
     internal static string? GetPgTargetBaselineQuery(string metricName) => metricName switch
     {
+        /* Transactions per second: the summed per-database difference over the collection's own gap. The
+           ::DOUBLE PRECISION cast is the io-arm rule — STDDEV_SAMP over numeric can overflow System.Decimal at
+           materialization. No restart-signature exclusion (the SQL Server batch-request arm drops the first 0
+           after a >1000 sample): the PostgreSQL counters are differenced with the reset recorded explicitly and
+           a rewind clamped to 0, so a restart reads as ONE zero-or-small interval, which a median/MAD frame
+           absorbs — the classical arm needed the exclusion because a restart poisoned a mean. */
+        MetricNames.PgTps => DatabaseCounterDeltasCte + @"
+clean AS (
+    SELECT collection_time, xacts / interval_sec AS v
+    FROM per_collection
+    WHERE interval_sec > 0
+)," + RobustTierScaffold,
+
+        /* Deadlocks per HOUR per collection, so the bucket mean is directly comparable to the window's
+           deadlocks / observed hours (the PG_DEADLOCK_RATE fact's unit) and the ratio is unit-free. Mostly zeros
+           on a healthy server, which is the point: the median and MAD sit at 0, EffectiveRobustSigma reads 0,
+           and the detector judges the RATIO against the mean — the event-family shape — rather than a modified
+           z against a collapsed frame. */
+        MetricNames.PgDeadlockRate => DatabaseCounterDeltasCte + @"
+clean AS (
+    SELECT collection_time, deadlocks * 3600.0 / interval_sec AS v
+    FROM per_collection
+    WHERE interval_sec > 0
+)," + RobustTierScaffold,
+
+        /* The instance-wide session count of each capture: MAX(total_sessions) per collection_time is a PICK,
+           not an aggregate — pg_session_states repeats the instance totals on every stored row so any one row
+           answers "out of how many" (PgTargetFactCollector.Sessions.cs states the V86 design). The same read
+           the PG_CONNECTION_SATURATION fact takes its peak from, so the anomaly and the fact it folds into
+           count the same thing. Two properties of the source ride into the baseline and the detector's doc
+           says them: it is an EXCEPTION table, storing a capture only when some session was over the
+           collector's floors, so quiet minutes are ABSENT and the buckets describe the captures that had
+           something to report (the median sits high of the true median; the detector's peak-vs-bucket
+           comparison is like-for-like because the window read has the same gap); and total_sessions counts
+           PostgreSQL's own background processes (backend_type redacts), a few points high on every row alike. */
+        MetricNames.PgSessionCount => @"
+WITH clean AS (
+    SELECT collection_time, MAX(total_sessions)::DOUBLE PRECISION AS v
+    FROM pg_session_states
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   total_sessions IS NOT NULL
+    GROUP BY collection_time
+)," + RobustTierScaffold,
+
+        /* The Aurora all-types wait rate, ms per second, CPU excluded — PgAnomalyDetector.WaitRateWindowSql's
+           per_collection over pg_wait_stats with the wait partial's three-state interval
+           (PgTargetFactCollector.Waits.cs): the STORED sample_interval_seconds (MAX over the collection's rows;
+           0 only when every row was unknowable — a restart) through NULLIF so a restart collection is NOT a
+           sample, a pre-V128 NULL falling back to LAG(collection_time). Never ELSE 0. `CPU` is a wait TYPE on
+           Aurora (on-CPU time under the same function) and is excluded here exactly as the wait facts' share
+           denominator excludes it, so the window's rate and its baseline agree on what "waiting" is. Only
+           pg_wait_stats: stock's pg_wait_sampling estimate has no arm in v1 (class summary). */
+        MetricNames.PgWaitMsPerSec => @"
+WITH per_collection AS (
+    SELECT collection_time,
+           CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM pg_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    GROUP BY collection_time
+),
+clean AS (
+    SELECT collection_time, coalesce(total_wait_ms, 0) / interval_sec AS v
+    FROM per_collection
+    WHERE interval_sec > 0
+)," + RobustTierScaffold,
+
+        /* Percent of the CONFIGURED capacity ceiling — acu_utilization_percent, never cpu_percent (#3281: on the
+           db.serverless class the whole measured fleet runs, cpu_percent is percent of the capacity CURRENTLY
+           ALLOCATED, which is re-sized continuously, so a one-vCPU minute reads 100 while the instance sits at a
+           third of its ceiling; the fleet card bands on the ACU reading for the same reason). Rows with no
+           capacity sample contribute nothing rather than a percentage of an unknown denominator; a provisioned
+           instance (ACU always NULL) therefore has no CPU baseline and its PG_CPU_PERCENT fact says the reading
+           is not graded — "Unknown, never Healthy", the card's own rule (#3271). Raw hypertable at the
+           collector's five-minute grain, the same precedent the SQL Server CPU arm argues. */
+        MetricNames.PgCpu => @"
+WITH clean AS (
+    SELECT collection_time, acu_utilization_percent::DOUBLE PRECISION AS v
+    FROM pg_cpu_utilization
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   acu_utilization_percent IS NOT NULL
+)," + RobustTierScaffold,
+
         _ => null,
     };
 
