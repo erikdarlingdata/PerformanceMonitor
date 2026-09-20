@@ -506,6 +506,26 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             }
         }
 
+        /* The tool file carries no SQL: the clutter view's statements live in DarlingQueryStoreClutterReader (ConfigSql
+           selects the health row's columns by name) and its judgment in QueryStoreClutter. Those two are the files a
+           READ would land in, so they are held to naming NEITHER capture-mode column — the fence the SELECT scan above
+           cannot provide from a file without a SELECT in it (#3797 lane 6, after #3821). */
+        foreach (var file in new[] { "DarlingQueryStoreClutterReader.cs", "QueryStoreClutter.cs" })
+        {
+            var path = System.IO.Path.Combine(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"), "Mcp", file);
+            if (!System.IO.File.Exists(path))
+            {
+                continue;
+            }
+
+            var text = WithoutComments(System.IO.File.ReadAllText(path));
+            foreach (var column in CaptureModeColumns)
+            {
+                Assert.False(text.Contains(column, StringComparison.Ordinal),
+                    $"{file} names {column}: the clutter view's READ half now reaches the column — retire the (a) arm and the tool's null placeholder deliberately.");
+            }
+        }
+
         /* And the store-metrics MCP reader in particular publishes none of the five store_metrics columns yet. */
         var reader = WithoutComments(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs"));
         foreach (var column in ToastColumns.Concat(CheckpointerColumns))
