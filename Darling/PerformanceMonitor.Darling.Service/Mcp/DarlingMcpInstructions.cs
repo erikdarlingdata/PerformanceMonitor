@@ -102,7 +102,7 @@ internal static class DarlingMcpInstructions
 
         ### Plan-analysis tools
 
-        These run the shared execution-plan analyzer over the plan XML the collectors already captured into the store (a STORED-plan read — no live query to the monitored server), returning warnings, missing indexes (column lists + the statement-scoped impact estimate, no CREATE INDEX text), parameters, memory grants, and a stated cut of top operators (`operators_returned` / `total_operators` / `truncated`, ranked by `operators_ranked_by`).
+        These run the shared execution-plan analyzer over the plan XML the collectors already captured into the store (a STORED-plan read — no live query to the monitored server), returning warnings, missing indexes (column lists, the statement-scoped impact estimate labelled `impact_basis`, and `create_statement` — the optimizer's suggested CREATE INDEX for that one statement, corroboration for a statement already measured slow and never a diagnosis; every row carries the fixed `caveat`: the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and a stated cut of top operators (`operators_returned` / `total_operators` / `truncated`, ranked by `operators_ranked_by`).
 
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|

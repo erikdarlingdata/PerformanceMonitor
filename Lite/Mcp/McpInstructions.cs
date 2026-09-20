@@ -211,7 +211,7 @@ internal static class McpInstructions
         | `get_plan_xml` | Get raw showplan XML by query_hash | `query_hash` (required), `server_name` |
 
         Plan analysis detects 31 performance anti-patterns including:
-        - Missing indexes as column lists (equality / inequality / include) with the optimizer's statement-scoped impact estimate — evidence, not DDL
+        - Missing indexes as column lists (equality / inequality / include) with the optimizer's statement-scoped impact estimate (`impact_basis`) and its suggested `create_statement` — corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed `caveat` (per-statement estimate, per-table commitment with write cost and regression risk for other plans — test it)
         - Non-SARGable predicates, implicit conversions, data type mismatches
         - Memory grant issues, spills to TempDB
         - Parallelism problems: serial plan reasons, thread skew, ineffective parallelism
