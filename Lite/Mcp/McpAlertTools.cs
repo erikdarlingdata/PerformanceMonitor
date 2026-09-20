@@ -26,7 +26,7 @@ public sealed class McpAlertTools
 
     /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712). Darling's twin states the precedence
     /// between the knob's TWO homes there (the settings-row column since V137, over darling.json) and publishes
-    /// which one decided under <c>uncorroborated_route_source</c>; Lite has ONE home, its settings file, so this
+    /// which one decided under a provenance key beside the route; Lite has ONE home, its settings file, so this
     /// note says where it is edited and there is no source key to publish (<c>McpAlertSettingsKeyTests</c> holds
     /// that omission as a decision).</summary>
     internal const string UncorroboratedRouteNote =
@@ -348,7 +348,7 @@ public sealed class McpAlertTools
                     /* #3712: where a notify-worthy but UNCORROBORATED finding goes — Darling's key, Lite's own live
                        value (Settings → Alerts, or analysis_uncorroborated_route in the settings file). The note
                        key rides for shape parity with Darling; here it names the surface that edits it. Darling's
-                       uncorroborated_route_source (which of its two homes decided) is deliberately NOT mirrored:
+                       provenance key (which of its two homes decided the route) is deliberately NOT mirrored:
                        Lite has one home, so the key could only ever read a constant. */
                     uncorroborated_route = FindingRouting.RouteText(App.AnalysisUncorroboratedRoute),
                     uncorroborated_route_note = UncorroboratedRouteNote
