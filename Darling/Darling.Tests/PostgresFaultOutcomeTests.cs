@@ -357,6 +357,117 @@ public class PostgresFaultOutcomeTests
         Assert.DoesNotContain("database ''", generic, StringComparison.Ordinal);
     }
 
+    /* ---- #3818: a missing COMPANION object is not the extension missing. ---- */
+
+    /// <summary>
+    /// #3818, the case that issue is about. On 23 of 50 clusters in an upgraded fleet <c>pg_stat_statements</c>
+    /// was installed, preloaded and readable at catalog version 1.8, and the collector's read of
+    /// <c>pg_stat_statements_info</c> - created by the 1.9 update script - failed 42P01 every cycle for 25 hours.
+    /// The stored sentence was #3240's: "the pg_stat_statements extension this collector reads is not
+    /// installed on this target", with <c>CREATE EXTENSION</c> and a <c>shared_preload_libraries</c> restart as
+    /// the remedy. All of it false: the extension was there, the base view resolved (PostgreSQL resolves FROM
+    /// before the select list and names the FIRST object it cannot find), and the remedy was one statement
+    /// with no restart. The declared companion (<see cref="PgExtensionDependency.Companions"/>) is what lets
+    /// the mapping say the true thing: the object the server named, that the extension IS present, the two
+    /// states that produce this, <c>ALTER EXTENSION ... UPDATE</c> as the remedy - and never the three lies.
+    /// </summary>
+    [Theory]
+    [InlineData("relation \"public.pg_stat_statements_info\" does not exist")]
+    [InlineData("relation \"pg_stat_statements_info\" does not exist")]
+    public void AMissingCompanionObject_IsNotRecordedAsTheExtensionMissing(string message)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", message), "pg_statement_stats", "appdb");
+
+        /* NOT EXTENSION_MISSING: that status word says the extension is absent and every health surface
+           bands it as an optional module left uninstalled - a legitimate resting state. The general
+           non-fatal bucket, with the text carrying the truth, is the shape the generic ObjectMissing arm has
+           always used. */
+        Assert.NotEqual(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+        Assert.Equal(CollectorRuntimePrecondition.DegradedStatus, status);
+        Assert.Equal("PERMISSIONS", status);
+
+        /* The server's own words survive, and the object it named is called out by its bare name. */
+        Assert.Contains(message, explanation, StringComparison.Ordinal);
+        Assert.Contains("42P01", explanation, StringComparison.Ordinal);
+        Assert.Contains("the missing object is pg_stat_statements_info", explanation, StringComparison.Ordinal);
+
+        /* The true statements: the extension is present, at a version below 1.9 or outside the schema the
+           query names, in the named database. */
+        Assert.Contains("extension IS installed in database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("this is not the extension missing", explanation, StringComparison.Ordinal);
+        Assert.Contains("catalog version below 1.9", explanation, StringComparison.Ordinal);
+        Assert.Contains("installed outside the schema the query text names", explanation, StringComparison.Ordinal);
+        Assert.Contains("ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("pg_extension.extversion and extnamespace", explanation, StringComparison.Ordinal);
+        Assert.Contains("NOT a missing grant", explanation, StringComparison.Ordinal);
+
+        /* The three lies the base sentence would have told here: not installed, CREATE EXTENSION, and a
+           preload restart to schedule. The update is a statement, and the sentence says so in as many words. */
+        Assert.DoesNotContain("is not installed on this target", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE EXTENSION", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("has to be in shared_preload_libraries", explanation, StringComparison.Ordinal);
+        Assert.Contains("a statement, with no restart and no shared_preload_libraries change", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The inference that motivated #3240 still holds when the object the server named IS the extension's
+    /// base object - the view itself on the vanilla flavor, Aurora's function on the other - and when the
+    /// message has no shape this can read (the bare "boom" every other pin here sends): both stay on the
+    /// EXTENSION_MISSING arm, exactly as before. #3818 narrows the claim; it does not remove it.
+    /// </summary>
+    [Theory]
+    [InlineData("42P01", "relation \"public.pg_stat_statements\" does not exist")]
+    [InlineData("42883", "function aurora_stat_statements(boolean) does not exist")]
+    [InlineData("42P01", "boom")]
+    public void TheBaseObjectMissing_StillRecordsExtensionMissing(string sqlState, string message)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState, message), "pg_statement_stats", "appdb");
+
+        Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+        Assert.Contains("CREATE EXTENSION pg_stat_statements", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the missing object is", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A companion name on a collector that declares NO companions routes as it always did: the declaration
+    /// is per collector, so pg_buffer_usage's 42P01 naming some other extension's info view is still, for
+    /// pg_buffer_usage, its declared extension missing. And the unknown-database fallback holds on the
+    /// companion arm too, without inventing a name.
+    /// </summary>
+    [Fact]
+    public void TheCompanionArm_IsScopedToTheDeclaringCollector_AndFallsBackOnAnUnknownDatabase()
+    {
+        var other = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", "relation \"public.pg_stat_statements_info\" does not exist"), "pg_buffer_usage");
+        Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, other.Status);
+
+        var (_, unknownDb) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", "relation \"pg_stat_statements_info\" does not exist"), "pg_statement_stats", null);
+        Assert.Contains("extension IS installed in the connected database", unknownDb, StringComparison.Ordinal);
+        Assert.Contains("ALTER EXTENSION pg_stat_statements UPDATE in the connected database", unknownDb, StringComparison.Ordinal);
+        Assert.DoesNotContain("database ''", unknownDb, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// How the mapping reads the object out of the server's message: the quoted relation of a 42P01, the
+    /// function name of a 42883, the LAST segment when the query text qualified it, and null - never a
+    /// guess - for a message with neither shape. Npgsql's relation/function fields are not consulted, because
+    /// PostgreSQL fills them for constraint and datatype errors and not for an unresolved name.
+    /// </summary>
+    [Theory]
+    [InlineData("relation \"public.pg_stat_statements_info\" does not exist", "pg_stat_statements_info")]
+    [InlineData("relation \"pg_stat_statements_info\" does not exist", "pg_stat_statements_info")]
+    [InlineData("relation \"ext.pg_stat_statements\" does not exist", "pg_stat_statements")]
+    [InlineData("function aurora_stat_statements(boolean) does not exist", "aurora_stat_statements")]
+    [InlineData("function public.pg_stat_kcache() does not exist", "pg_stat_kcache")]
+    [InlineData("boom", null)]
+    [InlineData("column \"toplevel\" does not exist", null)]
+    public void TheMissingObjectIsReadOffTheMessage_OrNotAtAll(string message, string? expected)
+    {
+        Assert.Equal(expected, DarlingWorker.MissingObjectNamedBy(Pg("42P01", message)));
+    }
+
     /// <summary>
     /// Aurora does not implement some community sources at all (0A000 for pg_stat_wal) and gates others by
     /// parameter group (55006). Neither will change until the platform or the parameter group does, so
