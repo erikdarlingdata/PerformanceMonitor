@@ -2742,13 +2742,50 @@ public sealed class DarlingWorker : BackgroundService
     /// block. Everything but cancellation is swallowed here: the pass is failure-isolated per aggregate
     /// already, so this catch is for the connection-open path, and a store whose holes cannot be repaired
     /// degrades to the holes it had, never to a service that did not start.</para>
+    ///
+    /// <para><b>One INFORMATION line per start, whatever the scan found (#3756).</b> The pass returns its
+    /// tally and this method writes it, UNCONDITIONALLY. It is the self-proving-flag class (#3574's
+    /// <c>visibility</c>, #3735's <c>collection_health_age_seconds</c>): a check whose negative outcome is
+    /// indistinguishable from its non-execution has not reported. The first store to carry the scan showed
+    /// the failure: the pass wrote a summary only when it had repaired, deferred or failed something, so a
+    /// start that found nothing, a start whose scan threw before its first probe and was swallowed by the
+    /// per-aggregate isolation, and a start that never reached the scan all left the same absence, and the
+    /// countersign had to accept "zero needed" on inference. Now every outcome writes a DIFFERENT line, all
+    /// from this one method so a reader has one place to look: the pass returned — this summary, with zeros
+    /// when there were zeros and the isolated-failure count when isolation caught anything (the per-aggregate
+    /// WARNING already names the aggregate and the message; the summary's job is the census, so it stays
+    /// INFORMATION rather than repeating the failure at WARNING and counting it twice in any warning-rate
+    /// read); the pass threw outside its isolation or the connection would not open — the WARNING below;
+    /// shutdown cancelled it before it could report — the cancellation line, so the next start's reader knows
+    /// this one's scan is not a verdict. A start that never launches it (plain-PostgreSQL mode, or the
+    /// TimescaleDB block faulting first) already writes its own line at the launch site's catch; nothing here
+    /// can or should speak for that case.</para>
     /// </summary>
     private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
-            await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+            var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+
+            /* #3756: not gated on any count — the zero-hole start is the one this line exists for. Every figure
+               is the pass's own (TimescaleSupport.MaterializationHoleRepairSummary states the arithmetic:
+               buckets found = repaired + deferred; a range the cap split counts once as found and once on each
+               side), and the elapsed is the pass's clock, not this method's connection open. */
+            _logger.LogInformation(
+                "TimescaleDB: materialization hole scan (#3653 Q10) — {Scanned} aggregate(s) walked, {Skipped} skipped, {HolesFound} hole(s) found spanning {BucketsFound} bucket(s), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred past the cap, {Remaining} bucket(s) still reading as holes after repair, {Failures} isolated failure(s), in {ElapsedMs} ms.",
+                summary.AggregatesScanned, summary.AggregatesSkipped, summary.HolesFound, summary.BucketsFound,
+                summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
+                summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
+        }
+        catch (OperationCanceledException)
+        {
+            /* #3756: the absence the issue's three did not name. Without this, a scan cut short by shutdown leaves
+               exactly the nothing a scan that never ran leaves. Rethrown so the drain's contract is untouched (it
+               swallows this as "expected on shutdown"); the line is the whole of the change. */
+            _logger.LogInformation(
+                "TimescaleDB: materialization hole scan (#3653 Q10) was cancelled before it could report — at shutdown that is expected, and the next start's scan re-finds anything this one left, because the scan reads the materialization rather than a ledger of what this start meant to do.");
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
