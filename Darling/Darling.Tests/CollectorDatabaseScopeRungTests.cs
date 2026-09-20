@@ -355,6 +355,10 @@ public sealed class CollectorDatabaseScopeRungTests
     /// enumeration when the context carries one, and none of them does when it does not. Walking
     /// CollectorCatalog.All is what makes a SIXTH enumerating collector that skips the seam fail here,
     /// in its author's own run, instead of shipping a collector the scope silently does not govern.
+    /// The walk also takes the per-target census: since #3764 every one of the five is an enumerator on
+    /// SQL Server proper only — on Azure SQL DB all five ride the per-database connection loop, because
+    /// the <c>[db].sys.sp_executesql</c> idiom their per-item queries nest is rejected there — so the Azure
+    /// enumerator set is EMPTY, and a collector that starts enumerating on Azure again fails here.
     /// </summary>
     [Fact]
     public void EveryEnumeratingCollector_SplicesTheScope_AndCountsMatchTheHealthCensus()
@@ -362,6 +366,7 @@ public sealed class CollectorDatabaseScopeRungTests
         var scoped = new[] { "ScopeA", "ScopeB" };
         var excluded = new[] { "Nope" };
         var enumerators = new HashSet<string>(StringComparer.Ordinal);
+        var azureEnumerators = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var target in new[]
         {
@@ -384,6 +389,10 @@ public sealed class CollectorDatabaseScopeRungTests
                 }
 
                 enumerators.Add(definition.GetType().Name);
+                if (target.IsAzureSqlDb)
+                {
+                    azureEnumerators.Add(definition.GetType().Name);
+                }
 
                 /* The scope rides the enumeration as parameters, before the exclusion, never as text. */
                 Assert.Contains("@scope_db_0", scopedPlan.Text, StringComparison.Ordinal);
@@ -416,10 +425,16 @@ public sealed class CollectorDatabaseScopeRungTests
                 nameof(QueryStoreHealthCollector),
             },
             enumerators.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        /* And on Azure SQL DB, none of them. query_store_health was the last one still enumerating there
+           (#3764, after database_scoped_config left in #3755), and both were collecting nothing: every
+           per-item EXECUTE [db].sys.sp_executesql was rejected from a logical-server registration's master
+           connection. An enumerator reappearing in this set is that defect coming back. */
+        Assert.Empty(azureEnumerators);
     }
 
     /// <summary>
-    /// The OTHER fan-out family — the per-database CONNECTION loop (Azure SQL DB's eight, PostgreSQL's
+    /// The OTHER fan-out family — the per-database CONNECTION loop (Azure SQL DB's eleven, PostgreSQL's
     /// per-database collectors) — takes the scope inside the SAME engine-evaluated list plan the
     /// exclusion rides, per provider, so both instruments are judged by the engine's collation reality
     /// on that path too. And the maintenance-database screen survives a scope that names it: naming

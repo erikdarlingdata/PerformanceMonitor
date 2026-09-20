@@ -4681,7 +4681,7 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
     /// <para><b>Which collectors, and it is two mechanisms rather than one.</b> Five drive the fan-out from
     /// an ENUMERATION on any SQL Server target — <c>query_store</c>, <c>plan_correction</c>,
     /// <c>query_store_health</c>, <c>index_object_stats</c>, <c>database_scoped_config</c>. Separately,
-    /// <c>RunsPerDatabase</c> puts eight on a per-database CONNECTION loop when the target is Azure SQL DB,
+    /// <c>RunsPerDatabase</c> puts eleven on a per-database CONNECTION loop when the target is Azure SQL DB,
     /// and <c>pg_autovacuum_stats</c> on one always. Both mechanisms feed the same accumulator, which is the
     /// point: <c>query_store</c> uses the first on-prem and the second on Azure, so a rollup wired to only
     /// one of them would report a different notion of a slow database depending on where it ran.</para>

@@ -77,8 +77,8 @@ public sealed class DarlingEmptyEnumerationInventoryTests
            against the collectors that actually enumerate. A collector that starts enumerating without an
            entry there would quietly never be qualified; one that stops enumerating would carry a mapping
            for a note it can no longer produce. Same shape as the on-load set's pin against the schedule
-           table. Probed on an ON-PREM target: query_store and index_object_stats deliberately return no
-           enumeration on Azure SQL DB, where the collector runs per-database instead. */
+           table. Probed on an ON-PREM target: on Azure SQL DB none of the five enumerates (query_store_health
+           was the last, #3764) — every one of them runs on the host's per-database connection loop there. */
         var onPrem = new CollectorContext
         {
             ServerId = ServerId,
