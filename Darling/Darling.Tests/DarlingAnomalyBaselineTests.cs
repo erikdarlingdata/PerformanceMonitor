@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -148,8 +149,11 @@ public sealed class DarlingAnomalyBaselineTests
     [Fact]
     public void BaselineProvider_CarriesLitesSurface_AndAllElevenMetricQueries()
     {
-        /* Lite's public surface: bucket lookup with tier collapse + the test cache hooks. */
-        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync"));
+        /* Lite's public surface: bucket lookup with tier collapse + the test cache hooks. The lookup is asked for by
+           its four-parameter signature since #3691 lane 33 put the KEYED five-parameter overload beside it — a bare
+           GetMethod(name) is ambiguous with two overloads and would throw, not fail. Lite's twin has one overload. */
+        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync", [typeof(int), typeof(string), typeof(DateTime), typeof(CancellationToken)]));
+        Assert.NotNull(typeof(PgBaselineProvider).GetMethod("GetBaselineAsync", [typeof(int), typeof(string), typeof(string), typeof(DateTime), typeof(CancellationToken)]));
         Assert.NotNull(typeof(PgBaselineProvider).GetMethod("InvalidateCache"));
         Assert.NotNull(typeof(PgBaselineProvider).GetMethod("ClearCache"));
         Assert.NotNull(typeof(PgBaselineProvider).GetProperty("CacheTtl"));

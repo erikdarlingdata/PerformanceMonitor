@@ -73,9 +73,24 @@ public static class MetricNames
        its content lane's (PgTargetBaselineProvider.Plans.cs / .Kernel.cs) and the provider's arm answers null until
        it lands, which the shared reader treats as "no baseline for this metric". */
     /// <summary>A statement's mean execution ms per collection — the reset-aware <c>pg_statement_stats</c>
-    /// <c>total_exec_time / calls</c> difference. The reader keys a series on (server, metric) alone, so WHICH
-    /// statement this names is lane 27's decision (see the stub arm's doc), not this constant's. Lane 27.</summary>
+    /// <c>total_exec_time / calls</c> difference. Two arms answer to this one name since lane 33: the UNKEYED arm (lane
+    /// 27's, the SERVER-WIDE per-call mean — the reader keyed a series on (server, metric) alone when it was written, so
+    /// WHICH statement it names was lane 27's decision, and it chose the server) and the KEYED arm (lane 33's, one
+    /// statement's per-call mean, reached through the five-argument overload with the <c>queryid</c> as the key) —
+    /// so lane 27's follow-up can switch its detector to the statement's own series without a new name. Lane 27 / 33.</summary>
     public const string PgStatementMeanMs = "pg_statement_mean_ms";
+
+    /* #3691 lane 33: the first KEYED metric. Since lane 33 the reader has a key dimension — the five-argument
+       PgBaselineProvider.GetBaselineAsync overload keys a series on (server, metric, key), and a provider declares which
+       metrics are keyed through ResolveKeyedBaselineQuery — so this name has NO unkeyed arm at all (a statement's share
+       of the server's total is 1.0 by construction when there is no statement) and answers only when a queryid is
+       passed as the key. Lane 34 is the consumer (the bad-actor share re-graded as deviation from the statement's OWN
+       hour-of-week share, Erik's 2026-09-20 ruling). */
+    /// <summary>ONE statement's share of the collection's total execution time — Σ <c>delta_total_exec_time_ms</c> for
+    /// the keyed <c>queryid</c> over Σ for every statement row of the same <c>collection_time</c>, from
+    /// <c>pg_statement_stats</c>' stored deltas, a fraction in [0, 1] per collection. Keyed by <c>queryid</c> as text;
+    /// no server-wide arm exists. Lane 33 (the seam), lane 34 (the consumer).</summary>
+    public const string PgStatementShare = "pg_statement_share";
     /// <summary>Cores busy — user-plus-system CPU seconds per wall second from the reset-aware <c>pg_kernel_stats</c>
     /// differences summed across statements per collection. Lane 28.</summary>
     public const string PgCpuBurnCores = "pg_cpu_burn_cores";

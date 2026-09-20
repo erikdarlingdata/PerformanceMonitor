@@ -56,12 +56,22 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// PostgreSQL target has no <c>server_properties</c> row at all, so <see cref="PgTargetBaselineProvider"/> overrides
 /// the clock READ (<see cref="ReadServerClockAsync"/>, #3691) to hand the same resolver the target's own
 /// <c>TimeZone</c> setting. <see cref="RobustTierScaffold"/> and the two event-family arms extract from
-/// <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, and <see cref="GetBaselineAsync"/> looks the analysis
+/// <see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, and
+/// <see cref="GetBaselineAsync(int, string, DateTime, CancellationToken)"/> looks the analysis
 /// time up through the SAME three numbers (<see cref="LocalClockWindow.LocalKey"/>), cached beside the buckets.
 /// Nothing keyed is stored, so the re-bucketing the ruling asks for is the next compute after the cache
 /// expires. Neither PostgreSQL nor Npgsql rejects a statement that ignores <c>$4..$6</c> (measured), so an arm
 /// that bypassed the scaffold would key on UTC silently — <c>LocalClockBucketKeyTests</c>' local-clock census
 /// is what forbids it.
+/// </para>
+///
+/// <para>
+/// <b>A series may be scoped to one MEMBER of a population (#3691 lane 33).</b> The five-argument
+/// <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/> keys a bucket map on (server,
+/// metric, key) — the key a <c>queryid</c> as text for the first consumer, a statement's own hour-of-week share of
+/// the server's execution time — resolved through the THIRD seam, <see cref="ResolveKeyedBaselineQuery"/>, and bound
+/// as <c>$7</c> after the clock parameters. The four-argument overload is the unkeyed series, byte-identical to what
+/// it was, and the base declares no keyed metric: the SQL Server store's arms are all population-wide.
 /// </para>
 ///
 /// <para>
@@ -117,6 +127,10 @@ public class PgBaselineProvider
 
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
 
+    /* #3691 lane 33: the keyed-cardinality note's once-per-cache-period gate (NoteKeyedCardinality). */
+    private readonly object _keyedWarnGate = new();
+    private DateTime? _keyedCardinalityWarnedAt;
+
     public PgBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -129,11 +143,55 @@ public class PgBaselineProvider
     /// <summary>
     /// Gets the baseline for a specific metric, server, and time bucket.
     /// Returns the most specific bucket available, collapsing as needed.
+    /// <para>The UNKEYED series — one per (server, metric), every caller and pin that existed before #3691 lane 33
+    /// byte-identical: this overload delegates to the keyed one with <c>key: null</c>, which resolves through
+    /// <see cref="ResolveBaselineQuery"/> exactly as before and binds exactly the six parameters it always bound.</para>
+    /// </summary>
+    public Task<BaselineBucket> GetBaselineAsync(
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
+        => GetBaselineAsync(serverId, metricName, key: null, analysisTime, cancellationToken);
+
+    /// <summary>
+    /// The KEYED series (#3691 lane 33): one hour×day-of-week bucket map per (server, metric, <paramref name="key"/>),
+    /// for a baseline that is scoped to ONE member of a population — the first consumer is a statement's own
+    /// hour-of-week share of the server's execution time, keyed by its <c>queryid</c> as text (lane 34), by Erik's
+    /// 2026-09-20 ruling that the bad-actor share is graded as deviation from the statement's OWN baseline, which is
+    /// impossible with one series per (server, metric).
+    ///
+    /// <para><b>Mechanism.</b> The key is a third segment of the cache key (<see cref="CacheKeyFor"/>), so two keys
+    /// are two independent computes and two cache entries with their own TTL; the SQL is resolved through
+    /// <see cref="ResolveKeyedBaselineQuery"/> — a SEPARATE seam from <see cref="ResolveBaselineQuery"/>, so a
+    /// provider declares which of its metrics have a keyed shape and which do not (the base declares none: the SQL
+    /// Server store has no keyed arm, and a keyed call for any metric there is "no baseline", never a server-wide
+    /// bucket mistaken for a member's) — and the key is bound as <c>$7</c>, AFTER the six the unkeyed compute binds
+    /// (<c>$1</c> server, <c>$2</c>/<c>$3</c> window, <c>$4..$6</c> the Q6 clock), so a keyed arm is an ordinary arm
+    /// ending in <c>clean(collection_time, v)</c> + <see cref="RobustTierScaffold"/> whose own text adds
+    /// <c>queryid = $7::BIGINT</c> (or whatever its dimension is) and inherits the local-clock key, the eight-column
+    /// reader, the timeout classification and the degrade-to-empty posture unchanged. Neither PostgreSQL nor Npgsql
+    /// complains about a bound parameter a statement does not reference (measured in #3749), which is why the
+    /// census in <c>LocalClockBucketKeyTests</c> is TWO-ARMED: an unkeyed statement references exactly <c>$1..$6</c>,
+    /// a keyed one exactly <c>$1..$7</c> — a keyed arm that forgot the clock would otherwise key on UTC silently, and
+    /// an unkeyed arm that named <c>$7</c> would fail at execution on every pass.</para>
+    ///
+    /// <para><b>Cardinality, stated honestly.</b> A keyed series is one cache entry per (server, metric, key) and one
+    /// 30-day scan per entry per <see cref="CacheTtl"/>. The provider refuses nothing — it cannot know which keys
+    /// matter — so the CONSUMER bounds the population: a detector or scorer calling this overload asks only for the
+    /// TOP-N members of its window (lane 34 asks for the top-share candidates the bad-actor read already returns,
+    /// never every statement the server ran), and says so in its doc. What the provider does is make a runaway
+    /// consumer visible: when the keyed entries in the cache exceed <see cref="KeyedBaselineCacheWarnCount"/> it
+    /// logs the count once per cache period (<see cref="ShouldWarnKeyedCardinality"/>), which is the closest thing
+    /// this class has to "once per pass" — within one TTL a pass's repeat lookups are cache hits that compute
+    /// nothing.</para>
+    ///
+    /// <para><b>What it does not do.</b> No key travels into <c>BaselineBucket</c> or <c>BaselineMath</c> — the
+    /// bucket a keyed call returns is the same shape an unkeyed one returns, and the caller that passed the key is the
+    /// one that knows what it belongs to. The key is a string so the seam is engine- and dimension-neutral (a
+    /// <c>queryid</c> today, a database name or a wait type tomorrow); an arm casts it to its own column's type.</para>
     /// </summary>
     public async Task<BaselineBucket> GetBaselineAsync(
-        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
+        int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
-        var cached = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var cached = await GetOrComputeBaselinesAsync(serverId, metricName, key, analysisTime, cancellationToken);
         var baselines = cached.Buckets;
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
@@ -157,10 +215,44 @@ public class PgBaselineProvider
     /// <summary>Forces full cache clear — used during testing.</summary>
     public void ClearCache() => _cache.Clear();
 
+    /// <summary>
+    /// The cache identity of a series (#3691 lane 33): <c>{server}:{metric}</c> for the unkeyed series — the exact
+    /// string it has always been, so <see cref="InvalidateCache"/>'s <c>{server}:</c> prefix sweep keeps finding it —
+    /// and <c>{server}:{metric}:{key}</c> for a keyed one, which the same prefix sweep also finds. Two keys are two
+    /// entries; a keyed and an unkeyed series of the same metric are two entries. A key is never empty here: the
+    /// overload treats <c>""</c> as a key like any other, because "no key" is spelled <c>null</c> and nothing else.
+    /// </summary>
+    internal static string CacheKeyFor(int serverId, string metricName, string? key)
+        => key is null ? $"{serverId}:{metricName}" : $"{serverId}:{metricName}:{key}";
+
+    /// <summary>
+    /// The keyed-entry count above which the provider logs the cache's size (#3691 lane 33) — a runaway consumer
+    /// asking for every statement's series instead of its top-N is visible in the log before it is visible as a
+    /// store that scans 30 days per statement per hour. Chosen, not measured: 500 is ten servers × a fifty-statement
+    /// top-N at the widest consumer the campaign has ruled on (lane 34 asks for the top-1 share candidates), so a
+    /// count above it means a consumer is NOT bounding — calibrate against the keyed entry counts a fleet pass
+    /// actually reaches before the next release. A ceiling, not a cap: the provider refuses nothing (the lookup's
+    /// doc says why).
+    /// </summary>
+    internal const int KeyedBaselineCacheWarnCount = 500;
+
+    /// <summary>How many keyed series the cache holds right now — the number the cardinality note reports.</summary>
+    internal int KeyedEntryCount => _cache.Count(pair => pair.Value.Key is not null);
+
+    /// <summary>
+    /// Pure: is it time to say the keyed cache is over <see cref="KeyedBaselineCacheWarnCount"/>? Yes when the count
+    /// is over the bar AND the note was never logged, or was logged a full <see cref="CacheTtl"/> ago — once per cache
+    /// period, the provider's grain for "once per pass" (a pass inside the TTL computes nothing new). At or under the
+    /// bar, never — a consumer that stays bounded costs the log nothing.
+    /// </summary>
+    internal static bool ShouldWarnKeyedCardinality(int keyedEntries, DateTime? lastWarnedAt, DateTime nowUtc)
+        => keyedEntries > KeyedBaselineCacheWarnCount
+           && (lastWarnedAt is null || nowUtc - lastWarnedAt.Value >= CacheTtl);
+
     private async Task<CachedBaseline> GetOrComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
+        int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken)
     {
-        var cacheKey = $"{serverId}:{metricName}";
+        var cacheKey = CacheKeyFor(serverId, metricName, key);
         var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
 
         if (_cache.TryGetValue(cacheKey, out var cached) &&
@@ -170,27 +262,57 @@ public class PgBaselineProvider
             return cached;
         }
 
-        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, key, analysisTime, cancellationToken);
 
         var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
             Buckets = buckets,
-            Clock = clock
+            Clock = clock,
+            Key = key
         };
         _cache[cacheKey] = entry;
+
+        if (key is not null)
+        {
+            NoteKeyedCardinality(serverId, metricName);
+        }
 
         return entry;
     }
 
-    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
+    /// <summary>The cardinality note itself (#3691 lane 33): Warning, because a consumer over the bar is a defect in
+    /// the consumer, not a statement about the host — the opposite of the clock resolver's Information note.</summary>
+    private void NoteKeyedCardinality(int serverId, string metricName)
     {
-        var query = ResolveBaselineQuery(metricName);
+        var keyedEntries = KeyedEntryCount;
+        var now = DateTime.UtcNow;
+        lock (_keyedWarnGate)
+        {
+            if (!ShouldWarnKeyedCardinality(keyedEntries, _keyedCardinalityWarnedAt, now))
+            {
+                return;
+            }
+
+            _keyedCardinalityWarnedAt = now;
+        }
+
+        _logger?.LogWarning(
+            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}) — each is a 30-day scan per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
+            keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
+    }
+
+    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
+        int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken)
+    {
+        /* Two seams, never one: a keyed lookup resolves ONLY through the keyed seam, so a metric with an unkeyed arm
+           and no keyed one answers "no baseline" to a keyed call rather than the population's buckets under a member's
+           name — and the reverse, so lane 27's server-wide arm keeps answering the unkeyed call it always answered. */
+        var query = key is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
         if (query == null) return (null, LocalClockWindow.Utc(analysisTime));
 
-        return await ComputeBucketsAsync(serverId, metricName, analysisTime, query, cancellationToken);
+        return await ComputeBucketsAsync(serverId, metricName, key, analysisTime, query, cancellationToken);
     }
 
     /// <summary>
@@ -251,6 +373,19 @@ LIMIT 1";
     /// Null means "no baseline for this metric", exactly as it always has.
     /// </summary>
     protected virtual string? ResolveBaselineQuery(string metricName) => GetBaselineQuery(metricName);
+
+    /// <summary>
+    /// The third seam (#3691 lane 33, after <see cref="ResolveBaselineQuery"/> and <see cref="ReadServerClockAsync"/>):
+    /// which SQL computes <paramref name="metricName"/>'s buckets for ONE member of a population, when the caller
+    /// passed a key to <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>. The base
+    /// declares no keyed metric — the SQL Server store's arms are all population-wide, and a keyed call against this
+    /// class is "no baseline for this metric" exactly as an unknown name is; <c>PgBaselineProviderKeyedTests</c> pins
+    /// that for every declared metric name. <see cref="PgTargetBaselineProvider"/> overrides it for the statement
+    /// family. The text an override returns is an ordinary arm plus a <c>$7</c> predicate on its member column
+    /// (<c>queryid = $7::BIGINT</c> — the key is bound as text, and an arm casts it to its own column's type), and the
+    /// two-armed census in <c>LocalClockBucketKeyTests</c> holds it to exactly <c>$1..$7</c>.
+    /// </summary>
+    protected virtual string? ResolveKeyedBaselineQuery(string metricName) => null;
 
     /// <summary>
     /// Did this failure mean "the statement ran out of time" rather than "the connection broke"?
@@ -386,7 +521,7 @@ LIMIT 1";
     }
 
     private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBucketsAsync(
-        int serverId, string metricName, DateTime analysisTime, string query, CancellationToken cancellationToken)
+        int serverId, string metricName, string? key, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
@@ -399,7 +534,13 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
+            /* The successor/legacy supply swap is the SQL Server pair's (#3653) and compares the text against this
+               class's own unkeyed successor arm; a keyed arm's text never matches it, so the swap is inert for a keyed
+               compute by construction — skipped explicitly so the two probes are not paid for nothing. */
+            if (key is null)
+            {
+                query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
+            }
 
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
@@ -420,6 +561,15 @@ LIMIT 1";
             cmd.Parameters.AddWithValue(AsNaive(clock.TransitionAtUtc));
             cmd.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
             cmd.Parameters.AddWithValue(clock.OffsetAfterMinutes);
+            /* $7 (#3691 lane 33): the member key, bound as text and ONLY on a keyed compute — an unkeyed statement
+               never sees a seventh parameter, so the SQL Server pass binds exactly what it bound before this seam
+               existed. A keyed arm casts it to its column's type (queryid = $7::BIGINT); the two-armed census in
+               LocalClockBucketKeyTests holds keyed text to $1..$7 and unkeyed text to $1..$6, because the engine
+               accepts a surplus bind and would run a keyed arm that forgot the clock parameters on UTC without a word. */
+            if (key is not null)
+            {
+                cmd.Parameters.AddWithValue(key);
+            }
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
@@ -1032,5 +1182,9 @@ clean AS (
 
         /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
         public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);
+
+        /// <summary>The member key this series is scoped to (#3691 lane 33); null for the population-wide series.
+        /// Read only by <see cref="KeyedEntryCount"/> — the entry's identity is the cache key string.</summary>
+        public string? Key { get; init; }
     }
 }
