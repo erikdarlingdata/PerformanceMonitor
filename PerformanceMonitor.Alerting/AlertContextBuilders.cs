@@ -769,6 +769,58 @@ public static class AlertContextBuilders
         };
     }
 
+    /// <summary>The <c>Excluded By Database</c> label on the Long-Running Query card's excluded-databases item
+    /// (#3742) — the one field a reader of the card or of <c>get_alert_history</c>'s <c>context_json</c> looks up
+    /// to see how many over-threshold sessions the shared <c>excludedDatabases</c> list removed ahead of the page.
+    /// A constant so the engine, the tests and any reader spell it once, beside the knob's three.</summary>
+    public const string LongRunningQueryExcludedByDatabaseLabel = "Excluded By Database";
+
+    /// <summary>
+    /// The Long-Running Query card's EXCLUDED-DATABASES item (#3742): how many over-threshold sessions the shared
+    /// <c>excludedDatabases</c> list removed from this evaluation ahead of the row cap, and the databases that
+    /// did it. Appended by the engine after the sessions and after the knob's own item, and only when the list is
+    /// SET — it is empty by default on both SKUs, so a fresh install's card is byte-identical to the pre-#3742
+    /// one; an operator who has named a database gets the receipt on every card, including a "0", exactly as the
+    /// knob's item reads 0/0/0 on a sweep where it removed nothing.
+    ///
+    /// <para>Why this is its own item and not three more fields on the knob's: the two settings are different
+    /// instruments with different owners. The knob names programs and principals, ships seeded, and is the
+    /// Long-Running Query alert's alone; <c>excludedDatabases</c> is the blunt, empty-by-default list the
+    /// blocking and deadlock arms also honour. The knob item's heading says "excluded by the opt-out knob" and
+    /// its <c>Excluded Count</c> has always been the knob's two arms; folding a database count into it would
+    /// make that heading false and that count ambiguous. The count here is SESSIONS the database list removed
+    /// that neither knob arm had already removed (the read counts the database arm last), so this item's number
+    /// and the knob item's sum to the sessions the page does not show.</para>
+    ///
+    /// <para>Why the count is on the card at all is #3742's whole finding: before it, the list was applied after
+    /// the cap, so an excluded reporting database whose ETL held the five longest sessions consumed the page and
+    /// the alert came back short or empty — and NOTHING on the card said so. Now the rows are removed ahead of
+    /// the cap AND the card states how many, so a page of two with "Excluded By Database: 6" beside it is a
+    /// page an operator can read. ANNOTATION, NEVER SUPPRESSION, like the knob's item: the fire is decided
+    /// before this exists and it can only add a line.</para>
+    /// </summary>
+    /// <param name="excludedDatabases">The shared list as the engine holds it (the settings value, not re-normalised —
+    /// the card lists what the operator typed).</param>
+    /// <param name="excludedByDatabase">The read's count of sessions the database list removed and neither knob arm did.</param>
+    public static AlertDetailItem BuildLongRunningQueryExcludedDatabasesItem(IReadOnlyList<string> excludedDatabases, int excludedByDatabase)
+    {
+        if (excludedDatabases is null) throw new ArgumentNullException(nameof(excludedDatabases));
+
+        var fields = new List<(string Label, string Value)>
+        {
+            (LongRunningQueryExcludedByDatabaseLabel, excludedByDatabase.ToString(CultureInfo.InvariantCulture)),
+            ("Excluded Databases", string.Join(", ", excludedDatabases))
+        };
+
+        return new AlertDetailItem
+        {
+            Heading = excludedByDatabase == 1
+                ? "1 session over the threshold was in an excluded database"
+                : $"{excludedByDatabase} sessions over the threshold were in excluded databases",
+            Fields = fields
+        };
+    }
+
     /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */
 
     /// <summary>

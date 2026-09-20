@@ -305,6 +305,25 @@ public sealed class DarlingAlertReadAdapterTests
                 "sp_replcmds (second request, MARS)", 499_000_000L, 5L, 5L, 5L, "PREEMPTIVE_OS_WAITFORSINGLEOBJECT", 0, "0x4444444444444444",
                 ".Net SqlClient Data Provider", @"nt authority\network service");
 
+            /* --- long-running queries, #3742's lie in one snapshot: SIX sessions in the excluded database, every one
+                   LONGER than every real session (81–86, 600M ms and up — the reporting ETL that always runs long),
+                   plus 87, a job step ALSO in the excluded database (the knob's prefix arm and the database arm both
+                   match — it must count ONCE, under the prefix, the database arm being last). Under the retired
+                   shape a cap of 5 read 81–85, dropped all five in C#, and returned an EMPTY page while 76, 74, 75 and
+                   71 ran on; the read now removes them ahead of LIMIT and counts them. The database is spelled
+                   "ExcludedDb" in the rows and "excludeddb" in the list below — the match is case-insensitive. --- */
+            for (var i = 0; i < 6; i++)
+            {
+                await InsertAsync(connection, lrqInsert,
+                    6L + i, collectionTime, TestServerId, TestServerName, 81 + i, "ExcludedDb",
+                    "INSERT INTO dbo.FactSales SELECT …", 600_000_000L + i, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x" + (81 + i).ToString("X16", CultureInfo.InvariantCulture),
+                    ".Net SqlClient Data Provider", "svc_etl");
+            }
+            await InsertAsync(connection, lrqInsert,
+                12L, collectionTime, TestServerId, TestServerName, 87, "ExcludedDb",
+                "EXEC dbo.RebuildReportingIndexes", 550_000_000L, 5L, 5L, 5L, "PAGEIOLATCH_SH", 0, "0x8787878787878787",
+                "SQLAgent - TSQL JobStep (Job 0x3C4D0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", "app_admin");
+
             /* --- volumes: two files on C:\ (MAX total / MIN free), one on healthy D:\ --- */
             await InsertAsync(connection,
                 "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, volume_mount_point, volume_total_mb, volume_free_mb) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -386,8 +405,11 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal("THREADPOOL", storm.WaitType);
             Assert.Equal(AlertSeverityLevel.Warning, storm.Severity);
 
-            /* --- long-running queries: threshold + excluded-database drop, with an EMPTY knob — every session
-                   evaluated, both counts 0, and the two arms' FALSE literals leave the pre-knob rows intact. --- */
+            /* --- long-running queries: threshold + the excluded-database arm, with an EMPTY knob — every session
+                   the knob could name is evaluated, both knob counts 0, the two knob arms' FALSE literals leave the
+                   pre-knob rows intact, and the database arm (#3742) removes the EIGHT ExcludedDb sessions (72,
+                   81–86, 87) IN the read and counts them: with the knob empty, 87's job step is the database
+                   list's. A cap of 10 shows the whole kept set. --- */
             var lrqRead = await adapter.GetLongRunningQueriesAsync(
                 TestServerKey, thresholdMinutes: 5, maxResults: 10,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
@@ -396,7 +418,8 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal(0, lrqRead.ExcludedByProgramPrefix);
             Assert.Equal(0, lrqRead.ExcludedByLogin);
             Assert.Equal(0, lrqRead.ExcludedCount);
-            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, lrqRead.Sessions.Select(q => q.SessionId).ToArray()); /* longest first; 72 dropped client-side */
+            Assert.Equal(8, lrqRead.ExcludedByDatabase);
+            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, lrqRead.Sessions.Select(q => q.SessionId).ToArray()); /* longest first; no ExcludedDb row */
             var query = Assert.Single(lrqRead.Sessions, q => q.SessionId == 71);
             Assert.Equal(600L, query.ElapsedSeconds);
             Assert.Equal("HammerDB", query.ProgramName);
@@ -404,21 +427,49 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal("0x9AAF0129E4E9AD07", query.QueryHash);
             Assert.Equal(@"nt authority\network service", lrqRead.Sessions[0].LoginName);
 
-            /* --- the SEEDED knob against real PostgreSQL: the three background sessions are gone BEFORE the cap
-                   (a cap of 2 would otherwise have held only the two longest of them), the human's query is the
-                   one row left, and the counts are SESSIONS by arm — 74 and 75 under the prefix (75 also runs as
-                   SYSTEM: once, here), 76 under login despite its two request rows. The cap is 2, not 1, because
-                   the excluded-DATABASE row (72) is still dropped CLIENT-SIDE after the cap — the pre-existing
-                   shape this knob deliberately does not share — and a cap of 1 would hold 72 alone. --- */
+            /* --- #3742, THE LIE, at the shipped cap: five real rows exist and eight excluded-database sessions
+                   run longer than or between them. The retired post-read filter would have read 81–85, dropped all
+                   five, and returned NOTHING — the alert switched off for every other database by a setting
+                   about one. The page is now a page of MATCHES: N = 5 rows, every one a match, the interleaved
+                   excluded rows gone ahead of LIMIT and counted. --- */
+            var pageOfFive = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 5,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(new[] { 76, 76, 74, 75, 71 }, pageOfFive.Sessions.Select(q => q.SessionId).ToArray());
+            Assert.DoesNotContain(pageOfFive.Sessions, q => string.Equals(q.DatabaseName, "ExcludedDb", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(8, pageOfFive.ExcludedByDatabase);
+
+            /* --- and WITHOUT the list, the same cap holds exactly the excluded database's longest five: the row set
+                   the retired shape read and threw away. The control that makes the assertion above mean something
+                   — the six ETL sessions really are the longest on this server. --- */
+            var unfiltered = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 5,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string>(), LongRunningQueryExclusions.None, ct);
+            Assert.Equal(new[] { 86, 85, 84, 83, 82 }, unfiltered.Sessions.Select(q => q.SessionId).ToArray());
+            Assert.Equal(0, unfiltered.ExcludedByDatabase);
+
+            /* --- the SEEDED knob against real PostgreSQL, at a cap of ONE: the three background sessions and the
+                   eight excluded-database sessions are all gone BEFORE the cap, so the single row is the human's
+                   query. The counts are SESSIONS by arm — 74, 75 and 87 under the prefix (75 also runs as SYSTEM:
+                   once, here; 87 also sits in the excluded database: once, HERE, the knob being the earlier arm),
+                   76 under login despite its two request rows, and the SEVEN ExcludedDb sessions the knob does
+                   not name (72, 81–86) under the database list. 3 + 1 + 7 = the eleven sessions the page does
+                   not show. Before #3742 this cap had to be 2, because 72 was dropped after the cap and a cap of
+                   1 held 72 alone. --- */
             var seededRead = await adapter.GetLongRunningQueriesAsync(
-                TestServerKey, thresholdMinutes: 5, maxResults: 2,
+                TestServerKey, thresholdMinutes: 5, maxResults: 1,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
                 excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, ct);
             Assert.Equal(71, Assert.Single(seededRead.Sessions).SessionId);
-            Assert.Equal(2, seededRead.ExcludedByProgramPrefix);
+            Assert.Equal(3, seededRead.ExcludedByProgramPrefix);
             Assert.Equal(1, seededRead.ExcludedByLogin);
-            Assert.Equal(3, seededRead.ExcludedCount);
+            Assert.Equal(4, seededRead.ExcludedCount);
+            Assert.Equal(7, seededRead.ExcludedByDatabase);
 
             /* --- an operator who CLEARED the login default: the prefix arm alone, so the NETWORK SERVICE session
                    is evaluated again and is the longest. Present-and-empty means empty, not re-seeded. --- */
@@ -429,8 +480,25 @@ public sealed class DarlingAlertReadAdapterTests
                 excludedDatabases: new List<string> { "excludeddb" },
                 LongRunningQueryExclusions.From(LongRunningQueryExclusions.DefaultProgramNamePrefixes, null), ct);
             Assert.Equal(new[] { 76, 76 }, prefixOnlyRead.Sessions.Select(q => q.SessionId).ToArray()); /* its two request rows fill the cap of 2 */
-            Assert.Equal(2, prefixOnlyRead.ExcludedByProgramPrefix);
+            Assert.Equal(3, prefixOnlyRead.ExcludedByProgramPrefix);
             Assert.Equal(0, prefixOnlyRead.ExcludedByLogin);
+            Assert.Equal(7, prefixOnlyRead.ExcludedByDatabase);
+
+            /* --- a row with NO database name is never on an excluded database (the rule since the list existed):
+                   plant one over the threshold with database_name NULL, and it stays under a list that names
+                   everything else. Planted late so the reads above keep their arithmetic. --- */
+            await InsertAsync(connection,
+                "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                13L, collectionTime, TestServerId, TestServerName, 88, DBNull.Value,
+                "DBCC CHECKDB", 900_000L, 1L, 1L, 0L, "CXPACKET", 0, "0x8888888888888888", "HammerDB");
+            var noDatabaseRead = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 10,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb", "StackOverflow" }, LongRunningQueryExclusions.None, ct);
+            Assert.Equal(88, Assert.Single(noDatabaseRead.Sessions).SessionId);
+            Assert.Equal("", noDatabaseRead.Sessions[0].DatabaseName);
+            Assert.Equal(12, noDatabaseRead.ExcludedByDatabase);   /* 8 ExcludedDb + 71, 74, 75, 76 in StackOverflow */
 
             /* --- volumes: per-volume rollup, worst free-ratio first --- */
             var volumes = await adapter.GetVolumeFreeSpaceAsync(TestServerKey, ct);

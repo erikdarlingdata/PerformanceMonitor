@@ -675,6 +675,16 @@ LIMIT 2000";
     /// <c>AND NOT</c> the program flag so a session matching both arms counts once, under the prefix. An arm with
     /// no entries is the literal <c>FALSE</c>, and with both empty the rows are exactly what the pre-knob read
     /// returned.</para>
+    ///
+    /// <para><b>#3742: <paramref name="excludedDatabases"/> is the CTE's third flag, for the same reason.</b>
+    /// Until #3742 the adapter above this read applied the database list in C#, AFTER <c>LIMIT</c> — exactly the
+    /// shape the paragraph above refuses for the knob — so an excluded reporting database whose ETL held the five
+    /// longest sessions consumed the page and the alert came back short or empty while un-excluded long-running
+    /// sessions existed. The list now rides this statement as <c>excluded_by_database</c> (exact, case-insensitive,
+    /// one <c>ILIKE</c> term per entry through the same builder, operands appended after the knob's so no ordinal
+    /// the knob bound moves), the outer <c>WHERE</c> drops it with the knob's two, and its count is taken <c>AND
+    /// NOT</c> both knob flags — the database arm is last, so a session the knob would have removed anyway is the
+    /// knob's, and the three counts sum to the sessions removed. Null or empty spells the arm <c>FALSE</c>.</para>
     /// </summary>
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         int serverId,
@@ -685,7 +695,8 @@ LIMIT 2000";
         bool excludeBackups = true,
         bool excludeMiscWaits = true,
         bool excludeCdc = true,
-        LongRunningQueryExclusions? exclusions = null)
+        LongRunningQueryExclusions? exclusions = null,
+        IReadOnlyList<string>? excludedDatabases = null)
     {
         exclusions ??= LongRunningQueryExclusions.None;
 
@@ -714,8 +725,9 @@ LIMIT 2000";
 
         /* #3653 (A5, Q5): the opt-out knob's two arms, operands binding as $5 onward after the four fixed
            parameters below (program prefixes first, then logins); the shared builder spells the ILIKE … ESCAPE
-           predicates so this read and Darling's cannot drift. */
-        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", firstParameterOrdinal: 5);
+           predicates so this read and Darling's cannot drift. #3742: the shared excludedDatabases list is the
+           third arm, its operands appended after the logins. */
+        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", "r.database_name", excludedDatabases, firstParameterOrdinal: 5);
 
         command.CommandText = @$"
                 WITH candidates AS (
@@ -734,7 +746,8 @@ LIMIT 2000";
                         r.login_name,
                         r.total_elapsed_time_ms,
                         {exclusionSql.ProgramPrefixPredicate} AS excluded_by_program_prefix,
-                        {exclusionSql.LoginPredicate} AS excluded_by_login
+                        {exclusionSql.LoginPredicate} AS excluded_by_login,
+                        {exclusionSql.DatabasePredicate} AS excluded_by_database
                     FROM v_query_snapshots AS r
                     WHERE r.server_id = $1
                         AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
@@ -761,9 +774,10 @@ LIMIT 2000";
                     r.program_name,
                     r.login_name,
                     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_program_prefix_count,
-                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_login_count
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_login_count,
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS INTEGER) AS excluded_by_database_count
                 FROM candidates AS r
-                WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)
+                WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
                 ORDER BY r.total_elapsed_time_ms DESC
                 LIMIT $3;";
 
@@ -783,6 +797,7 @@ LIMIT 2000";
         var items = new List<LongRunningQueryInfo>();
         int excludedByProgramPrefix = 0;
         int excludedByLogin = 0;
+        int excludedByDatabase = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -804,13 +819,14 @@ LIMIT 2000";
                 ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
                 LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
             });
-            /* The same two scalars on every row — read once is enough, and a read with no rows has nothing to
+            /* The same three scalars on every row — read once is enough, and a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (LongRunningQueryReadResult says why). */
             excludedByProgramPrefix = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
             excludedByLogin = reader.IsDBNull(13) ? 0 : reader.GetInt32(13);
+            excludedByDatabase = reader.IsDBNull(14) ? 0 : reader.GetInt32(14);
         }
 
-        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin);
+        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin, excludedByDatabase);
     }
 }
 

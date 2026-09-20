@@ -121,23 +121,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     {
         var serverId = ParseServerKey(serverKey);
         /* #3653 (A5, Q5): the opt-out knob goes INTO the DuckDB read, ahead of its LIMIT — see
-           LongRunningQueryExclusions for why a client-side drop here (the excludedDatabases shape below)
-           would let the excluded sessions fill the cap. */
-        var read = await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
+           LongRunningQueryExclusions for why a client-side drop would let the excluded sessions fill the cap.
+           #3742: excludedDatabases goes in the same way. This adapter used to drop the excluded databases'
+           rows HERE, after the read's LIMIT had already been spent on them, so a page of five could be five
+           excluded rows and the alert came back empty while matches existed. The read now applies the list
+           as its third CTE flag and counts what it removed; nothing is filtered on this side of the seam. */
+        return await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
             serverId, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor,
-            excludeBackups, excludeMiscWaits, excludeCdc, exclusions), cancellationToken);
-
-        var longRunning = read.Sessions;
-        if (excludedDatabases is { Count: > 0 })
-        {
-            longRunning = longRunning
-                .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
-                    !excludedDatabases.Any(e =>
-                        string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-        }
-
-        return new LongRunningQueryReadResult(longRunning, read.ExcludedByProgramPrefix, read.ExcludedByLogin);
+            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(

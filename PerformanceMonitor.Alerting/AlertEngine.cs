@@ -1837,6 +1837,20 @@ public sealed class AlertEngine
                         lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin));
                     }
 
+                    /* #3742: the shared excludedDatabases list's own receipt, beside the knob's. The read now
+                       applies that list AHEAD of the cap too (it used to be dropped client-side after LIMIT, so
+                       an excluded database's sessions could consume the whole page and the alert came back
+                       short or empty while matches existed), and a page that is short for that reason should
+                       say so. Only when the list is SET — it is empty by default, so a fresh install's card is
+                       unchanged — and, like the knob's item, rendered even at 0 for an operator who set it: a
+                       setting whose only effect is an absence needs a line that says the absence was nothing.
+                       Appended after the knob's item: the sessions are the alert; these are footnotes about the
+                       ones that are not. ANNOTATION, NEVER SUPPRESSION. */
+                    if (_settings.ExcludedDatabases.Count > 0 && lrqContext is not null)
+                    {
+                        lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(_settings.ExcludedDatabases, read.ExcludedByDatabase));
+                    }
+
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
