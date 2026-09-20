@@ -384,11 +384,21 @@ public sealed class IntervalHonestHourlyRollupTests
         Assert.Throws<ArgumentException>(() => DarlingTrendReader.QueryHistoryHourlySqlFor(" "));
 
         /* The daily summary: the one-argument form is the legacy; the two-argument form swaps the queries CTE's
-           relation and nothing else; the daily tier ignores the argument. */
+           relation — and, since #3653 A6, carries the successor's own WHERE into the not-carried member's
+           source probe (the hole scan's rule: a day holding only restart rows is not a hole for an aggregate
+           that rejects them) — and nothing else; the daily tier ignores the argument. The expected text is
+           built from the legacy's by exactly those two edits, so a third difference reds here. */
         Assert.Equal(DailySummarySql.RangeSqlFor(RetentionTier.Hourly), DailySummarySql.RangeSqlFor(RetentionTier.Hourly, legacy));
-        Assert.Equal(
-            DailySummarySql.RangeSqlFor(RetentionTier.Hourly).Replace($"FROM collect.{legacy}", $"FROM collect.{successor}", StringComparison.Ordinal),
-            DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor));
+        var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(TimescaleSupport.CreateQueryStatsIntervalHourlySql);
+        Assert.Equal("sample_interval_seconds IS DISTINCT FROM 0", successorFilter);
+        Assert.Equal(string.Empty, TimescaleSupport.MaterializationHoleSourceFilterFor(TimescaleSupport.CreateQueryStatsHourlySql));
+        const string SourceProbeTail = "AND s.collection_time < b.d + INTERVAL '1 day'";
+        var legacyRouted = DailySummarySql.RangeSqlFor(RetentionTier.Hourly);
+        Assert.Equal(1, legacyRouted.Split(SourceProbeTail).Length - 1);
+        var expectedSuccessorRouted = legacyRouted
+            .Replace($"FROM collect.{legacy}", $"FROM collect.{successor}", StringComparison.Ordinal)
+            .Replace(SourceProbeTail + ")", SourceProbeTail + "\n          AND " + successorFilter + ")", StringComparison.Ordinal);
+        Assert.Equal(expectedSuccessorRouted, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor));
         Assert.Contains(successor, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.DoesNotContain(legacy, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.Equal(DailySummarySql.RangeSqlFor(RetentionTier.Daily), DailySummarySql.RangeSqlFor(RetentionTier.Daily, successor));

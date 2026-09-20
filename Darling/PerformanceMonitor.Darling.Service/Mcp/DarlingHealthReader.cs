@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -192,9 +193,17 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /* ═══════════════════════════ daily summary ═══════════════════════════ */
 
     /// <summary>One day's rolled-up signals plus the shared composite health band. Structurally a subset of the
-    /// viewer's <c>DailySummaryRow</c>; the band comes from the SHARED <see cref="DailyHealthBandCalculator"/>.</summary>
+    /// viewer's <c>DailySummaryRow</c>; the band comes from the SHARED <see cref="DailyHealthBandCalculator"/>.
+    ///
+    /// <para><see cref="UniqueQueries"/> is <c>long?</c> since #3653 A6: <c>null</c> is "not carried at this
+    /// tier" — the rollup that answers the window never materialized this server's day while the rollup's
+    /// source still holds the day's rows (<see cref="DailySummarySql"/>, the routed <c>queries</c> CTE's third
+    /// member) — and is NOT the same day as one with 0 distinct queries. The band never read this count
+    /// (<see cref="DailyHealthSignals"/> has no member for it), so a NULL moves no verdict; what it moves is
+    /// the wire (<c>unique_queries: null</c>) and the range read's <c>days_missing</c>. Raw-tier rows and
+    /// Lite's rows never carry a NULL here: raw is the source itself.</para></summary>
     public sealed record DailySummaryReadRow(
-        DateTime SummaryDate, decimal TotalWaitTimeSec, string TopWaitType, long UniqueQueries, long DeadlockCount,
+        DateTime SummaryDate, decimal TotalWaitTimeSec, string TopWaitType, long? UniqueQueries, long DeadlockCount,
         long BlockingEvents, long HighCpuEvents, long CollectionErrors, long MemoryPressureEvents,
         long MemoryCriticalEvents, long AlertCount, long MaxBlockDurationMs, bool HasData)
     {
@@ -276,7 +285,22 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// <param name="Rows">One row per day the spine holds, oldest first, each stamped with its <see cref="DailySummaryReadRow.DataState"/>.</param>
     /// <param name="RetentionHorizon">The oldest UTC day every signal source still holds — <see cref="DailySummaryRetention.HorizonFor"/>.</param>
     /// <param name="ShortestRetentionDays">The retention (days) the horizon was computed from: the shortest effective horizon among the sources.</param>
-    public sealed record DailySummaryRangeReadResult(List<DailySummaryReadRow> Rows, DateTime RetentionHorizon, int ShortestRetentionDays);
+    public sealed record DailySummaryRangeReadResult(List<DailySummaryReadRow> Rows, DateTime RetentionHorizon, int ShortestRetentionDays)
+    {
+        /// <summary>
+        /// The days in <see cref="Rows"/> whose query count the routed tier did NOT carry (#3653 A6) — every row
+        /// with <see cref="DailySummaryReadRow.UniqueQueries"/> <c>null</c>, oldest first, as UTC dates. Derived
+        /// from the rows rather than read separately so the list and the NULLs cannot disagree: a day is here
+        /// exactly when its cell is NULL, and the SQL produces that NULL from one witness (the rollup holds no
+        /// row for the server's day while the rollup's source still does). Empty on the raw tier by
+        /// construction, and on every rollup-tier window whose days the rollup carried. The wire spells it
+        /// <c>days_missing[]</c> on both daily tools.
+        /// </summary>
+        public IReadOnlyList<DateTime> DaysMissing => Rows
+            .Where(row => row.UniqueQueries is null)
+            .Select(row => row.SummaryDate.Date)
+            .ToArray();
+    }
 
     /// <summary>
     /// The collectors whose tables the daily aggregate reads as SIGNALS, by their schedule names — the
@@ -486,7 +510,10 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
         reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
         reader.IsDBNull(2) ? "" : reader.GetString(2),
-        reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
+        /* #3653 A6: a NULL unique_queries is the routed statement's "not carried at this tier" and is KEPT as
+           null — the 0L this used to substitute is the lie the item names. The other counts stay COALESCEd:
+           the statement never produces a NULL for them. */
+        reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
         reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
         reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
         reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),

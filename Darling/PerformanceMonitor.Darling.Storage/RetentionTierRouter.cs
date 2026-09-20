@@ -174,20 +174,29 @@ public static class RetentionTierRouter
     /// about two hours — because the first refresh after resume opens at <c>now - start_offset</c>, the
     /// watermark jumps past that tail, and a real-time aggregate serves nothing below its watermark that was
     /// never materialized (the hard partition <see cref="TimescaleSupport.BackfillBaselineAggregatesAsync"/>
-    /// documents). Any outage longer than <c>start_offset</c> less that tail does it. Nothing in the product
-    /// repairs it: the startup backfill and <c>--backfill-rollups</c> both measure the FLOOR, and a floor cannot
-    /// see a hole above itself; once raw retention passes the tail (four days on the rollup tier) the hole is
-    /// permanent. The repair that fits without a rung is a startup pass that finds raw-time gaps longer than
-    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/> and runs <c>refresh_continuous_aggregate</c>
-    /// (forced) over <c>[gap start - the tail, gap end + start_offset]</c> for every hourly aggregate; it is
-    /// its own lane, because the gap scan has to be bounded by shape on the largest raw tables and the store
-    /// carries no collection-run ledger to read it from cheaply. Recorded here so the next reader does not
-    /// re-derive "a day of history" from the constant's name.</para>
+    /// documents). Any outage longer than <c>start_offset</c> less that tail does it. The floor-measuring
+    /// passes cannot see it: the startup backfill and <c>--backfill-rollups</c> both measure the FLOOR, and a
+    /// floor cannot see a hole above itself; once the source's retention passes the tail (four days of raw
+    /// under the hourly tier) the hole is permanent. What DOES see it, since #3731 (Q10):
+    /// <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/> — at every service start, for every
+    /// aggregate, the bucket ranges inside the materialized span that the source holds admitted rows for and
+    /// the aggregate never materialized, each refreshed over exactly its bounds, capped at one policy window
+    /// per aggregate per start. So the hole is repaired at the next start rather than never; between the
+    /// post-resume refresh that moves the ceiling past it and that start, and past the cap, it stands. For
+    /// the one reader whose cell it reaches whole — the daily summary's <c>unique_queries</c>, when a whole
+    /// day of a server's rows was skipped — <see cref="DailySummarySql"/> asks the repair's two probes per
+    /// server at day grain and prints NULL with the day named in <c>days_missing[]</c> (#3653 A6), instead of
+    /// the 0 it printed. Recorded here so the next reader does not re-derive "a day of history" from the
+    /// constant's name.</para>
     ///
     /// <para><i>A window STRADDLING the floor is served partially, with no signal to the caller.</i> When the
     /// window starts below the floor but no lower tier reaches further back, this returns the tier — which is
     /// the correct CHOICE (raw would return less on a healthy store), but the part of the window below the
-    /// floor is missing and nothing here tells the caller so.</para>
+    /// floor is missing and nothing HERE tells the caller so. One reader now tells its own caller: the daily
+    /// summary's not-carried probe (#3653 A6) does not distinguish below-the-floor from below-the-ceiling —
+    /// both are "the rollup holds no row for this server's day while its source still does" — so for as long
+    /// as the source holds the day, the straddled days read NULL and are listed. The rest of the routed
+    /// readers still carry this gap.</para>
     ///
     /// <para>Both are accepted because both are strictly better than the age-only routing they replace, which
     /// served the ENTIRE window as empty in exactly these cases. What must NOT be inferred is the belief this

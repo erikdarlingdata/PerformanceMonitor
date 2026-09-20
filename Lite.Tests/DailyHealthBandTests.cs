@@ -573,6 +573,26 @@ public class DailyHealthBandTests
         Assert.Contains("Total wait: 20.0 min", line); // 1200s / 60
     }
 
+    /// <summary>
+    /// #3653 A6: a null count is "not carried at this tier" — the store's rollup never materialized the day
+    /// for this server — and the line says so in words rather than printing 0 (a measured quiet day) or the
+    /// grids' dash (there was none of this). A measured 0 still prints 0: the two cases the item told apart
+    /// stay apart on the one line either calendar renders the count on. Darling's routed calendar is the only
+    /// caller that hands a null; Lite has no rollup tier and always hands a count.
+    /// </summary>
+    [Fact]
+    public void BuildKeyMetricsLine_NullUniqueQueries_SaysNotMaterialized_NotZero()
+    {
+        var notCarried = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, null);
+        Assert.Contains("Unique queries: " + DailyHealthBandCalculator.UniqueQueriesNotMaterialized, notCarried);
+        Assert.DoesNotContain("Unique queries: 0", notCarried);
+        Assert.Equal("not materialized at this tier", DailyHealthBandCalculator.UniqueQueriesNotMaterialized);
+
+        var measuredZero = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, 0);
+        Assert.Contains("Unique queries: 0", measuredZero);
+        Assert.DoesNotContain(DailyHealthBandCalculator.UniqueQueriesNotMaterialized, measuredZero);
+    }
+
     /* ─────────── #3525 review: the still-forming day clamps to its elapsed portion ─────────── */
 
     [Fact]
