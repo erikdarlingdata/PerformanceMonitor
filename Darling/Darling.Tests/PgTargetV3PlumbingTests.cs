@@ -70,18 +70,36 @@ public sealed class PgTargetV3PlumbingTests
     }
 
     /// <summary>
-    /// Inert through every shared entry point: a fact under each v3 source scores base 0 with no amplifier, composes
-    /// no advice (static or through <c>FactAdvice</c>), opens no edge, has no baseline, and still has next reads
-    /// (the McpSurface census requires a row the day a key is declared). The exit criterion — <c>analyze_server</c>
-    /// on the gated e2e returns the SAME payload — follows: nothing here can emit, score or compose.
+    /// Inert through every shared entry point: a fact under each UNFILLED v3 source scores base 0 with no amplifier,
+    /// composes no advice (static or through <c>FactAdvice</c>), opens no edge, has no baseline, and still has next
+    /// reads (the McpSurface census requires a row the day a key is declared). The exit criterion —
+    /// <c>analyze_server</c> on the gated e2e returns the SAME payload — follows: nothing here can emit, score or
+    /// compose. Lane 27 filled the plan family's regression, sensitivity and anomaly arms: a BARE fact under those
+    /// keys (no graded metadata) still scores 0 — the family self-gates on its own keys — and its advice, edges and
+    /// baseline are pinned in <c>PgTargetPlanTests</c>; <c>PG_SEQ_SCAN_ADVISORY</c> stays lane 30's inert stub here.
     /// </summary>
     [Fact]
     public void TheV3Families_AreInertThroughEverySharedEntryPoint_UntilTheirLanesLand()
     {
+        /* Lane 27's filled keys: a bare fact scores 0 (self-gated) and composes the family's static block, not null. */
+        var filled = new[] { PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity }
+            .Select(k => new Fact { Source = PgTargetSources.PlansSource, Key = k, Value = 42, ServerId = 1 })
+            .ToList();
+        new FactScorer().ScoreAll(filled);
+        foreach (var fact in filled)
+        {
+            Assert.Equal(0.0, fact.BaseSeverity);
+            Assert.NotNull(PgTargetAdvice.Compose(fact.Key, filled.ToFactLookup()));
+            Assert.NotNull(FactAdvice.GetForFactKey(fact.Key));
+            Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(fact.Key)!);
+        }
+        Assert.NotNull(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyPlanRegression));
+        Assert.Single(new PgTargetRelationshipGraph().GetAllEdges(PgTargetFactKeys.AnomalyPlanRegression));
+        Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgStatementMeanMs));
+        Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgStatementMeanMs));
+
         var facts = new[]
             {
-                (PgTargetSources.PlansSource, PgTargetFactKeys.PlanRegression),
-                (PgTargetSources.PlansSource, PgTargetFactKeys.ParameterSensitivity),
                 (PgTargetSources.PlansSource, PgTargetFactKeys.SeqScanAdvisory),
                 (PgTargetSources.KernelSource, PgTargetFactKeys.CpuBurnCores),
                 (PgTargetSources.KernelSource, PgTargetFactKeys.CpuDecomposition),
@@ -101,13 +119,13 @@ public sealed class PgTargetV3PlumbingTests
             Assert.Empty(graph.GetAllEdges(fact.Key));
             Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(fact.Key)!);
         }
-        foreach (var anomaly in new[] { PgTargetFactKeys.AnomalyPlanRegression, PgTargetFactKeys.AnomalyCpuBurn })
+        foreach (var anomaly in new[] { PgTargetFactKeys.AnomalyCpuBurn })
         {
             Assert.Null(FactAdvice.GetForFactKey(anomaly));
             Assert.Empty(graph.GetAllEdges(anomaly));
             Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(anomaly)!);
         }
-        foreach (var metric in new[] { MetricNames.PgStatementMeanMs, MetricNames.PgCpuBurnCores })
+        foreach (var metric in new[] { MetricNames.PgCpuBurnCores })
         {
             Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
             Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));

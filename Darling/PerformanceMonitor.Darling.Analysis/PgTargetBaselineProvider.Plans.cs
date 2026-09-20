@@ -11,21 +11,55 @@ namespace PerformanceMonitor.Darling.Analysis;
 public sealed partial class PgTargetBaselineProvider
 {
     /// <summary>
-    /// <c>pg_statement_mean_ms</c>: a statement's mean execution ms per collection from <c>pg_statement_stats</c> —
-    /// the reset-aware <c>total_exec_time / calls</c> difference, the <c>PgTps</c> arm's differencing shape on another
-    /// counter. THE DECISION LANE 27 OWNS FIRST: <c>PgBaselineProvider.GetBaselineAsync</c> keys one series on
-    /// (<c>server_id</c>, metric) and has no per-statement dimension, so this arm is either the server-wide mean over
-    /// every statement (one series, honest but blunt) or the seam grows a key dimension — a SHARED-FILE change to
-    /// report to the coordinator, never made inside the lane. The stub takes no side.
-    /// <para>/* filled by lane 27 — answers null until then, which the shared reader treats as "no arm for this
-    /// metric". The filled arm is a CTE chain ending in <c>clean(collection_time, v)</c> followed by the ONE
-    /// <c>PgBaselineProvider.RobustTierScaffold</c> — the #3653 Q6 contract: the scaffold binds the hour-of-week key
-    /// through the ROOT's clock parameters (<c>$4..$6</c> after <c>$3</c>), never its own <c>EXTRACT</c>
-    /// (LocalClockBucketKeyTests reads every arm) — window bounds <c>&gt;= $2 AND &lt; $3</c>, <c>::DOUBLE PRECISION</c>
-    /// on the value, <c>server_id = $1</c>, no bare <c>now()</c>; the baseline census in <c>PgTargetAnomalyTests</c>
-    /// gains the metric's (name, table) row in the same PR, and the table joins
-    /// <c>DarlingRetentionHorizons.BaselineServingRawCollectors</c> by COLLECTOR name the day this arm reads it
-    /// (BaselineSupplyTests derives that set from the arms' text and fails without the floor). */</para>
+    /// <c>pg_statement_mean_ms</c>: the SERVER-WIDE mean execution ms per statement call, per collection, from
+    /// <c>pg_statement_stats</c> — Σ <c>delta_total_exec_time_ms</c> over Σ <c>delta_calls</c> across every statement
+    /// row stamped with one <c>collection_time</c>, the collector's STORED deltas (never a re-differencing of the
+    /// cumulative columns — <c>PgTargetFactCollector.Queries.cs</c>'s discipline) and so already reset-aware.
+    ///
+    /// <para><b>THE DECISION LANE 27 OWNED FIRST, taken: (a) the server-wide series.</b>
+    /// <c>PgBaselineProvider.GetBaselineAsync</c> keys one series on (<c>server_id</c>, metric) and has no per-statement
+    /// dimension, so a per-<c>queryid</c> baseline needed either a key dimension on the shared seam (a shared-file
+    /// change, reported to the coordinator as an out-of-lane item, never made inside the lane) or ONE series for the
+    /// whole server. The coordinator's ruling for v3 is the server-wide mean — honest but blunt: the anomaly it feeds
+    /// says "this server's statements got slower per call than this hour usually sees", not "this statement did".
+    /// The per-statement flip is <c>PG_PLAN_REGRESSION</c>'s (the collector, with its own bars); the anomaly is the
+    /// server-level corroborator that folds onto it (<c>PgTargetFactKeys.AnomalyToFamilies</c>). A heavier parameter
+    /// mix, a colder cache or one new expensive statement all move this series too, and the detector's doc and the
+    /// advice both say so.</para>
+    ///
+    /// <para><b>Why a per-call mean and not a total.</b> Σ exec time per collection is throughput-shaped — it rises
+    /// with calls — and lane 9's <c>pg_tps</c> already baselines throughput. Dividing by calls gives the quantity a
+    /// plan change moves: what one call costs. A collection with no calls (<c>HAVING SUM(delta_calls) &gt; 0</c>) is
+    /// not a sample — a mean over no calls is undefined, not zero — so an idle minute contributes nothing, which is
+    /// the same rule the fact family applies to its own means.</para>
+    ///
+    /// <para><b>Cost, stated.</b> Thirty days of one-minute <c>pg_statement_stats</c> for one server is every statement
+    /// shape's row per minute — tens of millions of rows on a busy server — read once through the (server_id,
+    /// collection_time) index and aggregated to one row per collection (~43,000), once an hour per server (the
+    /// provider's <c>CacheTtl</c>), on the analysis path and never the alerting one. It is the family's heaviest read
+    /// by an order of magnitude and the reason <c>pg_statement_stats</c> joins
+    /// <c>DarlingRetentionHorizons.BaselineServingRawCollectors</c> in this PR: its 30-day schedule default was the only
+    /// thing covering the window, and it is user-editable (D10, the #1757 shape).</para>
+    ///
+    /// <para>/* filled by lane 27 — the marker stays, as v1's did. The arm is a CTE chain ending in
+    /// <c>clean(collection_time, v)</c> followed by the ONE <see cref="PgBaselineProvider.RobustTierScaffold"/> — the
+    /// #3653 Q6 contract: the scaffold binds the hour-of-week key through the ROOT's clock parameters (<c>$4..$6</c>
+    /// after <c>$3</c>), never its own <c>EXTRACT</c> (LocalClockBucketKeyTests reads every arm) — window bounds
+    /// <c>&gt;= $2 AND &lt; $3</c>, <c>::DOUBLE PRECISION</c> on the value (the io-arm rule: STDDEV_SAMP over numeric
+    /// can overflow System.Decimal at materialisation), <c>server_id = $1</c>, no bare <c>now()</c>; the baseline
+    /// census in <c>PgTargetAnomalyTests</c> gains the metric's (name, table) row in the same PR. */</para>
     /// </summary>
-    private static partial string? StatementMeanMsBaselineQuery() => null;
+    private static partial string? StatementMeanMsBaselineQuery() => @"
+WITH per_collection AS (
+    SELECT collection_time,
+           SUM(delta_total_exec_time_ms)::DOUBLE PRECISION / SUM(delta_calls) AS mean_ms
+    FROM pg_statement_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    GROUP BY collection_time
+    HAVING SUM(delta_calls) > 0
+),
+clean AS (
+    SELECT collection_time, mean_ms AS v
+    FROM per_collection
+)," + RobustTierScaffold;
 }

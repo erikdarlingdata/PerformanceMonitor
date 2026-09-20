@@ -71,6 +71,8 @@ public sealed class PgTargetAnomalyTests
         MetricNames.PgBlockedSessions,
         /* lane 24 (#3691): stock's SAMPLED wait rate over sampled_ms — its own metric beside the Aurora one. */
         MetricNames.PgSampledWaitMsPerSec,
+        /* lane 27 (#3691 v3): the SERVER-WIDE per-call statement mean — one series per server, by the coordinator's ruling. */
+        MetricNames.PgStatementMeanMs,
     ];
 
     private static readonly (string Metric, string Table)[] s_metricTables =
@@ -86,6 +88,7 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgWalBytesPerSec, "pg_write_stats"),
         (MetricNames.PgBlockedSessions, "pg_blocking_edges"),
         (MetricNames.PgSampledWaitMsPerSec, "pg_wait_sampling"),
+        (MetricNames.PgStatementMeanMs, "pg_statement_stats"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
@@ -93,7 +96,7 @@ public sealed class PgTargetAnomalyTests
     [Fact]
     public void TheServedPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
     {
-        Assert.Equal(9, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(10, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
         foreach (var metric in s_pgMetricNames)
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
@@ -133,11 +136,11 @@ public sealed class PgTargetAnomalyTests
     [Fact]
     public void TheV2BaselinesAndDetectors_AreReachableInertStubs_EachNamingItsLane()
     {
-        /* Lanes 11, 12, 15 and 17 filled pg_io_read_latency, pg_replay_lag_bytes, pg_wal_bytes_per_sec and
-           pg_blocked_sessions (each arm pinned in its own family's tests; the served ones also in s_pgMetricNames
-           above); the wave-2 name still answers null, and so do the two v3 names (#3691 v3 plumbing) — each has a
-           reachable stub arm (pinned by text below), not "no arm", so lanes 27 / 28 fill a partial. */
-        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers, MetricNames.PgStatementMeanMs, MetricNames.PgCpuBurnCores })
+        /* Lanes 11, 12, 15, 17 and 27 filled pg_io_read_latency, pg_replay_lag_bytes, pg_wal_bytes_per_sec,
+           pg_blocked_sessions and pg_statement_mean_ms (each arm pinned in its own family's tests; the served ones also
+           in s_pgMetricNames above); the wave-2 name still answers null, and so does the remaining v3 name (#3691 v3
+           plumbing) — a reachable stub arm (pinned by text below), not "no arm", so lane 28 fills a partial. */
+        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers, MetricNames.PgCpuBurnCores })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
@@ -145,6 +148,7 @@ public sealed class PgTargetAnomalyTests
             Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
         }
         Assert.Contains(MetricNames.PgBlockedSessions, s_pgMetricNames);
+        Assert.Contains(MetricNames.PgStatementMeanMs, s_pgMetricNames);
         Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgReplayLagBytes));
         Assert.Contains(MetricNames.PgWalBytesPerSec, s_pgMetricNames);
 
@@ -154,7 +158,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),", provider, StringComparison.Ordinal);
         /* wave 3 (#3691): the blocking arm, routed to the partial lane 17 filled. */
         Assert.Contains("MetricNames.PgBlockedSessions => BlockedSessionsBaselineQuery(),", provider, StringComparison.Ordinal);
-        /* v3 (#3691 plumbing): the plan and kernel arms are reachable and null — stubs, not "no arm". */
+        /* v3 (#3691 plumbing): the plan arm (filled by lane 27) and the kernel arm (reachable and null — a stub, not "no arm"). */
         Assert.Contains("MetricNames.PgStatementMeanMs => StatementMeanMsBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.Contains("MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
@@ -289,6 +293,8 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.WalVolumeWindowSql,
         /* wave 3 (#3691) lane 17 */
         PgTargetAnomalyDetector.BlockedSessionsWindowSql,
+        /* lane 27 (#3691 v3): the server-wide per-call statement mean */
+        PgTargetAnomalyDetector.StatementMeanWindowSql,
         /* lane 24 (#3691): the sampled wait profile's two reads */
         PgTargetAnomalyDetector.SampledWaitRateWindowSql,
         PgTargetAnomalyDetector.SampledWaitContribWindowSql,
@@ -355,12 +361,13 @@ public sealed class PgTargetAnomalyTests
     /// Every FILLED detector is fenced and reads its bucket: the five v1 detectors in the root file, and (since the
     /// #3691 between-waves batch re-pinned this from "five") the v2 detectors in their own partials — I/O (lane
     /// 11), replication (lane 12), WAL volume (lane 15) — and, since lane 17 filled its body, the wave-3 blocking
-    /// detector. Nine; the exemption the between-waves batch named is gone with the stub. The two v3 detectors (plan
-    /// regression, lane 27; CPU burn, lane 28) are stubs (<c>Task.CompletedTask</c>, no read to fence) and are named as
-    /// the exemptions; each lane adds its file to the filled list the day it fills the body.
+    /// detector, and since lane 27 filled its body, the v3 plan-regression detector. Ten; the exemption the
+    /// between-waves batch named is gone with the stub. The remaining v3 detector (CPU burn, lane 28) is a stub
+    /// (<c>Task.CompletedTask</c>, no read to fence) and is named as the exemption; the lane adds its file to the filled
+    /// list the day it fills the body.
     /// </summary>
     [Fact]
-    public void TheDetector_FencesEachOfNineFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
+    public void TheDetector_FencesEachOfTenFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
@@ -375,8 +382,8 @@ public sealed class PgTargetAnomalyTests
             Assert.Contains("_baselineProvider.GetBaselineAsync(", body, StringComparison.Ordinal);
         }
 
-        /* The four filled partials: one detector per file, the same fence and the same bucket read. */
-        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies") })
+        /* The five filled partials: one detector per file, the same fence and the same bucket read. */
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies"), ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies") })
         {
             var partialCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
             Assert.Contains("private async partial Task " + detector + "(", partialCode, StringComparison.Ordinal);
@@ -384,8 +391,8 @@ public sealed class PgTargetAnomalyTests
             Assert.Contains("_baselineProvider.GetBaselineAsync(", partialCode, StringComparison.Ordinal);
             Assert.DoesNotContain("DateTime.UtcNow", partialCode, StringComparison.Ordinal);
         }
-        /* The two exemptions, by name: the v3 stubs have no body to fence (#3691 v3 plumbing). */
-        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies") })
+        /* The one exemption, by name: the remaining v3 stub has no body to fence (#3691 v3 plumbing; lane 27 filled the plan one). */
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies") })
         {
             var stub = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
             Assert.Contains(detector + "(AnalysisContext context, List<Fact> anomalies) => Task.CompletedTask;", stub, StringComparison.Ordinal);
@@ -680,7 +687,7 @@ public sealed class PgTargetAnomalyTests
             .Select(f => f.Name)
             .ToList();
         Assert.Equal(
-            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec", "PgSessionCountFallback", "PgSessionCountFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
+            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec", "PgSessionCountFallback", "PgSessionCountFloor", "PgStatementMeanMsFallback", "PgStatementMeanMsFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
             pgConstants.Order(StringComparer.Ordinal).ToArray());
 
         var lines = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');

@@ -217,7 +217,7 @@ public class BaselineSupplyTests
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
         var pgSources = PgTargetBaselineSources();
-        Assert.Equal(9, pgSources.Count);   /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) */
+        Assert.Equal(10, pgSources.Count);  /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) + pg_statement_stats (lane 27) */
         Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
@@ -271,13 +271,13 @@ public class BaselineSupplyTests
     private static string CollectorNameFor(string table) =>
         CollectorCatalog.All.Single(c => c.TargetTable == table).Name;
 
-    /// <summary>The derivation itself, pinned: the nine tables the arms read today, by name, so a table quietly
+    /// <summary>The derivation itself, pinned: the ten tables the arms read today, by name, so a table quietly
     /// leaving an arm (or a regex that stopped matching) is a visible change and not a smaller floor.</summary>
     [Fact]
     public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
     {
         Assert.Equal(
-            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_replication_stats", "pg_session_states", "pg_wait_sampling", "pg_wait_stats", "pg_write_stats" },
+            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_replication_stats", "pg_session_states", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "pg_write_stats" },
             PgTargetBaselineSources());
         /* Lane 17's arm reads the log for its zero samples too; the log is not a collector table and needs no floor of
            this kind (DarlingRetentionHorizons.CollectionLogRetentionDays, twice the base, already covers the window). */

@@ -82,7 +82,10 @@ public static class DarlingRetentionHorizons
     /// table name differ, so the test maps the derived table back to its collector through the catalog. Lane 24
     /// added <c>pg_wait_sampling</c>, read directly by the stock <c>pg_sampled_wait_ms_per_sec</c> arm (its
     /// <c>sampled_ms</c> denominator, V133) — the same silent-starvation shape for <c>ANOMALY_PG_SAMPLED_WAIT_PROFILE</c>
-    /// without it.</para>
+    /// without it. Lane 27 (v3) added <c>pg_statement_stats</c>, read directly by the server-wide
+    /// <c>pg_statement_mean_ms</c> arm (Σ stored exec-time deltas over Σ stored call deltas per collection) — the
+    /// family's heaviest read and the one whose 30-day default retention an operator is likeliest to shorten, which
+    /// would have starved <c>ANOMALY_PG_PLAN_REGRESSION</c> the same silent way.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -92,6 +95,7 @@ public static class DarlingRetentionHorizons
             "pg_replication_stats", "pg_io_stats", "pg_write_stats",
             "pg_blocking",
             "pg_wait_sampling",
+            "pg_statement_stats",
         };
 
     /// <summary>
