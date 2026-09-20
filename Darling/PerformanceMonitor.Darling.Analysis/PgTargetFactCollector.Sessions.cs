@@ -335,9 +335,28 @@ LIMIT 25";
     /// (<c>peak_idle_in_transaction_share</c>, lane 3's amplifier gate and the graph's) keeps the capture's own
     /// <c>total_sessions</c> as its denominator — <c>numbackends</c> has no state, so a share of it would be a count
     /// from one instrument over a count from another. Two instruments, two denominators, each honest for what it
-    /// measures. The bars do not move; a store still needs a capture in the window for this family to speak at
-    /// all (the breakdown and the redaction verdict come from the captures), which is the next honest step after
-    /// this one, not this one.</para>
+    /// measures. The bars do not move.</para>
+    ///
+    /// <para><b>A window with NO capture still grades the level (lane 26 of #3691) — the level-only card.</b> Before
+    /// this lane the first read's empty was the family's empty: a quiet OLTP pool that tripped no capture rule in the
+    /// window got no saturation fact even where <c>numbackends</c> could have supplied the numerator alone. Now the
+    /// capture read's empty only records that there is no capture (<c>captures_with_rows = 0</c>); the ceiling is
+    /// still looked up and the level still read, and when the level DECIDES (coverage at or over the floor) the fact
+    /// is emitted with <c>Value</c> = the level's peak instant over the ceiling, <c>numerator_source = 1</c>, and
+    /// NONE of the capture-derived keys — no <c>peak_total_sessions</c>, no state split, no
+    /// <c>peak_idle_in_transaction_share</c>, no newest-capture figures, no <c>peak_age_s</c>. Absence is the honest
+    /// stamp: a share of 0 would claim "nothing parked", and nothing observed the states. Every reader of those keys
+    /// already treats absence as "not measured": the parked-share amplifier and the saturation ↔ idle edge gate
+    /// cannot match without the share (they ask for the key, not for 0), and #3713's compare banding
+    /// (<c>ComparisonBanding.BaselinedValueFor</c>) returns null without <c>peak_total_sessions</c>, so the level-only
+    /// row takes the absolute rule rather than a sigma against a bucket built from capture counts. Without a capture
+    /// there is no redaction verdict to take (the redacted-majority rule is over stored rows; zero rows are neither
+    /// redacted nor visible) and no idle-in-transaction read to run. When the level does NOT decide — a pre-V133
+    /// store, or one mid-migration — and there is no capture, the family is silent exactly as v1 was: a partial
+    /// window's level is the capture-peak lie in a new coat, and there is no capture peak to fall back to. A window
+    /// WITH a capture is composed byte for byte as lane 25 left it (pinned). The redacted-majority-WITH-captures
+    /// ruling (withhold the ratio although <c>numbackends</c> is unprivileged) is untouched here — it is the
+    /// coordinator's open item, not this lane's.</para>
     ///
     /// <para><b>The idle-in-transaction fact does not need the ceiling.</b> A duration is graded on its own bar, so
     /// the second read runs after the redaction gate and BEFORE the ceiling lookup, and a window with no config
@@ -396,37 +415,42 @@ LIMIT 25";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            long peakTotal, peakActive, peakIdleInTransaction, latestTotal, latestActive, latestIdleInTransaction, capturesWithRows, rowsStored, rowsRedacted;
-            DateTime? peakAt, latestAt;
+            long peakTotal = 0, peakActive = 0, peakIdleInTransaction = 0, latestTotal = 0, latestActive = 0, latestIdleInTransaction = 0, capturesWithRows = 0, rowsStored = 0, rowsRedacted = 0;
+            DateTime? peakAt = null, latestAt = null;
             /* The reader is closed before the second read runs — Npgsql allows one open reader per connection. */
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
                 /* The CROSS JOIN against the two LIMIT 1 CTEs yields no row at all when the window stored no capture —
-                   the exception table's honest empty, and this family's. */
-                if (!await reader.ReadAsync(context.CancellationToken))
-                    return;
-
-                peakTotal = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-                peakActive = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-                peakIdleInTransaction = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
-                peakAt = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-                latestTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-                latestActive = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
-                latestIdleInTransaction = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
-                latestAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
-                capturesWithRows = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
-                rowsStored = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
-                rowsRedacted = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                   the exception table's honest empty. Since lane 26 of #3691 that is NOT this family's empty: the
+                   zeroed locals say "no capture", and the level below may still grade the pool alone. */
+                if (await reader.ReadAsync(context.CancellationToken))
+                {
+                    peakTotal = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+                    peakActive = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                    peakIdleInTransaction = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+                    peakAt = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+                    latestTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+                    latestActive = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                    latestIdleInTransaction = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                    latestAt = reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7);
+                    capturesWithRows = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+                    rowsStored = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
+                    rowsRedacted = reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10));
+                }
             }
 
-            if (rowsStored <= 0 || peakTotal <= 0)
-                return;
+            /* A capture is one that stored rows and counted a positive peak; anything else is "no capture" — the
+               level-only path, where the capture-derived keys are ABSENT rather than zero. */
+            var hasCapture = rowsStored > 0 && peakTotal > 0;
+            if (!hasCapture)
+                capturesWithRows = 0;
 
             var windowEnd = AsNaive(context.TimeRangeEnd);
-            var redactedShare = rowsRedacted / (double)rowsStored;
+            var redactedShare = hasCapture ? rowsRedacted / (double)rowsStored : 0.0;
 
-            /* ── Redaction first: the login's blindness is the finding, and no ratio is built on blank rows. ── */
-            if (redactedShare >= PgTargetScorer.RedactedShareMajority)
+            /* ── Redaction first: the login's blindness is the finding, and no ratio is built on blank rows. Only a
+               window WITH stored rows can be redacted — zero rows are neither blank nor visible. ── */
+            if (hasCapture && redactedShare >= PgTargetScorer.RedactedShareMajority)
             {
                 var advisory = new Fact
                 {
@@ -454,8 +478,10 @@ LIMIT 25";
             }
 
             /* ── The parked transactions, on the same connection: graded on duration alone, so they need no ceiling
-               and are stated before the ceiling lookup can return early. ── */
-            await ReadIdleInTransactionAsync(connection, context, facts, capturesWithRows, redactedShare, windowEnd);
+               and are stated before the ceiling lookup can return early. Skipped without a capture: the holders
+               are the captures' rows, and "no row over the floor" is not a finding when there are no rows. ── */
+            if (hasCapture)
+                await ReadIdleInTransactionAsync(connection, context, facts, capturesWithRows, redactedShare, windowEnd);
 
             /* ── The ceiling, off lane 2's context facts (emission order: Config before Sessions). The third is
                PostgreSQL 16+'s reserved_connections (pg_use_reserved_connections); absent on a pre-16 snapshot and
@@ -491,6 +517,16 @@ LIMIT 25";
                 numerator = levelPeak;
                 useNumbackends = true;
             }
+            else if (!hasCapture)
+            {
+                /* No capture AND the level did not decide (a pre-V133 store, or one mid-migration): there is no
+                   numerator that is not the capture-peak lie in a new coat, and no capture peak to fall back to —
+                   v1's silence, kept on purpose (#3691 lane 26). */
+                _logger?.LogDebug(
+                    "[PgTargetFactCollector] CollectSessionFactsAsync on server {ServerId} ({ServerName}) stored no session capture in the window and pg_stat_database.numbackends covered {Sampled} of {Instants} instants (under the floor); no saturation fact this pass.",
+                    context.ServerId, context.ServerName, level.NumbackendsSamples, level.DatabaseStatsSamples);
+                return;
+            }
 
             var ratio = numerator / usable;
             var fact = new Fact
@@ -508,32 +544,43 @@ LIMIT 25";
                     [PgTargetScorer.NumbackendsPartialKey] = choice.Partial ? 1 : 0,
                     [PgTargetScorer.NumbackendsSamplesKey] = level.NumbackendsSamples,
                     [PgTargetScorer.DatabaseStatsSamplesKey] = level.DatabaseStatsSamples,
-                    /* The capture peak stays under its v1 name whichever numerator decided: #3713's compare banding
-                       reads it, and the breakdown below is ITS breakdown. */
-                    ["peak_total_sessions"] = peakTotal,
-                    ["peak_active_sessions"] = peakActive,
-                    ["peak_idle_in_transaction_sessions"] = peakIdleInTransaction,
-                    /* Neither active nor idle-in-transaction: idle client sessions AND PostgreSQL's own background
-                       processes, which this series cannot tell apart (backend_type redacts). */
-                    ["peak_other_sessions"] = Math.Max(0, peakTotal - peakActive - peakIdleInTransaction),
-                    ["peak_idle_in_transaction_share"] = peakIdleInTransaction / (double)peakTotal,
-                    ["latest_total_sessions"] = latestTotal,
-                    ["latest_active_sessions"] = latestActive,
-                    ["latest_idle_in_transaction_sessions"] = latestIdleInTransaction,
-                    ["max_connections"] = maxConnections.Value,
-                    ["superuser_reserved_connections"] = reserved.Value,
-                    ["reserved_connections"] = reservedForRole,
-                    ["usable_connections"] = usable,
-                    ["max_connections_pending_restart"] = maxConnections.Metadata.GetValueOrDefault("pending_restart"),
-                    ["config_snapshot_age_s"] = maxConnections.Metadata.GetValueOrDefault("snapshot_age_s"),
-                    ["captures_with_rows"] = capturesWithRows,
-                    ["rows_redacted_share"] = redactedShare,
                 },
             };
-            if (peakAt is { } at)
-                fact.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(at)).TotalSeconds);
-            if (latestAt is { } lastAt)
-                fact.Metadata["latest_age_s"] = Math.Max(0, (windowEnd - AsNaive(lastAt)).TotalSeconds);
+            /* The capture-derived keys, in lane 3's order (a reader of the persisted payload sees the keys as it always
+               did). ABSENT on the level-only card (#3691 lane 26): every reader of these keys treats absence as "not
+               measured" — a zero share would claim "nothing parked" of states nobody observed. */
+            if (hasCapture)
+            {
+                /* The capture peak stays under its v1 name whichever numerator decided: #3713's compare banding
+                   reads it, and the breakdown below is ITS breakdown. */
+                fact.Metadata["peak_total_sessions"] = peakTotal;
+                fact.Metadata["peak_active_sessions"] = peakActive;
+                fact.Metadata["peak_idle_in_transaction_sessions"] = peakIdleInTransaction;
+                /* Neither active nor idle-in-transaction: idle client sessions AND PostgreSQL's own background
+                   processes, which this series cannot tell apart (backend_type redacts). */
+                fact.Metadata["peak_other_sessions"] = Math.Max(0, peakTotal - peakActive - peakIdleInTransaction);
+                fact.Metadata["peak_idle_in_transaction_share"] = peakIdleInTransaction / (double)peakTotal;
+                fact.Metadata["latest_total_sessions"] = latestTotal;
+                fact.Metadata["latest_active_sessions"] = latestActive;
+                fact.Metadata["latest_idle_in_transaction_sessions"] = latestIdleInTransaction;
+            }
+            fact.Metadata["max_connections"] = maxConnections.Value;
+            fact.Metadata["superuser_reserved_connections"] = reserved.Value;
+            fact.Metadata["reserved_connections"] = reservedForRole;
+            fact.Metadata["usable_connections"] = usable;
+            fact.Metadata["max_connections_pending_restart"] = maxConnections.Metadata.GetValueOrDefault("pending_restart");
+            fact.Metadata["config_snapshot_age_s"] = maxConnections.Metadata.GetValueOrDefault("snapshot_age_s");
+            /* 0 on the level-only card — the one capture-side key that IS stamped there, because "no capture" is a
+               count the reader can act on, where a share or a split would be a claim about unobserved states. */
+            fact.Metadata["captures_with_rows"] = capturesWithRows;
+            if (hasCapture)
+            {
+                fact.Metadata["rows_redacted_share"] = redactedShare;
+                if (peakAt is { } at)
+                    fact.Metadata["peak_age_s"] = Math.Max(0, (windowEnd - AsNaive(at)).TotalSeconds);
+                if (latestAt is { } lastAt)
+                    fact.Metadata["latest_age_s"] = Math.Max(0, (windowEnd - AsNaive(lastAt)).TotalSeconds);
+            }
             /* Both readings side by side whenever the level exists at all — including the partial fallback, where
                the reader should see the number that was NOT used and why. A pre-V133 window has no level to show. */
             if (level.PeakNumbackends is { } peakLevel)

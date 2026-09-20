@@ -257,11 +257,22 @@ public static partial class PgTargetAdvice
 
     /// <summary>The Aurora wait-profile ratio: peak ms/sec, the multiple or the modified z, the leading (type,
     /// event) contributors — or the first-occurrence rendering when <c>is_new</c>. Says "the engine measured";
-    /// never "estimated from sampling", never "spent".</summary>
+    /// never "estimated from sampling", never "spent".
+    /// <para><b>The window mean beside the peak</b> (#3691 lane 26). Since #3780 the detector fires the trusted arms
+    /// only when the window MEAN clears the bar as well as the peak, and stamps <c>mean_ms_per_sec</c> /
+    /// <c>mean_ratio</c> / <c>mean_modified_z</c>; a reader given the peak alone would take one hot five-minute
+    /// collection's number for the whole window's. So on the trusted arms the sentence names the mean against the
+    /// baseline it was judged on — the sampled composer's shape (<c>PgTargetAdvice.Wait.cs</c>, #3765) in this
+    /// composer's words: the mean's robust sigmas when the bucket had a median/MAD, else its multiple of the
+    /// baseline. On <c>is_new</c> the bar is on the peak ALONE (#3741's ruling), so the mean is stated as plain
+    /// context and no gate is claimed. A fact without the mean (pre-#3780) composes byte for byte as before.</para></summary>
     private static AdviceBlock ComposeWaitProfileRatio(Fact fact)
     {
         if (!fact.Metadata.TryGetValue("current_ms_per_sec", out var current))
             return s_waitProfileStatic;
+
+        /* Nullable on purpose: absent on a fact from before #3780's pair gate, and then no sentence at all. */
+        double? windowMean = fact.Metadata.TryGetValue("mean_ms_per_sec", out var meanRate) ? meanRate : null;
 
         var contributors = fact.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
@@ -279,7 +290,7 @@ public static partial class PgTargetAdvice
                 Headline = "The cluster's wait profile is heavy, with no baseline yet for this time of week",
                 Investigation =
                     $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
-                    $"time this window (CPU excluded), led by {led}. This cluster's hour-of-week wait baseline is too thin to trust " +
+                    $"time this window (CPU excluded{(windowMean is { } firstMean ? $"; the window's mean was about {firstMean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec" : string.Empty)}), led by {led}. This cluster's hour-of-week wait baseline is too thin to trust " +
                     "a deviation against yet, so this fired on its absolute level — a first look at where the cluster waits, not a " +
                     "proven shift." + s_anomalyHedge,
             };
@@ -288,6 +299,18 @@ public static partial class PgTargetAdvice
         var modifiedZ = fact.Metadata.GetValueOrDefault("modified_z");
         var ratio = fact.Metadata.GetValueOrDefault("ratio");
         var mean = fact.Metadata.GetValueOrDefault("baseline_mean");
+        var meanModifiedZ = fact.Metadata.GetValueOrDefault("mean_modified_z");
+        var meanRatio = fact.Metadata.GetValueOrDefault("mean_ratio");
+        /* The mean against the same baseline the peak was judged on: its robust sigmas on the gate arm (mean_modified_z
+           > 0), else its multiple on the ratio arm; the stamped mean_ratio first, the quotient as the belt for a fact
+           stamped without it. */
+        var meanSentence = windowMean is not { } meanValue
+            ? string.Empty
+            : meanModifiedZ > 0
+                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} robust sigmas above it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
+                : meanRatio > 0 || mean > 0
+                    ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — about {(meanRatio > 0 ? meanRatio : meanValue / mean).ToString("0.#", CultureInfo.InvariantCulture)}× it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
+                    : string.Empty;
         var deviation = modifiedZ > 0
             ? $"{Sigma(modifiedZ)} robust sigmas above its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline"
             : $"about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline";
@@ -298,7 +321,7 @@ public static partial class PgTargetAdvice
                 : $"The cluster's wait profile shifted to about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its baseline for this time of week",
             Investigation =
                 $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
-                $"time this window (CPU excluded) — {deviation} for this hour-of-week — led by {led}. This is a shift in the overall " +
+                $"time this window (CPU excluded) — {deviation} for this hour-of-week — led by {led}.{meanSentence} This is a shift in the overall " +
                 "wait profile, and the named contributors are where to look." + s_anomalyHedge,
         };
     }

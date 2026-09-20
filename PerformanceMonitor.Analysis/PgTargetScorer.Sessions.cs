@@ -29,7 +29,12 @@ namespace PerformanceMonitor.Analysis;
 /// denormalised <c>total_sessions</c>, v1's only numerator) is the stated FALLBACK for a store whose rows do not
 /// carry the column yet. Which one decided rides the fact as <see cref="SaturationNumeratorSourceKey"/>, and
 /// BOTH readings stay in the metadata (<c>peak_total_sessions</c> for #3713's compare banding and the state
-/// breakdown; <see cref="PeakNumbackendsKey"/> for the level). This arm receives the composed fact and grades
+/// breakdown; <see cref="PeakNumbackendsKey"/> for the level). Since lane 26 a window with NO capture still
+/// composes the fact when the level decided — the <b>level-only card</b>: <c>numerator_source = 1</c>,
+/// <c>captures_with_rows = 0</c>, and none of the capture-derived keys (no <c>peak_total_sessions</c>, no state
+/// split, no <c>peak_idle_in_transaction_share</c>). This arm grades it identically; the parked-share amplifier and
+/// the graph's saturation ↔ idle gate ask for the share's KEY and so cannot match, and #3713's banding takes the
+/// absolute rule without <c>peak_total_sessions</c>. This arm receives the composed fact and grades
 /// <c>saturation_ratio</c> the same way from either numerator; it never re-reads the config snapshot and never
 /// sees a fact set — the base-severity seam is one fact, by design.</para>
 ///
@@ -373,7 +378,10 @@ public static partial class PgTargetScorer
     /// <item><description><b>Parked connections</b>: the peak capture's idle-in-transaction share reached
     /// <see cref="IdleInTransactionShareBar"/>. The slots are held by sessions doing nothing, so the lever is
     /// transaction scoping in the application, not capacity. Under partial redaction the idle-in-transaction count
-    /// UNDER-reports (state is a privileged column), so this can only fail to fire, never fire falsely.</description></item>
+    /// UNDER-reports (state is a privileged column), so this can only fail to fire, never fire falsely. On the
+    /// level-only card (#3691 lane 26 — a window with no capture, graded from <c>numbackends</c> alone) the share
+    /// is ABSENT, and the predicate asks for the key before it compares: absence is "not measured", never a 0 %
+    /// that happens to sit under the bar.</description></item>
     /// <item><description><b><see cref="PgTargetFactKeys.CpuPercent"/> fired</b> (Aurora / Performance Insights
     /// only — absent on stock, so inert there): the instance is CPU-bound while the pool is near its ceiling —
     /// arrivals are stacking up on a saturated CPU, the D7 "queueing at the cliff" shape, and a pooler will not
@@ -436,7 +444,9 @@ public static partial class PgTargetScorer
             Boost = ConnectionSaturationCoFireBoost,
             Predicate = facts =>
                 facts.TryGetValue(key, out var self)
-                && self.Metadata.GetValueOrDefault("peak_idle_in_transaction_share") >= IdleInTransactionShareBar,
+                /* The key, then the bar: a level-only card carries no share, and "not measured" must not read as 0. */
+                && self.Metadata.TryGetValue("peak_idle_in_transaction_share", out var parkedShare)
+                && parkedShare >= IdleInTransactionShareBar,
         },
         new()
         {
