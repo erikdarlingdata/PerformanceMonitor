@@ -596,6 +596,20 @@ public static class FactAdvice
     /// A non-dynamic setting whose configured value moved while in-use did not gets its own sentence:
     /// the engine is still running the old value, so nothing should have moved yet.</para>
     ///
+    /// <para><b>Slice two: three families, one grammar.</b> Each change on the fact is decoded from its
+    /// ObjectName segment (<see cref="ConfigChangeAttribution.Changes"/>) and described in its family's own
+    /// words — a server setting exactly as above (that prose is pinned and unchanged), a database option as
+    /// "<c>`AdventureWorks` recovery_model FULL → SIMPLE</c>" (set to / cleared when one side was NULL), a
+    /// trace flag as "<c>trace flag 4199 enabled (GLOBAL)</c>" / "disabled (was GLOBAL)" / "scope changed (now
+    /// …)". The headline names the family ("Database configuration changed", "Trace flag changed") or, for an
+    /// event folded across families at one connect, "Configuration changed: N configuration changes observed
+    /// together" — the folded card exists precisely because the data cannot say which of them moved a metric,
+    /// and the prose does not pretend otherwise. The observation, span, after-half and compare sentences are
+    /// the same words for every family (the snapshot cadence and the compare are the same). The remediation
+    /// points at the history tool(s) of the families present and adds the grading tool that exists for each:
+    /// <c>audit_config</c> for a server setting, the standing <c>DB_CONFIG</c> advisory for a database option,
+    /// <c>get_trace_flags</c> for what is on now.</para>
+    ///
     /// <para>Falls back to the static block when the fact is absent (a finding persisted before the
     /// composer existed, or a story whose root the lookup cannot find).</para>
     /// </summary>
@@ -605,30 +619,65 @@ public static class FactAdvice
         if (!facts.TryGetValue(ConfigChangeAttribution.FactKey, out var fact))
             return fallback;
 
-        var settings = ConfigChangeAttribution.SettingNames(fact);
-        if (settings.Count == 0)
+        var changes = ConfigChangeAttribution.Changes(fact);
+        if (changes.Count == 0)
             return fallback;
 
-        // ── the change itself: `name` old → new, per setting ──
-        var described = new List<string>(settings.Count);
-        var pendingRestart = new List<string>();
-        foreach (var name in settings)
-        {
-            var oldInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldInUseKey(name), out var oi) ? oi : (double?)null;
-            var newInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewInUseKey(name), out var ni) ? ni : (double?)null;
-            var oldCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldConfiguredKey(name), out var oc) ? oc : (double?)null;
-            var newCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewConfiguredKey(name), out var nc) ? nc : (double?)null;
-            var restart = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.RequiresRestartKey(name)) > 0;
+        var families = changes.Aggregate((ConfigChangeAttribution.ChangeFamily)0, (acc, c) => acc | c.Family);
+        var hasServer = (families & ConfigChangeAttribution.ChangeFamily.ServerConfig) != 0;
+        var hasDatabase = (families & ConfigChangeAttribution.ChangeFamily.DatabaseConfig) != 0;
+        var hasTraceFlags = (families & ConfigChangeAttribution.ChangeFamily.TraceFlags) != 0;
+        var mixed = (hasServer ? 1 : 0) + (hasDatabase ? 1 : 0) + (hasTraceFlags ? 1 : 0) > 1;
 
-            if (oldInUse is not null && newInUse is not null && oldInUse != newInUse)
-                described.Add($"`{name}` {Num(oldInUse.Value)} → {Num(newInUse.Value)}");
-            else if (oldCfg is not null && newCfg is not null && oldCfg != newCfg)
+        // ── the change itself: `name` old → new, per setting, in its family's words ──
+        var described = new List<string>(changes.Count);
+        var pendingRestart = new List<string>();
+        foreach (var change in changes)
+        {
+            var name = change.Name;
+            switch (change.Family)
             {
-                described.Add($"`{name}` configured {Num(oldCfg.Value)} → {Num(newCfg.Value)}" + (restart ? " (in use unchanged until restart)" : " (in use unchanged)"));
-                if (restart) pendingRestart.Add(name);
+                case ConfigChangeAttribution.ChangeFamily.DatabaseConfig:
+                {
+                    var db = $"`{change.DatabaseName}`";
+                    described.Add(change.OldText is null && change.NewText is not null
+                        ? $"{db} {change.Setting} set to {change.NewText}"
+                        : change.OldText is not null && change.NewText is null
+                            ? $"{db} {change.Setting} cleared (was {change.OldText})"
+                            : $"{db} {change.Setting} {change.OldText ?? "(none)"} → {change.NewText ?? "(none)"}");
+                    break;
+                }
+                case ConfigChangeAttribution.ChangeFamily.TraceFlags:
+                {
+                    described.Add(change.ChangeType switch
+                    {
+                        "enabled" => $"trace flag {change.Setting} enabled ({change.Scope})",
+                        "disabled" => $"trace flag {change.Setting} disabled (was {change.Scope})",
+                        "modified" => $"trace flag {change.Setting} scope changed (now {change.Scope})",
+                        _ => $"trace flag {change.Setting} changed",
+                    });
+                    break;
+                }
+                default:
+                {
+                    var oldInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldInUseKey(name), out var oi) ? oi : (double?)null;
+                    var newInUse = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewInUseKey(name), out var ni) ? ni : (double?)null;
+                    var oldCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.OldConfiguredKey(name), out var oc) ? oc : (double?)null;
+                    var newCfg = fact.Metadata.TryGetValue(ConfigChangeAttribution.NewConfiguredKey(name), out var nc) ? nc : (double?)null;
+                    var restart = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.RequiresRestartKey(name)) > 0;
+
+                    if (oldInUse is not null && newInUse is not null && oldInUse != newInUse)
+                        described.Add($"`{name}` {Num(oldInUse.Value)} → {Num(newInUse.Value)}");
+                    else if (oldCfg is not null && newCfg is not null && oldCfg != newCfg)
+                    {
+                        described.Add($"`{name}` configured {Num(oldCfg.Value)} → {Num(newCfg.Value)}" + (restart ? " (in use unchanged until restart)" : " (in use unchanged)"));
+                        if (restart) pendingRestart.Add(name);
+                    }
+                    else
+                        described.Add($"`{name}` changed");
+                    break;
+                }
             }
-            else
-                described.Add($"`{name}` changed");
         }
         var changeList = string.Join(", ", described);
 
@@ -656,9 +705,9 @@ public static class FactAdvice
                     ? $" The configuration snapshot (taken on connect) first observed it {lagHours:0.#} h later, at {observedAt.Value:yyyy-MM-dd HH:mm} UTC; the compare below is anchored on the trace's time, not on that observation."
                     : $" The configuration snapshot first observed it at {observedAt.Value:yyyy-MM-dd HH:mm} UTC, within minutes of the change.");
             }
-            var undated = settings.Where(s => !fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(s))).ToList();
-            if (undated.Count > 0 && undated.Count < settings.Count)
-                inv.Append($" The trace dated {settings.Count - undated.Count} of the {settings.Count} settings; {string.Join(", ", undated.Select(s => $"`{s}`"))} had no matching line in the span between snapshots and shares this anchor.");
+            var undated = changes.Where(c => !fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(c.Name))).ToList();
+            if (undated.Count > 0 && undated.Count < changes.Count)
+                inv.Append($" The trace dated {changes.Count - undated.Count} of the {changes.Count} settings; {string.Join(", ", undated.Select(c => $"`{c.Name}`"))} had no matching line in the span between snapshots and shares this anchor.");
         }
         else
         {
@@ -694,7 +743,7 @@ public static class FactAdvice
                 : $"the {afterHours:0.#} h after it";
             inv.Append($" The engine compared the {beforeHours:0} h before the {(traceAnchored ? "change" : "observation")} with {afterClause}.");
 
-            if (pendingRestart.Count == settings.Count)
+            if (pendingRestart.Count == changes.Count)
             {
                 verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
             }
@@ -726,24 +775,40 @@ public static class FactAdvice
         if (earlier > 0)
             inv.Append($" {Plural(earlier, "earlier configuration change")} also sat inside this pass's window and is not compared here — the passes that ran while it was the most recent change carried its own compare.");
 
-        // ── headline ──
-        var subject = settings.Count == 1 ? described[0] : $"{Plural(settings.Count, "server setting")} changed together";
+        // ── headline: the family names itself; a folded event says it was observed together ──
+        var family = mixed ? "Configuration changed"
+            : hasDatabase ? "Database configuration changed"
+            : hasTraceFlags ? (changes.Count == 1 ? "Trace flag changed" : "Trace flags changed")
+            : "Server configuration changed";
+        var subject = changes.Count == 1 ? described[0]
+            : mixed ? $"{Plural(changes.Count, "configuration change")} observed together"
+            : hasDatabase ? $"{Plural(changes.Count, "database setting")} changed together"
+            : hasTraceFlags ? $"{Plural(changes.Count, "trace flag")} changed together"
+            : $"{Plural(changes.Count, "server setting")} changed together";
         var headline = unavailable
-            ? $"Server configuration changed: {subject} — effect not yet compared"
-            : pendingRestart.Count == settings.Count
-                ? $"Server configuration changed: {subject} — takes effect at the next restart"
+            ? $"{family}: {subject} — effect not yet compared"
+            : pendingRestart.Count == changes.Count
+                ? $"{family}: {subject} — takes effect at the next restart"
                 : moved.Count == 0
-                    ? $"Server configuration changed: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
-                    : $"Server configuration changed: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+                    ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                    : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
-        // ── remediation ──
+        // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
+        var historyTools = new List<string>(3);
+        if (hasServer) historyTools.Add("`get_server_config_changes`");
+        if (hasDatabase) historyTools.Add("`get_database_config_changes`");
+        if (hasTraceFlags) historyTools.Add("`get_trace_flag_changes`");
+        var graders = new List<string>(3);
+        if (hasServer) graders.Add("`audit_config` grades the new value against guidance");
+        if (hasDatabase) graders.Add("the standing `DB_CONFIG` advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
+        if (hasTraceFlags) graders.Add("`get_trace_flags` lists what is on now");
         var rem =
             "This is an attribution, not an accusation: one window against one window cannot show that a change CAUSED anything " +
             "(DB time on an unchanged server routinely varies severalfold day to day), and a metric that moved may have moved for " +
             "reasons of its own. Read it as a pointer. If something moved the wrong way and stays moved on later passes, the " +
-            "setting is the first suspect: `get_server_config_changes` lists the change with its old and new values, " +
+            $"{(mixed ? "changes are" : "setting is")} the first suspect: {string.Join(" / ", historyTools)} {(historyTools.Count == 1 ? "lists" : "list")} the change with its old and new values, " +
             "`compare_analysis` reruns the compare over any pair of windows (a wider one, or the same hour yesterday), and " +
-            "`audit_config` grades the new value against guidance. If nothing moved, there is nothing to do; the card recurs " +
+            $"{string.Join("; ", graders)}. If nothing moved, there is nothing to do; the card recurs " +
             "on each pass while the change sits inside the analysis window and stops on its own.";
 
         return fallback with { Headline = headline, Investigation = inv.ToString(), Remediation = rem };
@@ -2743,16 +2808,18 @@ public static class FactAdvice
             Remediation:
                 "Dumps mean investigate, not a setting to flip — so there is nothing to Apply. First, get current on Cumulative Updates: a large share of dump-producing bugs are already fixed in later builds, and 'apply the latest CU and re-evaluate' resolves many cases outright. If dumps continue on a current build, match the ERRORLOG failure type to a known issue or open a case with Microsoft and attach the dump files — they are the artifact support needs. Watch the volume holding the dump directory: repeated large dumps can themselves fill the disk. Do not delete the dump files until you (or support) have read them.");
 
-        // #3653 A10 (Q2): the static fallback for CONFIG_CHANGED — a finding persisted before the composer
-        // existed, or a read that cannot find the fact. The composed block (ComposeConfigChanged) states the
-        // setting, the values, the observation time and the compare; this one only says what the family is.
+        // #3653 A10 (Q2, and slice two): the static fallback for CONFIG_CHANGED — a finding persisted before
+        // the composer existed, or a read that cannot find the fact. The composed block (ComposeConfigChanged)
+        // states the setting, the values, the observation time and the compare; this one only says what the
+        // family is — all three of them, since slice two the fact covers a server setting, a database option
+        // or a trace flag (or several observed at one connect).
         t[ConfigChangeAttribution.FactKey] = new AdviceBlock(
             Headline:
-                "A server configuration setting changed inside the analysis window",
+                "A configuration setting changed inside the analysis window — a server setting, a database option or a trace flag",
             Investigation:
-                "The configuration snapshot (taken on each connect) observed a sys.configurations value that differs from the previous snapshot's, and the engine compared the four hours before the change with the four hours after it — anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option, on the observation otherwise — banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. The frozen finding text states the setting, old → new, when it changed or was first observed and which clock said so, and which metrics moved beyond their band — or that none did. `get_server_config_changes` lists the change; `compare_analysis` reruns the compare over any pair of windows.",
+                "A configuration snapshot (taken on each connect) observed a value that differs from the previous snapshot's — a sys.configurations setting, a sys.databases option on one database, or a trace flag enabled or disabled — and the engine compared the four hours before the change with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. A server setting is anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option; every other change is anchored on the snapshot that first observed it, and the prose says which. The frozen finding text states what changed, old → new, when it changed or was first observed, and which metrics moved beyond their band — or that none did. `get_server_config_changes`, `get_database_config_changes` and `get_trace_flag_changes` list the change; `compare_analysis` reruns the compare over any pair of windows.",
             Remediation:
-                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the setting is the first suspect; `audit_config` grades the new value against guidance. If nothing moved, there is nothing to do.");
+                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the change is the first suspect; `audit_config` grades a new server value against guidance, the DB_CONFIG advisory grades the database options this engine has an opinion on, and `get_trace_flags` lists what is on now. If nothing moved, there is nothing to do.");
 
         // ─────────────────────────────────────────────────────────────────
         // Query-plan advisories (WS4) — advise-only: missing indexes, plan warnings.

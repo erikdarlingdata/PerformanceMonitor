@@ -91,7 +91,7 @@ public sealed class ConfigChangeTraceAnchorTests
 
         /* And no bare read of the column survives anywhere in the statement. */
         var bare = new Regex(@"dte\.event_time(?!\s*-\s*make_interval)");
-        Assert.Equal(0, bare.Matches(sql).Count);
+        Assert.Empty(bare.Matches(sql));
     }
 
     /* ───────────────────────── the join, from this assembly ───────────────────────── */
