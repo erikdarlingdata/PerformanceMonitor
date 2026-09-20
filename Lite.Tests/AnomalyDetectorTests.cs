@@ -640,6 +640,94 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.True(profile.Metadata["ratio"] >= 4.0);
     }
 
+    // ── #3741 (the last leg of #3653 Q1 / #3724): the wait-profile detector hands the shared gate the window PEAK
+    //    and MEAN ms/sec as a pair; one hot collection in a quiet window no longer reads as a profile shift ──
+
+    /* The three fixtures below share one baseline: 14 days, THREE collections per day in the analysis hour with a
+       STORED 180 s interval (the v60 shape, so every collection rates as exactly total/180 with no LAG artefact),
+       totals cycling 18000 / 36000 / 54000 ms → rates 100 / 200 / 300 ms/sec, fourteen of each. Per-dow Full
+       buckets hold 6 samples (under the 10 collapse threshold), so the exact hour-only tier is selected: 42
+       samples over 14 distinct days — TRUSTWORTHY — median 200 (21st and 22nd of 42 both 200), MAD 100 (|v−200|
+       is 14 zeros and 28 hundreds; 21st and 22nd both 100 — no even-count interpolation ambiguity),
+       EffectiveRobustSigma 100 / 0.6745 = 148.26. The verdict is the gate's robust pair arm at the heavy-tail 5.0
+       cutoff: a rate clears at 200 + 5 × 148.26 = 941 ms/sec (and the 250 ms/sec floor, on the peak). */
+
+    [Fact]
+    public async Task DetectWaitAnomalies_OneHotCollectionInAQuietWindow_DoesNotFire_ThePeakAloneWouldHave()
+    {
+        // THE A8 shape through the DuckDB read: sixteen collections at a stored 900 s interval, fifteen at the
+        // 200 ms/sec median (180000 ms) and ONE at 3200 ms/sec (2880000 ms). The peak is 20.2 robust σ and
+        // over the 250 floor — the pre-#3741 inline gate fired on exactly this. The window mean
+        // (15 × 200 + 3200) / 16 = 387.5 ms/sec is 1.26σ — under 5.0 — and the pair gate stays quiet.
+        await SeedBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
+        for (int i = 0; i < 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "SOS_SCHEDULER_YIELD", i == 7 ? 2_880_000 : 180_000, sampleIntervalSeconds: 900);
+
+        var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
+        Assert.True(baseline.IsTrustworthy, "the fixture must land on the gate's z path, not the is_new bar");
+        Assert.Equal(200.0, baseline.Median, precision: 6);
+        Assert.Equal(100.0, baseline.Mad, precision: 6);
+        Assert.True(BaselineMath.ModifiedZScore(baseline, 3200) >= AnomalyThresholds.HeavyTailModifiedZThreshold, "red-first: the peak alone clears the cutoff");
+        Assert.True(BaselineMath.ModifiedZScore(baseline, 387.5) < AnomalyThresholds.HeavyTailModifiedZThreshold, "the window mean is what keeps this quiet");
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_SustainedHeavyWindow_Fires_ReportsThePeak_AndTheMeanBesideIt()
+    {
+        // The same baseline, a window that ran 1500 ms/sec (1350000 ms over 900 s) for fifteen collections and
+        // 3200 for one: peak 3200 (20.2σ) and mean 1606.25 (9.5σ) both clear the cutoff — fire. current_ms_per_sec
+        // and the ratio stay the PEAK's (the scorer grades off modified_z unchanged); avg_ms_per_sec and
+        // mean_modified_z ride beside them in the same uncapped frame.
+        await SeedBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "SOS_SCHEDULER_YIELD", i == 7 ? 2_880_000 : 1_350_000, sampleIntervalSeconds: 900);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(0.0, profile.Metadata["is_new"]);                              // the trusted robust arm
+        Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6); // the PEAK
+        Assert.Equal(1606.25, profile.Metadata["avg_ms_per_sec"], precision: 6);    // (15 × 1500 + 3200) / 16
+        Assert.Equal(3200.0 / 200.0, profile.Metadata["ratio"], precision: 6);       // peak ÷ baseline mean (the mean of 100/200/300 is 200)
+        Assert.Equal(15 * 1_350_000.0 + 2_880_000.0, profile.Value);                 // total wait ms in the window
+        Assert.True(profile.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
+        Assert.True(profile.Metadata["modified_z"] >= profile.Metadata["mean_modified_z"], "the reported deviation is the peak's; the mean's is the smaller one");
+        Assert.Equal((3200.0 - 200.0) / (100.0 / 0.6745), profile.Metadata["modified_z"], precision: 3);
+        Assert.Equal((1606.25 - 200.0) / (100.0 / 0.6745), profile.Metadata["mean_modified_z"], precision: 3);
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_NoBaselineFallback_StillGatesOnThePeakAlone()
+    {
+        // A THIN wait baseline (two calendar days — under every tier's day floor, so IsTrustworthy is false and
+        // the detector takes the is_new absolute-bar arm). The ruling keeps that arm on the PEAK alone: one
+        // collection at 3200 ms/sec in a window that otherwise idled at 10 ms/sec (mean 209 — under the 250 bar
+        // a wrongly pair-gated fallback would demand of it) still fires, with the mean stamped as context.
+        await SeedThinBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "SOS_SCHEDULER_YIELD", i == 7 ? 2_880_000 : 9_000, sampleIntervalSeconds: 900);
+
+        var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
+        Assert.False(baseline.IsTrustworthy, "the fixture must land on the is_new arm");
+        Assert.True(baseline.Mean > 0, "a thin baseline, not an empty one — the arm is chosen by trust, not by presence");
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.Metadata["is_new"]);
+        Assert.Equal(AnomalyThresholds.NoBaselineRatio, profile.Metadata["ratio"]);
+        Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.Equal((15 * 10.0 + 3200.0) / 16, profile.Metadata["avg_ms_per_sec"], precision: 6);
+        Assert.True(profile.Metadata["avg_ms_per_sec"] < AnomalyThresholds.WaitProfileFallbackMsPerSec, "the mean sits under the bar the peak cleared — the arm is peak-only by ruling");
+    }
+
     // ── No baseline = no anomalies ──
 
     [Fact]
@@ -761,6 +849,36 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await ExecuteSeedAsync("COMMIT");
     }
 
+    /// <summary>Seeds the #3741 wait-RATE baseline: 14 days, three collections per day at a stored 180 s interval,
+    /// rates cycling 100 / 200 / 300 ms/sec (totals 18000 / 36000 / 54000 ms) so the hour-only tier's median is 200
+    /// and its MAD 100 with no interpolation ambiguity — the arithmetic is written out above the fixtures.</summary>
+    private async Task SeedBaselineWaitRates()
+    {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
+        for (int day = 1; day <= 14; day++)
+        {
+            var baseDay = SeedDayStart(day);
+            for (int i = 0; i < 3; i++)
+                await SeedWaitStatAsync(baseDay.AddMinutes(i * 3), "SOS_SCHEDULER_YIELD", 18_000L * (i + 1), sampleIntervalSeconds: 180);
+        }
+        await ExecuteSeedAsync("COMMIT");
+    }
+
+    /// <summary>Seeds a THIN wait-rate baseline (#3741): the same three-rate day, on only two calendar days (7 and
+    /// 14 back, the analysis start's own day-of-week) — under every tier's distinct-day trust floor, so the
+    /// detector takes the is_new absolute-bar arm while the bucket still carries a mean.</summary>
+    private async Task SeedThinBaselineWaitRates()
+    {
+        await ExecuteSeedAsync("BEGIN TRANSACTION");
+        foreach (var day in new[] { 7, 14 })
+        {
+            var baseDay = SeedDayStart(day);
+            for (int i = 0; i < 3; i++)
+                await SeedWaitStatAsync(baseDay.AddMinutes(i * 3), "SOS_SCHEDULER_YIELD", 18_000L * (i + 1), sampleIntervalSeconds: 180);
+        }
+        await ExecuteSeedAsync("COMMIT");
+    }
+
     /// <summary>Seeds a per-file-row I/O baseline (#3653): one read-bearing row per sample at a fixed
     /// stall/reads ratio, 14 days in the analysis hour like every other baseline seed here.</summary>
     private async Task SeedBaselineIo(long stallReadMs, long reads)
@@ -827,7 +945,11 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs)
+    /// <summary>Seeds one wait_stats row. <paramref name="sampleIntervalSeconds"/> null (the default, every
+    /// pre-#3741 caller) leaves the v60 column NULL so the reads take their LAG fallback; a value is the
+    /// collection's STORED interval, which both the WaitMsPerSec baseline and the detector's window read divide
+    /// by directly — so (deltaWaitMs, sampleIntervalSeconds) IS the collection's ms/sec.</summary>
+    private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -835,13 +957,14 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         cmd.CommandText = @"INSERT INTO wait_stats
             (collection_id, collection_time, server_id, server_name, wait_type,
              waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
-             delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-            VALUES ($1, $2, $3, 'TestServer', $4, 0, 0, 0, 0, $5, 0)";
+             delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+            VALUES ($1, $2, $3, 'TestServer', $4, 0, 0, 0, 0, $5, 0, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = time });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = waitType });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaWaitMs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = sampleIntervalSeconds.HasValue ? sampleIntervalSeconds.Value : DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 

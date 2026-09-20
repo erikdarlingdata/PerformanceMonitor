@@ -1624,6 +1624,16 @@ public static class FactAdvice
     /// Names the top contributing wait types (from the contrib_&lt;TYPE&gt; metadata keys — the type
     /// name lives in the KEY since the metadata dictionary values are doubles), and states the current
     /// vs baseline per-second rate. When is_new (thin baseline), renders it as a first occurrence.
+    /// <para>
+    /// #3741: when the fact carries the window MEAN rate (<c>avg_ms_per_sec</c>) the sentence names it
+    /// beside the peak, as #3724's <see cref="ComposeAnomaly"/> does for every other family — the
+    /// detector now fires the trusted arms only when the mean clears its bar too, and an operator reading
+    /// the peak alone would take one hot collection's number for the whole window's. On the trusted arms
+    /// the clause says so and carries the mean's robust deviation (<c>mean_modified_z</c>) when the bucket
+    /// had one, or the mean's multiple of the baseline when it did not (the ratio arm). On is_new the bar
+    /// is on the peak ALONE, so the mean is stated as plain context — the sentence must not claim a gate
+    /// the detector did not apply. A pre-#3741 fact (no mean) keeps its sentence verbatim.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyWaitProfile(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1646,14 +1656,20 @@ public static class FactAdvice
         var current = f.Metadata.GetValueOrDefault("current_ms_per_sec");
         var mean = f.Metadata.GetValueOrDefault("baseline_mean");
         var ratio = f.Metadata.GetValueOrDefault("ratio");
+        /* #3741: the window mean beside the peak. Nullable: absent on a fact from before the pair. */
+        double? windowMean = f.Metadata.TryGetValue("avg_ms_per_sec", out var avg) ? avg : null;
+        var meanModifiedZ = f.Metadata.GetValueOrDefault("mean_modified_z");
 
         string inv;
         string headline;
         if (isNew)
         {
             headline = "The server's wait profile is heavy, with no baseline yet to compare against";
+            var meanClause = windowMean is null
+                ? ""
+                : $" (the window's mean was about {windowMean.Value:0.#} ms/sec)";
             inv =
-                $"The all-types wait rate peaked at about {current:0.#} ms/sec this window, led by {topList}. There is no " +
+                $"The all-types wait rate peaked at about {current:0.#} ms/sec this window{meanClause}, led by {topList}. There is no " +
                 "established wait-rate baseline for this hour-of-week yet, so this is flagged on its absolute level, not a " +
                 "proven deviation — treat it as a first look at where the server spends its wait time, and check whether it " +
                 "lines up with a workload change or a one-off job.";
@@ -1661,9 +1677,21 @@ public static class FactAdvice
         else
         {
             headline = $"The server's wait profile shifted to about {ratio:0.#}× its baseline for this time of week";
+            /* The trusted arms fire only when the mean clears its bar as well — say so, with the mean's own
+               deviation: its robust modified z when the bucket had a median/MAD (the gate arm), otherwise its
+               multiple of the baseline mean (the ratio arm, where the modified z is 0 by construction). */
+            var meanClause = windowMean is null
+                ? ""
+                : meanModifiedZ > 0
+                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {meanModifiedZ:0.#} robust σ above the baseline median " +
+                      "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                    : mean > 0
+                        ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
+                          "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                        : "";
             inv =
                 $"The all-types wait rate peaked at about {current:0.#} ms/sec this window — roughly {ratio:0.#}× the " +
-                $"{mean:0.#} ms/sec normal for this hour-of-week — led by {topList}. This is a shift in the overall wait " +
+                $"{mean:0.#} ms/sec normal for this hour-of-week — led by {topList}{meanClause}. This is a shift in the overall wait " +
                 "profile, not necessarily a sustained problem: check whether it coincides with a workload change, a deploy, " +
                 "or a one-off event before treating it as chronic.";
         }

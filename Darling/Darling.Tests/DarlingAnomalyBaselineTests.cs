@@ -382,19 +382,84 @@ public sealed class DarlingAnomalyBaselineTests
 
         /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
            in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
-           documented transitional state, owned by its content lanes). */
+           documented transitional state, owned by its content lanes). Eight since #3741: the wait-profile
+           detector's trusted robust arm is the eighth call — it was the one baseline detector #3724 left
+           on an inline peak-only gate, and this pin deliberately excluded it until it went through the root. */
         var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
         var liteCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
         foreach (var code in new[] { pg, liteCode })
         {
             var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*(\w+),\s*(\w+),");
-            Assert.Equal(7, calls.Count); // cpu, read, write, batch, session, query duration, memory
+            Assert.Equal(8, calls.Count); // cpu, wait profile (#3741), read, write, batch, session, query duration, memory
             foreach (System.Text.RegularExpressions.Match call in calls)
             {
                 Assert.StartsWith("peak", call.Groups[1].Value, StringComparison.Ordinal);
                 Assert.StartsWith("avg", call.Groups[2].Value, StringComparison.Ordinal);
             }
             Assert.DoesNotMatch(@"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*\w+,\s*(ioThreshold|GetDeviationThreshold)", code);
+        }
+    }
+
+    /// <summary>
+    /// #3741 (the last leg of #3653 Q1 / #3724): the wait-profile window read hands the detector the PEAK and
+    /// the MEAN all-types ms/sec, and the trusted robust arm is the shared gate's PAIR call rather than the
+    /// inline peak-only test it kept through #3724. Structural pin on the PG const (the two aggregates share
+    /// the interval-guarded arm, so a NULL-interval collection is neither statistic's term; column order is
+    /// the reader's ordinal contract), a line-for-line parity pin against Lite's inline twin, and a pin on
+    /// the detector bodies: the gate call names <c>HeavyTailModifiedZThreshold</c> and
+    /// <c>WaitProfileFallbackMsPerSec</c> (the wait family's cutoff and its one bar), the inline
+    /// <c>modifiedZ &lt; HeavyTailModifiedZThreshold</c> gate is gone from both SKUs, the ratio arm tests a
+    /// <c>meanRatio</c> beside <c>ratio</c>, and the no-baseline arm still tests <c>peakRate</c> alone against
+    /// the bar — the ruling keeps it there.
+    /// </summary>
+    [Fact]
+    public void WaitRateWindow_ReadsThePeakAndMeanPair_AndTheRobustArmIsTheSharedPairGate_LiteVerbatim()
+    {
+        var sql = PgAnomalyDetector.WaitRateWindowSql;
+        var expectedColumns = new[]
+        {
+            "MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec",
+            "AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec",
+            "SUM(total_wait_ms) AS total_wait_ms",
+            "COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count",
+        };
+        foreach (var column in expectedColumns)
+            Assert.Contains(column, sql, StringComparison.Ordinal);
+
+        /* The column ORDER is the reader's ordinal contract (0 peak, 1 avg, 2 total, 3 count). */
+        var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg/total/count column order is the reader's ordinal contract");
+
+        /* Lite's inline twin carries the same four columns, in the same order. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
+        var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.All(litePositions, p => Assert.True(p > 0, "Lite's wait-rate window read has drifted from the PG twin"));
+        Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pg, liteCode })
+        {
+            /* The robust arm: ONE pair call, the wait family's cutoff as the modified-z cutoff and its one bar as
+               the floor — peak AND mean must clear 5.0, the 250 ms/sec floor stays on the peak inside the gate. */
+            Assert.Matches(
+                @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*avgRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap\)",
+                code);
+
+            /* The inline peak-only gate is gone. */
+            Assert.DoesNotMatch(@"modifiedZ\s*<\s*HeavyTailModifiedZThreshold", code);
+
+            /* The ratio arm asks the same of both ratios. */
+            Assert.Matches(@"var\s+meanRatio\s*=\s*avgRate\s*/\s*baseline\.Mean", code);
+            Assert.Matches(@"ratio\s*<\s*DefaultRatioThreshold\s*\|\|\s*meanRatio\s*<\s*DefaultRatioThreshold", code);
+
+            /* The no-baseline arm stays on the peak's absolute bar alone (the ruling), and the reader takes
+               the mean at ordinal 1 with total and count shifted behind it. */
+            Assert.Matches(@"ratio\s*=\s*peakRate\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
+            Assert.DoesNotMatch(@"avgRate\s*>=\s*WaitProfileFallbackMsPerSec", code);
+            Assert.Matches(@"avgRate\s*=\s*rateReader\.IsDBNull\(1\)", code);
+            Assert.Matches(@"totalWaitMs\s*=\s*rateReader\.IsDBNull\(2\)", code);
+            Assert.Matches(@"collectionCount\s*=\s*rateReader\.IsDBNull\(3\)", code);
         }
     }
 
@@ -799,6 +864,11 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal(600000.0, fact.Value);               // total all-types wait ms in the window
             Assert.Equal(1.0, fact.Metadata["is_new"]);       // thin baseline → absolute-bar fallback
             Assert.Equal(100.0, fact.Metadata["ratio"]);      // NoBaselineRatio sentinel (is_new)
+            /* #3741: the mean rides beside the peak on every arm; on THIS arm the bar stayed on the peak alone
+               (both rated collections sit at 666.7, so the two statistics coincide here — the arm's rule is
+               pinned structurally, its verdict on a split window in the pair e2e below). */
+            Assert.Equal(200000.0 / 300.0, fact.Metadata["current_ms_per_sec"], 0.01);
+            Assert.Equal(200000.0 / 300.0, fact.Metadata["avg_ms_per_sec"], 0.01);
             Assert.True(fact.Metadata.ContainsKey($"contrib_{TestWaitType}"), "the planted wait type must be named as a contributor");
             Assert.Equal(600000.0, fact.Metadata[$"contrib_{TestWaitType}"]);
             /* The Full-tier baseline still resolved (10 samples ≥ collapse threshold) — only its
@@ -1010,6 +1080,146 @@ public sealed class DarlingAnomalyBaselineTests
                 using (var command = new NpgsqlCommand(
                     $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
                     $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3741 proven live through the PG detector: the wait-profile read hands the detector the per-collection
+    /// PEAK and MEAN ms/sec, and the trusted robust arm — now the shared gate's pair call — fires only when
+    /// both clear the heavy-tail 5.0 cutoff. History: three Mondays at 10:00, twelve collections each at
+    /// 5-minute spacing, one wait type, totals cycling 30000 / 60000 / 90000 ms so the rates cycle 100 / 200 /
+    /// 300 ms/sec (the interval is the LAG — no stored interval, the pre-V127 shape the baseline read still
+    /// serves). The first collection of the first Monday has no prior and is dropped; the first of each later
+    /// Monday rates against a week-long LAG and lands near zero. 35 samples over 3 distinct days: the Full
+    /// bucket is TRUSTWORTHY, median 200, MAD 100 (percentile_cont over the 35, hand-checked: 2 near-zero, 9 at
+    /// 100, 12 at 200, 12 at 300 — the 18th of both sorted sets), EffectiveRobustSigma 148.26.
+    /// Window A (the A8 shape #3724 removed everywhere else): seventeen collections at 5-minute spacing, the
+    /// first unrated (no in-window prior), fifteen at the 60000 ms median rate and ONE at 960000 ms — peak
+    /// 3200 ms/sec is 20.2 robust σ and over the 250 ms/sec floor, the pre-#3741 fire; the window mean 387.5
+    /// ms/sec is 1.26σ, under 5.0 — no fact. Window B: fifteen at 450000 ms (1500 ms/sec) and one at 960000 —
+    /// peak 3200 (20.2σ), mean 1606.25 (9.5σ) — ONE ANOMALY_WAIT_PROFILE, is_new 0, current_ms_per_sec the
+    /// PEAK, avg_ms_per_sec the mean, modified_z and mean_modified_z both over the cutoff, and Value the
+    /// window's total wait ms including the unrated first collection (the SUM ranges over every collection;
+    /// only the rates skip the unrated one).
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_WaitProfileDetector_PeakAndMeanPair_OneHotCollectionStaysQuiet_SustainedWindowFires_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live wait-profile pair test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int waitServerId = TestServerId + 4; // own id — this test cleans its own rows
+        const string waitServerName = "wait-peak-mean-e2e";
+        const string insertWait =
+            "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {waitServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7); // a Monday 10:00, at least a day in the past
+
+            var id = 700L;
+            foreach (var weeksBack in new[] { 2, 1, 0 })
+            {
+                var monday = lastHistoryMonday.AddDays(-7 * weeksBack);
+                for (var i = 0; i < 12; i++)
+                {
+                    var totalMs = (i % 3) switch { 0 => 30000L, 1 => 60000L, _ => 90000L };
+                    await InsertAsync(connection, insertWait, id++, monday.AddMinutes(5 * i), waitServerId, waitServerName, TestWaitType, 10L, totalMs);
+                }
+            }
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var baseline = await provider.GetBaselineAsync(waitServerId, MetricNames.WaitMsPerSec, analysisTime);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(35L, baseline.SampleCount);
+            Assert.Equal(3L, baseline.DistinctDays);
+            Assert.True(baseline.IsTrustworthy, "three Mondays clear the Full-tier day floor: the gate's z path, not the is_new bar");
+            Assert.Equal(200.0, baseline.Median, 0.001);
+            Assert.Equal(100.0, baseline.Mad, 0.001);
+            Assert.True(baseline.EffectiveRobustSigma > 0, "the robust frame — the arm the pair gate now owns");
+            var robustSigma = baseline.EffectiveRobustSigma;
+            Assert.Equal(100.0 / 0.6745, robustSigma, 0.01);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = waitServerId,
+                ServerName = waitServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(90),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: one hot collection in an otherwise-median window. i = 0 is the unrated first
+               collection (its LAG has no in-window prior); i = 1..16 rate against 300 s. */
+            for (var i = 0; i < 17; i++)
+                await InsertAsync(connection, insertWait, id++, analysisTime.AddMinutes(5 * (i + 1)), waitServerId, waitServerName, TestWaitType, 50L, i == 8 ? 960000L : 60000L);
+
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WAIT_PROFILE");
+            Assert.Empty(quiet);
+
+            /* The A8 arithmetic, stated so a reader can see the pre-#3741 fire this window used to be: the
+               peak alone cleared both halves of the old inline gate. */
+            var peakZ = (3200.0 - baseline.Median) / robustSigma;
+            var meanAZ = (387.5 - baseline.Median) / robustSigma;
+            Assert.True(peakZ >= AnomalyThresholds.HeavyTailModifiedZThreshold && 3200.0 >= AnomalyThresholds.WaitProfileFallbackMsPerSec, "red-first: the peak-only gate fired on window A");
+            Assert.True(meanAZ < AnomalyThresholds.HeavyTailModifiedZThreshold, "the window mean is what keeps window A quiet");
+
+            /* Window B: the whole window ran heavy. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM wait_stats WHERE server_id = {waitServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 17; i++)
+                await InsertAsync(connection, insertWait, id++, analysisTime.AddMinutes(5 * (i + 1)), waitServerId, waitServerName, TestWaitType, 50L, i == 8 ? 960000L : 450000L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained);
+            Assert.Equal("ANOMALY_WAIT_PROFILE", fact.Key);
+            Assert.Equal(0.0, fact.Metadata["is_new"]);                                     // the trusted robust arm
+            Assert.Equal(3200.0, fact.Metadata["current_ms_per_sec"], 0.001);                // the PEAK
+            Assert.Equal(1606.25, fact.Metadata["avg_ms_per_sec"], 0.001);                   // the window mean (15 × 1500 + 3200) / 16
+            Assert.Equal(16 * 450000.0 + 960000.0, fact.Value, 0.001);                        // every collection's total, the unrated first included
+            Assert.Equal(3200.0 / baseline.Mean, fact.Metadata["ratio"], 0.001);             // the ratio stays the peak's
+            Assert.Equal(peakZ, fact.Metadata["modified_z"], 0.001);                          // uncapped, the scorer's anchor
+            Assert.Equal((1606.25 - baseline.Median) / robustSigma, fact.Metadata["mean_modified_z"], 0.001);
+            Assert.True(fact.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
+            Assert.True(fact.Metadata["modified_z"] >= fact.Metadata["mean_modified_z"], "the reported deviation is the peak's; the mean's is the smaller one");
+            Assert.Equal(16 * 450000.0 + 960000.0, fact.Metadata[$"contrib_{TestWaitType}"], 0.001); // the one type carries the whole total
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {waitServerId};", cleanup))
                 {
                     await command.ExecuteNonQueryAsync(cleanupCt);
                 }

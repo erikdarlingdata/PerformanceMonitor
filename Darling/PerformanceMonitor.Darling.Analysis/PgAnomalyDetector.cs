@@ -50,6 +50,19 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </para>
 ///
 /// <para>
+/// #3741 (the last leg of that slice): the WAIT-PROFILE detector, which never went through the gate,
+/// gets the same pair. Its window read computed a peak ms/sec and nothing else, and its inline gate
+/// tested that peak alone — modified z on the median/MAD frame at the heavy-tail 5.0 cutoff AND the
+/// 250 ms/sec floor — so one hot collection in an otherwise quiet window fired the one metric the
+/// fleet measured as heavy-tailed by nature. <see cref="WaitRateWindowSql"/> now reads AVG beside MAX
+/// and the trustworthy robust arm is ONE <see cref="AnomalyGate"/> pair call: peak and mean both clear
+/// the 5.0 cutoff, the floor stays on the peak. The ratio arm (a trustworthy bucket without robust
+/// statistics) asks the same of both ratios; the no-baseline arm stays on the peak's absolute bar, as
+/// the ruling says. <c>current_ms_per_sec</c> stays the peak; <c>avg_ms_per_sec</c> and
+/// <c>mean_modified_z</c> ride beside it.
+/// </para>
+///
+/// <para>
 /// Postgres discipline (see PgFindingStore): the SQL is Lite-verbatim against the
 /// V4 passthrough views (already dialect-shared — no QUALIFY in the detector
 /// queries), with every window bound a naive-UTC Kind-Unspecified parameter.
@@ -173,9 +186,18 @@ AND   collection_time >= $2 AND collection_time < $3";
 
     /* Wait-profile current window: all-types wait ms/sec per collection (the collection's STORED interval
        since V127, the LAG for pre-V127 collections — never an assumed cadence; mirrors the WaitMsPerSec
-       baseline), then PEAK across collections. A restart collection (every row's stored interval 0) has a
-       NULL interval, so it is neither a peak candidate nor counted as a sample — before #3540 it was a
-       sample worth 0.00 ms/sec. Window bound aligned to the baseline (>= $2 AND < $3). */
+       baseline), then PEAK and MEAN across collections. A restart collection (every row's stored interval
+       0) has a NULL interval, so it is neither a peak candidate, nor a term of the mean, nor counted as a
+       sample — before #3540 it was a sample worth 0.00 ms/sec. Window bound aligned to the baseline
+       (>= $2 AND < $3).
+
+       #3741: the MEAN beside the peak, same arm, same guard — AVG over exactly the collections MAX ranges
+       over (a NULL-interval collection contributes NULL to both, and AVG ignores NULL as MAX does), so the
+       two statistics describe the same sample set and the pair gate compares like with like. The peak
+       alone tested a window MAX against a per-collection distribution, so one hot collection in a quiet
+       window read as a profile shift; the mean of N collections drawn from the baseline sits at the
+       baseline whatever N is, and requiring it to clear the same bar removes that bias without a new
+       number. Column ORDER is the reader's ordinal contract (0 peak, 1 avg, 2 total, 3 count) — pinned. */
     public const string WaitRateWindowSql = @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -194,6 +216,7 @@ WITH per_collection AS (
     GROUP BY collection_time
 )
 SELECT MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec,
+       AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,
        COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count
 FROM per_collection";
@@ -533,8 +556,10 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            // Current window: all-types wait ms/sec per collection (interval via LAG), then PEAK.
+            // Current window: all-types wait ms/sec per collection (interval via LAG), then PEAK and MEAN
+            // (#3741) across collections — the ordinals are WaitRateWindowSql's column order, pinned.
             double peakRate;
+            double avgRate;
             double totalWaitMs;
             long collectionCount;
             using (var rateCmd = new NpgsqlCommand(WaitRateWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -546,8 +571,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                 using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
                 if (!await rateReader.ReadAsync(context.CancellationToken)) return;
                 peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
-                totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
-                collectionCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
+                avgRate = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
+                totalWaitMs = rateReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rateReader.GetValue(2));
+                collectionCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
             }
 
             if (collectionCount == 0) return; // no rated collection in the window
@@ -561,21 +587,48 @@ ORDER BY ms_delta DESC LIMIT 1";
                floor is what was measured WITH the 5.0 cutoff. The ratio still rides the metadata
                for display and for scoring pre-#1743 facts; a bucket without robust stats keeps the
                classical ratio trigger; an untrustworthy baseline keeps the absolute peak-rate bar
-               (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new). */
+               (NOT silence) so a genuinely heavy profile still surfaces on a young store (is_new).
+
+               #3741 (the last leg of #3653 Q1 / #3724): the trusted robust arm is no longer an inline
+               test of the peak alone — it is the shared AnomalyGate PAIR call every other baseline
+               detector took in #3724, so the window PEAK and the window MEAN must BOTH clear the 5.0
+               modified-z cutoff, with the 250 ms/sec floor on the peak only (the gate's rule: the floor
+               is the "trivial value" ceiling for the value the finding reports, sized for a peak). The
+               gate speaks the same frame this arm always spoke: DecideRobustFirst judges both statistics
+               as modified z against the bucket's median and EffectiveRobustSigma — the exact arithmetic
+               of BaselineMath.ModifiedZScore, which still stamps the uncapped modified_z the scorer
+               grades — and the EffectiveRobustSigma > 0 guard on this arm means the classical frame
+               inside the gate is unreachable here, so the same 5.0 is passed as both cutoffs and the
+               absolute bar is the family's one bar. The mean's z is judged against the SAME per-collection
+               median/MAD as the peak's, as #3724 did for every other family (one centre, one dispersion,
+               one body). Said honestly for a heavy-tailed family: the mean of N draws converges to the
+               distribution's MEAN, which sits above its median when the tail is to the right, so the
+               mean clause's null expectation is a little above zero and the clause is a little LESS
+               strict than a symmetric reading would suggest — a bias toward firing, never toward
+               silence, and bounded, because it can only admit a window the peak already admitted; the
+               median-centred alternative (option b in #3741) was weighed and the ruling took the engine's
+               precedent. The ratio arm asks the same of both ratios (peak/mean AND window-mean/mean over
+               DefaultRatioThreshold). The no-baseline arm stays on the peak's absolute bar alone — there
+               is no z to trust on either statistic there, and the ruling keeps that bar where it was. */
             bool isNew;
             double ratio;
             var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
+            var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, avgRate);
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
                 ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
-                if (modifiedZ < HeavyTailModifiedZThreshold || peakRate < WaitProfileFallbackMsPerSec) return;
+                var decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakRate, avgRate,
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap);
+                if (!decision.Fire) return;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
                 isNew = false;
                 ratio = peakRate / baseline.Mean;
-                if (ratio < DefaultRatioThreshold) return;
+                var meanRatio = avgRate / baseline.Mean;
+                if (ratio < DefaultRatioThreshold || meanRatio < DefaultRatioThreshold) return;
             }
             else
             {
@@ -584,13 +637,20 @@ ORDER BY ms_delta DESC LIMIT 1";
                 if (ratio < DefaultRatioThreshold) return;
             }
 
+            /* current_ms_per_sec stays the PEAK (the value the story leads with and the ratio is taken
+               on); avg_ms_per_sec is the window mean beside it, mean_modified_z its deviation in the
+               same uncapped frame as modified_z — the wait profile's own vocabulary, where the other
+               families' deviation_sigma / mean_deviation_sigma pair is the capped one (#3741). Both are
+               stamped on every arm: 0 modified z on a robust-less bucket, exactly as modified_z is. */
             var metadata = new Dictionary<string, double>
             {
                 ["current_ms_per_sec"] = peakRate,
+                ["avg_ms_per_sec"] = avgRate,
                 ["baseline_mean"] = baseline.Mean,
                 ["total_wait_ms"] = totalWaitMs,
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
+                ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0
             };
             AddBaselineContext(metadata, baseline);
