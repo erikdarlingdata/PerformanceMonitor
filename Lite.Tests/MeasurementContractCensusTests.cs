@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using Darling.Tests;
 using PerformanceMonitor.Collectors;
@@ -107,9 +108,18 @@ namespace PerformanceMonitorLite.Tests;
 /// (<c>Batch Requests/sec</c> and its siblings) are stored as <c>delta_cntr_value</c> — a per-interval
 /// delta, not a rate — and divided by every reader. <b>PINNED here</b> for the SQL half
 /// (<see cref="EveryPerSecondAlias_IsAQuotient_AndNoStoredColumnCarriesTheName"/>): every per-second alias in
-/// product SQL is a division or a window over one, and no collector payload column carries the name. The
-/// C# payload keys that carry these names copy a reader field the SQL alias populated; that copy is not
-/// censused here — the bound is stated, not pretended.</description></item>
+/// product SQL is a division or a window over one, and no collector payload column carries the name. And
+/// <b>PINNED here for the C# half</b> (<see cref="EveryPerSecondPayloadKey_IsAReaderRateOrACSharpQuotient_OrIsNamed"/>):
+/// every C# payload key carrying the name — an MCP tool's anonymous-object member, a fact's
+/// <c>Metadata["…"]</c> entry, a key reached through a <c>const</c> — is populated from a reader field of
+/// the SAME rate name (so the SQL half above is what proves it divides), from a C# division by a measured
+/// interval or elapsed in the same expression or one local up, from a rate helper handed the interval, or
+/// from an aggregate over a reader's rate field; never a stored delta passed through under the name, never
+/// a division by a cadence literal. The keys whose provenance is not the alias of their own name are
+/// rostered shrink-only in <see cref="PayloadKeysUnderAnotherNameThanTheirAlias"/>, each with the alias or
+/// quotient it rests on asserted. This file's C# half sweeps Lite and the shared libraries; the Darling
+/// twin sweeps all four Darling trees, because a Service tool's reader field is populated by a
+/// <c>Darling.Storage</c> alias the <c>lite</c> filter cannot reach.</description></item>
 /// <item><description><b>A host restart seeds EVERY delta family, keys and pass window.</b> <b>PINNED</b> by
 /// <see cref="DeltaFamilySeedingCensusTests"/> (#3614, #3630): both hosts' seeders against the calculator's
 /// family list, byte-identical shared reads, per-family guards, <c>ClearServer</c> on both remove paths.
@@ -134,7 +144,10 @@ namespace PerformanceMonitorLite.Tests;
 /// assembled query is still a query), then SQL comments (<c>/* … */</c>, <c>-- …</c>) are blanked with their
 /// newlines kept, so prose that QUOTES the forbidden shape — and this repository's SQL comments quote it
 /// often — cannot count as the shape. C# is read off <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>
-/// for the same reason in the other direction. Every negative census here carries two controls, because a
+/// for the same reason in the other direction. Rule 6's C# half reads a third text — comments blanked,
+/// code AND literal text kept (<see cref="BlankComments"/>) — because a payload key can be a C# identifier
+/// (<c>waits_per_second = …</c>) or a string (<c>["current_ms_per_sec"] = …</c>) and the value it is given
+/// is always code. Every negative census here carries two controls, because a
 /// negative result agrees with a dead filter: a POSITIVE control (a fixture the regex must fire on) and a
 /// POPULATION floor (the swept text must contain at least N of the thing the rule governs). Offenders are
 /// reported as <c>path:line</c>.</para>
@@ -145,7 +158,12 @@ namespace PerformanceMonitorLite.Tests;
 /// guard whose source read PR CI cannot run (#2839), so this file sweeps exactly the trees named in
 /// <see cref="SweptTrees"/>, and the Darling twin sweeps the other two with the same regexes and carries the
 /// Darling-only artifacts (the continuous aggregates). The regexes are duplicated deliberately rather than
-/// linked: a cross-project pin on their equality would itself be a read the gate has to reach.</para>
+/// linked: a cross-project pin on their equality would itself be a read the gate has to reach. Rule 6's C#
+/// half splits differently, by where a key's ALIAS lives rather than by what the filter reaches: this file
+/// censuses the payload keys of <see cref="PayloadKeyTrees"/> (Lite and the shared libraries, whose
+/// aliases are Lite's own SQL) and the twin censuses all four Darling trees, because a Darling Service tool
+/// copies a reader field that a <c>Darling.Storage</c> alias populated, and only the twin can see both
+/// ends of that copy.</para>
 /// </summary>
 public sealed class MeasurementContractCensusTests
 {
@@ -166,6 +184,16 @@ public sealed class MeasurementContractCensusTests
         "Darling/PerformanceMonitor.Darling.Service",
         "Darling/PerformanceMonitor.Darling.Viewer",
     };
+
+    /// <summary>The trees whose C# payload keys rule 6's C# half censuses HERE: Lite and the shared libraries —
+    /// <see cref="SweptTrees"/> less the two Darling trees, which the Darling twin sweeps for that half together
+    /// with Storage and Analysis. The split is by alias, not by filter: a key on these trees copies a reader field
+    /// that Lite's own SQL populated, so the vocabulary this half checks a key against is complete on these trees;
+    /// a Service tool's key copies a field a <c>Darling.Storage</c> alias populated, and the <c>lite</c> filter
+    /// cannot reach that alias to check it. The SQL rules above still sweep all ten.</summary>
+    private static readonly string[] PayloadKeyTrees = SweptTrees
+        .Where(t => !t.StartsWith("Darling/", StringComparison.Ordinal))
+        .ToArray();
 
     /* ---------------- rule 1: readers NULL-not-0 ---------------- */
 
@@ -763,6 +791,556 @@ public sealed class MeasurementContractCensusTests
             "the /sec-named counters are the population rule 6 speaks about; fewer than twenty means the list moved");
     }
 
+    /* ---------------- rule 6, the C# half: every payload key that carries the name ---------------- */
+
+    /// <summary>A payload key spelled as a C# identifier and given a value: an anonymous-object member or an
+    /// object-initializer member (<c>waits_per_second = PerSecond(…)</c>). Read off CODE, so a SQL predicate
+    /// inside a literal (<c>WHERE ms_per_sec = 0</c>) is blank where this looks. Not <c>==</c>, not
+    /// <c>=&gt;</c>.</summary>
+    private static readonly Regex IdentifierPayloadKey = new(
+        @"(?<![\w.])(?<key>\w+_per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
+
+    /// <summary>A payload key spelled as a string and given a value through an indexer:
+    /// <c>["current_ms_per_sec"] = peakRate</c>. Read off the comments-blanked text, where the literal is
+    /// still legible and the brackets and the <c>=</c> are code.</summary>
+    private static readonly Regex QuotedPayloadKey = new(
+        @"\[\s*""(?<key>\w+_per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
+
+    /// <summary>The same key given a value through <c>Add("…", value)</c> / <c>TryAdd</c>. No product site writes
+    /// this shape today; it is swept so the day one does it is a site and not a gap.</summary>
+    private static readonly Regex AddedPayloadKey = new(
+        @"\.(?:Try)?Add\(\s*""(?<key>\w+_per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
+
+    /// <summary>A <c>const string</c> whose VALUE is a per-second name (<c>IoOpsPerSecKey = "ops_per_sec"</c>), so a
+    /// key written through the constant (<c>[PgTargetScorer.IoOpsPerSecKey] = …</c>) is swept under the name it
+    /// really writes.</summary>
+    private static readonly Regex PerSecondKeyConstant = new(
+        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>\w+_per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
+
+    /// <summary>An indexer keyed by an identifier (<c>[X.Y] = …</c>), a candidate constant-keyed site; it counts only
+    /// when the last identifier is one of <see cref="PerSecondKeyConstant"/>'s names.</summary>
+    private static readonly Regex ConstantIndexerKey = new(
+        @"\[\s*(?:\w+\s*\.\s*)*(?<name>\w+)\s*\]\s*=(?![=>])", RegexOptions.Compiled);
+
+    /// <summary><c>Add(X.Y, value)</c>, the constant twin of <see cref="AddedPayloadKey"/>.</summary>
+    private static readonly Regex ConstantAddedKey = new(
+        @"\.(?:Try)?Add\(\s*(?:\w+\s*\.\s*)*(?<name>\w+)\s*,", RegexOptions.Compiled);
+
+    /// <summary>A division whose divisor names a measured span — an interval, an elapsed, a seconds, an observed
+    /// duration — through any member path and an optional cast: <c>/ observedSeconds</c>, <c>/ p.IntervalSeconds</c>,
+    /// <c>/ (double)seconds</c>, <c>/ TriggerElapsedMs</c>. What the divisor is NAMED is the bound: a measured
+    /// span stored in a variable called <c>n</c> is outside this regex and reads as a division by nothing
+    /// measured, which fails loud rather than quiet.</summary>
+    private static readonly Regex DivisionByAMeasuredSpan = new(
+        @"/\s*\(?\s*(?:\(\s*(?:double|decimal|float|long|int)\??\s*\)\s*)?(?:\w+\s*\.\s*)*\w*(?:[Ii]nterval|[Ee]lapsed|[Ss]econds|[Oo]bserved)\w*",
+        RegexOptions.Compiled);
+
+    /// <summary>Rule 2's literal set, as a divisor in a per-second key's value: <c>/ 60.0</c>, <c>/ 3600</c>. Built
+    /// from the same <see cref="CadenceLiterals"/> the rule-2 pin uses, so the two cannot disagree about what a
+    /// cadence is; rule 2's own regex anchors on a Delta-named dividend and stays where it is.</summary>
+    private static readonly Regex DivisionByACadenceLiteral = new(
+        @"/\s*" + CadenceLiterals + @"[dDmMfF]?\b", RegexOptions.Compiled);
+
+    /// <summary>A call to a rate helper — a method whose name ends in <c>PerSecond</c> / <c>PerSec</c> — handed an
+    /// interval or elapsed among its arguments: <c>PerSecond(r.DeltaSpins, r.SampleIntervalSeconds)</c>. The helper's
+    /// body is pinned separately (<see cref="EveryRateHelper_DividesByTheIntervalItIsHanded"/>) to divide by
+    /// that argument.</summary>
+    private static readonly Regex RateHelperCall = new(
+        @"\b(?<helper>\w*PerSec(?:ond)?)\s*\((?<args>[^()]*(?:\([^()]*\)[^()]*)*)\)", RegexOptions.Compiled);
+
+    /// <summary>A rate helper's DEFINITION: a static method returning a double whose name ends in <c>PerSecond</c> /
+    /// <c>PerSec</c>, with its parameter list.</summary>
+    private static readonly Regex RateHelperDefinition = new(
+        @"\bstatic\s+(?:double|decimal|float)\??\s+(?<helper>\w*PerSec(?:ond)?)\s*\((?<parameters>[^)]*)\)\s*(?<arrow>=>)?",
+        RegexOptions.Compiled);
+
+    /// <summary>A stored delta named in a value: the calculator's <c>Delta…</c> model fields (<c>r.DeltaWaitTimeMs</c>,
+    /// <c>row.StoredDelta</c>) or a <c>delta_</c> column. Under a per-second key WITHOUT a division this is the
+    /// exact lie rule 6 forbids — a per-interval delta labelled as a rate.</summary>
+    private static readonly Regex StoredDeltaName = new(
+        @"\b(?:\w+\s*\.\s*)?(?:[Dd]elta\w*|\w+[Dd]elta)\b|\bdelta_\w+", RegexOptions.Compiled);
+
+    /// <summary>A member access whose member is rate-named (<c>p.WaitTimeMsPerSecond</c>) and is not a call.</summary>
+    private static readonly Regex RateNamedMember = new(
+        @"\.\s*(?<member>\w+PerSec(?:ond)?)\b(?!\s*\()", RegexOptions.Compiled);
+
+    /// <summary>Any member access that is not a call — the population a value's provenance is read from.</summary>
+    private static readonly Regex AnyMember = new(
+        @"\.\s*(?<member>[A-Za-z_]\w*)\b(?!\s*\()", RegexOptions.Compiled);
+
+    /// <summary>An aggregate over a reader's rate field — <c>points.Max(p =&gt; p.ReadsPerSecond)</c> — the C# twin
+    /// of the SQL half's "a window over a rate" (<c>LAG(ms_per_sec)</c>): a max, min or mean of rates is a rate,
+    /// and the field it aggregates is the one whose alias the SQL half proved.</summary>
+    private static readonly Regex AggregateOverAMember = new(
+        @"\.(?:Max|Min|Average)\(\s*\w+\s*=>\s*\w+\s*\.\s*(?<member>\w+PerSec(?:ond)?)\b", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Payload keys on <see cref="PayloadKeyTrees"/> whose value is NOT the reader field of their own name and
+    /// NOT a C# quotient — named as <c>file: key</c>, with the alias each really rests on, so the list can only
+    /// shrink deliberately and a new key of this shape has to name itself and its alias to pass.
+    /// <list type="bullet">
+    /// <item><description><c>Lite/Analysis/AnomalyDetector.cs: current_ms_per_sec</c> — the wait-profile story's
+    /// name for the window's PEAK, which the SQL aliases <c>peak_ms_per_sec</c> (the local it copies is read off
+    /// that column); #3741 kept <c>current</c> as the peak when it put <c>avg_ms_per_sec</c> beside it. Rests on
+    /// <c>peak_ms_per_sec</c>, asserted present in the same file's SQL.</description></item>
+    /// <item><description><c>Lite/Mcp/McpQueryTools.cs: elapsed_ms_per_second</c> — <c>p.Value</c>: the duration
+    /// trend point's <c>Value</c> IS the elapsed-ms-per-second alias (#3541 says so in the tool's own remarks,
+    /// and the same payload carries <c>value</c> beside it as the same quantity). Rests on
+    /// <c>elapsed_ms_per_second</c>, asserted present in Lite's SQL.</description></item>
+    /// </list>
+    /// Each entry rests on exactly one of two facts, and the census asserts whichever is named: <c>Alias</c>, a
+    /// per-second alias the SQL half divides for (in the key's own file when the key is a story's name for a
+    /// column that file reads); or <c>QuotientIn</c>, a <c>file: member</c> whose computed body divides by a
+    /// measured span — the Darling twin's stall-probe rate is that shape; nothing on these trees is.
+    /// </summary>
+    private static readonly (string File, string Key, string? Alias, string? QuotientIn)[] PayloadKeysUnderAnotherNameThanTheirAlias =
+    {
+        ("Lite/Analysis/AnomalyDetector.cs", "current_ms_per_sec", "peak_ms_per_sec", null),
+        ("Lite/Mcp/McpQueryTools.cs", "elapsed_ms_per_second", "elapsed_ms_per_second", null),
+    };
+
+    /// <summary>
+    /// Rule 6, the C# half: every payload key on <see cref="PayloadKeyTrees"/> that carries a per-second name is
+    /// given a value the census can trace to a measurement — a reader field of the same rate name (the SQL half
+    /// proved that alias divides), a division by a measured span in the value or one local up, a rate helper
+    /// handed the interval, or an aggregate over a reader's rate field — or is on the roster with the alias it
+    /// rests on. Never a stored delta under the name, never a cadence literal, never a division by something
+    /// that is not a span. Both directions on the roster; a population floor on the keys found, read off the
+    /// real count so an empty sweep cannot pass; and the fixture control below is what proves each verdict
+    /// fires on the shape it is for.
+    ///
+    /// <para><b>Bounds, stated.</b> "Reader field" is judged by NAME: the member the value copies must spell the
+    /// key (<c>WaitTimeMsPerSecond</c> for <c>wait_time_ms_per_second</c>) and the key must be an alias some
+    /// swept SQL divides for; the ordinal wiring from that alias to that member is positional and outside a
+    /// text census. A bare local is followed ONE assignment up (<c>var bytesPerSec = tempBytes / observedSeconds</c>
+    /// two lines before the stamp), assignments only — a local bound by a pattern (<c>callsPerSec is { } rate</c>)
+    /// is accepted on the key's name alone when that name is an alias.</para>
+    /// </summary>
+    [Fact]
+    public void EveryPerSecondPayloadKey_IsAReaderRateOrACSharpQuotient_OrIsNamed()
+    {
+        var sources = ProductSources(PayloadKeyTrees, PayloadKeyTreesFileFloor).ToList();
+        var vocabulary = PerSecondAliasVocabulary(sources);
+        Assert.True(vocabulary.Count >= 10, $"only {vocabulary.Count} distinct per-second aliases on the payload trees' SQL — the vocabulary is not reading the readers");
+
+        var constants = PerSecondKeyConstants(sources);
+        Assert.True(constants.Count >= 4, $"only {constants.Count} per-second key constants found — PgTargetScorer alone declares four");
+
+        var sites = new List<PayloadKeySite>();
+        foreach (var (file, text) in sources)
+        {
+            sites.AddRange(PayloadKeySites(file, text, constants, vocabulary));
+        }
+
+        Assert.True(sites.Count >= 10, $"only {sites.Count} per-second payload keys found on {PayloadKeyTrees.Length} trees (12 when this landed, the metric-to-table map entry among them) — the sweep is not reading the tools");
+
+        var offenders = sites.Where(s => s.Verdict.StartsWith("OFFENDER", StringComparison.Ordinal)).Select(s => s.ToString()).ToList();
+        Assert.True(offenders.Count == 0, "per-second payload key(s) whose value is a lie:\n  " + string.Join("\n  ", offenders));
+
+        /* Both directions: the roster is exactly the keys whose provenance is not the alias of their own name —
+           the ones it names (Rostered) and any it does not yet (UnderAnotherName), so a new key of the shape
+           fails here naming itself, and a retired one fails here until its row leaves. */
+        var underAnotherName = sites.Where(s => s.Verdict is UnderAnotherName or Rostered).Select(s => (s.File, s.Key)).OrderBy(s => s.File, StringComparer.Ordinal).ThenBy(s => s.Key, StringComparer.Ordinal).ToList();
+        Assert.Equal(
+            PayloadKeysUnderAnotherNameThanTheirAlias.Select(r => (r.File, r.Key)).OrderBy(s => s.File, StringComparer.Ordinal).ThenBy(s => s.Key, StringComparer.Ordinal),
+            underAnotherName);
+
+        /* And each roster entry rests on the one fact it names: an alias the SQL half divides for — in its own
+           file when the key is the story's name for a column that file reads, on the trees when the model's
+           field carries it — or a model member whose computed body is a quotient over a measured span. */
+        foreach (var (file, key, alias, quotientIn) in PayloadKeysUnderAnotherNameThanTheirAlias)
+        {
+            Assert.True((alias is null) != (quotientIn is null), $"{file}: {key} must rest on exactly one of an alias or a model quotient");
+            if (alias is not null)
+            {
+                Assert.Contains(alias, vocabulary);
+                if (alias != key)
+                {
+                    Assert.Contains(alias, PerSecondAliasVocabulary(new[] { (file, ReadRepoFile(file)) }));
+                }
+            }
+            else
+            {
+                var colon = quotientIn!.IndexOf(':', StringComparison.Ordinal);
+                var (modelFile, member) = (quotientIn[..colon], quotientIn[(colon + 1)..].Trim());
+                var modelCode = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(modelFile));
+                var definition = Regex.Match(modelCode, @"\b" + Regex.Escape(member) + @"\s*=>");
+                Assert.True(definition.Success, $"{modelFile}: no computed member {member} for {file}: {key} to rest on");
+                var body = modelCode[(definition.Index + definition.Length)..(modelCode.IndexOf(';', definition.Index) + 1)];
+                Assert.True(DivisionByAMeasuredSpan.IsMatch(body) && !DivisionByACadenceLiteral.IsMatch(body), $"{modelFile}: {member} does not divide by a measured span: {Collapse(body)}");
+            }
+        }
+
+        /* The verdicts that DID fire, as a floor per kind: a census where every key came out one way is a census
+           reading one file. */
+        Assert.Contains(sites, s => s.Verdict == ReaderAlias);
+        Assert.Contains(sites, s => s.Verdict == RateHelper);
+        Assert.Contains(sites, s => s.Verdict == Rostered);
+    }
+
+    /// <summary>
+    /// Rule 6's C# half, the fixture control: one synthetic file carrying every shape the census judges, with the
+    /// verdict each must draw — including the planted <c>planted_per_sec = row.StoredDelta</c>, which MUST fail.
+    /// Asserted as the whole ordered list, so a regex that stopped firing on one shape cannot pass by the others.
+    /// </summary>
+    [Fact]
+    public void ThePayloadKeyVerdicts_FireOnEveryShape_AndThePlantedPassthroughFails()
+    {
+        const string Fixture = """
+            internal static class Keys { public const string ConstPerSecKey = "constant_per_sec"; }
+            static double? PerSecond(long? delta, int? seconds) => delta is long d && seconds > 0 ? d / (double)seconds : null;
+            var peak = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var bytesPerSec = tempBytes / observedSeconds;
+            var copied = row.DeltaBytes;
+            var stamped = new Dictionary<string, double>
+            {
+                ["honest_per_sec"] = peak,
+                ["hopped_per_sec"] = bytesPerSec,
+                ["copied_per_sec"] = copied,
+                ["planted_per_sec"] = row.StoredDelta,
+                ["assumed_per_sec"] = row.DeltaValue / 60.0,
+                [Keys.ConstPerSecKey] = ops / observedSeconds,
+                ["unknown_per_sec"] = something,
+            };
+            stamped.Add("added_per_sec", total / elapsed.TotalSeconds);
+            var page = new
+            {
+                divided_per_second = Math.Round(p.DeltaWaitMs / (double)p.IntervalSeconds, 2),
+                helped_per_second = PerSecond(r.DeltaSpins, r.SampleIntervalSeconds),
+                aliased_per_second = p.AliasedPerSecond is { } a ? Math.Round(a, 3) : (double?)null,
+                swapped_per_second = p.OtherPerSecond,
+                peak_aliased_per_second = points.Max(p => p.AliasedPerSecond) is { } m ? Math.Round(m, 3) : (double?)null,
+                halved_per_second = total / count,
+                renamed_per_second = p.Value,
+                mapped_per_second = "a_table",
+                compared = ms_per_sec == 0,
+            };
+            """;
+
+        var vocabulary = new HashSet<string>(StringComparer.Ordinal) { "honest_per_sec", "aliased_per_second", "renamed_per_second", "swapped_per_second" };
+        var constants = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match m in PerSecondKeyConstant.Matches(BlankComments(Fixture)))
+        {
+            constants[m.Groups["name"].Value] = m.Groups["key"].Value;
+        }
+
+        Assert.Equal(new Dictionary<string, string> { ["ConstPerSecKey"] = "constant_per_sec" }, constants);
+
+        var verdicts = PayloadKeySites("Fixture.cs", Fixture, constants, vocabulary)
+            .Select(s => (s.Key, Kind: s.Verdict.Split(':')[0]))
+            .ToList();
+
+        Assert.Equal(
+            new[]
+            {
+                ("honest_per_sec", ReaderAlias),            /* a local read off the reader, under a name the SQL divides for */
+                ("hopped_per_sec", Quotient),               /* a local that divided by observedSeconds one assignment up */
+                ("copied_per_sec", "OFFENDER"),             /* a local that copied a stored delta one assignment up */
+                ("planted_per_sec", "OFFENDER"),            /* THE planted passthrough: a stored delta under a rate name */
+                ("assumed_per_sec", "OFFENDER"),            /* a delta over a cadence literal */
+                ("constant_per_sec", Quotient),             /* through a const, divided by observedSeconds */
+                ("unknown_per_sec", UnderAnotherName),      /* a local nothing explains, under a name no SQL divides for */
+                ("added_per_sec", Quotient),                /* Add(key, total / elapsed.TotalSeconds) */
+                ("divided_per_second", Quotient),
+                ("helped_per_second", RateHelper),
+                ("aliased_per_second", ReaderAlias),        /* the member spells the key and the key is an alias */
+                ("swapped_per_second", UnderAnotherName),   /* a rate-named member that spells a DIFFERENT key */
+                ("peak_aliased_per_second", AggregateOverARate),
+                ("halved_per_second", "OFFENDER"),          /* divides by a count, not a span */
+                ("renamed_per_second", UnderAnotherName),   /* p.Value: not the field of its own name */
+                ("mapped_per_second", MapEntry),            /* a name mapped to a name — outside the rule */
+            },
+            verdicts);
+
+        /* The comparison inside the fixture (`compared = ms_per_sec == 0`) is not a key site: `==`. And a SQL
+           predicate of that shape inside a literal is blank where the identifier regex looks. */
+        Assert.DoesNotContain(verdicts, v => v.Key == "ms_per_sec");
+        Assert.Empty(PayloadKeySites("Sql.cs", "var sql = @\"SELECT 1 FROM t WHERE ms_per_sec = 0 AND x_per_second = 2\";", constants, vocabulary));
+    }
+
+    /// <summary>
+    /// Rule 6's C# half, the helper pin: every rate helper on the payload trees — a static method returning a
+    /// double whose name ends in <c>PerSecond</c> / <c>PerSec</c> — divides by a parameter that names a measured
+    /// span, so a call site the census accepted as <see cref="RateHelper"/> really did divide. Floored on the one
+    /// Lite writes (<c>McpLatchSpinlockTools.PerSecond</c>); the Darling twin's trees carry none today and its
+    /// copy of this pin says so.
+    /// </summary>
+    [Fact]
+    public void EveryRateHelper_DividesByTheIntervalItIsHanded()
+    {
+        var helpers = new List<string>();
+        var offenders = new List<string>();
+
+        foreach (var (file, text) in ProductSources(PayloadKeyTrees, PayloadKeyTreesFileFloor))
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+            foreach (Match m in RateHelperDefinition.Matches(code))
+            {
+                helpers.Add($"{file}: {m.Groups["helper"].Value}");
+                var body = m.Groups["arrow"].Success
+                    ? code[(m.Index + m.Length)..(code.IndexOf(';', m.Index + m.Length) + 1)]
+                    : CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', m.Index + m.Length));
+                if (!DivisionByAMeasuredSpan.IsMatch(body) || DivisionByACadenceLiteral.IsMatch(body))
+                {
+                    offenders.Add($"{file}:{1 + LineOffset(code, m.Index)}: {m.Groups["helper"].Value} does not divide by a measured span: {Collapse(body)}");
+                }
+            }
+        }
+
+        Assert.Contains("Lite/Mcp/McpLatchSpinlockTools.cs: PerSecond", helpers);
+        Assert.Empty(offenders);
+    }
+
+    private const string Quotient = "quotient";
+    private const string RateHelper = "rate-helper";
+    private const string ReaderAlias = "reader-alias";
+    private const string AggregateOverARate = "aggregate-over-a-rate";
+    private const string MapEntry = "map-entry";
+    private const string UnderAnotherName = "under-another-name";
+    private const string Rostered = "rostered";
+
+    /// <summary>One payload key site and its verdict: <see cref="Quotient"/>, <see cref="RateHelper"/>,
+    /// <see cref="ReaderAlias"/>, <see cref="AggregateOverARate"/>, <see cref="MapEntry"/>,
+    /// <see cref="UnderAnotherName"/> (rosterable), <see cref="Rostered"/>, or <c>OFFENDER: reason</c>.</summary>
+    private sealed record PayloadKeySite(string File, int Line, string Key, string Verdict, string Value)
+    {
+        public override string ToString() => $"{File}:{Line}: {Key} = {Collapse(Value)} — {Verdict}";
+    }
+
+    /// <summary>Every per-second payload key in one file, with its verdict. Keys are found on the comments-blanked
+    /// text (so a string key is legible) and on the code (so an identifier key is), the value is read off the code
+    /// (so a literal value is blank and a SQL predicate cannot be a value), and locals are followed one assignment
+    /// up through the code before the site.</summary>
+    private static IEnumerable<PayloadKeySite> PayloadKeySites(string file, string text, IReadOnlyDictionary<string, string> constants, ISet<string> vocabulary)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+        var kept = BlankComments(text);
+        var sites = new List<(int Index, string Key, int ValueStart, char Closer)>();
+
+        foreach (Match m in IdentifierPayloadKey.Matches(code))
+        {
+            sites.Add((m.Index, m.Groups["key"].Value, m.Index + m.Length, '\0'));
+        }
+
+        foreach (Match m in QuotedPayloadKey.Matches(kept))
+        {
+            sites.Add((m.Index, m.Groups["key"].Value, m.Index + m.Length, '\0'));
+        }
+
+        foreach (Match m in AddedPayloadKey.Matches(kept))
+        {
+            sites.Add((m.Index, m.Groups["key"].Value, m.Index + m.Length, ')'));
+        }
+
+        foreach (Match m in ConstantIndexerKey.Matches(code))
+        {
+            if (constants.TryGetValue(m.Groups["name"].Value, out var key))
+            {
+                sites.Add((m.Index, key, m.Index + m.Length, '\0'));
+            }
+        }
+
+        foreach (Match m in ConstantAddedKey.Matches(code))
+        {
+            if (constants.TryGetValue(m.Groups["name"].Value, out var key))
+            {
+                sites.Add((m.Index, key, m.Index + m.Length, ')'));
+            }
+        }
+
+        foreach (var (index, key, valueStart, _) in sites.OrderBy(s => s.Index))
+        {
+            var value = ValueExpression(code, valueStart);
+            var verdict = Verdict(key, value, code, index, vocabulary, hops: 1);
+            if (verdict == UnderAnotherName && PayloadKeysUnderAnotherNameThanTheirAlias.Any(r => r.File == file && r.Key == key))
+            {
+                verdict = Rostered;
+            }
+
+            yield return new PayloadKeySite(file, 1 + LineOffset(code, index), key.ToLowerInvariant(), verdict, value);
+        }
+    }
+
+    /// <summary>The verdict on one value expression — see <see cref="PayloadKeySite"/>. Order matters: a division is
+    /// judged before a delta name (a delta divided by its interval is the honest shape), and a bare local is
+    /// followed one assignment up before its name is judged.</summary>
+    private static string Verdict(string key, string value, string code, int site, ISet<string> vocabulary, int hops)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0)
+        {
+            return MapEntry; /* the whole value was a literal: a name mapped to a name, not a measurement */
+        }
+
+        if (DivisionByACadenceLiteral.IsMatch(trimmed))
+        {
+            return "OFFENDER: divides by a cadence literal (rule 2)";
+        }
+
+        var helper = RateHelperCall.Match(trimmed);
+        if (helper.Success && Regex.IsMatch(helper.Groups["args"].Value, @"[Ii]nterval|[Ee]lapsed|[Ss]econds"))
+        {
+            return RateHelper;
+        }
+
+        if (trimmed.Contains('/', StringComparison.Ordinal))
+        {
+            return DivisionByAMeasuredSpan.IsMatch(trimmed)
+                ? Quotient
+                : "OFFENDER: divides by something that is not a measured span";
+        }
+
+        if (StoredDeltaName.IsMatch(trimmed))
+        {
+            return "OFFENDER: a stored delta passed through under a per-second name";
+        }
+
+        var aggregate = AggregateOverAMember.Match(trimmed);
+        if (aggregate.Success)
+        {
+            return vocabulary.Contains(Snake(aggregate.Groups["member"].Value))
+                ? AggregateOverARate
+                : UnderAnotherName;
+        }
+
+        if (hops > 0 && Regex.IsMatch(trimmed, @"^[A-Za-z_]\w*$"))
+        {
+            /* A bare local: its nearest preceding assignment in this file is where the value was made. */
+            var assignment = Regex.Matches(code[..site], @"(?<![\w.])" + Regex.Escape(trimmed) + @"\s*=(?![=>])").LastOrDefault();
+            if (assignment is not null)
+            {
+                var made = ValueExpression(code, assignment.Index + assignment.Length);
+                var upstream = Verdict(key, made, code, assignment.Index, vocabulary, hops - 1);
+                if (upstream != UnderAnotherName && upstream != ReaderAlias)
+                {
+                    return upstream; /* a quotient, a helper, an aggregate or an offender, one assignment up */
+                }
+            }
+
+            return vocabulary.Contains(key.ToLowerInvariant()) ? ReaderAlias : UnderAnotherName;
+        }
+
+        var members = AnyMember.Matches(trimmed).Select(m => m.Groups["member"].Value).ToList();
+        if (members.Count == 0)
+        {
+            return vocabulary.Contains(key.ToLowerInvariant()) ? ReaderAlias : UnderAnotherName;
+        }
+
+        var spellsTheKey = RateNamedMember.Matches(trimmed).Any(m => Snake(m.Groups["member"].Value) == key.ToLowerInvariant());
+        return spellsTheKey && vocabulary.Contains(key.ToLowerInvariant()) ? ReaderAlias : UnderAnotherName;
+    }
+
+    /// <summary>The value expression starting at <paramref name="start"/>: to the first <c>,</c> or <c>;</c> at
+    /// depth zero, or the closer of whatever the site sits inside. Read off CODE, so a brace in a literal cannot
+    /// unbalance it.</summary>
+    private static string ValueExpression(string code, int start)
+    {
+        var depth = 0;
+        for (var i = start; i < code.Length; i++)
+        {
+            var c = code[i];
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                if (depth == 0)
+                {
+                    return code[start..i];
+                }
+
+                depth--;
+            }
+            else if ((c == ',' || c == ';') && depth == 0)
+            {
+                return code[start..i];
+            }
+        }
+
+        return code[start..];
+    }
+
+    /// <summary>Every distinct per-second alias in the SQL of <paramref name="sources"/>, lower-cased — the names
+    /// rule 6's SQL half has already proved are quotients.</summary>
+    private static HashSet<string> PerSecondAliasVocabulary(IEnumerable<(string File, string Text)> sources)
+    {
+        var vocabulary = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (_, text) in sources)
+        {
+            foreach (var (_, body) in CSharpSourceWalker.StringLiteralBodies(text))
+            {
+                if (!LooksLikeSql(body))
+                {
+                    continue;
+                }
+
+                foreach (Match alias in PerSecondAlias.Matches(BlankSqlComments(body)))
+                {
+                    vocabulary.Add(alias.Groups[1].Value.ToLowerInvariant());
+                }
+            }
+        }
+
+        return vocabulary;
+    }
+
+    /// <summary>Every <c>const string</c> on <paramref name="trees"/> whose value is a per-second name, by the
+    /// constant's simple name.</summary>
+    private static Dictionary<string, string> PerSecondKeyConstants(IEnumerable<(string File, string Text)> sources)
+    {
+        var constants = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (_, text) in sources)
+        {
+            foreach (Match m in PerSecondKeyConstant.Matches(BlankComments(text)))
+            {
+                constants[m.Groups["name"].Value] = m.Groups["key"].Value;
+            }
+        }
+
+        return constants;
+    }
+
+    /// <summary>The source with comments blanked and everything else — code and literal text — kept, newlines
+    /// preserved. The third text beside <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> (code only) and
+    /// <see cref="CSharpSourceWalker.StringLiteralBodies"/> (literals only), built on the same walk so a delimiter
+    /// one understands cannot desynchronise this one.</summary>
+    private static string BlankComments(string text)
+    {
+        var keep = CSharpSourceWalker.CodeMask(text);
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
+        {
+            for (var i = start; i < start + body.Length; i++)
+            {
+                keep[i] = true;
+            }
+
+            /* The literal's own quote delimiters are neither code nor body; a quoted key needs them legible. A raw
+               string's triple quotes are not restored — no key is written inside one, and its body is kept. */
+            if (start > 0 && text[start - 1] == '"')
+            {
+                keep[start - 1] = true;
+            }
+
+            if (start + body.Length < text.Length && text[start + body.Length] == '"')
+            {
+                keep[start + body.Length] = true;
+            }
+        }
+
+        var sb = new StringBuilder(text.Length);
+        for (var i = 0; i < text.Length; i++)
+        {
+            sb.Append(keep[i] ? text[i] : text[i] == '\n' ? '\n' : ' ');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary><c>WaitTimeMsPerSecond</c> → <c>wait_time_ms_per_second</c>.</summary>
+    private static string Snake(string pascal) =>
+        Regex.Replace(pascal, @"(?<=[a-z0-9])(?=[A-Z])", "_").ToLowerInvariant();
+
     /* ---------------- rule 8: gauges never delta'd (the census, since the rung) ---------------- */
 
     /// <summary>
@@ -836,7 +1414,7 @@ public sealed class MeasurementContractCensusTests
     /// offsets inside the body still map to lines.</summary>
     private static IEnumerable<(string File, int Line, string Sql)> SqlBodies()
     {
-        foreach (var (file, text) in ProductSources())
+        foreach (var (file, text) in ProductSources(SweptTrees, SweptTreesFileFloor))
         {
             foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
             {
@@ -853,18 +1431,27 @@ public sealed class MeasurementContractCensusTests
     /// <summary>Every product file's CODE — comments and literal text blanked, newlines kept.</summary>
     private static IEnumerable<(string File, string Code)> CodeBodies()
     {
-        foreach (var (file, text) in ProductSources())
+        foreach (var (file, text) in ProductSources(SweptTrees, SweptTreesFileFloor))
         {
             yield return (file, CSharpSourceWalker.StripCommentsAndStrings(text));
         }
     }
 
-    private static IEnumerable<(string File, string Text)> ProductSources()
+    /// <summary>The floor that makes every empty offender list above mean something: the ten trees hold well over
+    /// a thousand source files; a sweep that read a hundred read the wrong checkout (1,089 when this landed).</summary>
+    private const int SweptTreesFileFloor = 900;
+
+    /// <summary>The same floor for <see cref="PayloadKeyTrees"/>, the ten less the two Darling trees.</summary>
+    private const int PayloadKeyTreesFileFloor = 600;
+
+    /// <summary>Every <c>*.cs</c> under <paramref name="trees"/> (bin/ and obj/ excluded), as repo-relative
+    /// forward-slash path and LF-normalised text, floored at <paramref name="fileFloor"/> files.</summary>
+    private static IEnumerable<(string File, string Text)> ProductSources(string[] trees, int fileFloor)
     {
         var root = RepoRoot();
         var files = 0;
 
-        foreach (var tree in SweptTrees)
+        foreach (var tree in trees)
         {
             var dir = Path.Combine(root, tree.Replace('/', Path.DirectorySeparatorChar));
             Assert.True(Directory.Exists(dir), $"swept tree missing: {tree}");
@@ -880,9 +1467,7 @@ public sealed class MeasurementContractCensusTests
             }
         }
 
-        /* The floor that makes every empty offender list above mean something: the ten trees hold well over
-           a thousand source files; a sweep that read a hundred read the wrong checkout. */
-        Assert.True(files >= 900, $"the sweep read only {files} files across {SweptTrees.Length} trees (1,089 when this landed)");
+        Assert.True(files >= fileFloor, $"the sweep read only {files} files across {trees.Length} trees (floor {fileFloor})");
     }
 
     /// <summary>The literals the SQL sweeps read: anything carrying a SELECT, or naming an interval (a fragment a
