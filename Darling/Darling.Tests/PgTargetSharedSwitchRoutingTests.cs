@@ -438,8 +438,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(pgCpuBurnAnomaly);
         Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyCpuBurn), pgCpuBurnAnomaly);
         Assert.DoesNotContain("Anomalous spike", pgCpuBurnAnomaly!.Headline, StringComparison.Ordinal);
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 — routed by name to ComposeMemory, ahead of the config prefix arm */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
+        /* v3 (#3691): lane 32 filled the memory family — both keys compose their own block (the static shape when no fact is
+           in the lookup); the sum is routed by name to ComposeMemory ahead of the config prefix arm. Moved from Null. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from

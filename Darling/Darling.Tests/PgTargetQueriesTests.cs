@@ -476,9 +476,9 @@ public sealed class PgTargetQueriesTests
             using (var doc = JsonDocument.Parse(factsJson))
             {
                 var root = doc.RootElement;
-                /* total_facts is the pass's unfiltered count (three bad actors + the registry major); shown is the
-                   filtered page. */
-                Assert.Equal(4, root.GetProperty("total_facts").GetInt32());
+                /* total_facts is the pass's unfiltered count (three bad actors + the registry major + the memory family's
+                   stock honesty arm, PG_HOST_MEMORY_PRESSURE unavailable, lane 32); shown is the filtered page. */
+                Assert.Equal(5, root.GetProperty("total_facts").GetInt32());
                 Assert.Equal(3, root.GetProperty("shown").GetInt32());
                 Assert.Equal(3, root.GetProperty("facts").GetArrayLength());
                 foreach (var fact in root.GetProperty("facts").EnumerateArray())

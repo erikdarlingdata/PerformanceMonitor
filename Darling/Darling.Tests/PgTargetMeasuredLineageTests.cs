@@ -90,6 +90,9 @@ public sealed class PgTargetMeasuredLineageTests
             /* lane 30 — the Seq-Scan advisory: no plan-node, predicate-selectivity or relation-size distribution was read. */
             "SeqScanSelectiveFraction", "SeqScanLargeRelationBytes", "SeqScanMinCapturesPerHour", "SeqScanAdvisoryBase" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgStatementMeanMsFloor", "PgStatementMeanMsFallback" }),
+        /* Lane 32 (#3691 v3): the memory family — the 2026-09-19 calibration ran before V136 landed the memory columns, so it
+           read no reclaimable share and no overcommit ratio; the 1.0 line is engine-defined and is not listed here. */
+        ("PgTargetScorer.Memory.cs", new[] { "OvercommitCriticalRatio", "HostMemoryReclaimableWarningShare", "HostMemoryReclaimableCriticalShare", "HostMemoryPressureSustainSamples", "OvercommitCriticalBandBoost", "HostMemoryCauseBoost" }),
         /* The ratio families' ramp spans: the 2026-09-20 read placed the firing multiple, not where a ramp should top out. */
         ("PgTargetScorer.Anomaly.cs", new[] { "RatioAnomalySaturation", "WaitProfileModifiedZSpan" }),
     };
