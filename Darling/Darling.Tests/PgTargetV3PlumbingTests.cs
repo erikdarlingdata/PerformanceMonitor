@@ -102,24 +102,17 @@ public sealed class PgTargetV3PlumbingTests
         Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgStatementMeanMs));
         Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgStatementMeanMs));
 
-        var facts = new[]
-            {
-                (PgTargetSources.MemorySource, PgTargetFactKeys.ConfigMemoryOvercommit),
-                (PgTargetSources.MemorySource, PgTargetFactKeys.HostMemoryPressure),
-            }
-            .Select(t => new Fact { Source = t.Item1, Key = t.Item2, Value = 42, ServerId = 1 })
-            .ToList();
-        new FactScorer().ScoreAll(facts);
+        /* The stub-inert loop that stood here — a bare fact of each unfilled v3 key scoring 0 with no amplifier, null
+           advice, no edge — is RETIRED: lanes 27, 28, 30 and 32 have filled every v3 family, so its set is empty, and a
+           test asserting over an empty set proves nothing. What remains below is the filled-shape half of the same
+           contract, one clause per lane, each family's full pins in its own class. */
         var graph = new PgTargetRelationshipGraph();
-        foreach (var fact in facts)
-        {
-            Assert.Equal(0.0, fact.BaseSeverity);
-            Assert.Empty(fact.AmplifierResults);
-            Assert.Null(PgTargetAdvice.Compose(fact.Key, facts.ToFactLookup()));
-            Assert.Null(FactAdvice.GetForFactKey(fact.Key));
-            Assert.Empty(graph.GetAllEdges(fact.Key));
-            Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(fact.Key)!);
-        }
+        /* Lane 32's memory family is filled: both keys compose their own block, the sum roots at the advisory base on the
+           arithmetic alone and its edges live on HostMemory.cs — PgTargetMemoryTests holds the pins; here only that the
+           stub-inert loop above no longer names them. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));
+        Assert.NotEmpty(new PgTargetRelationshipGraph().GetAllEdges(PgTargetFactKeys.HostMemoryPressure));
         /* Lane 28's kernel family is filled too: the anomaly composes its own block, the proxy's edges live on the
            decomposition (not on the anomaly — no anomaly has an edge), and the metric is served by the PostgreSQL provider
            only. No v3 anomaly or metric is a stub any longer. */

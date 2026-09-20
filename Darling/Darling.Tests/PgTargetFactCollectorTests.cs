@@ -397,11 +397,18 @@ public sealed class PgTargetFactCollectorTests
             Assert.Equal(14_400_000, coverage.ObservedMs, precision: 3);
             Assert.Equal(241, coverage.SampleCount);
 
-            var major = Assert.Single(facts);
-            Assert.Equal(PgTargetFactKeys.ServerMajorVersion, major.Key);
+            /* Two facts, deliberately, since lane 32 (#3691 §4b): the registry fact, and the memory family's honesty arm —
+               a STOCK target has no host-memory source by architecture (the only pg_cpu_utilization writer is gated to
+               Aurora), so PG_HOST_MEMORY_PRESSURE is emitted unavailable with reason_no_host_memory_source, base 0,
+               rooting nothing. Every other family is still silent on this fixture: no snapshot, flat counters, no rows. */
+            Assert.Equal(2, facts.Count);
+            var major = Assert.Single(facts, f => f.Key == PgTargetFactKeys.ServerMajorVersion);
             Assert.Equal(PgTargetSources.ConfigSource, major.Source);
             Assert.Equal(18, major.Value);
             Assert.Equal(0, major.Metadata["is_aurora"]);
+            var hostMemory = Assert.Single(facts, f => f.Key == PgTargetFactKeys.HostMemoryPressure);
+            Assert.Equal(1, hostMemory.Metadata["unavailable"]);
+            Assert.Equal(1, hostMemory.Metadata[PgTargetScorer.HostMemoryReasonNoSourceKey]);
 
             /* ── the service routes to the PostgreSQL set off the registry, for both PostgreSQL tokens. */
             var service = new DarlingAnalysisService(postgres);
@@ -427,12 +434,14 @@ public sealed class PgTargetFactCollectorTests
                 Assert.True(hints.GetProperty("persisted").GetBoolean());
             }
 
-            /* The facts read shows the one fact, under its pg_ source, and the source filter accepts it. */
+            /* The facts read shows the one pg_config fact under its source, and the source filter accepts it; total_facts
+               is the unfiltered count — that fact plus the memory family's stock honesty arm (PG_HOST_MEMORY_PRESSURE
+               unavailable, lane 32 — the collector pin above). */
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, PgTargetSources.ConfigSource);
             using (var doc = JsonDocument.Parse(factsJson))
             {
                 var root = doc.RootElement;
-                Assert.Equal(1, root.GetProperty("total_facts").GetInt32());
+                Assert.Equal(2, root.GetProperty("total_facts").GetInt32());
                 Assert.False(root.GetProperty("coverage").GetProperty("partial").GetBoolean());
                 var fact = Assert.Single(root.GetProperty("facts").EnumerateArray());
                 Assert.Equal(PgTargetFactKeys.ServerMajorVersion, fact.GetProperty("key").GetString());

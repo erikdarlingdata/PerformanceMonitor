@@ -801,8 +801,10 @@ public sealed class PgTargetKnobsTests
             {
                 Assert.Equal(0, doc.RootElement.GetProperty("shown").GetInt32());
                 /* And the whole pass emitted exactly the registry fact plus the twelve config facts one snapshot
-                   yields: nothing from pg_write (no rows planted) and nothing from pg_buffer (flat counters). */
-                Assert.Equal(13, doc.RootElement.GetProperty("total_facts").GetInt32());
+                   yields, plus (since lane 32, #3691 §4b) the memory family's honesty arm — PG_HOST_MEMORY_PRESSURE
+                   unavailable, because a STOCK target has no host-memory source: nothing from pg_write (no rows planted)
+                   and nothing from pg_buffer (flat counters). */
+                Assert.Equal(14, doc.RootElement.GetProperty("total_facts").GetInt32());
             }
 
             bodySucceeded = true;
