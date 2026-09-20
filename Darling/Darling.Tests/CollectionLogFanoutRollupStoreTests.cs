@@ -323,7 +323,7 @@ public class CollectionLogFanoutRollupStoreTests
     /// <para>The issue said "query_store plus the two snapshot ones" and a comment in the runner said the
     /// same; two more had joined since (<c>query_store_health</c> #2319, <c>plan_correction</c> #1952). And
     /// the description's FIRST version then made the opposite mistake, claiming five collectors fan out full
-    /// stop — there are two mechanisms, and <c>RunsPerDatabase</c> puts eight more on a per-database
+    /// stop — there are two mechanisms, and <c>RunsPerDatabase</c> puts eleven more on a per-database
     /// connection loop on Azure SQL DB plus <c>pg_autovacuum_stats</c> always. Both are asserted, because
     /// the accumulator feeds from both and a caller told only half would look past a collector that has a
     /// <c>fanout</c> block.</para>

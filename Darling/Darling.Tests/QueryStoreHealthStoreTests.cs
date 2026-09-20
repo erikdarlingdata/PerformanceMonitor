@@ -87,7 +87,10 @@ public sealed class QueryStoreHealthStoreTests
     /// The enumeration list's load-bearing filters, each of which cost real rounds elsewhere:
     /// HAS_DBACCESS self-skip (#1823 — a least-privilege login without per-db access raised 916 per db
     /// per cycle), the AG filter (a readable-secondary's databases answer for the primary's identity),
-    /// ONLINE only (a RESTORING database's catalog views are unreachable), and the house RECOMPILE.
+    /// ONLINE only (a RESTORING database's catalog views are unreachable), and the house RECOMPILE. And
+    /// since #3764 the target that does NOT enumerate: Azure SQL DB, where the three-part reference the
+    /// per-item query nests is rejected for every database but the connection's own, so the host connects
+    /// per database there and the definition says so with a null enumeration.
     /// </summary>
     [Fact]
     public void TheEnumerationCarriesTheLoadBearingFilters()
@@ -101,11 +104,16 @@ public sealed class QueryStoreHealthStoreTests
         Assert.Contains("OPTION(RECOMPILE)", query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("/*EXCLUSION_FILTER*/", query.Text, StringComparison.Ordinal);
 
-        /* Azure lists all online databases — from master, HAS_DBACCESS returns 0 for every user database
-           and there is no AG catalog, so the on-prem filters would enumerate NOTHING there. */
-        var azure = QueryStoreHealthCollector.Instance.BuildEnumerationQuery(TestContext(isAzure: true))!;
-        Assert.DoesNotContain("HAS_DBACCESS", azure.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("dm_hadr_database_replica_states", azure.Text, StringComparison.Ordinal);
+        /* #3764: Azure SQL DB does not enumerate at all. The master-side Azure list this arm used to pin fed
+           EXECUTE [db].sys.sp_executesql, which Azure rejects for every database that is not the
+           connection's own — so on a logical-server registration every item failed and the collector stored
+           nothing while reading HEALTHY. The host now connects per database there (RunsPerDatabase, the
+           database_scoped_config #3755 shape), the definition returns null from its side, and the dead
+           Azure list query is deleted rather than left reachable. The definition-level pins live in
+           Lite.Tests/QueryStoreHealthCollectorDefinitionTests. */
+        var azureTarget = TestContext(isAzure: true);
+        Assert.True(QueryStoreHealthCollector.Instance.RunsPerDatabase(azureTarget.Target));
+        Assert.Null(QueryStoreHealthCollector.Instance.BuildEnumerationQuery(azureTarget));
     }
 
     /// <summary>A database named with a closing bracket must not escape its identifier — the same
