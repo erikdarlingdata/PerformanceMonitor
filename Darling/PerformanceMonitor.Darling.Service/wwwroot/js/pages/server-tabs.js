@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, windowFromHours } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, localTime, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -192,6 +192,25 @@ export function waitsPanel(server, ctx) {
   return panel;
 }
 
+/**
+ * #3653 A5: the baseline-discontinuity sentences a trend payload's trailing `discontinuities[]` carries, one
+ * per entry, ready for a noticeStrip beside the chart — the web twin of the dashed marker the desktop viewers
+ * draw. The identity-epoch carriers (#3694, #3705) forget a server's delta baselines when the target restarts,
+ * fails over, is renamed or has its statistics reset, so a delta-rate trend across that instant shows a step
+ * that is the instrument re-baselining, not the workload; without the sentence a reader takes the step for a
+ * change in load. The wording is the shared `baseline discontinuity at {time} ({reason})` both desktop viewers
+ * use (BaselineDiscontinuities.Sentence), with the payload's detail after a dash so the browser reader sees
+ * what moved without opening the JSON; `at` is the store's naive-UTC instant and localTime renders it on the
+ * reader's clock like every other timestamp on this page. Empty array in, empty array out — a fully
+ * continuous window adds no strip. Every value reaches the DOM through noticeStrip's text path (R4).
+ */
+function discontinuityNotes(data) {
+  const list = data && Array.isArray(data.discontinuities) ? data.discontinuities : [];
+  return list.map(
+    (d) => "baseline discontinuity at " + localTime(d.at) + " (" + d.reason + ")" + (d.detail ? " — " + d.detail : "")
+  );
+}
+
 async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, loadingStrip());
   const trend = await readTool("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
@@ -199,8 +218,11 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
     mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
     return;
   }
-  mount(
-    slot,
+  /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
+     failover most directly manufactures; the payload's discontinuities render as a notice above it. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
       xKey: "time",
@@ -212,8 +234,8 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       unit: "ms/s",
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
       ...windowFromHours(ctx.hours),
-    })
-  );
+    }),
+  ]);
 }
 
 /**
@@ -271,8 +293,10 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
     ]);
     return;
   }
-  mount(
-    slot,
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
       xKey: "time",
@@ -283,8 +307,8 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
       formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
       ...windowFromHours(ctx.hours),
-    })
-  );
+    }),
+  ]);
 }
 
 /**
@@ -385,6 +409,8 @@ async function drawQueryTrend(slot, server, ctx, query) {
         " the window asked for — earlier collections have aged out of the tier that answered."
     );
   }
+  /* #3653 A5: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
+  notes.push(...discontinuityNotes(trend.data));
 
   mount(slot, [
     notes.length ? noticeStrip(notes.join(" ")) : null,
@@ -442,8 +468,13 @@ export function fileIoPanel(server, ctx) {
       valueKey: "avg_read_latency_ms",
     });
     if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. */
-    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }));
+    mount(body, [
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }),
+    ]);
   })();
   return panel;
 }

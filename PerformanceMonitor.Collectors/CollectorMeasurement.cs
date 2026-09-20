@@ -213,6 +213,71 @@ public static class CollectorMeasurementNote
     }
 
     /// <summary>
+    /// The grammar's inverse for ONE label (#3653 A5): reads <c>label=count</c> back out of a stored
+    /// <c>collection_log.error_message</c>, whether the note is the bare <see cref="Render"/> output or the
+    /// <see cref="Compose"/>d form with a host note in front of it. True with the count when the label is
+    /// present as a whole token; false when it is absent, or present only as part of a longer token.
+    ///
+    /// <para>Token-exact on purpose. The host half of a composed note is free prose — it can contain <c>=</c>,
+    /// spaces and semicolons — so a substring search for <c>label=</c> could match inside a sentence the host
+    /// wrote, and a label is a prefix of other legal labels (<c>candidates</c> of <c>candidates_visible</c>).
+    /// A token is bounded by the two separators the grammar itself emits — the space between pairs
+    /// (<see cref="Render"/>) and the <c>; </c> that <see cref="EnumeratedCollectorDriver.MergeNotes"/> puts
+    /// between the host note and the counts — or by the ends of the string, and its value is the run of ASCII
+    /// digits <see cref="Render"/> wrote (invariant, no grouping), so the read reverses exactly the write. A
+    /// note the store truncated mid-token (Darling cuts the column at 4,000 characters, host note first) reads
+    /// as absent rather than as a partial number.</para>
+    ///
+    /// <para>This is the read side of the #3161 seam: a definition records counts, and a reader that wants one
+    /// of them keys on the label through here rather than through its own regex, so the two ends of the
+    /// grammar cannot drift. The first reader is the identity-epoch marker
+    /// (<see cref="BaselineDiscontinuities"/>), keying on <see cref="ServerEpoch.IdentityChangesMeasurement"/>
+    /// and its siblings.</para>
+    /// </summary>
+    public static bool TryReadCount(string? note, string label, out long count)
+    {
+        count = 0;
+        if (string.IsNullOrEmpty(note) || !IsValidLabel(label))
+        {
+            return false;
+        }
+
+        var index = 0;
+        while ((index = note.IndexOf(label, index, StringComparison.Ordinal)) >= 0)
+        {
+            var end = index + label.Length;
+            var startsToken = index == 0 || IsTokenBreak(note[index - 1]);
+            if (startsToken && end < note.Length && note[end] == '=')
+            {
+                var digitsStart = end + 1;
+                var digitsEnd = digitsStart;
+                while (digitsEnd < note.Length && char.IsAsciiDigit(note[digitsEnd]))
+                {
+                    digitsEnd++;
+                }
+
+                if (digitsEnd > digitsStart && (digitsEnd == note.Length || IsTokenBreak(note[digitsEnd])))
+                {
+                    return long.TryParse(
+                        note.AsSpan(digitsStart, digitsEnd - digitsStart),
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out count);
+                }
+            }
+
+            index = end;
+        }
+
+        return false;
+    }
+
+    /* The two characters a rendered pair can sit beside: the space Render puts between pairs, and the
+       semicolon MergeNotes puts after the host note (its separator is "; ", so the token after it is
+       preceded by a space, but the token BEFORE a second MergeNotes join is followed by the semicolon). */
+    private static bool IsTokenBreak(char c) => c is ' ' or ';';
+
+    /// <summary>
     /// The host's own note and the definition's measurements as the one string the
     /// <c>collection_log.error_message</c> column takes, composed through
     /// <see cref="EnumeratedCollectorDriver.MergeNotes"/> so the separator is the one every other note

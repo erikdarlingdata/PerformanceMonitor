@@ -240,11 +240,12 @@ public partial class ServerTab : UserControl
                         var pdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
                         var qsdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
                         var ect = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
-                        await System.Threading.Tasks.Task.WhenAll(qdt, pdt, qsdt, ect);
-                        UpdateQueryDurationTrendChart(qdt.Result, hoursBack, fromDate, toDate);
-                        UpdateProcDurationTrendChart(pdt.Result, hoursBack, fromDate, toDate);
-                        UpdateQueryStoreDurationTrendChart(qsdt.Result, hoursBack, fromDate, toDate);
-                        UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate);
+                        var disc = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
+                        await System.Threading.Tasks.Task.WhenAll(qdt, pdt, qsdt, ect, disc);
+                        UpdateQueryDurationTrendChart(qdt.Result, hoursBack, fromDate, toDate, disc.Result);
+                        UpdateProcDurationTrendChart(pdt.Result, hoursBack, fromDate, toDate, disc.Result);
+                        UpdateQueryStoreDurationTrendChart(qsdt.Result, hoursBack, fromDate, toDate, disc.Result);
+                        UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
                         break;
                     case 1: // Active Queries
                         var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
@@ -310,6 +311,8 @@ public partial class ServerTab : UserControl
             var procDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var queryStoreDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var executionCountTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
+            /* #3653 A5: the window's baseline discontinuities, one read for the four trend charts. */
+            var discontinuitiesTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
             var heatmapTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Heatmap", () => Task.Run(async () =>
             {
                 try { return await _dataService.GetQueryHeatmapAsync(_serverId, (HeatmapMetric)Dispatcher.Invoke(() => HeatmapMetricCombo.SelectedIndex), hoursBack, fromDate, toDate, SelectedDatabaseFilter); }
@@ -319,7 +322,7 @@ public partial class ServerTab : UserControl
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, queryStatsTask, procStatsTask, queryStoreTask, planCorrectionTask,
                 queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
-                heatmapTask);
+                discontinuitiesTask, heatmapTask);
 
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
             LiveSnapshotIndicator.Text = "";
@@ -353,10 +356,10 @@ public partial class ServerTab : UserControl
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
 
-            UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate);
-            UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate);
-            UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result, hoursBack, fromDate, toDate);
-            UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate);
+            UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
+            UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
+            UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
+            UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryHeatmapChart(heatmapTask.Result);
         }
         catch (Exception ex)
@@ -774,6 +777,25 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"Trend query failed: {ex.Message}");
             return new List<T>();
+        }
+    }
+
+    /// <summary>
+    /// The Performance Trends window's baseline discontinuities (#3653 A5), on <see cref="SafeQueryAsync"/>'s
+    /// discipline: a store that cannot answer this read still gets its four series drawn, unmarked, rather
+    /// than an empty tab. Same window arguments as the four trend reads beside it, so the markers and the
+    /// points describe one span.
+    /// </summary>
+    private async Task<IReadOnlyList<PerformanceMonitor.Collectors.BaselineDiscontinuity>> SafeDiscontinuitiesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        try
+        {
+            return await _dataService.GetBaselineDiscontinuitiesAsync(_serverId, hoursBack, fromDate, toDate);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"Baseline-discontinuity read failed; trend charts drawn without markers: {ex.Message}");
+            return Array.Empty<PerformanceMonitor.Collectors.BaselineDiscontinuity>();
         }
     }
 }

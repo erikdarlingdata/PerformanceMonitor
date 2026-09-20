@@ -225,7 +225,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_stats first to discover the dominant wait types.")]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_stats first to discover the dominant wait types." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetWaitTrend(
         NpgsqlDataSource postgres,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,
@@ -278,12 +278,19 @@ public sealed class DarlingMcpDataTools
                 signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond
             });
 
+            /* #3653 A5: wait_stats is the FIRST identity-epoch carrier (#3705), so this is the trend whose
+               step a restart or failover most directly manufactures; the markers ride the payload's trailing
+               key exactly as on the DarlingMcpTrendTools family (see that class's remarks), over the same
+               window as the points. */
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 wait_type,
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

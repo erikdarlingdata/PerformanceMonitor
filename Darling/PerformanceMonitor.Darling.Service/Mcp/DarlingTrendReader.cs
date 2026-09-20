@@ -1152,6 +1152,21 @@ internal static class DarlingTrendReader
                 postgres, $"SELECT 1 FROM {route.HourlyView} WHERE server_id = $1 LIMIT 1", serverId, cancellationToken);
     }
 
+    /// <summary>
+    /// The baseline discontinuities inside a trend's window (#3653 A5), oldest first, empty when none — the
+    /// <c>discontinuities[]</c> block every trend tool in <see cref="DarlingMcpTrendTools"/> (and
+    /// <c>get_wait_trend</c>) attaches after its points. Reads flow through here so the trend tools keep one
+    /// door to the store; the read itself is the Storage-side
+    /// <see cref="BaselineDiscontinuityReader.ReadAsync"/>, which the desktop viewer's Performance Trends
+    /// charts also run, so the payload and the chart cannot disagree about where a series re-baselined. The
+    /// window is the SAME [start, end] the tool's points were read over — a marker outside the window's points
+    /// but inside the window is still a fact about the window (a restart in a quiet hour is why the hour is
+    /// quiet), and one just past the window's edge is not this window's to report.
+    /// </summary>
+    public static Task<IReadOnlyList<PerformanceMonitor.Collectors.BaselineDiscontinuity>> GetBaselineDiscontinuitiesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        => BaselineDiscontinuityReader.ReadAsync(postgres, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
     /// <summary>All the probes share one shape: a scalar that is null when no row qualifies.</summary>
     private static async Task<bool> HasAnySampleAsync(
         NpgsqlDataSource postgres, string sql, int serverId, CancellationToken cancellationToken)

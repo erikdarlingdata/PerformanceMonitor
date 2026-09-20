@@ -139,6 +139,7 @@ namespace PerformanceMonitor.Common
                 ["Crosshair"]        = "#FFFFFF", // correlated-charts crosshair vline
                 ["GhostLine"]        = "#FFFFFF", // comparison-overlay ghost line (rendered semi-transparent)
                 ["Placeholder"]      = "#888888", // no-data placeholder line
+                ["Discontinuity"]    = "#E8B21E", // #3653 A5 baseline-discontinuity marker (dashed vline; gold, like a threshold: chart chrome, not a series)
             };
 
         /// <summary>Color for a threshold / pressure-zone / anomaly accent.</summary>

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -124,7 +125,7 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_types first to discover available wait types.")]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_types first to discover available wait types." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -175,13 +176,18 @@ public sealed class McpWaitTools
                 wait_time_ms_per_second = p.WaitTimeMsPerSecond,
                 signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond
             });
+            /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the trend whose step a restart
+               or failover most directly manufactures; the window's discontinuities ride the trailing key as on
+               every trend tool of both SKUs — see BaselineDiscontinuities. */
+            var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 wait_type,
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
