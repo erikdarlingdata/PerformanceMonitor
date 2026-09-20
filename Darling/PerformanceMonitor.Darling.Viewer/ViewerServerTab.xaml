@@ -2843,6 +2843,14 @@
                                 <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
                                 <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                 <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
+                                <!-- V137 (#3796): the two capture modes, trailing like the store columns and the MCP payload. ALL is the
+                                     plan-churn factory; a dash is a pre-rung row (or, for wait stats, a 2016 engine), never OFF. -->
+                                <DataGridTextColumn Binding="{Binding CaptureModeDisplay}" Width="110">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Capture Mode" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding WaitStatsCaptureModeDisplay}" Width="130">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitStatsCaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Stats Capture" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>

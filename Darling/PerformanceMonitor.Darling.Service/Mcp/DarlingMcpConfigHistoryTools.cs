@@ -237,7 +237,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
+    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, the runtime-stats interval length, and — the two trailing fields on every row since V137 / Lite v64 (#3796) — query_capture_mode and wait_stats_capture_mode. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. CAPTURE MODE IS THE PLAN-CHURN KNOB: query_capture_mode is the one option on this row that names a plan-churn factory. ALL captures every query the engine compiles, one-off ad hoc statements included — on an ad hoc workload each distinct text is a new query with a new plan, so the store fills toward max_storage_size_mb, size-based cleanup cycles, and the READ_ONLY cap hit that readonly_reason decodes follows; ALL was the engine default on SQL Server 2016 and 2017. The shape one production store class showed — ~755 k new distinct plans a day from 42 servers, with every other knob on this row uniform — is what ALL produces on an ad hoc workload, and until V137 this row could not say whether that was the cause because it never asked. AUTO skips insignificant queries (the engine's own thresholds over a day: fewer than 30 executions, under 1 s of compile CPU and under 100 ms of execution CPU) and has been the default since SQL Server 2019 and on Azure SQL Database. CUSTOM (2019+) is AUTO with operator-set thresholds — the capture_policy_* knobs, which this row does not collect, so CUSTOM here says the thresholds were tuned, not to what. NONE stops capturing NEW queries while the store keeps collecting compile and runtime statistics for the ones it already holds. wait_stats_capture_mode ON (the default) records per-plan wait statistics into every runtime-stats interval, at a per-execution bookkeeping cost and more store bytes per interval; OFF saves both and leaves the store's per-query wait view empty. Both are the DMV's *_desc spelling verbatim. null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017 (the column does not exist there) — never OFF. Consumed by the Viewer's Query Store grid and, next, by get_query_store_clutter (#3797) as its churn × ALL 'switch to AUTO' arm; this tool reports the modes and renders no verdict on them. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static async Task<string> GetQueryStoreHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -275,6 +275,13 @@ public sealed class DarlingMcpConfigHistoryTools
                 stale_query_threshold_days = r.StaleQueryThresholdDays,
                 max_plans_per_query = r.MaxPlansPerQuery,
                 interval_length_minutes = r.IntervalLengthMinutes,
+                /* V137 (#3796): the two capture modes, TRAILING and in the collector's order, so a client that
+                   indexed the row by position before the rung still finds its ten fields where they were. The
+                   DMV's *_desc spelling verbatim, and null is published as null rather than coalesced: it is
+                   the pre-rung row or the 2016 engine (wait stats), a real state the description spells out,
+                   and the same key shape both SKUs emit. No verdict on the value — that is #3797's. */
+                query_capture_mode = r.QueryCaptureMode,
+                wait_stats_capture_mode = r.WaitStatsCaptureMode,
             }).ToList();
 
             return JsonSerializer.Serialize(new

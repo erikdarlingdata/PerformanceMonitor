@@ -167,7 +167,7 @@ internal static class McpInstructions
         | `get_server_config` | sp_configure settings with configured and in-use values; `captured_at` (captured on connect — can be days old) | `server_name` |
         | `get_database_config` | Database-level settings: RCSI, recovery model, auto-shrink, Query Store, etc.; `captured_at` (captured on connect) | `server_name`, `database_name` |
         | `get_database_scoped_config` | Database-scoped configuration (MAXDOP, legacy CE, parameter sniffing); `captured_at` (captured on connect) | `server_name`, `database_name` |
-        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds | `server_name`, `database_name` |
+        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) | `server_name`, `database_name` |
         | `get_trace_flags` | Active trace flags with global/session scope; `captured_at` (captured on connect) | `server_name` |
         | `get_server_config_changes` | sp_configure change history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168), `as_of` |
         | `get_database_config_changes` | sys.databases change history (recovery model, RCSI, compat level, etc.) | `server_name`, `hours_back` (default 168), `as_of` |
