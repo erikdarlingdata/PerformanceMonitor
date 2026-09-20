@@ -47,6 +47,13 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <see cref="RequestedMetrics"/> for the names and why they cannot be paraphrased, and
 /// <see cref="BuildSamples"/> for why four metric queries need the response keyed by metric rather than
 /// flattened.</para>
+///
+/// <para><b>Nine metric names, still one call, still one row</b> (#3691, V136). The host's memory rides the
+/// same request: the five <c>os.memory.*</c> counters are appended to the metric list and land as six more
+/// columns on the SAME <c>pg_cpu_utilization</c> row — same minute stamp, same watermark, same COPY. See
+/// <see cref="HostMemoryMetrics"/> for the names, <see cref="BuildSamples"/> for the KB→bytes and ACU→bytes
+/// arithmetic, and <see cref="WithCapacityFallbackAsync{T}"/> for why the request now degrades in TWO steps
+/// rather than one. <see cref="PgCpuUtilizationCollector"/>'s doc says why columns and not a table.</para>
 /// </summary>
 public sealed class RdsCpuIngestor
 {
@@ -71,6 +78,27 @@ public sealed class RdsCpuIngestor
 
     /// <summary>The configured ACU ceiling — <see cref="AcuUtilizationMetric"/>'s denominator.</summary>
     private const string MaxConfiguredAcuMetric = "os.general.maxConfiguredAcu.avg";
+
+    /* The five host-memory counters (#3691, V136), in KILOBYTES per Performance Insights' counter list —
+       every os.memory.* name below is documented there with the unit "Kilobytes", which is why
+       BuildSamples multiplies by 1,024 and the store's columns say _bytes. The names were taken
+       from the published Aurora PostgreSQL counter list rather than guessed from the CPU metric's shape,
+       for #3281's reason: an unknown name fails the whole call. */
+
+    /// <summary>The host's total memory.</summary>
+    private const string MemoryTotalMetric = "os.memory.total.avg";
+
+    /// <summary>Unassigned memory.</summary>
+    private const string MemoryFreeMetric = "os.memory.free.avg";
+
+    /// <summary>The file-system cache — PostgreSQL's second buffer tier.</summary>
+    private const string MemoryCachedMetric = "os.memory.cached.avg";
+
+    /// <summary>I/O buffering ahead of the storage device.</summary>
+    private const string MemoryBuffersMetric = "os.memory.buffers.avg";
+
+    /// <summary>Assigned memory.</summary>
+    private const string MemoryActiveMetric = "os.memory.active.avg";
 
     /// <summary>
     /// Every metric name asked for, in one <c>GetResourceMetrics</c> call — which is what makes #3281's fix
@@ -97,6 +125,28 @@ public sealed class RdsCpuIngestor
     };
 
     /// <summary>
+    /// The host-memory names (#3691, V136), the ones the six <c>memory_*_bytes</c> / <c>configured_memory_bytes</c>
+    /// columns store. Kept as a list of their own rather than folded into <see cref="RequestedMetrics"/> because the fallback ladder needs the
+    /// boundary: the request that PI rejects is retried WITHOUT these first (<see cref="WithCapacityFallbackAsync{T}"/>),
+    /// so a rejection of a memory name costs the memory columns and nothing the CPU table already had.
+    /// Internal for the same reason as its sibling — a test holds every name here to a stored column and
+    /// the reverse.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> HostMemoryMetrics = new[]
+    {
+        MemoryTotalMetric,
+        MemoryFreeMetric,
+        MemoryCachedMetric,
+        MemoryBuffersMetric,
+        MemoryActiveMetric,
+    };
+
+    /// <summary>Every name asked for on the first attempt: the CPU and capacity four, then the memory five.
+    /// One <c>GetResourceMetrics</c> call, nine metric queries, the same IAM grant.</summary>
+    internal static readonly IReadOnlyList<string> AllMetrics =
+        RequestedMetrics.Concat(HostMemoryMetrics).ToArray();
+
+    /// <summary>
     /// What is asked for when Performance Insights rejects the request SHAPE: the CPU metric alone, the one
     /// every instance class this ingestor reaches publishes. See
     /// <see cref="WithCapacityFallbackAsync{T}"/> for why that retry exists at all.
@@ -104,8 +154,17 @@ public sealed class RdsCpuIngestor
     internal static readonly IReadOnlyList<string> CpuOnlyMetrics = new[] { CpuMetric };
 
     /// <summary>
-    /// Runs the Performance Insights request with ONE retry on <see cref="CpuOnlyMetrics"/> when the service
-    /// rejects the request shape.
+    /// Runs the Performance Insights request down a THREE-step ladder when the service rejects the request
+    /// shape: <see cref="AllMetrics"/>, then <see cref="RequestedMetrics"/>, then <see cref="CpuOnlyMetrics"/>.
+    ///
+    /// <para><b>The middle step is #3691's, and it is what bounds the memory addition to zero regression.</b>
+    /// Before V136 the ladder was two steps — the four, then the one. Appending the memory names to the first
+    /// request means a rejection of ANY of them would, on a two-step ladder, fall straight to the CPU metric
+    /// alone and take the capacity columns with it on every cycle for that target: a regression on the
+    /// series the saturation band reads, caused by a column nothing reads yet. The middle step asks exactly
+    /// what was asked before V136, so the worst case on a target whose Performance Insights does not publish
+    /// <c>os.memory.*</c> is exactly the pre-V136 behaviour — the memory table stays empty for it, which is
+    /// the truthful reading, and nothing else changes.</para>
     ///
     /// <para><b>Why: the capacity metrics do not apply to every instance class that reaches this
     /// ingestor.</b> Dispatch is on <see cref="RdsEndpoint.TryParse"/> succeeding and NOT on
@@ -129,13 +188,23 @@ public sealed class RdsCpuIngestor
     /// answer would be resting on a guess.</para>
     ///
     /// <para>Generic over the response and driven through a delegate so the decision is assertable without
-    /// an AWS client, a store or a connection — what matters is WHICH metric list is asked for second, and
-    /// which faults do not earn a retry at all.</para>
+    /// an AWS client, a store or a connection — what matters is WHICH metric list is asked for at each step,
+    /// and which faults do not earn a retry at all.</para>
     /// </summary>
     internal static async Task<T> WithCapacityFallbackAsync<T>(
         Func<IReadOnlyList<string>, Task<T>> request)
     {
         ArgumentNullException.ThrowIfNull(request);
+
+        try
+        {
+            return await request(AllMetrics);
+        }
+        catch (InvalidArgumentException)
+        {
+            /* The memory names cost nothing the CPU table had — see the type doc: this step IS the pre-V136
+               request, so a target that rejects os.memory.* behaves exactly as it did before. */
+        }
 
         try
         {
@@ -171,7 +240,8 @@ public sealed class RdsCpuIngestor
     /// <returns>Rows stored and whether Performance Insights was reached at all. This ingestor is the one
     /// that meets the not-reached case routinely: <c>pg_cpu_utilization</c>'s dispatch is UNCONDITIONAL, with
     /// no <c>pg_read_file</c>-shaped fallback for a self-hosted target, so every cycle of every self-hosted
-    /// PostgreSQL target lands here and no-ops.</returns>
+    /// PostgreSQL target lands here and no-ops — which since V136 is also the host-memory series' "no row"
+    /// arm (#3691), taken at the only place it can be.</returns>
     public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
@@ -223,9 +293,10 @@ public sealed class RdsCpuIngestor
 
             using var pi = _piClientFactory(parsed.Region);
 
-            /* All four names in one call — see RequestedMetrics for why that is the whole cost of #3281's
-               fix, and for why the os.general. prefix cannot be paraphrased — degrading to the CPU metric
-               alone if the service rejects the shape, per WithCapacityFallbackAsync. */
+            /* All nine names in one call — see RequestedMetrics for why that is the whole cost of #3281's
+               fix, HostMemoryMetrics for V136's five, and for why neither prefix can be paraphrased —
+               degrading first to the pre-V136 four and then to the CPU metric alone if the service rejects
+               the shape, per WithCapacityFallbackAsync. */
             var response = await WithCapacityFallbackAsync(metrics =>
                 pi.GetResourceMetricsAsync(
                     new GetResourceMetricsRequest
@@ -290,13 +361,73 @@ public sealed class RdsCpuIngestor
     /// <c>MAX(sample_time)</c>, so a capacity-only row would advance it past a CPU point that arrived one
     /// cycle later and retire that point unread. The cost of the choice is
     /// bounded and self-describing instead: <c>acu_utilization_percent</c> stays NULL for a minute PI had no
-    /// capacity sample for, and a NULL there bands Unknown, never Healthy.</para>
+    /// capacity sample for, and a NULL there bands Unknown, never Healthy. The six memory columns (V136)
+    /// hang off the same identity for the same reason — a memory-only minute produces no row either, and
+    /// the row that exists carries NULL where PI had no memory sample.</para>
+    ///
+    /// <para><b>KB → bytes by 1,024, rounded to whole bytes</b> (V136): PI publishes the <c>os.memory.*</c>
+    /// counters in kilobytes and its <c>.avg</c> over the minute can be fractional; a byte column does not
+    /// carry a fraction. <b>ACU → bytes by <see cref="PgCpuUtilizationCollector.BytesPerAcu"/></b> from the
+    /// SAME capacity sample the row stores as <c>serverless_capacity_acu</c>, so the two columns agree on the
+    /// minute's allocation; NULL where the instance publishes no capacity, which is what a provisioned
+    /// instance class looks like from here.</para>
     ///
     /// <para>Internal and static so the grouping is assertable without a store, an AWS client or a
     /// connection — it is the step that decides which value lands in which column.</para>
     /// </summary>
     internal static List<PgCpuUtilizationCollector.Row> BuildSamples(
         IEnumerable<MetricKeyDataPoints>? metricList, DateTime? watermark)
+    {
+        /* PI returns a data point with a null Value for a period it has no sample for. IndexByMetric records
+           nothing for it, so the column stays NULL — never a 0, which for a capacity ratio would read as
+           measured headroom. */
+        var byMetric = IndexByMetric(metricList);
+
+        if (!byMetric.TryGetValue(CpuMetric, out var cpu))
+        {
+            return [];
+        }
+
+        return cpu
+            .Where(p => !watermark.HasValue || p.Key > watermark.Value)
+            .OrderBy(p => p.Key)
+            .Select(p => new PgCpuUtilizationCollector.Row(
+                DateTime.SpecifyKind(p.Key, DateTimeKind.Utc),
+                p.Value,
+                ValueAt(byMetric, AcuUtilizationMetric, p.Key),
+                ValueAt(byMetric, ServerlessCapacityMetric, p.Key),
+                ValueAt(byMetric, MaxConfiguredAcuMetric, p.Key),
+                KilobytesToBytes(ValueAt(byMetric, MemoryTotalMetric, p.Key)),
+                KilobytesToBytes(ValueAt(byMetric, MemoryFreeMetric, p.Key)),
+                KilobytesToBytes(ValueAt(byMetric, MemoryCachedMetric, p.Key)),
+                KilobytesToBytes(ValueAt(byMetric, MemoryBuffersMetric, p.Key)),
+                KilobytesToBytes(ValueAt(byMetric, MemoryActiveMetric, p.Key)),
+                AcuToBytes(ValueAt(byMetric, ServerlessCapacityMetric, p.Key))))
+            .ToList();
+    }
+
+    /// <summary>One metric's value at one minute, or null where PI had no sample for that pairing. Null
+    /// rather than 0 for <see cref="BuildSamples"/>'s reason.</summary>
+    private static double? ValueAt(
+        Dictionary<string, Dictionary<DateTime, double>> byMetric, string metric, DateTime timestamp) =>
+        byMetric.TryGetValue(metric, out var points) && points.TryGetValue(timestamp, out var value)
+            ? value
+            : null;
+
+    /// <summary>PI's kilobyte counter as whole bytes; null stays null.</summary>
+    internal static long? KilobytesToBytes(double? kilobytes) =>
+        kilobytes.HasValue ? (long)Math.Round(kilobytes.Value * 1024d) : null;
+
+    /// <summary>The Serverless v2 capacity sample as the bytes it entitles the instance to; null stays null.
+    /// A fractional ACU (the capacity metric is a minute's average) rounds to whole bytes.</summary>
+    internal static long? AcuToBytes(double? acu) =>
+        acu.HasValue ? (long)Math.Round(acu.Value * PgCpuUtilizationCollector.BytesPerAcu) : null;
+
+    /// <summary>The response keyed by metric name, then by minute — <see cref="BuildSamples"/>'s walk, hoisted
+    /// so the null-value rule is stated once: a data point PI returned with a
+    /// null value is not recorded, so the column stays NULL rather than becoming 0.</summary>
+    private static Dictionary<string, Dictionary<DateTime, double>> IndexByMetric(
+        IEnumerable<MetricKeyDataPoints>? metricList)
     {
         var byMetric = new Dictionary<string, Dictionary<DateTime, double>>(StringComparer.Ordinal);
 
@@ -317,9 +448,6 @@ public sealed class RdsCpuIngestor
 
             foreach (var point in metric!.DataPoints ?? [])
             {
-                /* PI returns a data point with a null Value for a period it has no sample for. Nothing is
-                   recorded for it, so the column stays NULL — never a 0, which for a capacity ratio would
-                   read as measured headroom. */
                 if (point.Timestamp.HasValue && point.Value.HasValue)
                 {
                     points[point.Timestamp.Value] = point.Value.Value;
@@ -327,30 +455,8 @@ public sealed class RdsCpuIngestor
             }
         }
 
-        if (!byMetric.TryGetValue(CpuMetric, out var cpu))
-        {
-            return [];
-        }
-
-        return cpu
-            .Where(p => !watermark.HasValue || p.Key > watermark.Value)
-            .OrderBy(p => p.Key)
-            .Select(p => new PgCpuUtilizationCollector.Row(
-                DateTime.SpecifyKind(p.Key, DateTimeKind.Utc),
-                p.Value,
-                ValueAt(byMetric, AcuUtilizationMetric, p.Key),
-                ValueAt(byMetric, ServerlessCapacityMetric, p.Key),
-                ValueAt(byMetric, MaxConfiguredAcuMetric, p.Key)))
-            .ToList();
+        return byMetric;
     }
-
-    /// <summary>One metric's value at one minute, or null where PI had no sample for that pairing. Null
-    /// rather than 0 for <see cref="BuildSamples"/>'s reason.</summary>
-    private static double? ValueAt(
-        Dictionary<string, Dictionary<DateTime, double>> byMetric, string metric, DateTime timestamp) =>
-        byMetric.TryGetValue(metric, out var points) && points.TryGetValue(timestamp, out var value)
-            ? value
-            : null;
 
     /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
     /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own

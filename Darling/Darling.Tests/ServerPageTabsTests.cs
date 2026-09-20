@@ -210,7 +210,14 @@ public sealed class ServerPageTabsTests
            So the exemption clause above is now unused, and that is the state to keep it in. A collector
            whose whole output is genuinely a panel is still allowed to exist — raise the constant and say why
            here — but nothing currently claims to be one, and the last thing that did was wrong about it. */
-        const int KnownUnreadable = 0;
+        /* ONE, since V136 (#3691), and deliberately: pg_database_size_stats is landed one wave AHEAD of its read so
+           the fleet accrues rows before the consumer lanes (object growth, disk-free) arrive — the rung's PR
+           says "nothing reads it yet" as an exit criterion, not an oversight. This is not the "genuinely a
+           panel" exemption the paragraph above describes; it is a sequencing exemption with a named
+           successor, and the lower-it half below is what makes it expire: when the first get_pg_* read over
+           the table lands, this number must come down with it. Do not let a second collector join under
+           this comment. */
+        const int KnownUnreadable = 1;
 
         Assert.True(
             unreadable.Length <= KnownUnreadable,

@@ -217,12 +217,12 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 **Proof:** a `[PASS]` line that reports PostgreSQL facts, ending in how many collectors will actually run.
 
 ```
-  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 28 PostgreSQL collectors apply
+  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 29 PostgreSQL collectors apply
 ```
 
 **Read the count.** It is computed by asking the same gate the collector runner asks, so it is the real
 answer, and it is the difference between "this is configured" and "this will collect". A gated-off
-collector is named in the line itself — `24 of 28 PostgreSQL collectors apply (skipped: ...)` — and the
+collector is named in the line itself — `25 of 29 PostgreSQL collectors apply (skipped: ...)` — and the
 reasons come from the collectors' own gates in `CollectorCatalog`:
 
 | Target | Applies | Skipped, and why |
@@ -261,11 +261,11 @@ carries any older store to **v127**. `StorageVersion.SchemaVersion` is the sourc
 proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
-settings. Every collector table becomes a hypertable — all 70 of them, 28 PostgreSQL — so the required
+settings. Every collector table becomes a hypertable — all 71 of them, 29 PostgreSQL — so the required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-today the numbers are 73 and 84 for 71 hypertables, and both need a server restart. Managed mode does this itself.
+today the numbers are 74 and 85 for 72 hypertables, and both need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 

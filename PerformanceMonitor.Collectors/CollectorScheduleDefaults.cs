@@ -381,5 +381,13 @@ public static class CollectorScheduleDefaults
            1-minute data points (mirroring the ring buffer's own TOP(60) resilience), so a missed cycle is
            backfilled rather than lost. 30-day retention matches cpu_utilization. */
         ["pg_cpu_utilization"] = new(5, 30),
+        /* #3691 (V136) per-database size. HOURLY: a database's size moves in checkpoint- and
+           autovacuum-sized steps, and the questions the series answers ("how fast is it growing", "when
+           does it cross the volume") are rates over days, not minutes. A YEAR of retention — the existing
+           365-day tier, beside server_properties and the PostgreSQL configuration snapshots — because
+           "how has this grown since last year" is what a size series is for, and the row cost is trivial:
+           ~50 clusters × ~5 databases × 24 rows a day is ~6,000 rows a day fleet-wide, a rounding error
+           beside any per-minute family. One read of a shared catalog per cycle, no per-database fan-out. */
+        ["pg_database_size_stats"] = new(60, 365),
     };
 }

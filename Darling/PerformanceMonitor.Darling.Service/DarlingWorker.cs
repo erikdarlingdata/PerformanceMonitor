@@ -86,7 +86,7 @@ public sealed class DarlingWorker : BackgroundService
        no need to run it on the 30-second alert sweep.
 
        Cheap is load-bearing here rather than incidental, and #3199 is what it costs when it is not: the size
-       number came from pg_database_size, which walks every file in the store, and measured 2,090-3,745 ms on
+       number came from pg_database_size_stats, which walks every file in the store, and measured 2,090-3,745 ms on
        a 225 GiB store against a 5 s CommandTimeout floored on 6.2 ms. ~288 nominal iterations a day (this
        gate is start-to-start 5 minutes, stamped before the check runs and quantised to the loop's own
        finish-to-start tick, so the delivered count sits just under that) at ~2.5 s each is ~11.9 min/day of
@@ -5661,9 +5661,9 @@ LIMIT 1";
     /// (<see cref="StoreSelfMetrics.LatestStoreSizeSql"/>). Failure-isolated to null (Debug) so a transient
     /// store hiccup never breaks the disk-pressure check.
     ///
-    /// <para><b>Why this is not <c>pg_database_size</c> (#3199).</b> This method is one of the ten commands
+    /// <para><b>Why this is not <c>pg_database_size_stats</c> (#3199).</b> This method is one of the ten commands
     /// awaited inline on the collection loop's serial thread, under
-    /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> — and running <c>pg_database_size</c> here
+    /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> — and running <c>pg_database_size_stats</c> here
     /// made it the only one of the ten whose cost scaled with the store, against a bound floored on 6.2 ms
     /// measured on a 4.05 GB fixture. On a 225 GiB production store the same call measured
     /// <b>3,177 ms</b> — 64% of the 5 s bound, 1.57x headroom where the derivation claimed ~806x.</para>
@@ -5688,7 +5688,7 @@ LIMIT 1";
     /// millisecond reads, anything competing takes the rest.</para>
     ///
     /// <para><b>The walk is relocated, not eliminated.</b> The row this reads is written by
-    /// <see cref="StoreSelfMetrics.StoreInsertSql"/>, which runs <c>pg_database_size</c> itself — so the
+    /// <see cref="StoreSelfMetrics.StoreInsertSql"/>, which runs <c>pg_database_size_stats</c> itself — so the
     /// store-wide walk still happens, hourly, under
     /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> (300 s, ~120x the mean measured cost, sized by
     /// #2317 against a production store rather than a fixture). That sweep is awaited on this same thread,
@@ -8800,6 +8800,10 @@ LIMIT 1";
            self-hosted host resolves to nothing in IngestPgCpuAsync's RdsEndpoint.TryParse and the ingestor
            no-ops, the same "not this transport" answer RdsLogSource itself gives a non-RDS host. */
         ["pg_cpu_utilization"] = (r, s, ct) => r.IngestPgCpuAsync(s, ct),
+        /* #3691 (V136): the per-database size series, an ordinary SQL collector over the shared catalog.
+           (The rung's other series, host memory, has no entry here: it is six columns on the CPU row the
+           pg_cpu_utilization entry above already writes from the same Performance Insights call.) */
+        ["pg_database_size_stats"] = (r, s, ct) => r.RunAsync(PgDatabaseSizeStatsCollector.Instance, s, ct),
     };
 
     /// <summary>

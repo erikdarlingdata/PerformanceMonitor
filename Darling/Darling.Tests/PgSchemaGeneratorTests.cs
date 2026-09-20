@@ -49,13 +49,15 @@ public sealed class PgSchemaGeneratorTests
            pg_cpu_utilization (#2719, instance CPU via the RDS/Performance Insights API — no SQL route at
            all, see its own doc comment) = 69, plus
            pg_log_events (#3601, the classified server-log pipeline: the third reader of the same log the
-           deadlock and plan collectors tail, and the first to carry more than one family) = 70. The catalog is
+           deadlock and plan collectors tail, and the first to carry more than one family) = 70, plus
+           pg_database_size_stats (#3691 V136, the hourly per-database size series — the rung's other series, host
+           memory, is six columns on pg_cpu_utilization rather than a table) = 71. The catalog is
            deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(70, CollectorCatalog.All.Count);
+        Assert.Equal(71, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -647,6 +649,9 @@ public sealed class PgSchemaGeneratorTests
             (103, PgDeadlocksCollector.Instance),
             (106, PgCpuUtilizationCollector.Instance),
             (129, PgLogEventsCollector.Instance),
+            /* V136 (#3691) creates this table AND alters pg_cpu_utilization; only the CREATE half is the
+               generator's, so the comparison below takes the rung text up to its first ALTER. */
+            (136, PgDatabaseSizeStatsCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would
@@ -658,7 +663,7 @@ public sealed class PgSchemaGeneratorTests
 
         foreach (var (version, collector) in rungs)
         {
-            var rung = NormalizeDdl(PgMigrations.Scripts.Single(m => m.Version == version).Sql);
+            var rung = NormalizeDdl(CreateHalf(PgMigrations.Scripts.Single(m => m.Version == version).Sql));
 
             var generated = NormalizeDdl(
                     PgSchemaGenerator.CreateTable(collector)
@@ -675,6 +680,16 @@ public sealed class PgSchemaGeneratorTests
 
             Assert.Equal(generated, rung);
         }
+    }
+
+    /// <summary>A rung's CREATE half: the text before its first <c>ALTER TABLE</c>, or all of it when there is
+    /// none. V136 (#3691) is the first collector-creating rung that also alters another collector's table in
+    /// the same transaction; the ALTER half is pinned by that rung's own test against the collector's current
+    /// columns, and the V106 CREATE text those columns also live in stays under THIS comparison.</summary>
+    private static string CreateHalf(string sql)
+    {
+        var alter = sql.IndexOf("ALTER TABLE", StringComparison.Ordinal);
+        return alter < 0 ? sql : sql[..alter];
     }
 
     private static string NormalizeDdl(string sql) =>

@@ -174,7 +174,9 @@ public sealed class TimeHonestyRungTests
         }
 
         /* No table, no collector: the censuses did not move; each payload grew by exactly one. */
-        Assert.Equal(71, TimescaleSupport.HypertableCount);
+        /* 72 since V136 (#3691) added pg_database_size_stats; this rung itself added none. Restated as the current
+           census figure rather than as "unchanged from before", which is the claim the line makes. */
+        Assert.Equal(72, TimescaleSupport.HypertableCount);
         Assert.Equal(4, CpuUtilizationCollector.Instance.PayloadColumns.Count);
         Assert.Equal(23, ServerPropertiesCollector.Instance.PayloadColumns.Count);
     }
@@ -496,8 +498,12 @@ public sealed class TimeHonestyRungLivePostgresTests
                rung is skipped as already-passed — the exact hazard MigrationLadderPins.TheLadder_IsDenseAboveTheHistoricalGap
                guards at authoring time. Since V135 (#3653 A5, Q5 — the Long-Running Query opt-out knob's two
                config_alert_settings columns) landed on top, that is V135's two columns and its stamp as well, and
-               MigrateAsync must apply EXACTLY the two rungs, this one first, and put everything back. Both tables
-               are hypertables here (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
+               MigrateAsync must apply EXACTLY the two rungs, this one first, and put everything back — and since
+               V136 (#3691, two new PostgreSQL collector tables, CREATE TABLE IF NOT EXISTS over tables the store
+               still has) landed above THAT, the climb is every rung from this one to the ladder's top, counted
+               against the ladder rather than as a literal (the V133 test's idiom); the exact single-rung climb
+               belongs to the top rung's own test. Both tables are hypertables here (the fixture store converts
+               them), so this is the ADD COLUMN the fleet will run. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "DROP VIEW IF EXISTS collect.v_cpu_utilization_stats");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.cpu_utilization_stats DROP COLUMN IF EXISTS sample_time_utc");
             await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE VIEW collect.v_cpu_utilization_stats AS SELECT * FROM collect.cpu_utilization_stats");
@@ -505,7 +511,7 @@ public sealed class TimeHonestyRungLivePostgresTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS long_running_query_excluded_program_name_prefixes");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS long_running_query_excluded_logins");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 134");
-            Assert.Equal(2, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 134), await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
