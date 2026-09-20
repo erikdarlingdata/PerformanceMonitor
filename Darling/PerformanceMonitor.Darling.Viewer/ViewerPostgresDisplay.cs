@@ -628,6 +628,11 @@ internal static class PgDisplay
         public string RollbackPct { get; init; } = "";
         public int SampleCount { get; init; }
 
+        /// <summary>The window's peak of connected backends (V133 <c>numbackends</c>), the one LEVEL in a row
+        /// of differenced counters. "not sampled" when no row in the window carried the column — a pre-V133
+        /// history — rather than 0, which would read as an idle database.</summary>
+        public string PeakNumbackends { get; init; } = "";
+
         /// <summary>The stored <c>stats_reset</c> timestamp. Shown beside the caveat that counts resets in
         /// the window, because "reset once" and "reset at 14:02" send you to different places.</summary>
         public string StatsReset { get; init; } = "";
@@ -660,10 +665,16 @@ internal static class PgDisplay
             XactRollback = Count(row.XactRollback),
             RollbackPct = Percent(row.XactRollback, row.XactCommit + row.XactRollback),
             SampleCount = row.SampleCount,
+            PeakNumbackends = row.PeakNumbackends is { } backends ? Count(backends) : NotSampledText,
             StatsReset = Timestamp(row.StatsReset),
             Caveats = string.Join("; ", caveats),
         };
     }
+
+    /// <summary>What a column shows when the store never carried the value for these rows — distinct from
+    /// <see cref="NotApplicableText"/>, which says the engine has no such figure. A pre-V133 row has no
+    /// <c>numbackends</c> because nobody wrote it, not because PostgreSQL lacks one.</summary>
+    internal const string NotSampledText = "not sampled";
 
     internal sealed class TableBloatRow
     {

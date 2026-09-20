@@ -17,12 +17,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// Reads the per-database <c>pg_stat_database</c> counters from <c>pg_database_stats</c>, differenced across
 /// the window — temp-file spills, cache hit ratio, deadlocks, and the commit/rollback split (#2539).
-/// <para><b>Not yet read here: <c>numbackends</c></b> (V133, #3691) — the client backends connected to each
-/// database at the instant of the row, a LEVEL beside the counters this reader differences. A reader that
-/// takes it up must never difference it (the newest row's value is the reading, or a MAX/AVG over the window
-/// is the shape), must treat a NULL as "not sampled" rather than zero connections (every pre-V133 row is
-/// NULL), and must sum across databases for the cluster figure a <c>max_connections</c> fraction wants. The
-/// saturation consumer is the follow-on lane's; this rung only stores the column.</para>
+/// <para><b><c>numbackends</c> rides along as a LEVEL, never differenced</b> (V133, #3691; read here since the
+/// third between-waves batch, after #3791 reported the tool did not surface it). It is the client backends
+/// connected to each database at the instant of the row, so the window's figure is its peak
+/// (<c>MAX(numbackends)</c>) beside the counters' sums — the shape the saturation fact in
+/// <c>PgTargetFactCollector.Sessions.cs</c> already reads across databases. Two rules the projection keeps:
+/// NULL means "not sampled" (every pre-V133 row, and a row a pre-V133 collector wrote) and is carried as NULL
+/// rather than zero connections, and the per-database peaks are NOT summed into a cluster figure here — the
+/// peaks land at different instants, so their sum is a number no <c>max_connections</c> fraction can honestly
+/// use; the saturation fact sums at ONE instant and is the place for that question.</para>
 /// </summary>
 public static class DarlingPgDatabaseReader
 {
@@ -40,7 +43,8 @@ public static class DarlingPgDatabaseReader
         DateTime? StatsReset,
         int SampleCount,
         DateTime? FirstSampleAt,
-        DateTime? LastSampleAt);
+        DateTime? LastSampleAt,
+        int? PeakNumbackends);
 
     /// <summary>
     /// One page of the read: the rows the cap admitted, beside the WINDOW's figures over every database that
@@ -130,6 +134,7 @@ public static class DarlingPgDatabaseReader
                 database_name,
                 collection_time,
                 stats_reset,
+                numbackends,
                 xact_commit   - LAG(xact_commit)   OVER series AS raw_xact_commit,
                 xact_rollback - LAG(xact_rollback) OVER series AS raw_xact_rollback,
                 blks_read     - LAG(blks_read)     OVER series AS raw_blks_read,
@@ -167,6 +172,7 @@ public static class DarlingPgDatabaseReader
                 database_name,
                 collection_time,
                 stats_reset,
+                numbackends,
                 reset_here,
                 GREATEST(raw_xact_commit, 0)   AS d_xact_commit,
                 GREATEST(raw_xact_rollback, 0) AS d_xact_rollback,
@@ -197,6 +203,10 @@ public static class DarlingPgDatabaseReader
             CAST(count(*) AS integer)                         AS sample_count,
             MIN(collection_time)                              AS first_sample_at,
             MAX(collection_time)                              AS last_sample_at,
+            /* The one LEVEL in a row of counters (V133): the window's peak of connected backends for this
+               database, never differenced. MAX ignores NULLs and is NULL only when no row in the window
+               carried the column, which is what "not sampled" has to read as. */
+            MAX(numbackends)                                  AS peak_numbackends,
             /* The WINDOW's figures, on every row: over the grouped result, after the group filter below
                and before the cap - the same population the rows are drawn from (#3653). */
             CAST(COUNT(*) OVER () AS integer)                              AS window_database_count,
@@ -269,16 +279,17 @@ public static class DarlingPgDatabaseReader
                 reader.IsDBNull(10) ? null : reader.GetDateTime(10),
                 reader.GetInt32(11),
                 reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? null : reader.GetDateTime(13)));
+                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
+                reader.IsDBNull(14) ? null : reader.GetInt32(14)));
 
             /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
-            windowDatabaseCount = reader.GetInt32(14);
-            windowTempFiles = reader.GetInt64(15);
-            windowTempBytes = reader.GetInt64(16);
-            windowDeadlocks = reader.GetInt64(17);
-            windowBlksHit = reader.GetInt64(18);
-            windowBlksRead = reader.GetInt64(19);
-            windowResetCount = reader.GetInt32(20);
+            windowDatabaseCount = reader.GetInt32(15);
+            windowTempFiles = reader.GetInt64(16);
+            windowTempBytes = reader.GetInt64(17);
+            windowDeadlocks = reader.GetInt64(18);
+            windowBlksHit = reader.GetInt64(19);
+            windowBlksRead = reader.GetInt64(20);
+            windowResetCount = reader.GetInt32(21);
         }
 
         return new PgDatabasePage(rows, windowDatabaseCount, windowTempFiles, windowTempBytes, windowDeadlocks, windowBlksHit, windowBlksRead, windowResetCount);

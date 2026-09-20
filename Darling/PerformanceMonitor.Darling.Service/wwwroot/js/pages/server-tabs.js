@@ -3826,6 +3826,10 @@ const PG_DATABASE_COLUMNS = [
   { key: "counters_were_reset", label: "Reset", format: "bool" },
   { key: "reset_note", label: "Reset Note", wrap: true },
   { key: "sample_count", label: "Samples", format: "int" },
+  /* The one LEVEL in the row (V133): the window's peak of connected backends for this database, never
+     differenced. Empty on a pre-V133 history rather than 0 — not sampled is not idle. Per-database peaks land
+     at different instants, so there is deliberately no total tile for them above. */
+  { key: "peak_numbackends", label: "Peak Backends", format: "int" },
 ];
 
 /* bloat_pct_estimate and bloat_bytes_estimate are NULL on a suppressed row, which renders as an empty cell

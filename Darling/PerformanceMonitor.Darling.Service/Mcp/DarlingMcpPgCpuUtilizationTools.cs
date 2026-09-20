@@ -34,7 +34,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgCpuUtilizationTools
 {
-    [McpServerTool(Name = "get_pg_cpu_utilization"), Description("Gets instance-level CPU utilization over time for a PostgreSQL/Aurora target, from AWS Performance Insights, downsampled to 1-minute averages. Aurora and RDS only - self-hosted PostgreSQL has no instance-level CPU source and this returns empty for one. cpu_percent is os.cpuUtilization.total.avg, which is percent of the capacity CURRENTLY ALLOCATED: on Aurora Serverless v2 that allocation moves, so 100% is routinely a scale-up rather than saturation. acu_utilization_percent is percent of the CONFIGURED ACU ceiling and is the saturation figure - band and alert on that one. Both are reported per bucket, with the allocated and configured ACU beside them; a null ACU figure means no capacity sample, not headroom.")]
+    [McpServerTool(Name = "get_pg_cpu_utilization"), Description("Gets instance-level CPU utilization over time for a PostgreSQL/Aurora target, from AWS Performance Insights, downsampled to 1-minute averages. Aurora and RDS only - self-hosted PostgreSQL has no instance-level CPU source and this returns empty for one. cpu_percent is os.cpuUtilization.total.avg, which is percent of the capacity CURRENTLY ALLOCATED: on Aurora Serverless v2 that allocation moves, so 100% is routinely a scale-up rather than saturation. acu_utilization_percent is percent of the CONFIGURED ACU ceiling and is the saturation figure - band and alert on that one. Both are reported per bucket, with the allocated and configured ACU beside them; a null ACU figure means no capacity sample, not headroom. Since V136 the same row carries the HOST'S MEMORY from Performance Insights' os.memory.* counters, and each bucket reports it in bytes: memory_total_bytes, memory_free_bytes, memory_cached_bytes, memory_buffers_bytes, memory_active_bytes and configured_memory_bytes (the instance class's figure) - the figures the PG_HOST_MEMORY_PRESSURE and CONFIG_PG_MEMORY_OVERCOMMIT facts are measured against (get_analysis_facts source=pg_memory). Every memory figure is null on a pre-V136 row or an endpoint without os.memory.*, and null means not measured, never zero memory; memory_samples_in_bucket says how many samples carried it.")]
     public static async Task<string> GetPgCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -93,6 +93,22 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                        one Performance Insights call at one period, so they are present together in
                        practice, and the figure a reader bands on is the one whose coverage matters. */
                     capacity_samples_in_bucket = g.Count(r => r.AcuUtilizationPercent.HasValue),
+                    /* The V136 host-memory columns (#3809; the third between-waves batch of #3691), in bytes,
+                       averaged over the samples that carried them on the same terms as the capacity trio: a
+                       bucket is normally one sample, so the mean IS the sample, and a null must stay null - a
+                       0 here reads as a host with no memory. Integer bytes, not a double mean, because the
+                       payload is read as sizes and 8589934592.3 bytes is not a size. */
+                    memory_total_bytes = MeanBytes(g.Select(r => r.Memory?.TotalBytes)),
+                    memory_free_bytes = MeanBytes(g.Select(r => r.Memory?.FreeBytes)),
+                    memory_cached_bytes = MeanBytes(g.Select(r => r.Memory?.CachedBytes)),
+                    memory_buffers_bytes = MeanBytes(g.Select(r => r.Memory?.BuffersBytes)),
+                    memory_active_bytes = MeanBytes(g.Select(r => r.Memory?.ActiveBytes)),
+                    configured_memory_bytes = MeanBytes(g.Select(r => r.Memory?.ConfiguredBytes)),
+                    /* memory_total_bytes' own denominator, for the same reason capacity_samples_in_bucket
+                       exists: a null or a thin memory figure cannot otherwise be told from a bucket with no
+                       memory samples at all. Counts the total specifically - the six arrive together on one
+                       Performance Insights call, and the total is the one every share is measured against. */
+                    memory_samples_in_bucket = g.Count(r => r.Memory?.TotalBytes is not null),
                 });
 
             return JsonSerializer.Serialize(new
@@ -124,5 +140,14 @@ public sealed class DarlingMcpPgCpuUtilizationTools
     {
         var present = values.Where(v => v.HasValue).Select(v => v!.Value).ToList();
         return present.Count == 0 ? null : Math.Round(present.Average(), 1);
+    }
+
+    /// <summary>The byte-column twin of <see cref="Rounded"/>: the mean of the memory values that were sampled,
+    /// rounded to whole bytes, or null when none was. Null stays null for the same reason - zero bytes of
+    /// host memory is a measurement nobody made.</summary>
+    private static long? MeanBytes(System.Collections.Generic.IEnumerable<long?> values)
+    {
+        var present = values.Where(v => v.HasValue).Select(v => v!.Value).ToList();
+        return present.Count == 0 ? null : (long)Math.Round(present.Average());
     }
 }

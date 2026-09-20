@@ -4361,7 +4361,9 @@ public sealed class DarlingWorker : BackgroundService
                         standing.CpuPercent, standing.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
                     lastCounted = new DarlingPgCpuUtilizationReader.CpuSample(
                         standing.SampleTimeUtc, standing.CpuPercent, standing.AcuUtilizationPercent,
-                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu);
+                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu,
+                        /* The gate's own reads carry no memory (LatestCpuSql selects none); stated, not defaulted. */
+                        Memory: null);
                 }
             }
 

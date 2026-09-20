@@ -78,7 +78,7 @@ public static partial class PgTargetAdvice
     /* ── PG_AUTOVACUUM_BACKLOG ── */
 
     private static readonly AdviceBlock s_backlogStatic = new(
-        Headline: "A table has sat past its own autovacuum trigger line for consecutive hourly samples",
+        Headline: "A table has sat past its own autovacuum trigger line for consecutive samples",
         Investigation:
             "PostgreSQL's autovacuum fires on a table when n_dead_tup exceeds autovacuum_vacuum_threshold + " +
             "autovacuum_vacuum_scale_factor × n_live_tup (per-table reloptions honoured), or on PostgreSQL 13+ when " +
@@ -122,8 +122,8 @@ public static partial class PgTargetAdvice
         var autovacuumOff = facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var off) && off.BaseSeverity > 0;
 
         var headline = insertArm
-            ? $"{table}{db} has taken {Fmt(inserts)} inserts since its last vacuum, {ratio:0.#}× its insert-vacuum threshold, for {trailing:0} consecutive hourly samples"
-            : $"{table}{db} carries {Fmt(dead)} dead tuples, {ratio:0.#}× its own autovacuum trigger line, for {trailing:0} consecutive hourly samples";
+            ? $"{table}{db} has taken {Fmt(inserts)} inserts since its last vacuum, {ratio:0.#}× its insert-vacuum threshold, for {trailing:0} consecutive samples"
+            : $"{table}{db} carries {Fmt(dead)} dead tuples, {ratio:0.#}× its own autovacuum trigger line, for {trailing:0} consecutive samples";
 
         var inv = new StringBuilder();
         if (insertArm)
@@ -139,7 +139,7 @@ public static partial class PgTargetAdvice
             inv.Append(". ");
         }
 
-        inv.Append($"The table has been past its line for {trailing:0} consecutive hourly samples spanning {hours:0.#} h. ");
+        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h. ");
 
         if (slopeComputable)
         {
@@ -428,7 +428,7 @@ public static partial class PgTargetAdvice
             {
                 Headline = $"autovacuum is OFF server-wide, and {table} is {ratio:0.#}× past its own trigger line because of it",
                 Investigation = s_autovacuumOffStatic.Investigation +
-                    $" Here it has: {table} has sat past the line autovacuum would have fired at for {bl.Metadata.GetValueOrDefault(PgTargetScorer.BacklogTrailingSamplesKey):0} consecutive hourly samples (PG_AUTOVACUUM_BACKLOG).",
+                    $" Here it has: {table} has sat past the line autovacuum would have fired at for {bl.Metadata.GetValueOrDefault(PgTargetScorer.BacklogTrailingSamplesKey):0} consecutive samples (PG_AUTOVACUUM_BACKLOG).",
             };
         }
 
@@ -520,8 +520,8 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(insertArm
-            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive hourly samples spanning {FmtHours(hours)}. "
-            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive hourly samples spanning {FmtHours(hours)}. ");
+            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}. "
+            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}. ");
         inv.Append("The engine computed that line and would have fired; the reloption is the only reason it did not. ");
         if (hasLastAutovacuum)
             inv.Append($"autovacuum last ran on this table {FmtHours(sinceLast)} before the window end. ");

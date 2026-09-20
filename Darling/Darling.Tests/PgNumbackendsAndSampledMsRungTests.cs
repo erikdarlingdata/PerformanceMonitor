@@ -226,20 +226,25 @@ public sealed class PgNumbackendsAndSampledMsRungTests
     /// <summary>The previous rung's arm as the viewer spells it — V132's sentinel.</summary>
     private const string PreviousArmSource = "if (hasPerfmonCounterType)";
 
-    /* ---- nothing reads them yet -------------------------------------------------------------------- */
+    /* ---- the consumers, as they landed ------------------------------------------------------------- */
 
     /// <summary>
-    /// The exit criterion's last clause, pinned so a consumer lane has to move this deliberately: no product read
-    /// names either column. The wait-sampling reader's estimate keeps its <c>samples × period</c> arithmetic and
-    /// names <c>sampled_ms</c> only in its doc as the denominator a rate read must use; the database reader names
-    /// <c>numbackends</c> only in its doc as the level it does not yet select. A grep of both readers' SQL
-    /// constants shows neither column.
+    /// The exit criterion's last clause, re-shaped as the consumers landed (the rung's "no reader yet" was the
+    /// promise; each arrival moves its line here deliberately). <c>sampled_ms</c>: the wait-sampling MCP reader's
+    /// estimate keeps its <c>samples × period</c> arithmetic and names the column only in its doc as the denominator a
+    /// rate read must use — the analysis collector (<c>PgTargetFactCollector.Waits.cs</c>) is that rate read.
+    /// <c>numbackends</c>: read by the saturation fact (lane 25, summed at one instant) and, since the third
+    /// between-waves batch (#3791), by <c>DarlingPgDatabaseReader.PgDatabaseSql</c> as the per-database window PEAK —
+    /// pinned here in the shape the rung doc demanded of a consumer: <c>MAX</c>, never a <c>LAG</c> difference, and
+    /// never a <c>SUM</c> across databases (the peaks land at different instants). The reader's doc says the same.
     /// </summary>
     [Fact]
-    public void NoReaderSelectsEitherColumnYet_AndBothReadersSayWhatAConsumerMustDo()
+    public void TheWaitReaderStillEstimates_AndTheDatabaseReaderReadsNumbackendsAsAnUndifferencedPeak()
     {
         Assert.DoesNotContain(WaitSamplingColumn, DarlingPgWaitSamplingReader.PgWaitSamplingSql, StringComparison.Ordinal);
-        Assert.DoesNotContain(DatabaseStatsColumn, DarlingPgDatabaseReader.PgDatabaseSql, StringComparison.Ordinal);
+        Assert.Contains($"MAX({DatabaseStatsColumn})", DarlingPgDatabaseReader.PgDatabaseSql, StringComparison.Ordinal);
+        Assert.DoesNotContain($"LAG({DatabaseStatsColumn})", DarlingPgDatabaseReader.PgDatabaseSql, StringComparison.Ordinal);
+        Assert.DoesNotContain($"SUM({DatabaseStatsColumn})", DarlingPgDatabaseReader.PgDatabaseSql, StringComparison.Ordinal);
 
         var waits = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgWaitSamplingReader.cs");
         var estimated = waits.IndexOf("<param name=\"EstimatedWaitMs\">", StringComparison.Ordinal);
@@ -250,8 +255,8 @@ public sealed class PgNumbackendsAndSampledMsRungTests
         Assert.Contains("the whole", estimatedDoc, StringComparison.Ordinal);
 
         var databases = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgDatabaseReader.cs");
-        Assert.Contains("Not yet read here: <c>numbackends</c>", databases, StringComparison.Ordinal);
-        Assert.Contains("must never difference it", databases, StringComparison.Ordinal);
+        Assert.Contains("rides along as a LEVEL, never differenced", databases, StringComparison.Ordinal);
+        Assert.Contains("are NOT summed into a cluster figure here", databases, StringComparison.Ordinal);
     }
 }
 
