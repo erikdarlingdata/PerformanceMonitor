@@ -1474,11 +1474,13 @@ public sealed class TsqlConventionGuardTests
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
-        /* #3691 lane 29 (#3795): the buffer-composition drill-down's nullable four-place rounder — the same
-           expression-shaped helper as the formatter lines above. What its range strands is `Math.Round(value.Value, 4)`
-           and nothing else: no T-SQL, no tempdb label, no SQL literal a census reads, so the member scan stopping
-           short of it loses no counted site. ARRIVED with #3795; named here so the scan's contract stays exact. */
-        "Darling/PerformanceMonitor.Darling.Analysis/PgTargetDrillDownCollector.Buffer.cs Round",
+        /* #3691 lane 27 (#3798): the plan-flip record's expression-bodied `Ratio` property (`MeanAfter / MeanBefore`,
+           null unless both sides exist) — the same expression-shaped member as the formatter lines above. What its
+           range strands is the pattern-matched quotient and nothing else: no T-SQL, no tempdb label, no SQL literal a
+           census reads, so the member scan stopping short of it loses no counted site. ARRIVED with #3798 (surfaced
+           on dev's 291e15f8 run); the buffer drill-down's `Round` LEFT on the same run — #3799 reshaped it into a
+           block the walk reads whole — so its #3804 line comes off here. */
+        "Darling/PerformanceMonitor.Darling.Analysis/PgTargetFactCollector.Plans.cs Ratio",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */
