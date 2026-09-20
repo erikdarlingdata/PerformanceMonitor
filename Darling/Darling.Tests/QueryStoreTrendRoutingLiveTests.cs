@@ -191,7 +191,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Contains("--backfill-rollups", routing.GetProperty("unserved_note").GetString()!, StringComparison.Ordinal);
         Assert.StartsWith("2026-03-04T10:00:00", payload.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.Equal(3.0, payload.GetProperty("effective_hours_back").GetDouble());
-        Assert.True(payload.GetProperty("truncated").GetBoolean());
+        Assert.True(payload.GetProperty("window_truncated").GetBoolean());
 
         /* ── a window ENTIRELY below the floor is a coverage gap, not a quiet server: the empty answer
               names the mechanism and the remedy instead of advising a wider window — and carries the same
@@ -207,7 +207,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal("rollup+raw", belowFloor.GetProperty("source").GetString());
         Assert.StartsWith("2026-03-04T09:30:00", belowFloor.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.Equal(0.0, belowFloor.GetProperty("effective_hours_back").GetDouble());
-        Assert.True(belowFloor.GetProperty("truncated").GetBoolean());
+        Assert.True(belowFloor.GetProperty("window_truncated").GetBoolean());
 
         /* ── #3541 A2: the tail-only server over a window whose head is below the floor and whose covered
               part holds nothing for it. Sampled, so not "unavailable"; nothing in [10:00, 11:00), so
@@ -232,7 +232,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal(1, tailOnly.GetProperty("trend").GetArrayLength());
         Assert.Equal("rollup+raw", tailOnly.GetProperty("source").GetString());
         Assert.StartsWith("2026-03-04T12:00:00", tailOnly.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
-        Assert.False(tailOnly.GetProperty("truncated").GetBoolean());
+        Assert.False(tailOnly.GetProperty("window_truncated").GetBoolean());
         /* #3541 A12: a lone point has nothing to difference against, so it is UNRATED — `value` and its named
            twin are both null (this assertion used to compare two fabricated zeros), the point is still
            there (so effective_start above is truthful), and the envelope says why. */

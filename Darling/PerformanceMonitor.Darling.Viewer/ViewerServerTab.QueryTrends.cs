@@ -129,7 +129,7 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// What a routed trend chart says about what it served (#3653) — the chart-side form of the MCP payload's
-    /// <c>source</c> / <c>effective_start</c> / <c>truncated</c> triple, rendered as the plot title the way
+    /// <c>source</c> / <c>effective_start</c> / <c>window_truncated</c> triple, rendered as the plot title the way
     /// the heatmap titles itself. Always names the tier, because a series read from the hourly rollup is a
     /// different measurement from one read per collection (bucket-width denominator, up to two hours behind
     /// the clock) and a user comparing two loads of the same chart across the raw horizon must be able to

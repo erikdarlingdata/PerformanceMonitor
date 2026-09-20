@@ -774,7 +774,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering.")]
+    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -856,7 +856,14 @@ public sealed class DarlingMcpDataTools
                    back as though it described the data. */
                 effective_start = effectiveStart.ToString("o"),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
-                truncated,
+                /* #3653 item 17: the WINDOW floor under its own key. This tool has no page cut to disclose (top
+                   is a rank, not a cap the window overflowed), and the flag was spelled `truncated` anyway — the
+                   page dialect's word, which on every neighbour in this file means "limit bit, raise it". Here
+                   nothing the caller sends changes it: the raw tier is where the rows were, and it stops where
+                   it stops. The trend family renamed the same fact the same way (DarlingMcpTrendTools, Lite's
+                   WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
+                   beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
+                window_truncated = truncated,
                 truncation_note = truncated
                     ? "The window reaches further back than this server's raw query_store_stats retains, so the "
                       + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "

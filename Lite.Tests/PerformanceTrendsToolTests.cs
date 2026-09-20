@@ -101,7 +101,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
             AssertDisclosureBlock(envelope);
             Assert.Equal("raw", envelope.GetProperty("source").GetString());
             Assert.Equal("per-collection", envelope.GetProperty("bucket").GetString());
-            Assert.False(envelope.GetProperty("truncated").GetBoolean());
+            Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, envelope.GetProperty("aggregate_note").ValueKind);
         }
 
@@ -183,7 +183,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
             #3541 A2: the disclosure block, with Lite's truth. One tier (raw, per-collection, no aggregate
             note), and the series the store held begins at the 20-minutes-ago seed — the unrated first
             collection, kept since #3541 A12 exactly so effective_start can say so — and because that head
-            sits three-plus hours past the requested 4-hour start, `truncated` is true. The label describes
+            sits three-plus hours past the requested 4-hour start, `window_truncated` is true. The label describes
             the data, not the request; that is the whole contract.
         */
         AssertDisclosureBlock(root);
@@ -192,7 +192,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(JsonValueKind.Null, root.GetProperty("aggregate_note").ValueKind);
         Assert.False(root.TryGetProperty("routing", out _));
         Assert.Equal(trend[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
-        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.2, 0.5);
     }
 
@@ -219,7 +219,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
            test — and effective_start names the first collection the store held rather than the first rate. */
         Assert.Equal(2, root.GetProperty("trend").GetArrayLength());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("trend")[0].GetProperty("value").ValueKind);
-        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.False(root.GetProperty("window_truncated").GetBoolean());
         Assert.Equal(root.GetProperty("trend")[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.8, 1.0);
     }
@@ -262,7 +262,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         AssertDisclosureBlock(root);
         Assert.Equal("per-interval", root.GetProperty("bucket").GetString());
         Assert.Equal(trend[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
-        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
     }
 
     /// <summary>The six keys every Performance-Trends envelope carries since #3541 A2, in the order they are
@@ -270,7 +270,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
     private static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "truncated", "bucket", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());

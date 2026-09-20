@@ -124,11 +124,11 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
             Assert.Equal("raw", root.GetProperty("source").GetString());
             Assert.Equal("per-collection", root.GetProperty("bucket").GetString());
             Assert.True(root.TryGetProperty("effective_start", out _));
-            Assert.True(root.TryGetProperty("truncated", out _));
+            Assert.True(root.TryGetProperty("window_truncated", out _));
         }
 
-        Assert.False(JsonDocument.Parse(never).RootElement.GetProperty("truncated").GetBoolean());
-        Assert.False(JsonDocument.Parse(quiet).RootElement.GetProperty("truncated").GetBoolean());
+        Assert.False(JsonDocument.Parse(never).RootElement.GetProperty("window_truncated").GetBoolean());
+        Assert.False(JsonDocument.Parse(quiet).RootElement.GetProperty("window_truncated").GetBoolean());
 
         var data = JsonDocument.Parse(payload).RootElement;
         Assert.Equal(data.GetProperty("trend")[0].GetProperty("time").GetString(), data.GetProperty("effective_start").GetString());
@@ -148,7 +148,7 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("raw", single.GetProperty("source").GetString());
         Assert.Equal("per-collection", single.GetProperty("bucket").GetString());
         Assert.Equal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString());
-        Assert.True(single.GetProperty("truncated").GetBoolean(), "a series beginning 10 minutes ago in a 4-hour window starts past the slack");
+        Assert.True(single.GetProperty("window_truncated").GetBoolean(), "a series beginning 10 minutes ago in a 4-hour window starts past the slack");
         Assert.Equal(1, single.GetProperty("data_points").GetInt32());
     }
 

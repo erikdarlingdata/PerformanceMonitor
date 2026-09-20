@@ -474,7 +474,7 @@ internal static class DarlingTrendReader
        readonly bound to the Storage builder's output, an expression-bodied delegation for the pure
        functions — so there is one definition and nothing to drift. The names stay: DarlingMcpTrendTools,
        DarlingQueryTrendTieringTests and DarlingMcpTrendToolsTests read them by these names, the payload
-       vocabulary they document (source / effective_start / truncated) is this reader's contract, and the
+       vocabulary they document (source / effective_start / window_truncated) is this reader's contract, and the
        reasoning for each — the wall-clock age rule, the bucket-width denominator, the ninety-minute slack —
        lives ONCE, on the Storage member each alias names. The SQL aliases are static readonly rather
        than const because the Storage side is a builder (one text with and one without the viewer's $4
@@ -587,7 +587,8 @@ internal static class DarlingTrendReader
     /// One routed duration-trend answer: the points, the route that produced them, and what the points
     /// actually cover — the <see cref="QueryHistoryResult"/> shape for the unkeyed trends, so all four tiered
     /// reads describe themselves with the same three words (<c>source</c>, <c>effective_start</c>,
-    /// <c>truncated</c>).
+    /// <c>window_truncated</c> — the wire spelling of <c>Truncated</c> since #3653 item 17; the member keeps its
+    /// name, the key says which of the two facts spelled <c>truncated</c> this one is).
     /// </summary>
     public sealed record DurationTrendResult(
         List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated);
@@ -936,7 +937,7 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
-    /// <c>truncated</c> — <see cref="DurationTrendRouting.TruncationSlack"/>, by alias (#3653). Lite's twin
+    /// <c>window_truncated</c> — <see cref="DurationTrendRouting.TruncationSlack"/>, by alias (#3653). Lite's twin
     /// (<c>McpQueryTools.TruncationSlack</c>) carries the same ninety minutes, pinned on each side because
     /// neither SKU references the other's assembly.
     /// </summary>

@@ -261,6 +261,33 @@ internal static class McpHelpers
         "same one in more detail.";
 
     /// <summary>
+    /// The one clause every tool that publishes the WINDOW FLOOR carries in its description, on both SKUs
+    /// (#3653 item 17, the second fact #3703 found under the page dialect's spelling).
+    ///
+    /// <para><c>truncated</c> meant two things on the wire. On every paged tool it is the page cut — the caller's
+    /// <c>limit</c> bit, observed off a <c>cap + 1</c> fetch, beside a <c>*_returned</c> count, and the remedy is
+    /// a bigger <c>limit</c>. On the #2364 / #2353 trend family (<c>get_query_trend</c>, the duration-trend
+    /// trio) and on <c>get_query_store_top</c> it was the store's REACH — the served series begins later than
+    /// the requested start because the tier that answered no longer holds the window's head — beside
+    /// <c>effective_start</c> / <c>effective_hours_back</c>, and no <c>limit</c> changes it. A client that had
+    /// learned the first meaning read the second as "raise the cap", which is exactly the wrong move. The
+    /// window-floor fact is now spelled <c>window_truncated</c> (the <c>&lt;bound&gt;_truncated</c> dialect
+    /// #3703 classified for a second bound in one payload), the page cut keeps <c>truncated</c>, and
+    /// <c>McpPayloadContractCensusTests</c> holds the two apart on both SKUs.</para>
+    ///
+    /// <para>A constant for the reason <see cref="AsOfDescription"/> is one: the clause is the same true
+    /// sentence on every tool that publishes the key, and a rename is a WIRE CHANGE the description has to
+    /// own — a client still reading <c>truncated</c> off these tools reads a key that is no longer there and
+    /// gets <c>undefined</c>, not <c>false</c>. Leading space: it is appended to each tool's own sentence.</para>
+    /// </summary>
+    public const string WindowTruncatedDescription =
+        " window_truncated is true when the store did not hold the whole requested window: the served series " +
+        "begins later than hours_back asked for because the tier that answered no longer reaches that far back, " +
+        "and effective_start / effective_hours_back say where it does begin. That is the window floor, not a " +
+        "page cut — no limit changes it. WIRE CHANGE: this key was spelled truncated before #3653; the old " +
+        "spelling is not published here any more.";
+
+    /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
     ///
     /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that

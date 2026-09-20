@@ -400,7 +400,10 @@ async function drawQueryTrend(slot, server, ctx, query) {
      columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured here". */
   const notes = [];
   if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
-  if (trend.data.truncated) {
+  /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
+     which this read has none of) is a different fact with the opposite remedy, and the two used to share a
+     spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
+  if (trend.data.window_truncated) {
     notes.push(
       "History for this query starts " +
         trend.data.effective_hours_back +

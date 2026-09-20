@@ -54,7 +54,7 @@ public static class DurationTrendRouting
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
-    /// <c>truncated</c>. Ninety minutes: an hourly bucket can begin up to an hour after a window start that
+    /// <c>window_truncated</c> (the wire key since #3653 item 17). Ninety minutes: an hourly bucket can begin up to an hour after a window start that
     /// falls mid-hour (<c>bucket &gt;= $start</c> excludes the bucket the start falls inside), and a raw series
     /// legitimately opens a collection cadence or two late; anything past that means the tier did not hold the
     /// window's head. Extracted from #2353's inline literal so every tiered read shares one boundary.

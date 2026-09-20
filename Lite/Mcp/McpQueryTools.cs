@@ -629,7 +629,7 @@ public sealed class McpQueryTools
     private static string InvalidHeatmapMetric(string metric) =>
         $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -681,7 +681,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetProcedureDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -723,7 +723,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Every point is a rate over the gap since the PREVIOUS point, so the window's first collection - which has no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -778,7 +778,7 @@ public sealed class McpQueryTools
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
-    /// <c>truncated</c>. Twin of Darling's <c>DarlingTrendReader.TruncationSlack</c> (#2353, #3541 A2) and
+    /// <c>window_truncated</c>. Twin of Darling's <c>DarlingTrendReader.TruncationSlack</c> (#2353, #3541 A2) and
     /// must stay equal to it: the two SKUs' payloads are one contract, and a window that one SKU calls
     /// truncated and the other does not is a divergence about the same data. Ninety minutes: a raw series
     /// legitimately opens a collection cadence or two late; anything past that means the store did not hold
@@ -791,8 +791,10 @@ public sealed class McpQueryTools
     /// on both SKUs and on both branches. Lite has ONE tier — DuckDB keeps raw rows for the collector's whole
     /// <c>retention_days</c>, nothing rolls them up — so <c>source</c> is always <c>raw</c> and
     /// <c>aggregate_note</c> is always null here; what varies is <c>effective_start</c>, the first point the
-    /// store actually held for the window, and <c>truncated</c>, true when that head sits more than
-    /// <see cref="TruncationSlack"/> after what was asked for. Darling's twin publishes the same keys with
+    /// store actually held for the window, and <c>window_truncated</c>, true when that head sits more than
+    /// <see cref="TruncationSlack"/> after what was asked for — the WINDOW floor, spelled apart from the page
+    /// dialect's <c>truncated</c> since #3653 item 17 (this file's paged tools mean "limit bit" by that word;
+    /// this block means "the store did not hold the head", and no limit changes it). Darling's twin publishes the same keys with
     /// Darling's truth (<c>raw</c>, <c>hourly</c> or <c>rollup+raw</c>), so a client reads one shape across
     /// SKUs even though the depth behind it differs. Emitted as an ordered dictionary rather than an
     /// anonymous type so the data envelope and the empty envelope are built by the same code.
@@ -806,7 +808,10 @@ public sealed class McpQueryTools
            beside it — the requested start arrives Kind=Utc and would otherwise carry a trailing Z. */
         envelope["effective_start"] = DateTime.SpecifyKind(effectiveStart, DateTimeKind.Unspecified).ToString("o");
         envelope["effective_hours_back"] = Math.Round((windowEndUtc - effectiveStart).TotalHours, 1);
-        envelope["truncated"] = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
+        /* #3653 item 17: the window floor under its own key, at the same position Darling's TrendDisclosure.WriteTo
+           writes it. Darling.Tests' McpPayloadContractCensusTests sweeps this file too and fails a bare
+           `truncated` beside `effective_hours_back`; the literal stays a literal so that sweep can see it. */
+        envelope["window_truncated"] = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
         envelope["bucket"] = bucket;
         envelope["aggregate_note"] = null;
     }
@@ -898,7 +903,7 @@ public sealed class McpQueryTools
                 startUtc, windowEndUtc, bucket);
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
