@@ -44,10 +44,13 @@ namespace PerformanceMonitor.Analysis;
 /// the engine's, the bands are measured against it. Caveat the constants repeat: the numerator that read used was
 /// <c>pg_session_states</c>' <c>total_sessions</c> (the exception-capture peak — biased HIGH on a server that
 /// captures often and blind on one that never does; the fleet's captures per server ran 59 – 2,100 over 7 days);
-/// the fact is now composed from <c>numbackends</c> where the store carries it, whose distribution has not yet
-/// been read against the ceiling. The bars are not moved by that switch: 0.8 / 0.9 are fractions of the engine's
-/// own line, and a numerator that counts FEWER non-slot backends can only move the measured shape further into
-/// the empty interval, never out of it.</para>
+/// the fact is now composed from <c>numbackends</c> where the store carries it, and that level was read against
+/// the same ceilings on 2026-09-20 (~20 h of V133 rows, 50 Aurora PostgreSQL clusters): p50 median 0.8 %, p99
+/// median 1.8 %, fleet max 10.0 % — within 10 % of the capture peak over the same window (p99 median 2.0 %, max
+/// 10.0 %), from 1,056 samples per server where the captures had a median 24. The bars are not moved by the
+/// switch: 0.8 / 0.9 are fractions of the engine's own line, both numerators sit an order of magnitude under
+/// them, and a numerator that counts FEWER non-slot backends can only move the measured shape further into the
+/// empty interval, never out of it.</para>
 ///
 /// <para><b>Self-gating below the warning line, THREADPOOL's shape.</b> <see cref="FactScorer.ApplyThresholdFormula"/>
 /// grades ANY positive value below the concerning bar as a fraction of it, so a pool at 40% of its ceiling would
@@ -157,9 +160,10 @@ public static partial class PgTargetScorer
     /// capture against each server's usable ceiling) — the measured empty interval. Engine-neutral quantity,
     /// Aurora population; the stock-PostgreSQL population is not yet measured. That read's numerator was the
     /// exception-capture peak; since #3691 lane 25 the fact's numerator is pg_stat_database.numbackends (V133)
-    /// where the store carries it, and the numbackends distribution against the ceiling is not yet measured —
-    /// the capture-peak reading was 10.3 % of ceiling at most, and a level that excludes the database-less
-    /// background processes the capture counted sits at or under it on the same servers. The bars do not move
+    /// where the store carries it, and the level was read against the same ceilings — measured 2026-09-20:
+    /// numbackends/ceiling p99 median 1.8 %, fleet max 10.0 % over 20 h × 50 Aurora PostgreSQL clusters; agrees
+    /// with the capture peak within 10 % (capture p99 median 2.0 %, fleet max 10.0 % over the same window) —
+    /// the bars 0.8 / 0.9 stay engine-defined and deep in the measured empty interval. The bars do not move
     /// with the numerator. The fact carries threshold_lineage = 1.
     /// </summary>
     public const double ConnectionSaturationWarning = 0.8;

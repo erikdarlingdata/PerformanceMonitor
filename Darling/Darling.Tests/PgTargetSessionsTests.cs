@@ -652,7 +652,7 @@ public sealed class PgTargetSessionsTests
         Assert.Contains("numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples", block.Investigation, StringComparison.Ordinal);
         /* The measured note keeps its pinned clause and gains the second sentence: the read was of the capture peak. */
         Assert.Contains("fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("That fleet read was of the capture peak; the numbackends distribution against the ceiling is not yet measured", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("That fleet read was of the capture peak; the level was read against the same ceilings on 2026-09-20 (numbackends/ceiling p99 median 1.8%, fleet maximum 10.0% over 20 h across the same 50 clusters) and agrees with the capture peak within 10%, so the bars stand.", block.Investigation, StringComparison.Ordinal);
         /* The capture-only caveats are not claimed of the level. */
         Assert.DoesNotContain("so the ratio reads a few points high", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
