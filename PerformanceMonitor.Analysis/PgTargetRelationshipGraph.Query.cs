@@ -40,6 +40,18 @@ namespace PerformanceMonitor.Analysis;
 /// (<c>PG_BAD_ACTOR</c>, never a fact's key) and the root graph's <c>GetActiveEdges</c> override resolves it
 /// to the highest-severity bad actor present, or drops the edge. Lanes 6 and 9 write
 /// <c>AddEdge(PG_TEMP_SPILL, PgTargetFactKeys.BadActorFamily, …)</c> and nothing else changes.</para>
+///
+/// <para><b>Lane 34 (ruled 2026-09-20): the family's own anomaly walks INTO the statement it names.</b>
+/// <c>ANOMALY_PG_BAD_ACTOR_SHARE → PG_BAD_ACTOR</c> — the deviation from the statement's OWN hour-of-week share is
+/// the grade now, and the card is its context leaf (the share, the calls, the mean, the drill-down's text). The edge
+/// names the alias and opens only when the alias resolves to the statement the anomaly names
+/// (<see cref="PgTargetScorer.OwnNormalAnomalyNames"/> — the same predicate the card's lift uses, so the
+/// resolution and the lift agree by construction: the lift is what makes the named card the highest-severity bad
+/// actor). When the anomaly outranks the card it roots and consumes it — one story; when the lifted card outranks
+/// (a large share at a modest sigma) the card roots first and the anomaly stays its own story, and
+/// <c>InferenceEngine.ClusterIntoIncidents</c> unions the two across this active edge — one incident. The static
+/// <c>AnomalyToFamilies</c> entry names the same alias for the reconciler and cannot fold on it (an exact-key lookup;
+/// no path carries the alias) — recorded on that map; this edge is the mechanism.</para>
 /// </summary>
 public sealed partial class PgTargetRelationshipGraph
 {
@@ -51,8 +63,21 @@ public sealed partial class PgTargetRelationshipGraph
             "work_mem is the per-sort budget these temp files exceeded — the knob fired on this spill's evidence (D5)",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var knob) && knob.Severity > 0);
 
-        /* No edges out of a bad actor in v1 — see the class summary. */
+        /* Lane 34: the own-normal deviation leads to the statement it names — see the class summary. Predicate reads
+           the anomaly's verdict (BaseSeverity > 0, the shared deviation ramp's) and the alias resolution, never a bar. */
+        AddEdge(PgTargetFactKeys.AnomalyBadActorShare, PgTargetFactKeys.BadActorFamily, QueriesCategory,
+            "PG_BAD_ACTOR fired for the statement the anomaly names — its share of the window is beyond its own hour-of-week normal",
+            facts =>
+            {
+                var resolved = ResolveBadActor(facts);
+                return resolved is not null && PgTargetScorer.OwnNormalAnomalyNames(facts, resolved);
+            });
+
+        /* No edges OUT of a bad actor — see the class summary; the family's anomaly is an edge INTO it. */
     }
+
+    /// <summary>The edge category of the queries chain — the anomaly into its statement.</summary>
+    private const string QueriesCategory = "queries";
 
     /// <summary>The edge category of the temp chain (the audit label; a story's category is its root fact's
     /// source, so a spill-rooted finding files under <c>pg_temp</c> regardless).</summary>

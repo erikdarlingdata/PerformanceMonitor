@@ -66,7 +66,12 @@ public static partial class PgTargetScorer
             /* #3691 v3 plumbing: the plan-regression and CPU-burn anomalies are each a peak-vs-own-baseline z-score on
                one series (a statement's mean ms; cores busy) — registered by shape ahead of lanes 27 and 28. */
             or PgTargetFactKeys.AnomalyPlanRegression
-            or PgTargetFactKeys.AnomalyCpuBurn;
+            or PgTargetFactKeys.AnomalyCpuBurn
+            /* lane 34 (#3691, ruled 2026-09-20): one statement's window share against its OWN hour-of-week share bucket
+               (lane 33's keyed pg_statement_share arm) — a peak-AND-mean z-score on one keyed series, graded by the
+               shared deviation ramp off AnomalyGate's metadata like every z family here. The membership is the one edit
+               this lane makes to a scorer root; the detector, the card's context band and the advice are the family's. */
+            or PgTargetFactKeys.AnomalyBadActorShare;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>
