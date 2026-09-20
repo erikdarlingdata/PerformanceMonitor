@@ -174,8 +174,8 @@ AND   e.extension_name = 'pg_buffercache'";
     /// pool, and the share sitting in relations the clock sweep will evict first.
     ///
     /// <para><b>The pressure figures are REUSED from the root fact's metadata, never recomputed.</b>
-    /// <c>PgTargetFactCollector.Buffer.cs</c> stamps <c>miss_share</c>, <c>hit_ratio_suppressed</c>,
-    /// <c>evictions_per_sec</c>, <c>cache_turnovers_per_hour</c> and <c>buffers_alloc_per_sec</c>;
+    /// <c>PgTargetFactCollector.Buffer.cs</c> stamps <c>miss_share</c>, <c>hit_ratio_suppressed</c>, <c>evictions</c>,
+    /// <c>buffers_alloc</c>, <c>observed_ms</c> and <c>cache_turnovers_per_hour</c>;
     /// <see cref="AnalysisFinding.RootFactMetadata"/> carries them here when the composite is the root (the
     /// memory chain roots on it), and they ride in the payload so a reader has the rate and the level side by
     /// side without opening three tables. When the composite is on the path but not the root the figures are
@@ -297,9 +297,10 @@ AND   e.extension_name = 'pg_buffercache'";
             TopRelations: top,
             MissShare: Meta("miss_share"),
             HitRatioSuppressed: (Meta("hit_ratio_suppressed") ?? 0) > 0,
-            EvictionsPerSec: Meta("evictions_per_sec"),
-            CacheTurnoversPerHour: Meta("cache_turnovers_per_hour"),
-            BuffersAllocPerSec: Meta("buffers_alloc_per_sec"));
+            Evictions: Meta("evictions"),
+            BuffersAlloc: Meta("buffers_alloc"),
+            ObservedMs: Meta("observed_ms"),
+            CacheTurnoversPerHour: Meta("cache_turnovers_per_hour"));
 
         finding.DrillDown![BufferCompositionSection] = new
         {
@@ -350,14 +351,19 @@ AND   e.extension_name = 'pg_buffercache'";
                 dirty_share = Math.Round(r.DirtyShare, 4),
                 avg_usage_count = r.AvgUsageCount is { } u ? Math.Round(u, 2) : (double?)null,
             }).ToList(),
-            /* The root fact's figures, reused so the rate and the level sit side by side. */
+            /* The root fact's figures, reused so the rate and the level sit side by side. The counts and the
+               observed span ride rather than the fact's per-second quotients: the rates are the fact's to publish
+               (get_analysis_facts source=pg_buffer stamps evictions_per_sec and buffers_alloc_per_sec, computed
+               ONCE in PgTargetFactCollector.Buffer.cs over observed time) and the advice prose states them; a
+               copy here under a per-second name would be a second publication of one quotient. */
             pressure = new
             {
                 miss_share = Round(summary.MissShare),
                 hit_ratio_suppressed = summary.HitRatioSuppressed,
-                evictions_per_sec = Round(summary.EvictionsPerSec),
+                evictions = summary.Evictions,
+                buffers_alloc = summary.BuffersAlloc,
+                observed_ms = summary.ObservedMs,
                 cache_turnovers_per_hour = Round(summary.CacheTurnoversPerHour),
-                buffers_alloc_per_sec = Round(summary.BuffersAllocPerSec),
             },
             note = PgTargetAdvice.BufferCompositionSentence(summary),
         };
@@ -432,5 +438,11 @@ AND   e.extension_name = 'pg_buffercache'";
     internal static double? Share(long numerator, long denominator) =>
         denominator > 0 ? numerator / (double)denominator : null;
 
-    private static double? Round(double? value) => value is { } v ? Math.Round(v, 4) : null;
+    /// <summary>Four places, or null through — the per-relation shares are rounded inline; this is for the nullable capture-wide ones.</summary>
+    private static double? Round(double? value)
+    {
+        if (!value.HasValue)
+            return null;
+        return Math.Round(value.Value, 4);
+    }
 }

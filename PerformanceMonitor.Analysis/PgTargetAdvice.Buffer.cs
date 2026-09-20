@@ -418,9 +418,10 @@ public enum PgTargetBufferCompositionStatus
 /// carries both) and sum to 1 when the capture has rows. <paramref name="ColdShare"/> counts buffers in relations
 /// whose AVERAGE usage count is at or below 1 — the row is per relation, so the figure is a relation-level
 /// reading of what the clock sweep would evict first, and is described that way. The pressure figures
-/// (<paramref name="MissShare"/>, <paramref name="HitRatioSuppressed"/>, <paramref name="EvictionsPerSec"/>,
-/// <paramref name="CacheTurnoversPerHour"/>, <paramref name="BuffersAllocPerSec"/>) are the ROOT FACT's metadata,
-/// reused, null when the finding carried none. <paramref name="LastCaptureAt"/> / <paramref name="LastCaptureHoursBeforeWindow"/>
+/// (<paramref name="MissShare"/>, <paramref name="HitRatioSuppressed"/>, <paramref name="Evictions"/>,
+/// <paramref name="BuffersAlloc"/>, <paramref name="ObservedMs"/>, <paramref name="CacheTurnoversPerHour"/>) are the
+/// ROOT FACT's metadata, reused, null when the finding carried none — the counts and the observed span, not the
+/// fact's per-second quotients, which stay the fact's to publish. <paramref name="LastCaptureAt"/> / <paramref name="LastCaptureHoursBeforeWindow"/>
 /// are for the no-capture arm: when the server was last captured, and how far before the window's start.
 /// </summary>
 public sealed record PgTargetBufferCompositionSummary(
@@ -445,9 +446,10 @@ public sealed record PgTargetBufferCompositionSummary(
     IReadOnlyList<PgTargetBufferResident> TopRelations,
     double? MissShare,
     bool HitRatioSuppressed,
-    double? EvictionsPerSec,
-    double? CacheTurnoversPerHour,
-    double? BuffersAllocPerSec);
+    double? Evictions,
+    double? BuffersAlloc,
+    double? ObservedMs,
+    double? CacheTurnoversPerHour);
 
 /// <summary>
 /// One resident relation in the latest capture, largest first. <paramref name="RelationName"/> is NULL for a

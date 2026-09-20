@@ -122,9 +122,12 @@ public sealed class PgTargetBufferDrillDownTests
         Assert.Contains("finding.RootFactMetadata", code, StringComparison.Ordinal);
         Assert.Contains("miss_share", source, StringComparison.Ordinal);
         Assert.Contains("hit_ratio_suppressed", source, StringComparison.Ordinal);
-        Assert.Contains("evictions_per_sec", source, StringComparison.Ordinal);
+        Assert.Contains("\"evictions\"", source, StringComparison.Ordinal);
+        Assert.Contains("\"buffers_alloc\"", source, StringComparison.Ordinal);
+        Assert.Contains("\"observed_ms\"", source, StringComparison.Ordinal);
         Assert.Contains("cache_turnovers_per_hour", source, StringComparison.Ordinal);
-        Assert.Contains("buffers_alloc_per_sec", source, StringComparison.Ordinal);
+        /* The fact's per-second quotients are NOT re-published under a per-second key (MeasurementContractCensusTests, rule 6). */
+        Assert.DoesNotContain("_per_sec =", code, StringComparison.Ordinal);
         /* In CODE and in the SQL consts — the prose may name the tables to say they are NOT read. */
         var sqlTexts = PgTargetDrillDownCollector.PgTargetBufferCompositionSql + PgTargetDrillDownCollector.PgTargetBufferLastCaptureSql + PgTargetDrillDownCollector.PgTargetBufferCacheExtensionSql;
         foreach (var counterTable in new[] { "pg_database_stats", "pg_io_stats", "pg_write_stats" })
@@ -464,8 +467,9 @@ public sealed class PgTargetBufferDrillDownTests
                 var pressure = composition.GetProperty("pressure");
                 Assert.Equal(0.5, pressure.GetProperty("miss_share").GetDouble(), precision: 6);
                 Assert.False(pressure.GetProperty("hit_ratio_suppressed").GetBoolean());
-                Assert.Equal(0.0, pressure.GetProperty("evictions_per_sec").GetDouble(), precision: 6);
-                Assert.Equal(0.0, pressure.GetProperty("buffers_alloc_per_sec").GetDouble(), precision: 6);
+                Assert.Equal(0.0, pressure.GetProperty("evictions").GetDouble(), precision: 6);
+                Assert.Equal(0.0, pressure.GetProperty("buffers_alloc").GetDouble(), precision: 6);
+                Assert.InRange(pressure.GetProperty("observed_ms").GetDouble(), 3_000_000, 3_600_000);
 
                 /* The sentence is the pinned one with the real capture stamp, once, and equal to the payload note. */
                 var expected = ExpectedCapturedSentence.Replace("2026-09-19 10:30:00", capturedAt.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
@@ -554,13 +558,14 @@ public sealed class PgTargetBufferDrillDownTests
             TopRelations: top,
             MissShare: 0.5,
             HitRatioSuppressed: false,
-            EvictionsPerSec: 0,
-            CacheTurnoversPerHour: null,
-            BuffersAllocPerSec: 0);
+            Evictions: 0,
+            BuffersAlloc: 0,
+            ObservedMs: 3_600_000,
+            CacheTurnoversPerHour: null);
     }
 
     private static PgTargetBufferCompositionSummary Empty(PgTargetBufferCompositionStatus status) =>
-        new(status, null, null, null, 0, 0, 0, null, 0, 0, null, null, null, null, null, 0, null, 0, [], 0.5, false, 0, null, 0);
+        new(status, null, null, null, 0, 0, 0, null, 0, 0, null, null, null, null, null, 0, null, 0, [], 0.5, false, 0, 0, 3_600_000, null);
 
     private static Fact PressureFact(double missShare, bool aurora)
     {
