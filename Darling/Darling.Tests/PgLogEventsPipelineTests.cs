@@ -966,8 +966,19 @@ public sealed class PgLogEventsLivePostgresTests
             JsonAssert.Contains("\"status\": \"no_events\"", none);
             Assert.Contains("log_connections", none, StringComparison.Ordinal);
 
-            JsonAssert.Contains("\"status\": \"error\"", await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "nonsense", null, 100));
-            JsonAssert.Contains("\"status\": \"error\"", await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, "SEVERE", 100));
+            /* The two closed-vocabulary refusals are the `invalid` envelope (#3739), each naming the parameter it
+               refused. They wore `error` until then — the failure word — and so answered HTTP 500 on the web for a
+               typo; `IsErrorEnvelope` is asserted false so the old word cannot come back under a Contains. */
+            var badFamily = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "nonsense", null, 100);
+            Assert.True(McpHelpers.IsRefusalEnvelope(badFamily), badFamily);
+            Assert.False(McpHelpers.IsErrorEnvelope(badFamily), badFamily);
+            JsonAssert.Contains("\"parameter\": \"family\"", badFamily);
+            Assert.Contains("not one this pipeline classifies", McpHelpers.ErrorMessageOf(badFamily), StringComparison.Ordinal);
+            var badSeverity = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, "SEVERE", 100);
+            Assert.True(McpHelpers.IsRefusalEnvelope(badSeverity), badSeverity);
+            Assert.False(McpHelpers.IsErrorEnvelope(badSeverity), badSeverity);
+            JsonAssert.Contains("\"parameter\": \"min_severity\"", badSeverity);
+            Assert.Contains("not a PostgreSQL severity label", McpHelpers.ErrorMessageOf(badSeverity), StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally
