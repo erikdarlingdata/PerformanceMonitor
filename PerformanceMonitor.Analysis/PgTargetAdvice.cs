@@ -84,6 +84,16 @@ public static partial class PgTargetAdvice
                arm above into ComposeAnomaly, whose ANOMALY_PG_BLOCKING case delegates to ComposeBlockingAnomaly. */
             PgTargetFactKeys.BlockingChain or PgTargetFactKeys.LockWaitEvents or PgTargetFactKeys.LongRunningQuery
                 => ComposeBlocking(rootFactKey, factsByKey),
+            /* v3 (#3691 plumbing): the three new families' measured keys, one arm each; their anomalies take the
+               ANOMALY_PG_ prefix arm above into ComposeAnomaly, whose per-key cases delegate back to the family files.
+               CONFIG_PG_MEMORY_OVERCOMMIT is pg_memory-sourced and named here ahead of the config prefix arm, which
+               would compose null for it (the ConfigAutovacuumDisabled precedent above). */
+            PgTargetFactKeys.PlanRegression or PgTargetFactKeys.ParameterSensitivity or PgTargetFactKeys.SeqScanAdvisory
+                => ComposePlan(rootFactKey, factsByKey),
+            PgTargetFactKeys.CpuBurnCores or PgTargetFactKeys.CpuDecomposition
+                => ComposeKernel(rootFactKey, factsByKey),
+            PgTargetFactKeys.ConfigMemoryOvercommit or PgTargetFactKeys.HostMemoryPressure
+                => ComposeMemory(rootFactKey, factsByKey),
             _ when rootFactKey.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)
                 => ComposeConfig(rootFactKey, factsByKey),
             _ => null,
@@ -130,4 +140,13 @@ public static partial class PgTargetAdvice
        own arm to the anomaly partial; lane 17 does not). */
     private static partial AdviceBlock? ComposeBlocking(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeBlockingAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
+
+    /* v3 (#3691) — stubbed to null in PgTargetAdvice.Plans.cs / .Kernel.cs / .Memory.cs, filled by lanes 27 / 28 / 32.
+       The two anomaly composers are declared here too, so ComposeAnomaly's arms exist before the families do (the
+       #3737 shape for lane 17; lanes 12 and 15 each had to add their own arm to the anomaly partial). */
+    private static partial AdviceBlock? ComposePlan(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposePlanRegressionAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeKernel(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeCpuBurnAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeMemory(string key, IReadOnlyDictionary<string, Fact> factsByKey);
 }

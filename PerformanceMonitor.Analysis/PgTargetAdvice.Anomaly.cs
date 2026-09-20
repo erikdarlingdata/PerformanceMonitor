@@ -157,6 +157,14 @@ public static partial class PgTargetAdvice
                the sampled grade's vocabulary ("estimated from sampling", the duty cycle) lives there, never here. */
             case PgTargetFactKeys.AnomalySampledWaitProfile:
                 return ComposeSampledWaitAnomaly(factsByKey);
+            /* v3 (#3691 plumbing): the plan-regression and CPU-burn anomalies' arms, declared with the stubs so lanes 27
+               and 28 compose in their family files (PgTargetAdvice.Plans.cs / .Kernel.cs) and never edit this switch.
+               Null until then — the delegation-equality census's expectation of a stub — and never the SQL Server
+               "Anomalous spike" composer. */
+            case PgTargetFactKeys.AnomalyPlanRegression:
+                return ComposePlanRegressionAnomaly(factsByKey);
+            case PgTargetFactKeys.AnomalyCpuBurn:
+                return ComposeCpuBurnAnomaly(factsByKey);
 
             default:
                 return null;

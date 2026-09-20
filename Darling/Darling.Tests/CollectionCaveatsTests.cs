@@ -70,7 +70,8 @@ public sealed class CollectionCaveatsTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        /* The four files whose name is not the method's family word, spelled out so the mapping is a visible decision. */
+        /* The six files whose name is not the method's family word, spelled out so the mapping is a visible decision
+           (the caveat labels by FILE, so a plan-family failure reads "plans", the source's own word). */
         var methodToFile = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["observed_coverage"] = "coverage",
@@ -78,6 +79,7 @@ public sealed class CollectionCaveatsTests
             ["session"] = "sessions",
             ["wait"] = "waits",
             ["query"] = "queries",
+            ["plan"] = "plans",   /* #3691 v3 plumbing: CollectPlanFactsAsync in PgTargetFactCollector.Plans.cs, the Queries shape */
         };
         var expectedFiles = declared.Select(d => methodToFile.TryGetValue(d, out var f) ? f : d).OrderBy(n => n, StringComparer.Ordinal).ToArray();
         Assert.Equal(expectedFiles, files);
@@ -86,9 +88,11 @@ public sealed class CollectionCaveatsTests
     [Fact]
     public void TheFamilyCount_IsDerivedFromTheCollectorType_AndMatchesTheEmissionLists()
     {
-        /* 16 PostgreSQL-target families (the census in PgTargetFactCollectorTests names them); 32 SQL Server
-           reads (thirty-one families plus the coverage witness, the class doc's count). */
-        Assert.Equal(16, CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector)));
+        /* 19 PostgreSQL-target families (the census in PgTargetFactCollectorTests names them — sixteen through the
+           wave-3 blocking stub, nineteen since the #3691 v3 plumbing added the plan, kernel and memory stubs; a stub
+           is a family read that happens to return nothing, and the denominator counts reads, not facts); 32 SQL
+           Server reads (thirty-one families plus the coverage witness, the class doc's count). */
+        Assert.Equal(19, CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector)));
         Assert.Equal(32, CollectionCaveats.CountFamilies(typeof(PgFactCollector)));
     }
 

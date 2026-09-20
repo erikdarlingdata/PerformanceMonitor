@@ -212,7 +212,59 @@ internal static class PgTargetToolRecommendations
             new("get_pg_blocking", "Whether the long runner is the root of a captured blocking chain"),
         ],
         [PgTargetFactKeys.AnomalyBlocking] = BlockingReads(),
+        /* v3 (#3691 plumbing): the plan, kernel and memory families' rows, declared with their stubs — the same rule as
+           wave 3's. Every tool named here was verified registered (rg over the Mcp folder); the plan read is
+           get_pg_plans (there is no get_pg_plan_captures), and the host-memory columns ride pg_cpu_utilization's row
+           (V136), so the host read is get_pg_cpu_utilization — no memory tool exists or is needed. The content lanes
+           may reorder or extend. */
+        [PgTargetFactKeys.PlanRegression] = PlanReads(),
+        [PgTargetFactKeys.ParameterSensitivity] =
+        [
+            new("get_pg_plans", "Every plan_hash captured for the statement over the window, and when each appeared"),
+            new("get_pg_column_stats", "The predicate columns' top_value_frequency and n_distinct — the skew behind the flip"),
+            new("get_pg_top_queries", "The statement's calls and mean time beside its neighbours"),
+        ],
+        [PgTargetFactKeys.SeqScanAdvisory] =
+        [
+            new("get_pg_plans", "The captured plan with the Seq Scan node, its row estimate and actual rows"),
+            new("get_pg_predicate_stats", "How often the predicate was evaluated and how selective it was (pg_qualstats)"),
+            new("get_pg_column_stats", "The scanned columns' distribution — evidence, never a CREATE INDEX statement"),
+        ],
+        [PgTargetFactKeys.AnomalyPlanRegression] = PlanReads(),
+        [PgTargetFactKeys.CpuBurnCores] = KernelReads(),
+        [PgTargetFactKeys.CpuDecomposition] =
+        [
+            new("get_pg_kernel_stats", "User and system CPU time by statement over the window"),
+            new("get_pg_wait_stats", "The wait time the CPU time is decomposed against"),
+        ],
+        [PgTargetFactKeys.AnomalyCpuBurn] = KernelReads(),
+        [PgTargetFactKeys.ConfigMemoryOvercommit] =
+        [
+            new("get_pg_server_config", "shared_buffers, max_connections, work_mem, maintenance_work_mem and autovacuum_max_workers as set"),
+            new("get_pg_cpu_utilization", "The host's memory_total_bytes the sum is measured against (the V136 memory columns ride the capacity row)"),
+            new("get_pg_session_states", "How many of max_connections are in use — the ceiling's distance from the load"),
+        ],
+        [PgTargetFactKeys.HostMemoryPressure] =
+        [
+            new("get_pg_cpu_utilization", "Host memory free, cached and total per capture over the window — the pressure reading itself"),
+            new("get_pg_server_config", "The memory knobs the host's free-plus-cached share is measured against"),
+            new("get_pg_buffer_usage", "What the shared cache holds while the host is short"),
+        ],
     };
+
+    private static List<ToolRecommendation> PlanReads() =>
+    [
+        new("get_pg_plans", "The captured plans for the statement — both plan_hash values and when the flip was captured"),
+        new("get_pg_top_queries", "The statement's mean time and calls over the window against its neighbours"),
+        new("get_pg_query_duration_trend", "The statement's duration over time — where the step is"),
+    ];
+
+    private static List<ToolRecommendation> KernelReads() =>
+    [
+        new("get_pg_kernel_stats", "User and system CPU time by statement (pg_stat_kcache) — who burned the cores"),
+        new("get_pg_top_queries", "The same statements by calls and mean time"),
+        new("get_pg_extensions", "Whether pg_stat_kcache is installed and loaded — the reading exists only where it is"),
+    ];
 
     private static List<ToolRecommendation> BlockingReads() =>
     [

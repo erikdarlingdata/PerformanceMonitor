@@ -37,8 +37,12 @@ public sealed class PgTargetSharedSwitchRoutingTests
     public void EverySource_IsPgPrefixed_LowercaseSnakeCase_SortedOnce_AndNamedForTheRegistrySweep()
     {
         /* Eleven v1 sources (#3542) plus the three v2 families (#3691: pg_io, pg_replication, pg_bloat) plus the wave-3
-           blocking family's source, declared with its stubs by the between-waves batch (pg_blocking). */
-        Assert.Equal(15, PgTargetSources.All.Count);
+           blocking family's source, declared with its stubs by the between-waves batch (pg_blocking), plus the three v3
+           families' sources, declared with their stubs by the v3 plumbing (pg_plans, pg_kernel, pg_memory). */
+        Assert.Equal(18, PgTargetSources.All.Count);
+        Assert.Contains(PgTargetSources.PlansSource, PgTargetSources.All);
+        Assert.Contains(PgTargetSources.KernelSource, PgTargetSources.All);
+        Assert.Contains(PgTargetSources.MemorySource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.IoSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.ReplicationSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.BloatSource, PgTargetSources.All);
@@ -143,6 +147,11 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.Contains(PgTargetFactKeys.ConfigSharedBuffers, PgTargetFactKeys.ConfigAdvisoryRoots);
         Assert.Contains(PgTargetFactKeys.ConfigMaxWalSize, PgTargetFactKeys.ConfigAdvisoryRoots);
         Assert.Contains(PgTargetFactKeys.PostureFsync, PgTargetFactKeys.ConfigAdvisoryRoots);
+        /* v3 (#3691 plumbing): the §4b composition check is a CONVENTION reading (five knobs against the host) and roots
+           at the 0.4 advisory base on a quiet server; the co-fire lifts it (D5). Routed here so lane 32 never edits the
+           shared file; the pressure fact beside it is measured, not config, and is NOT a root here. */
+        Assert.Contains(PgTargetFactKeys.ConfigMemoryOvercommit, PgTargetFactKeys.ConfigAdvisoryRoots);
+        Assert.False(PgTargetFactKeys.IsConfigAdvisoryRoot(PgTargetFactKeys.HostMemoryPressure));
     }
 
     [Fact]
@@ -162,6 +171,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.Equal(new[] { PgTargetFactKeys.CheckpointPressure }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyWalVolume]);
         /* wave 3 (#3691 between waves): the blocking anomaly folds onto the chain fact, declared with the stubs. */
         Assert.Equal(new[] { PgTargetFactKeys.BlockingChain }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBlocking]);
+        /* v3 (#3691 plumbing): the plan-regression anomaly folds onto the regular fact that names the plan flip; the
+           CPU-burn anomaly onto the cores-busy fact — both declared with the stubs. */
+        Assert.Equal(new[] { PgTargetFactKeys.PlanRegression }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyPlanRegression]);
+        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
         /* The wait profile is resolved per story, never statically. */
         Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyWaitProfile));
     }
@@ -403,6 +416,19 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(pgBlockingAnomaly);
         Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyBlocking), pgBlockingAnomaly);
         Assert.DoesNotContain("Anomalous spike", pgBlockingAnomaly!.Headline, StringComparison.Ordinal);
+        /* v3 (#3691 plumbing) stubs: null IS the delegation — the equality above proves the shared entry points answer
+           what PgTargetAdvice.Plans.cs / .Kernel.cs / .Memory.cs answer, and each anomaly's ComposeAnomaly arm delegates
+           to the same family file (never the SQL Server "Anomalous spike" composer, which the equality would expose).
+           Each content lane moves ITS lines to NotNull, as lanes 11–13 and 17 did. */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.PlanRegression));          /* lane 27 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ParameterSensitivity));    /* lane 27 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.SeqScanAdvisory));         /* lane 30 */
+        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyPlanRegression)); /* lane 27 — the arm exists, the composer is a stub */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuBurnCores));            /* lane 28 */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuDecomposition));        /* lane 28 */
+        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyCpuBurn));       /* lane 28 — the arm exists, the composer is a stub */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 — routed by name to ComposeMemory, ahead of the config prefix arm */
+        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from

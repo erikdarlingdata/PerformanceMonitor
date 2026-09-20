@@ -255,6 +255,10 @@ LIMIT 6";
         /* lane 24 (#3691): stock's SAMPLED wait profile over sampled_ms (PgTargetAnomalyDetector.WaitsSampled.cs); sits
            out on Aurora and wherever pg_wait_stats also wrote the window. */
         await DetectSampledWaitProfileAnomalies(context, anomalies);
+        /* v3 (#3691 plumbing): the plan-regression and CPU-burn detectors (PgTargetAnomalyDetector.Plans.cs / .Kernel.cs),
+           inert until lanes 27 / 28. */
+        await DetectPlanRegressionAnomalies(context, anomalies);
+        await DetectCpuBurnAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -268,6 +272,8 @@ LIMIT 6";
     private partial Task DetectWalVolumeAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectSampledWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectPlanRegressionAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectCpuBurnAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;

@@ -60,6 +60,11 @@ public static partial class PgTargetScorer
             PgTargetSources.BloatSource => ScoreBloatFact(fact),
             /* wave 3 (#3691, between waves): the blocking family's arm, to its stub until lane 17. */
             PgTargetSources.BlockingSource => ScoreBlockingFact(fact),
+            /* v3 (#3691 plumbing): one arm per new family, each to its own partial's stub until its lane lands
+               (27 plans, 28 kernel, 32 memory). */
+            PgTargetSources.PlansSource => ScorePlanFact(fact),
+            PgTargetSources.KernelSource => ScoreKernelFact(fact),
+            PgTargetSources.MemorySource => ScoreMemoryFact(fact),
             _ => 0.0,
         };
     }
@@ -95,6 +100,12 @@ public static partial class PgTargetScorer
             /* wave 3 (#3691, between waves): the blocking family's three measured keys. PgTargetSharedSwitchRoutingTests'
                routing census reads this switch by reflection — a declared measured key with no arm here fails there. */
             PgTargetFactKeys.BlockingChain or PgTargetFactKeys.LockWaitEvents or PgTargetFactKeys.LongRunningQuery => BlockingAmplifiers(key),
+            /* v3 (#3691 plumbing): the three new families' measured keys, one arm each. CONFIG_PG_MEMORY_OVERCOMMIT is
+               named here, AHEAD of the config prefix arm, because it is pg_memory-sourced: its co-fire amplifiers are
+               the memory family's to declare (the ConfigSharedBuffers-in-BufferAmplifiers precedent). */
+            PgTargetFactKeys.PlanRegression or PgTargetFactKeys.ParameterSensitivity or PgTargetFactKeys.SeqScanAdvisory => PlanAmplifiers(key),
+            PgTargetFactKeys.CpuBurnCores or PgTargetFactKeys.CpuDecomposition => KernelAmplifiers(key),
+            PgTargetFactKeys.ConfigMemoryOvercommit or PgTargetFactKeys.HostMemoryPressure => MemoryAmplifiers(key),
             _ when key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) => ConfigAmplifiers(key),
             _ => [],
         };
@@ -151,4 +162,15 @@ public static partial class PgTargetScorer
 
     private static partial double ScoreBlockingFact(Fact fact);
     private static partial List<AmplifierDefinition> BlockingAmplifiers(string key);
+
+    /* v3 (#3691) — stubbed in PgTargetScorer.Plans.cs / .Kernel.cs / .Memory.cs, filled by lanes 27 / 28 / 32. */
+
+    private static partial double ScorePlanFact(Fact fact);
+    private static partial List<AmplifierDefinition> PlanAmplifiers(string key);
+
+    private static partial double ScoreKernelFact(Fact fact);
+    private static partial List<AmplifierDefinition> KernelAmplifiers(string key);
+
+    private static partial double ScoreMemoryFact(Fact fact);
+    private static partial List<AmplifierDefinition> MemoryAmplifiers(string key);
 }

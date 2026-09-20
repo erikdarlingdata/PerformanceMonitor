@@ -226,6 +226,10 @@ WITH clean AS (
         /* lane 24 (#3691): stock's SAMPLED wait rate over sampled_ms (V133) — its own metric, never pooled with the
            Aurora pg_wait_ms_per_sec arm above (PgTargetBaselineProvider.WaitsSampled.cs). */
         MetricNames.PgSampledWaitMsPerSec => SampledWaitBaselineQuery(),
+        /* v3 (#3691 plumbing): the plan and kernel families' arms, null until lanes 27 / 28 fill their partials
+           (PgTargetBaselineProvider.Plans.cs / .Kernel.cs). */
+        MetricNames.PgStatementMeanMs => StatementMeanMsBaselineQuery(),
+        MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),
 
         _ => null,
     };
@@ -235,6 +239,8 @@ WITH clean AS (
     private static partial string? WalBytesPerSecBaselineQuery();
     private static partial string? BlockedSessionsBaselineQuery();
     private static partial string? SampledWaitBaselineQuery();
+    private static partial string? StatementMeanMsBaselineQuery();
+    private static partial string? CpuBurnCoresBaselineQuery();
 
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
 }
