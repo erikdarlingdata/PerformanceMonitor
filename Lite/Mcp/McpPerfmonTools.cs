@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -62,7 +63,7 @@ public sealed class McpPerfmonTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored.")]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -137,6 +138,8 @@ public sealed class McpPerfmonTools
                    delta_value / sample_interval_seconds rather than assuming a fixed cadence (#2234). */
                 sample_interval_seconds = p.SampleIntervalSeconds
             });
+            /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
+            var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             return JsonSerializer.Serialize(new
             {
@@ -145,7 +148,8 @@ public sealed class McpPerfmonTools
                 cntr_type = seriesType,
                 counter_kind = PerfmonCounterTypes.Word(seriesType),
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

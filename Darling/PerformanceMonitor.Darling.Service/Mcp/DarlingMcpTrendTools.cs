@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -58,11 +59,25 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the same fields with Lite's truth (raw, unbounded within its retention), so the contract is one shape
 /// across SKUs even where the depth differs.
 /// </para>
+///
+/// <para>
+/// <b>Every trend here ends with <c>discontinuities[]</c> (#3653 A5).</b> The identity-epoch carriers (#3694,
+/// #3705) forget a server's delta baselines when the target restarts, fails over, is renamed or has its
+/// statistics reset, and mark the carrier run's <c>collection_log</c> row; a trend read over such a window
+/// shows a step that is the instrument re-baselining, not the workload. So each tool reads the markers inside
+/// the SAME window as its points (<see cref="DarlingTrendReader.GetBaselineDiscontinuitiesAsync"/>) and
+/// publishes them as the payload's trailing key — <see cref="BaselineDiscontinuities.PayloadKey"/>, an empty
+/// array when none, each entry <c>{ at, reason, detail }</c> through the shared
+/// <see cref="BaselineDiscontinuities.ToPayload"/> so Lite's twins spell the same three keys — and its
+/// description carries the shared sentence naming it. On the data path only: an empty answer is a status
+/// envelope with no series to mark. <c>get_wait_trend</c> in <see cref="DarlingMcpDataTools"/> carries the same
+/// block; the census in Darling.Tests enumerates all eight on both SKUs.
+/// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods.")]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -107,6 +122,7 @@ public sealed class DarlingMcpTrendTools
             var granted = AlignGrantSeries(
                 points.Select(p => p.CollectionTime).ToArray(),
                 grants.Select(g => (g.CollectionTime, g.TotalGrantedMb)).ToArray());
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             var result = points.Select((p, i) => new
             {
@@ -133,13 +149,15 @@ public sealed class DarlingMcpTrendTools
                     server = resolved.ServerName,
                     hours_back,
                     granted_note = GrantGapNote,
-                    trend = result
+                    trend = result,
+                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
                 }, McpHelpers.JsonOptions)
                 : JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
-                    trend = result
+                    trend = result,
+                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
                 }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -193,7 +211,7 @@ public sealed class DarlingMcpTrendTools
         return aligned;
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored.")]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
@@ -274,6 +292,7 @@ public sealed class DarlingMcpTrendTools
                 delta_value = p.DeltaValue,
                 sample_interval_seconds = p.SampleIntervalSeconds
             });
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
 
             return JsonSerializer.Serialize(new
             {
@@ -282,7 +301,8 @@ public sealed class DarlingMcpTrendTools
                 cntr_type = seriesType,
                 counter_kind = PerfmonCounterTypes.Word(seriesType),
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -291,7 +311,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_file_io_trend"), Description("Gets I/O latency trend over time per database, useful for spotting degradation in storage performance.")]
+    [McpServerTool(Name = "get_file_io_trend"), Description("Gets I/O latency trend over time per database, useful for spotting degradation in storage performance." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetFileIoTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -336,12 +356,14 @@ public sealed class DarlingMcpTrendTools
                 avg_read_latency_ms = Math.Round(p.AvgReadLatencyMs, 2),
                 avg_write_latency_ms = Math.Round(p.AvgWriteLatencyMs, 2)
             });
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -350,7 +372,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time.")]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
@@ -421,6 +443,7 @@ public sealed class DarlingMcpTrendTools
                 max_dop = aggregated ? (int?)null : r.MaxDop,
                 query_plan_hash = aggregated ? null : r.QueryPlanHash
             });
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             return JsonSerializer.Serialize(new
             {
@@ -442,7 +465,8 @@ public sealed class DarlingMcpTrendTools
                       + "null because the rollup does not carry them - null means not measured, not zero."
                     : null,
                 data_points = rows.Count,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -451,7 +475,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point.")]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -504,7 +528,8 @@ public sealed class DarlingMcpTrendTools
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
-            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now));
+            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now),
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
         }
         catch (Exception ex)
         {
@@ -512,7 +537,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point.")]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -549,7 +574,8 @@ public sealed class DarlingMcpTrendTools
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now));
+            return SerializeTrend(resolved.ServerName, hours_back, result.Points, DescribeRoute(result, now),
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
         }
         catch (Exception ex)
         {
@@ -557,7 +583,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why).")]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -645,7 +671,8 @@ public sealed class DarlingMcpTrendTools
                 return EmptyStatus("empty", QuietWindowMessage(resolved.ServerName, hours_back, "Query Store"), disclosure);
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points, disclosure);
+            return SerializeTrend(resolved.ServerName, hours_back, points, disclosure,
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
         }
         catch (Exception ex)
         {
@@ -762,7 +789,7 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points,
-        TrendDisclosure disclosure)
+        TrendDisclosure disclosure, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         var envelope = new Dictionary<string, object?>
         {
@@ -797,6 +824,8 @@ public sealed class DarlingMcpTrendTools
             execution_count = p.ExecutionCount,
             executions_per_second = p.ExecutionsPerSecond,
         });
+        /* #3653 A5: trailing, after the points, on the data envelope only — the class remarks. */
+        envelope[BaselineDiscontinuities.PayloadKey] = BaselineDiscontinuities.ToPayload(discontinuities);
 
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }

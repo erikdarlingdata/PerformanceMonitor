@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -63,7 +64,7 @@ public sealed class McpIoTools
         }
     }
 
-    [McpServerTool(Name = "get_file_io_trend"), Description("Gets I/O latency trend over time per database, useful for spotting degradation in storage performance.")]
+    [McpServerTool(Name = "get_file_io_trend"), Description("Gets I/O latency trend over time per database, useful for spotting degradation in storage performance." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetFileIoTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -109,12 +110,15 @@ public sealed class McpIoTools
                 avg_read_latency_ms = Math.Round(p.AvgReadLatencyMs, 2),
                 avg_write_latency_ms = Math.Round(p.AvgWriteLatencyMs, 2)
             });
+            /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
+            var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
-                trend = result
+                trend = result,
+                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

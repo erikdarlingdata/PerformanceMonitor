@@ -16,6 +16,7 @@ using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -1101,7 +1102,28 @@ public partial class ServerTab : UserControl
 
     /* ========== Performance Trend Charts ========== */
 
-    private void UpdateQueryDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <summary>
+    /// Draws the window's baseline discontinuities on one Performance Trends chart (#3653 A5): a dashed
+    /// vertical line per marker at its instant on the server's display clock (<c>UtcOffsetMinutes</c>, as
+    /// every point here is shifted), legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
+    /// The identity-epoch carriers (#3694, #3705) forget this server's delta baselines when the target
+    /// restarts, fails over, is renamed or has its statistics reset; the four series here are all
+    /// delta-family rates, so across such an instant they show a step that is the instrument re-baselining,
+    /// not the workload — the marker says which step. Called after the series is added and before the axis
+    /// limits and legend are set, as <see cref="ChartStyle.AddDiscontinuityMarker"/> asks; the Darling viewer's
+    /// <c>ViewerServerTab.QueryTrends</c> draws through the same helper, and Lite's MCP trend tools publish the
+    /// same instants as <c>discontinuities[]</c>.
+    /// </summary>
+    private void MarkDiscontinuities(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineDiscontinuity> discontinuities)
+    {
+        foreach (var discontinuity in discontinuities)
+        {
+            var shown = discontinuity.At.AddMinutes(UtcOffsetMinutes);
+            ChartStyle.AddDiscontinuityMarker(chart, shown.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+        }
+    }
+
+    private void UpdateQueryDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
@@ -1125,6 +1147,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryDuration"));
         ChartStyle.StyleScatter(plot);
         _queryDurationTrendHover?.Add(plot, "Query Duration");
+        MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         QueryDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
@@ -1135,7 +1158,7 @@ public partial class ServerTab : UserControl
         QueryDurationTrendChart.Refresh();
     }
 
-    private void UpdateProcDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private void UpdateProcDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
@@ -1159,6 +1182,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("ProcedureDuration"));
         ChartStyle.StyleScatter(plot);
         _procDurationTrendHover?.Add(plot, "Procedure Duration");
+        MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ProcDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
@@ -1169,7 +1193,7 @@ public partial class ServerTab : UserControl
         ProcDurationTrendChart.Refresh();
     }
 
-    private void UpdateQueryStoreDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private void UpdateQueryStoreDurationTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
@@ -1193,6 +1217,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryStoreDuration"));
         ChartStyle.StyleScatter(plot);
         _queryStoreDurationTrendHover?.Add(plot, "Query Store Duration");
+        MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);
@@ -1203,7 +1228,7 @@ public partial class ServerTab : UserControl
         QueryStoreDurationTrendChart.Refresh();
     }
 
-    private void UpdateExecutionCountTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private void UpdateExecutionCountTrendChart(List<QueryTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         ClearChart(ExecutionCountTrendChart);
         ApplyTheme(ExecutionCountTrendChart);
@@ -1227,6 +1252,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Executions"));
         ChartStyle.StyleScatter(plot);
         _executionCountTrendHover?.Add(plot, "Executions");
+        MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ExecutionCountTrendChart.Plot.Axes.SetLimitsX(xMin, xMax);

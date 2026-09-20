@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -49,7 +50,7 @@ public sealed class McpMemoryTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods.")]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetMemoryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -96,6 +97,9 @@ public sealed class McpMemoryTools
             var granted = AlignGrantSeries(
                 points.Select(p => p.CollectionTime).ToArray(),
                 grants.Select(g => (g.CollectionTime, g.TotalGrantedMb)).ToArray());
+            /* #3653 A5: the window's baseline discontinuities, the payload's trailing key on every trend tool of
+               both SKUs — see BaselineDiscontinuities; Darling's DarlingMcpTrendTools carries the same block. */
+            var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             var result = points.Select((p, i) => new
             {
@@ -121,13 +125,15 @@ public sealed class McpMemoryTools
                     server = resolved.ServerName,
                     hours_back,
                     granted_note = GrantGapNote,
-                    trend = result
+                    trend = result,
+                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
                 }, McpHelpers.JsonOptions)
                 : JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
-                    trend = result
+                    trend = result,
+                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
                 }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
