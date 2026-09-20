@@ -33,8 +33,10 @@ namespace Darling.Tests;
 /// store's finer keys — database_name / plan_id — as OPTIONAL refinements); the three stored-plan
 /// reads are Postgres-dialect, positional-param, and read the collector columns the schema
 /// generator actually emits (query_stats.query_plan_xml, procedure_stats.query_plan_xml +
-/// sql_handle, query_store_stats.query_plan_text); and analyze_plan_xml's no-fetch path is
-/// resilient (empty → the bare message, malformed → no throw). Gated on DARLING_TEST_PG: register
+/// sql_handle, query_store_stats.query_plan_text); analyze_plan_xml's no-fetch path is
+/// resilient (empty → the bare message, malformed → no throw); and the four analyze_* descriptions
+/// name missing_indexes[].create_statement and impact_basis for what they are rather than #3696's
+/// suppression sentence (#3805). Gated on DARLING_TEST_PG: register
 /// a server the way the worker does, plant stored plans, call the tool METHODS directly (not over
 /// the wire) and assert each fetch + analysis round-trips, the optional keys refine, and an absent
 /// key returns the #1224 "unavailable" envelope.
@@ -145,6 +147,48 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
 
     private static bool Optional((string Name, bool Optional)[] p, string name) =>
         p.Single(x => x.Name == name).Optional;
+
+    /* ---------------- ungated: the four analyze_* descriptions say what the payload carries ---------------- */
+
+    /// <summary>
+    /// #3805 — the four Darling <c>analyze_*_plan</c> descriptions (every plan tool but <c>get_plan_xml</c>, which
+    /// returns raw XML and enumerates no payload) name <c>missing_indexes[].create_statement</c> for what it is: the
+    /// optimizer's suggested CREATE INDEX for that one statement, CORROBORATION for a statement already measured slow
+    /// and never a diagnosis, beside the labelled <c>impact_basis</c> and the fixed per-row <c>caveat</c> whose three
+    /// clauses the description restates (per-statement estimate; per-table commitment with write cost and regression
+    /// risk for other plans; test it). #3696 had them say "no CREATE INDEX text — the suggestion is a hint, not a
+    /// design" on a rule that was never made — suppression; the maintainer's reframing is honesty, "corroboration,
+    /// with caveats", and the suppression sentence must not come back. Lite's three are pinned in <c>Lite.Tests</c>
+    /// (<c>McpDescriptionTruthPinTests</c>) with the same fragments, so the two SKUs describe one field in one voice.
+    /// </summary>
+    [Fact]
+    public void AnalyzeDescriptions_NameCreateStatementAndImpactBasis_NotTheSuppression()
+    {
+        var analyzeTools = ToolMethods()
+            .Where(m => (m.GetCustomAttribute<McpServerToolAttribute>()!.Name ?? "").StartsWith("analyze_", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(4, analyzeTools.Length);
+
+        Assert.All(analyzeTools, m =>
+        {
+            var description = m.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            Assert.Contains("labelled impact_basis", description, StringComparison.Ordinal);
+            Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", description, StringComparison.Ordinal);
+            Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", description, StringComparison.Ordinal);
+            Assert.Contains("every row carries the fixed caveat", description, StringComparison.Ordinal);
+            Assert.Contains("regression risk for other plans", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("no CREATE INDEX text", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
+        });
+
+        /* The instructions' family paragraph names the field the same way and no longer carries #3696's
+           "no CREATE INDEX text". */
+        var instructions = DarlingMcpInstructions.Text;
+        Assert.Contains("`create_statement` — the optimizer's suggested CREATE INDEX for that one statement, corroboration for a statement already measured slow and never a diagnosis", instructions, StringComparison.Ordinal);
+        Assert.Contains("every row carries the fixed `caveat`", instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("no CREATE INDEX text", instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("a hint, not a design", instructions, StringComparison.Ordinal);
+    }
 
     /* ---------------- ungated: stored-plan read SQL pins ---------------- */
 

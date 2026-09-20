@@ -1102,10 +1102,14 @@ public class FactScorerTests
     }
 
     // WS4: plan-XML advisories. MISSING_INDEX / PLAN_WARNING (Source "queries", Value = count)
-    // score the 0.4 advisory base only when the count is > 0, and 0 otherwise. Advise-only.
+    // score only when the count is > 0, and 0 otherwise. Advise-only. PLAN_WARNING keeps the 0.4
+    // advisory base; MISSING_INDEX is demoted to the Information rung (#3805,
+    // FactScorer.MissingIndexCorroborationSeverity = 0.25) — a request is corroboration and never
+    // outranks a standing misconfiguration — and the pin reads the constant so the ORDERING, not the
+    // digit, is what a future change has to argue with.
     [Theory]
-    [InlineData("MISSING_INDEX", 1, 0.4)]
-    [InlineData("MISSING_INDEX", 5, 0.4)]
+    [InlineData("MISSING_INDEX", 1, FactScorer.MissingIndexCorroborationSeverity)]
+    [InlineData("MISSING_INDEX", 5, FactScorer.MissingIndexCorroborationSeverity)]
     [InlineData("MISSING_INDEX", 0, 0.0)]
     [InlineData("PLAN_WARNING", 1, 0.4)]
     [InlineData("PLAN_WARNING", 0, 0.0)]

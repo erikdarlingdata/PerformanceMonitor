@@ -92,19 +92,46 @@ public sealed class McpDescriptionTruthPinTests
         return body[noteStart..body.IndexOf("\",", noteStart, StringComparison.Ordinal)];
     }
 
+    /// <summary>
+    /// The three Lite plan tools whose descriptions enumerate the payload (<c>analyze_query_store_plan</c>'s never
+    /// did — it says what it fetches and when to use it, so there is nothing there to pin). #3696 made each of these
+    /// say "no CREATE INDEX text — the suggestion is a hint, not a design" and pinned the phrase; #3805 restored
+    /// <c>create_statement</c> because the rule #3696 cited was never made (DDL recommendations are legitimate
+    /// product output — the engine's RCSI remediation, and the MISSING_INDEX finding's own <c>remediation_command</c>
+    /// carrying this same statement), and the maintainer's spec for the restore reframed the field from suppression
+    /// to honesty: "corroboration, with caveats". So the pin flips: the description names the field, calls it
+    /// corroboration for a statement already measured slow and never a diagnosis, names the fixed per-row
+    /// <c>caveat</c> and its regression-risk clause, and keeps <c>impact_basis</c> labelled. The suppression sentence
+    /// must not come back. The Darling four are pinned in <c>Darling.Tests</c> (<c>DarlingMcpPlanToolsTests</c>)
+    /// with the same fragments.
+    /// </summary>
     [Fact]
-    public void PlanTools_DescribeTheStatedOperatorCut_AndNoCreateIndexText()
+    public void PlanTools_DescribeTheStatedOperatorCut_AndTheCreateStatement()
     {
         foreach (var tool in new[] { "analyze_query_plan", "analyze_procedure_plan", "analyze_plan_xml" })
         {
             var description = Description(typeof(McpPlanTools), tool);
             Assert.Contains("operators_returned / total_operators / truncated", description, StringComparison.Ordinal);
             Assert.Contains("operators_ranked_by", description, StringComparison.Ordinal);
-            Assert.Contains("no CREATE INDEX text", description, StringComparison.Ordinal);
-            Assert.Contains("a hint, not a design", description, StringComparison.Ordinal);
+            Assert.Contains("labelled impact_basis", description, StringComparison.Ordinal);
+            Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", description, StringComparison.Ordinal);
+            Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", description, StringComparison.Ordinal);
+            Assert.Contains("every row carries the fixed caveat", description, StringComparison.Ordinal);
+            Assert.Contains("regression risk for other plans", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("no CREATE INDEX text", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
         }
 
-        Assert.DoesNotContain("Missing indexes with CREATE statements", McpInstructions.Text, StringComparison.Ordinal);
+        /* The instructions' anti-pattern bullet names the field too, and neither the pre-#3696 wording ("CREATE
+           statements and impact scores" — an unlabelled impact) nor #3696's suppression ("evidence, not DDL") is
+           what it says now. */
+        var instructions = McpInstructions.Text;
+        Assert.Contains("suggested `create_statement` — corroboration for a statement already measured slow, never a diagnosis", instructions, StringComparison.Ordinal);
+        Assert.Contains("every row carries the fixed `caveat`", instructions, StringComparison.Ordinal);
+        Assert.Contains("impact estimate (`impact_basis`)", instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("Missing indexes with CREATE statements", instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("evidence, not DDL", instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("no CREATE INDEX text", instructions, StringComparison.Ordinal);
     }
 
     /* ---------------- plumbing ---------------- */
