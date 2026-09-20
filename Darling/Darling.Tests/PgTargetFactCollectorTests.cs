@@ -55,8 +55,9 @@ public sealed class PgTargetFactCollectorTests
     /// <summary>
     /// The collect surface, ordinal-sorted: the two plumbing methods (coverage witness, registry metadata),
     /// the ten v1 family partials, (#3691 v2 plumbing) the three v2 family stubs — I/O (lane 11),
-    /// replication (lane 12), bloat (lane 13) — and (#3691 between waves) the wave-3 blocking stub (lane 17),
-    /// which the content lanes fill in place. Adding a family is a deliberate edit here.
+    /// replication (lane 12), bloat (lane 13) — (#3691 between waves) the wave-3 blocking stub (lane 17), and
+    /// (#3691 v3 plumbing) the three v3 family stubs — plans (lane 27, lane 30 shares it), kernel (lane 28), memory
+    /// (lane 32) — which the content lanes fill in place. Adding a family is a deliberate edit here.
     /// </summary>
     private static readonly string[] CollectSurface =
     {
@@ -67,7 +68,10 @@ public sealed class PgTargetFactCollectorTests
         "CollectCpuFactsAsync",
         "CollectDatabaseFactsAsync",
         "CollectIoFactsAsync",
+        "CollectKernelFactsAsync",
+        "CollectMemoryFactsAsync",
         "CollectObservedCoverageAsync",
+        "CollectPlanFactsAsync",
         "CollectPostureFactsAsync",
         "CollectQueryFactsAsync",
         "CollectReplicationFactsAsync",
@@ -106,16 +110,17 @@ public sealed class PgTargetFactCollectorTests
                 "CollectSessionFactsAsync" => "PgTargetFactCollector.Sessions.cs",
                 "CollectWaitFactsAsync" => "PgTargetFactCollector.Waits.cs",
                 "CollectQueryFactsAsync" => "PgTargetFactCollector.Queries.cs",
+                "CollectPlanFactsAsync" => "PgTargetFactCollector.Plans.cs",   /* v3: the family file is plural, the method singular (the Queries shape) */
                 _ => $"PgTargetFactCollector.{family}.cs",
             };
             Assert.Contains(file, files);
         }
 
         var stubs = files.Where(f => f is not ("PgTargetFactCollector.Coverage.cs" or "PgTargetFactCollector.Metadata.cs")).ToList();
-        /* Ten v1 families plus the three v2 families (#3691) plus the wave-3 blocking family (#3691 between waves).
-           Every family file names its lane — two digits now that v2's lanes are 11–13, which \d alone would have
-           matched on their first digit and told no one. */
-        Assert.Equal(14, stubs.Count);
+        /* Ten v1 families plus the three v2 families (#3691) plus the wave-3 blocking family (#3691 between waves) plus
+           the three v3 families (#3691 v3 plumbing: plans, kernel, memory). Every family file names its lane — two
+           digits now that v2's lanes are 11–13, which \d alone would have matched on their first digit and told no one. */
+        Assert.Equal(17, stubs.Count);
         foreach (var stub in stubs)
         {
             var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), stub!));
@@ -123,7 +128,7 @@ public sealed class PgTargetFactCollectorTests
         }
 
         /* The v2 files carry the exact marker the content briefs quote (a filled family keeps it, as v1's did). */
-        foreach (var (file, lane) in new[] { ("PgTargetFactCollector.Io.cs", 11), ("PgTargetFactCollector.Replication.cs", 12), ("PgTargetFactCollector.Bloat.cs", 13), ("PgTargetFactCollector.Blocking.cs", 17) })
+        foreach (var (file, lane) in new[] { ("PgTargetFactCollector.Io.cs", 11), ("PgTargetFactCollector.Replication.cs", 12), ("PgTargetFactCollector.Bloat.cs", 13), ("PgTargetFactCollector.Blocking.cs", 17), ("PgTargetFactCollector.Plans.cs", 27), ("PgTargetFactCollector.Kernel.cs", 28), ("PgTargetFactCollector.Memory.cs", 32) })
         {
             var text = File.ReadAllText(Path.Combine(AnalysisDirectory(), file));
             Assert.Contains($"/* filled by lane {lane}", text, StringComparison.Ordinal);
@@ -222,6 +227,17 @@ public sealed class PgTargetFactCollectorTests
             /* wave 3 (#3691 between waves): the blocking family's three tables, pinned for lane 17. */
             ("pg_log_events", "lane 17 — the lock_wait event family"),
             ("pg_session_states", "lane 17 — long-running active statements (lane 14 reads it too)"),
+            /* v3 (#3691 plumbing): the plan, kernel and buffer-composition families' tables, pinned for lanes 27 / 28 /
+               29 / 30. The memory family's host columns ride pg_cpu_utilization's row (V136, lane R5 — no pg_host_memory
+               table), pinned here for lane 32. NOT pinned: pg_database_size — it arrives with lane R5's V136 catalog
+               row; the first lane to read it adds the pin the day the row exists. */
+            ("pg_plan_capture", "lane 27 — plan_hash flips and captured plan_json (lane 30 reads the Seq Scan nodes)"),
+            ("pg_statement_stats", "lane 27 — the per-statement mean-ms step (lane 7's bad actors read it too)"),
+            ("pg_column_stats", "lane 27 — top_value_frequency skew behind parameter sensitivity"),
+            ("pg_predicate_stats", "lane 30 — predicate evaluation count and selectivity beside the Seq Scan"),
+            ("pg_kernel_stats", "lane 28 — pg_stat_kcache user/system CPU time, the self-hosted CPU proxy"),
+            ("pg_buffer_usage", "lane 29 — the buffer-composition drill-down on PG_BUFFER_CACHE_PRESSURE"),
+            ("pg_cpu_utilization", "lane 32 — the V136 host-memory columns beside the capacity percent (lane 9 reads it too)"),
         })
         {
             Assert.True(tables.Contains(table), $"{table} ({lane}) is not a CollectorCatalog target table; the v2 lane that reads it would fail the FROM/JOIN census");

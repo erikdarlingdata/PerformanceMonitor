@@ -91,6 +91,27 @@ public static class PgTargetSources
     /// family — the engine's own written blocked-process report) and <c>pg_session_states</c> (design §2a; lane 17).</summary>
     public const string BlockingSource = "pg_blocking";
 
+    /* ── v3 (#3691) sources, declared by the v3 plumbing lane and filled by lanes 27 / 28 / 32. ── */
+
+    /// <summary>Plan-shape facts from <c>pg_plan_capture</c> (auto_explain captures keyed by <c>query_id</c> and
+    /// <c>plan_hash</c>) joined to <c>pg_statement_stats</c> (the per-statement counters the step-change is read
+    /// from) and, for the predicate side, <c>pg_column_stats</c> / <c>pg_predicate_stats</c> (design §6; lane 27,
+    /// with lane 30's Seq-Scan advisory in the same family).</summary>
+    public const string PlansSource = "pg_plans";
+
+    /// <summary>Kernel-time facts from <c>pg_kernel_stats</c> — <c>pg_stat_kcache</c>'s per-statement user and
+    /// system CPU time, the self-hosted CPU PROXY where the Aurora capacity percent does not exist; the extension's
+    /// presence is read from <c>pg_extension_availability</c>, never inferred from the table (lane 28).</summary>
+    public const string KernelSource = "pg_kernel";
+
+    /// <summary>Memory-composition and host-memory facts: the §4b arithmetic over <c>pg_server_config</c>
+    /// (<c>shared_buffers</c>, <c>max_connections</c>, <c>work_mem</c>, <c>maintenance_work_mem</c>,
+    /// <c>autovacuum_max_workers</c>) against the host's <c>memory_total_bytes</c>, which rides
+    /// <c>pg_cpu_utilization</c>'s row since V136 (lane R5: six host-memory columns on the existing hypertable, the
+    /// V130 columns-on-the-row precedent — there is NO <c>pg_host_memory</c> table), and the host's free-plus-cached
+    /// share on Aurora (lane 32).</summary>
+    public const string MemorySource = "pg_memory";
+
     /// <summary>The prefix every PostgreSQL-target source carries; the shared scorer routes on it.</summary>
     public const string Prefix = "pg_";
 
@@ -98,8 +119,9 @@ public static class PgTargetSources
     /// keeps, so the two lists can be compared without re-sorting.</summary>
     public static readonly IReadOnlyList<string> All = new[]
     {
-        BloatSource, BlockingSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, IoSource, PostureSource, QueriesSource,
-        ReplicationSource, SessionsSource, TempSource, VacuumSource, WaitsSource, WriteSource,
+        BloatSource, BlockingSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, IoSource, KernelSource, MemorySource,
+        PlansSource, PostureSource, QueriesSource, ReplicationSource, SessionsSource, TempSource, VacuumSource, WaitsSource,
+        WriteSource,
     };
 
     /// <summary>Whether <paramref name="source"/> is a PostgreSQL-target source.</summary>
@@ -335,6 +357,69 @@ public static class PgTargetFactKeys
     /// shape; folds onto <see cref="BlockingChain"/>. Lane 17.</summary>
     public const string AnomalyBlocking = "ANOMALY_PG_BLOCKING";
 
+    /* ── v3 (#3691) vocabulary, declared by the v3 plumbing lane so lanes 27 / 28 / 29 / 30 / 32 reference constants
+       and never edit this file (the v2 plumbing's shape, #3715; the wave-3 batch's, #3737). Design §6 (plans), the
+       kernel-stats CPU decomposition and self-hosted CPU proxy, and §4b (composition checks). Every stub a family
+       fills carries its "filled by lane N" marker. NOT declared, deliberately: a max_wal_size-vs-disk composition
+       key — disk free is not collected, and a key nothing can measure is a lie waiting for a lane. Lane 29 (buffer
+       composition) declares nothing either: it is a drill-down on BufferCachePressure over pg_buffer_usage, lane
+       16's deadlock shape. ── */
+
+    /* Lane 27 — plans, from pg_plan_capture × pg_statement_stats (regression), pg_column_stats (sensitivity); lane 30
+       adds the Seq-Scan advisory from plan_json × pg_predicate_stats in the same family. */
+
+    /// <summary>A statement whose per-call cost STEP-CHANGED across the window (<c>pg_statement_stats</c>' reset-aware
+    /// mean-ms difference) at the same moment its captured <c>plan_hash</c> flipped (<c>pg_plan_capture</c>) — the
+    /// two readings together are a plan regression; either alone is not. Named by <c>query_id</c> through the
+    /// <c>ObjectName</c> seam; the advice must say <c>queryid</c> is not stable across major upgrades. Lane 27.</summary>
+    public const string PlanRegression = "PG_PLAN_REGRESSION";
+    /// <summary>A statement captured under SEVERAL <c>plan_hash</c> values in the window whose predicate columns show
+    /// a skewed <c>top_value_frequency</c> in <c>pg_column_stats</c> — the PostgreSQL reading of parameter
+    /// sensitivity (no plan cache to force, so the remedy is the statement's shape, never a forced plan). Lane 27.</summary>
+    public const string ParameterSensitivity = "PG_PARAMETER_SENSITIVITY";
+    /// <summary>A <c>plan_json</c> Seq Scan over a large relation under a selective predicate
+    /// (<c>pg_predicate_stats</c>' evaluation count and selectivity beside it) — EVIDENCE ONLY: predicate, rows,
+    /// selectivity, estimate error. Never a <c>CREATE INDEX</c> statement anywhere in the fact or its advice (D8,
+    /// the standing no-missing-index-folklore rule; the maintainer's decision on #3691 gates the lane). Lane 30.</summary>
+    public const string SeqScanAdvisory = "PG_SEQ_SCAN_ADVISORY";
+    /// <summary>A statement's mean execution ms against its own baseline (<c>pg_statement_mean_ms</c>) — z-score
+    /// shape; folds onto <see cref="PlanRegression"/>, the regular fact that names the plan flip behind the
+    /// deviation. The detector is lane 27's.</summary>
+    public const string AnomalyPlanRegression = "ANOMALY_PG_PLAN_REGRESSION";
+
+    /* Lane 28 — kernel, from pg_kernel_stats (pg_stat_kcache; availability from pg_extension_availability). */
+
+    /// <summary>User-plus-system CPU seconds per WALL second over the window — cores busy — from the reset-aware
+    /// <c>pg_kernel_stats</c> differences summed across statements: the self-hosted CPU PROXY that stands where
+    /// <see cref="CpuPercent"/> (Aurora's capacity percent) does not exist, and the second confirmer a stock
+    /// target's load storm needs to cross the page line. Rated over <c>ObservedDurationMs</c>, never the nominal
+    /// window. Lane 28.</summary>
+    public const string CpuBurnCores = "PG_CPU_BURN_CORES";
+    /// <summary>Burning versus waiting: the window's kernel CPU time against its measured wait time, so the operator
+    /// learns whether the box is out of CPU or the backends are parked — the decomposition that decides whether a
+    /// wait card or a CPU card is the story. A context reading beside <see cref="CpuBurnCores"/>. Lane 28.</summary>
+    public const string CpuDecomposition = "PG_CPU_DECOMPOSITION";
+    /// <summary>Cores busy against their own baseline (<c>pg_cpu_burn_cores</c>) — z-score shape; folds onto
+    /// <see cref="CpuBurnCores"/>. Lane 28.</summary>
+    public const string AnomalyCpuBurn = "ANOMALY_PG_CPU_BURN";
+
+    /* Lane 32 — memory composition (§4b) and host memory, from pg_server_config × pg_cpu_utilization's V136 memory columns
+       (memory_total_bytes, memory_free_bytes, memory_cached_bytes, memory_buffers_bytes, memory_active_bytes,
+       configured_memory_bytes — lane R5; no separate table). */
+
+    /// <summary>The §4b composition check: <c>shared_buffers + max_connections × work_mem</c> (plus
+    /// <c>maintenance_work_mem × autovacuum_max_workers</c>) against the host's <c>memory_total_bytes</c> — a
+    /// configuration that CAN exceed the box, stated with the values read from the facts. A CONFIG advisory: 0.4 on
+    /// its own (it is in <see cref="ConfigAdvisoryRoots"/>), and ≥ 0.5 only when a workload co-fire —
+    /// <see cref="HostMemoryPressure"/> or <see cref="TempSpill"/> — says the arithmetic is being felt (D5; the
+    /// content lane decides which and pins it). Lane 32.</summary>
+    public const string ConfigMemoryOvercommit = "CONFIG_PG_MEMORY_OVERCOMMIT";
+    /// <summary>The host's free-plus-cached share of total memory over the window (<c>pg_cpu_utilization</c>'s
+    /// <c>memory_free_bytes + memory_cached_bytes</c> over <c>memory_total_bytes</c>, V136; Aurora only,
+    /// where the host metrics exist) — the measured half of the composition story, and the co-fire that lifts
+    /// <see cref="ConfigMemoryOvercommit"/> past its advisory base. Lane 32.</summary>
+    public const string HostMemoryPressure = "PG_HOST_MEMORY_PRESSURE";
+
     /* Wave 2 — declared so the name is settled; no stub, no lane in this wave. */
 
     /// <summary>The autovacuum worker profile changing shape against its baseline
@@ -413,6 +498,10 @@ public static class PgTargetFactKeys
         PostureFsync,
         PostureFullPageWrites,
         PostureSynchronousCommit,
+        /* v3 (#3691) plumbing: the §4b composition check is a CONVENTION reading of five knobs against the host —
+           it may root a card on a quiet server at the 0.4 advisory base, and only a workload co-fire lifts it (D5).
+           Lane 32 fills the bar; membership is routing, decided here so the lane never edits this file. */
+        ConfigMemoryOvercommit,
     };
 
     private static readonly HashSet<string> s_configAdvisoryRoots = new(ConfigAdvisoryRoots, StringComparer.Ordinal);
@@ -435,7 +524,9 @@ public static class PgTargetFactKeys
     /// of checkpoint pressure (design §3.11), so the incident the operator sees is the checkpoint one, with the
     /// volume shift as its early evidence rather than a second card. Wave 3: <see cref="AnomalyBlocking"/> folds
     /// onto <see cref="BlockingChain"/> — more sessions blocked than this hour usually sees is the statistical
-    /// reading of the chain the regular fact names.</para>
+    /// reading of the chain the regular fact names. v3: <see cref="AnomalyPlanRegression"/> folds onto
+    /// <see cref="PlanRegression"/> (the deviation is the statistical reading of the plan flip the regular fact
+    /// names) and <see cref="AnomalyCpuBurn"/> onto <see cref="CpuBurnCores"/>.</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string[]> AnomalyToFamilies =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -447,6 +538,8 @@ public static class PgTargetFactKeys
             [AnomalyReplicationLag] = [ReplicationLag],
             [AnomalyWalVolume] = [CheckpointPressure],
             [AnomalyBlocking] = [BlockingChain],
+            [AnomalyPlanRegression] = [PlanRegression],
+            [AnomalyCpuBurn] = [CpuBurnCores],
         };
 
     /// <summary>The metadata prefix the wait-profile detector stamps its top contributors under —

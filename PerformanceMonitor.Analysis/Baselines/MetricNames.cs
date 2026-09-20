@@ -68,4 +68,15 @@ public static class MetricNames
     /// <summary>Sessions blocked per capture — the count of <c>pg_blocking_edges</c> waiters in each collection, a
     /// point series (no differencing). Lane 17.</summary>
     public const string PgBlockedSessions = "pg_blocked_sessions";
+
+    /* #3691 v3 plumbing: the plan and kernel families' baselines. Names only, the v2 shape — the CTE behind each is
+       its content lane's (PgTargetBaselineProvider.Plans.cs / .Kernel.cs) and the provider's arm answers null until
+       it lands, which the shared reader treats as "no baseline for this metric". */
+    /// <summary>A statement's mean execution ms per collection — the reset-aware <c>pg_statement_stats</c>
+    /// <c>total_exec_time / calls</c> difference. The reader keys a series on (server, metric) alone, so WHICH
+    /// statement this names is lane 27's decision (see the stub arm's doc), not this constant's. Lane 27.</summary>
+    public const string PgStatementMeanMs = "pg_statement_mean_ms";
+    /// <summary>Cores busy — user-plus-system CPU seconds per wall second from the reset-aware <c>pg_kernel_stats</c>
+    /// differences summed across statements per collection. Lane 28.</summary>
+    public const string PgCpuBurnCores = "pg_cpu_burn_cores";
 }

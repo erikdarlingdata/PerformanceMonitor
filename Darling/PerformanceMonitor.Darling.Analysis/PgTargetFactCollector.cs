@@ -145,7 +145,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         var facts = new List<Fact>();
 
         /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
-           failed at its first read still states "1 of 16" rather than "1 of 0". */
+           failed at its first read still states "1 of 19" rather than "1 of 0". */
         context.CollectionFamilyCount = s_familyCount;
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
@@ -172,6 +172,12 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         /* wave 3 (#3691, between waves): the blocking family, last — its chain fact reads the idle-in-transaction and
            Lock-wait facts already in the list to attribute a root by name. Stub until lane 17 lands. */
         await CollectBlockingFactsAsync(context, facts);
+        /* v3 (#3691 plumbing): the plan, kernel and memory families, after every earlier family — the plan facts
+           name bad actors the queries family already emitted, the kernel decomposition reads the wait facts, and the
+           memory composition reads the config family's knob facts by key. Stubs until lanes 27 / 28 / 32 land. */
+        await CollectPlanFactsAsync(context, facts);
+        await CollectKernelFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
 
         return facts;
     }
@@ -224,4 +230,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     private partial Task CollectReplicationFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectBloatFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectPlanFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectKernelFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts);
 }

@@ -96,7 +96,8 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
             }
             Assert.DoesNotContain("COLLECTION CAVEAT", clean, StringComparison.Ordinal);
             Assert.Empty(service.LastCollectionFailures);
-            Assert.Equal(16, service.LastCollectionFamilyCount);
+            /* 16 → 19 with the #3691 v3 plumbing (plan, kernel, memory stubs) — the denominator counts family READS. */
+            Assert.Equal(19, service.LastCollectionFamilyCount);
 
             /* ── one family blind. */
             await ExecuteAsync(connection, $"ALTER TABLE pg_autovacuum_stats RENAME TO {HiddenName}", ct);
@@ -115,7 +116,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                    further read of this table in the vacuum family joins the list without moving this pin. */
                 var caveats = envelope.GetProperty("collection_caveats");
                 Assert.Equal(1, caveats.GetProperty("families_failed").GetInt32());
-                Assert.Equal(16, caveats.GetProperty("families_total").GetInt32());
+                Assert.Equal(19, caveats.GetProperty("families_total").GetInt32());
                 var entries = caveats.GetProperty("entries").EnumerateArray().ToList();
                 Assert.NotEmpty(entries);
                 Assert.All(entries, entry =>
@@ -133,7 +134,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 var prose = status == "empty"
                     ? doc.RootElement.GetProperty("message").GetString()
                     : doc.RootElement.GetProperty("caveat").GetString();
-                Assert.Contains("1 of 16 fact families could not be read (vacuum (missing_schema)) — the absence of findings is not evidence", prose, StringComparison.Ordinal);
+                Assert.Contains("1 of 19 fact families could not be read (vacuum (missing_schema)) — the absence of findings is not evidence", prose, StringComparison.Ordinal);
                 if (status == "empty")
                 {
                     Assert.Contains(" COLLECTION CAVEAT: ", prose, StringComparison.Ordinal);
@@ -154,7 +155,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
             {
                 var root = doc.RootElement;
                 Assert.True(root.TryGetProperty("total_facts", out _), $"the facts read must return data over an observed window: {facts}");
-                Assert.Contains("1 of 16 fact families could not be read (vacuum (missing_schema))", root.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+                Assert.Contains("1 of 19 fact families could not be read (vacuum (missing_schema))", root.GetProperty("caveat").GetString(), StringComparison.Ordinal);
                 Assert.All(root.GetProperty("collection_caveats").GetProperty("entries").EnumerateArray(), entry => Assert.Equal("vacuum", entry.GetProperty("family").GetString()));
                 Assert.Equal("collection_caveats", root.EnumerateObject().Last().Name);
             }

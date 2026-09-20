@@ -47,6 +47,7 @@ public class FactScorer
         "jobs", "memory",
         PgTargetSources.BloatSource, PgTargetSources.BlockingSource, PgTargetSources.BufferSource, PgTargetSources.ConfigSource,
         PgTargetSources.CpuSource, PgTargetSources.DatabaseSource, PgTargetSources.IoSource,
+        PgTargetSources.KernelSource, PgTargetSources.MemorySource, PgTargetSources.PlansSource,
         PgTargetSources.PostureSource, PgTargetSources.QueriesSource, PgTargetSources.ReplicationSource,
         PgTargetSources.SessionsSource, PgTargetSources.TempSource, PgTargetSources.VacuumSource,
         PgTargetSources.WaitsSource, PgTargetSources.WriteSource,

@@ -135,8 +135,9 @@ public sealed class PgTargetAnomalyTests
     {
         /* Lanes 11, 12, 15 and 17 filled pg_io_read_latency, pg_replay_lag_bytes, pg_wal_bytes_per_sec and
            pg_blocked_sessions (each arm pinned in its own family's tests; the served ones also in s_pgMetricNames
-           above); the wave-2 name still answers null. */
-        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers })
+           above); the wave-2 name still answers null, and so do the two v3 names (#3691 v3 plumbing) — each has a
+           reachable stub arm (pinned by text below), not "no arm", so lanes 27 / 28 fill a partial. */
+        foreach (var metric in new[] { MetricNames.PgAutovacuumWorkers, MetricNames.PgStatementMeanMs, MetricNames.PgCpuBurnCores })
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
             Assert.DoesNotContain(metric, s_pgMetricNames);
@@ -153,13 +154,16 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("MetricNames.PgWalBytesPerSec => WalBytesPerSecBaselineQuery(),", provider, StringComparison.Ordinal);
         /* wave 3 (#3691): the blocking arm, routed to the partial lane 17 filled. */
         Assert.Contains("MetricNames.PgBlockedSessions => BlockedSessionsBaselineQuery(),", provider, StringComparison.Ordinal);
+        /* v3 (#3691 plumbing): the plan and kernel arms are reachable and null — stubs, not "no arm". */
+        Assert.Contains("MetricNames.PgStatementMeanMs => StatementMeanMsBaselineQuery(),", provider, StringComparison.Ordinal);
+        Assert.Contains("MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("PgAutovacuumWorkers", provider, StringComparison.Ordinal);
 
         var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
         var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
         Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);" })
+        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);", "await DetectPlanRegressionAnomalies(context, anomalies);", "await DetectCpuBurnAnomalies(context, anomalies);" })
             Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
 
         foreach (var (file, lane) in new[]
@@ -168,6 +172,9 @@ public sealed class PgTargetAnomalyTests
             ("PgTargetBaselineProvider.Io.cs", 11), ("PgTargetBaselineProvider.Replication.cs", 12), ("PgTargetBaselineProvider.Wal.cs", 15),
             /* wave 3 (#3691 between waves): the blocking family's two Darling-side stubs. */
             ("PgTargetAnomalyDetector.Blocking.cs", 17), ("PgTargetBaselineProvider.Blocking.cs", 17),
+            /* v3 (#3691 plumbing): the plan and kernel families' four Darling-side stubs. */
+            ("PgTargetAnomalyDetector.Plans.cs", 27), ("PgTargetBaselineProvider.Plans.cs", 27),
+            ("PgTargetAnomalyDetector.Kernel.cs", 28), ("PgTargetBaselineProvider.Kernel.cs", 28),
         })
         {
             var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file);
@@ -348,7 +355,9 @@ public sealed class PgTargetAnomalyTests
     /// Every FILLED detector is fenced and reads its bucket: the five v1 detectors in the root file, and (since the
     /// #3691 between-waves batch re-pinned this from "five") the v2 detectors in their own partials — I/O (lane
     /// 11), replication (lane 12), WAL volume (lane 15) — and, since lane 17 filled its body, the wave-3 blocking
-    /// detector. Nine; the exemption the between-waves batch named is gone with the stub.
+    /// detector. Nine; the exemption the between-waves batch named is gone with the stub. The two v3 detectors (plan
+    /// regression, lane 27; CPU burn, lane 28) are stubs (<c>Task.CompletedTask</c>, no read to fence) and are named as
+    /// the exemptions; each lane adds its file to the filled list the day it fills the body.
     /// </summary>
     [Fact]
     public void TheDetector_FencesEachOfNineFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
@@ -375,6 +384,13 @@ public sealed class PgTargetAnomalyTests
             Assert.Contains("_baselineProvider.GetBaselineAsync(", partialCode, StringComparison.Ordinal);
             Assert.DoesNotContain("DateTime.UtcNow", partialCode, StringComparison.Ordinal);
         }
+        /* The two exemptions, by name: the v3 stubs have no body to fence (#3691 v3 plumbing). */
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies") })
+        {
+            var stub = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
+            Assert.Contains(detector + "(AnalysisContext context, List<Fact> anomalies) => Task.CompletedTask;", stub, StringComparison.Ordinal);
+        }
+
         /* Lane 17's detector is the first PostgreSQL one on the #3653 PAIR gate (peak AND window mean); pinned so a
            later edit back to the peak-only overload is a visible decision. */
         var blockingDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Blocking.cs"));
@@ -414,10 +430,14 @@ public sealed class PgTargetAnomalyTests
         /* Five v1 anomalies (lane 9) plus the three v2 ones the plumbing registered by shape (#3691: I/O latency,
            replication lag, WAL volume — all z-score, all deviation-scored) plus the wave-3 blocking anomaly the
            between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored),
-           plus lane 24's stock sampled wait profile (the Aurora profile's ratio shape on another instrument). */
-        Assert.Equal(10, anomalyKeys.Count);
+           plus lane 24's stock sampled wait profile (the Aurora profile's ratio shape on another instrument), plus the
+           two v3 anomalies the v3 plumbing registered by shape (plan regression — a statement's mean ms; CPU burn —
+           cores busy; both z-score, both deviation-scored). */
+        Assert.Equal(12, anomalyKeys.Count);
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalySampledWaitProfile));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyPlanRegression));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyCpuBurn));
 
         foreach (var key in anomalyKeys)
         {

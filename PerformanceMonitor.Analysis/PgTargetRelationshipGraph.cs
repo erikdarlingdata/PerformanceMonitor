@@ -59,6 +59,11 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
         BuildBloatEdges();
         /* wave 3 (#3691, between waves): the blocking chain, an empty stub until lane 17. */
         BuildBlockingEdges();
+        /* v3 (#3691 plumbing): the plan, kernel and host-memory chains, each an empty stub until its lane lands
+           (27 / 28 / 32). The memory family's partial is HostMemory.cs — Memory.cs is lane 2's v1 buffer chain. */
+        BuildPlanEdges();
+        BuildKernelEdges();
+        BuildHostMemoryEdges();
     }
 
     private partial void BuildSaturationEdges();
@@ -70,6 +75,9 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
     private partial void BuildReplicationEdges();
     private partial void BuildBloatEdges();
     private partial void BuildBlockingEdges();
+    private partial void BuildPlanEdges();
+    private partial void BuildKernelEdges();
+    private partial void BuildHostMemoryEdges();
 
     /// <summary>
     /// The shared active-edge read, with the bad-actor alias resolved — see the class summary. Every edge

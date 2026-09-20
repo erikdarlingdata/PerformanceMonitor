@@ -62,7 +62,11 @@ public static partial class PgTargetScorer
             or PgTargetFactKeys.AnomalyWalVolume
             /* #3691 wave-3 plumbing (between waves): the blocking anomaly is a peak-vs-own-baseline z-score on one
                series (blocked sessions per capture) — registered by shape ahead of lane 17, as the v2 three were. */
-            or PgTargetFactKeys.AnomalyBlocking;
+            or PgTargetFactKeys.AnomalyBlocking
+            /* #3691 v3 plumbing: the plan-regression and CPU-burn anomalies are each a peak-vs-own-baseline z-score on
+               one series (a statement's mean ms; cores busy) — registered by shape ahead of lanes 27 and 28. */
+            or PgTargetFactKeys.AnomalyPlanRegression
+            or PgTargetFactKeys.AnomalyCpuBurn;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>
