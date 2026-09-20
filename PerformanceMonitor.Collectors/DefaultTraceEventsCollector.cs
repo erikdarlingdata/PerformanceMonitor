@@ -54,13 +54,28 @@ namespace PerformanceMonitor.Collectors;
 /// (a far-past cutoff), because the default trace persists hours-to-days of history on disk that would
 /// otherwise be lost — the same first-run-collects-all choice the Dashboard collector makes.</para>
 ///
-/// <para><b>Config-change de-duplication (must-handle):</b> the Dashboard collector's config-event slice
-/// (Server / Database Configuration Change, Alter Database) is deliberately DROPPED here — Darling already
-/// tracks that exact slice by diffing its <c>server_config</c> / <c>database_config</c> / <c>trace_flags</c>
-/// snapshots (get_server_config_changes / get_database_config_changes / get_trace_flag_changes), which
-/// carry the real old→new values, so re-collecting the trace's config events would double-count it. The
-/// remaining categories have no such snapshot twin. (DBCC commands stay — <c>Audit DBCC Event</c> is a
-/// distinct "someone ran DBCC" audit, not the resulting trace-flag STATE the snapshot diff tracks.)</para>
+/// <para><b>Config changes: the snapshot diff owns WHAT changed, the trace's ErrorLog line owns WHEN
+/// (must-handle, #3740):</b> the Dashboard collector's config-event slice (the server / database
+/// configuration-change event classes and the alter-database event) is deliberately DROPPED here — Darling
+/// already tracks that exact slice by diffing its <c>server_config</c> / <c>database_config</c> /
+/// <c>trace_flags</c> snapshots (get_server_config_changes / get_database_config_changes /
+/// get_trace_flag_changes), which carry the real old→new values, so re-collecting the trace's config event
+/// classes would double-count the history tools. That argument is right about the VALUES and wrong about
+/// the CLOCK: <c>server_config</c> is captured on connect, so the diff can only say when a new value was
+/// first OBSERVED, and the one place in the store that saw the change HAPPEN is the error-log line
+/// <c>sp_configure</c> writes at that instant — msg 15457, "Configuration option '%ls' changed from %ld to
+/// %ld. Run the RECONFIGURE statement to install." — which the default trace records as an <c>ErrorLog</c>
+/// event (class 22) with the real <c>StartTime</c>. The ErrorLog arm below collects it, and the
+/// <c>CONFIG_CHANGED</c> attribution (<c>ConfigChangeAttribution</c>) anchors its ±4 h compare on that
+/// row when one exists for the diffed option. The row is kept OUTSIDE every database predicate in the
+/// WHERE: the trace stamps an ErrorLog event with the SESSION's database context, and for an operator
+/// running <c>sp_configure</c> that context is <c>master</c> more often than not — measured on SQL Server
+/// 2022: <c>DatabaseID = 1</c> from master, <c>5</c> from a user database, <c>Error = 15457</c>,
+/// <c>Severity = 10</c> on both — so the master/model/msdb exclusion that keeps system-database noise out
+/// of every other category would silently drop the very row the attribution needs, and the per-server
+/// excluded-database splice could drop it the same way. The remaining categories have no snapshot twin.
+/// (DBCC commands stay — <c>Audit DBCC Event</c> is a distinct "someone ran DBCC" audit, not the resulting
+/// trace-flag STATE the snapshot diff tracks.)</para>
 ///
 /// <para><b>Azure SQL Database (edition 5): does NOT apply</b> — there is no default trace on Azure SQL DB
 /// (<c>sys.traces</c> exposes none), so the collector is gated off via <see cref="AppliesTo"/> =
@@ -155,8 +170,11 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
         public DateTime? EndTime { get; set; }
     }
 
-    /* The curated, config-slice-free event set (see the class remarks). A {0} placeholder is spliced with
-       the per-server excluded-database clause on ft.DatabaseName.
+    /* The curated, config-slice-free event set (see the class remarks), plus the one ErrorLog row that is
+       exempt from every database predicate: msg 15457, the sp_configure line whose StartTime is the real
+       moment a server setting changed (#3740). A {0} placeholder is spliced with the per-server
+       excluded-database clause on ft.DatabaseName; it sits INSIDE the curated arm so that the 15457 row is
+       kept whatever database the operator's session happened to be in when it ran sp_configure.
 
        The trace's live path is captured into @current_trace_path FIRST and everything downstream reads
        that ONE value — the arm decision, the file(s) handed to fn_trace_gettable, and the path handed
@@ -252,38 +270,49 @@ JOIN sys.trace_events AS te
 WHERE t.is_default = 1
 AND   t.status = 1
 AND   ft.StartTime > {1}
-AND   ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4) /*master, model, msdb*/
-AND   ISNULL(ft.DatabaseID, 0) < 32761 /*exclude contained AG system databases*/{0}
 AND
 (
-    /*Server Memory Change events*/
-    (te.name LIKE N'%Server Memory Change%')
+    /*The sp_configure line (msg 15457, an ErrorLog write): kept regardless of the session's database
+      context, because a server setting is server-scoped and the trace stamps the row with whatever
+      database the operator happened to be in - master, for most - which the exclusions below would
+      drop. Its StartTime is the clock the config-change attribution anchors on (#3740).*/
+    (te.name = N'ErrorLog' AND ft.Error = 15457)
     OR
-    /*Data/Log file auto grow/shrink STALLS (duration over one second only)*/
     (
-        ISNULL(ft.Duration, 0) > 1000000
+        ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4) /*master, model, msdb*/
+        AND ISNULL(ft.DatabaseID, 0) < 32761 /*exclude contained AG system databases*/{0}
         AND
         (
-            te.name LIKE N'%Data File Auto Grow%'
-            OR te.name LIKE N'%Log File Auto Grow%'
-            OR te.name LIKE N'%Data File Auto Shrink%'
-            OR te.name LIKE N'%Log File Auto Shrink%'
+            /*Server Memory Change events*/
+            (te.name LIKE N'%Server Memory Change%')
+            OR
+            /*Data/Log file auto grow/shrink STALLS (duration over one second only)*/
+            (
+                ISNULL(ft.Duration, 0) > 1000000
+                AND
+                (
+                    te.name LIKE N'%Data File Auto Grow%'
+                    OR te.name LIKE N'%Log File Auto Grow%'
+                    OR te.name LIKE N'%Data File Auto Shrink%'
+                    OR te.name LIKE N'%Log File Auto Shrink%'
+                )
+            )
+            OR
+            /*ErrorLog writes (severity gating happens in the significant-set layer, not here)*/
+            (te.name = N'ErrorLog')
+            OR
+            /*Schema DDL (@include_object_ddl gates the whole slice; exclude tempdb and auto-created _WA_ statistics)*/
+            (
+                @include_object_ddl = 1
+                AND ISNULL(ft.DatabaseID, 0) <> 2
+                AND ISNULL(ft.ObjectName, N'') NOT LIKE N'[_]WA[_]%'
+                AND te.name IN (N'Object:Created', N'Object:Altered', N'Object:Deleted')
+            )
+            OR
+            /*Security audit events (audit-change, DBCC, alter-trace)*/
+            (te.name IN (N'Audit Change Audit Event', N'Audit DBCC Event', N'Audit Server Alter Trace Event'))
         )
     )
-    OR
-    /*ErrorLog writes (severity gating happens in the significant-set layer, not here)*/
-    (te.name = N'ErrorLog')
-    OR
-    /*Schema DDL (@include_object_ddl gates the whole slice; exclude tempdb and auto-created _WA_ statistics)*/
-    (
-        @include_object_ddl = 1
-        AND ISNULL(ft.DatabaseID, 0) <> 2
-        AND ISNULL(ft.ObjectName, N'') NOT LIKE N'[_]WA[_]%'
-        AND te.name IN (N'Object:Created', N'Object:Altered', N'Object:Deleted')
-    )
-    OR
-    /*Security audit events (audit-change, DBCC, alter-trace)*/
-    (te.name IN (N'Audit Change Audit Event', N'Audit DBCC Event', N'Audit Server Alter Trace Event'))
 )
 ORDER BY
     ft.StartTime DESC
@@ -327,7 +356,7 @@ SELECT
            NULL DatabaseName are KEPT rather than silently dropped by a bare `NOT IN`. Spliced onto its own
            line (empty => nothing added) so the generated T-SQL stays readable. */
         var (exclusionClause, exclusionParameters) = BuildNullSafeDatabaseExclusion(context.ExcludedDatabases);
-        var exclusionSplice = exclusionClause.Length == 0 ? string.Empty : "\r\n" + exclusionClause;
+        var exclusionSplice = exclusionClause.Length == 0 ? string.Empty : "\r\n        " + exclusionClause;
 
         var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, exclusionSplice, CutoffExpression);
 

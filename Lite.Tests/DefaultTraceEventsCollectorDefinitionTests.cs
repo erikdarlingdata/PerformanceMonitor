@@ -20,9 +20,10 @@ namespace Lite.Tests;
 /// <summary>
 /// Pins the cross-SKU parity contract of the shared default_trace_events collector definition (the built-in
 /// Default Trace read via sys.fn_trace_gettable): the server-side rollover-file read with the base-path
-/// normalization, the CURATED event set and its four must-handles — the config-change slice DROPPED
-/// (Darling's config-snapshot diff owns it), the auto-grow/shrink stall gate, the tempdb / _WA_ DDL
-/// exclusions — the event_time watermark with its all-history FIRST-run cutoff (NOT the XE collectors'
+/// normalization, the CURATED event set and its must-handles — the config-change event CLASSES dropped
+/// (Darling's config-snapshot diff owns WHAT changed) while the sp_configure ErrorLog line (msg 15457) is
+/// kept outside every database predicate (the trace's StartTime owns WHEN, #3740), the auto-grow/shrink
+/// stall gate, the tempdb / _WA_ DDL exclusions — the event_time watermark with its all-history FIRST-run cutoff (NOT the XE collectors'
 /// 10-minute fallback), the collect-everywhere-but-Azure-SQL-DB AppliesTo, the per-server excluded-database
 /// splice, the 21-column payload, and the null-tolerant ReadAsync/WritePayload. An intentional change to any
 /// of these must consciously update this test.
@@ -150,13 +151,64 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     [Fact]
     public void BuildQuery_DropsTheConfigChangeSlice_DarlingSnapshotDiffOwnsIt()
     {
-        /* Must-handle: the config-change events (Server / Database Configuration Change, Alter Database) the
-           Dashboard collector included are DROPPED here so Darling's server/database/trace-flag change
-           tracking (the config-snapshot diff) is not double-counted. */
+        /* Must-handle: the config-change event CLASSES (Server / Database Configuration Change, Alter Database)
+           the Dashboard collector included are DROPPED here so Darling's server/database/trace-flag change
+           tracking (the config-snapshot diff) is not double-counted — the diff owns WHAT changed (the real
+           old → new values). #3740 did not reopen that slice: the WHEN comes from the ErrorLog row the
+           sp_configure line already produces, pinned separately below. */
         var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
 
         Assert.DoesNotContain("Configuration Change", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Alter Database", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3740: the sp_configure line (msg 15457, an ErrorLog write) is the one row in the store that saw a
+    /// server-setting change HAPPEN — <c>server_config</c> is captured on connect and can only say when the
+    /// new value was first observed — and the <c>CONFIG_CHANGED</c> attribution anchors on its StartTime. It
+    /// has to survive the collector's database predicates, because the trace stamps an ErrorLog event with
+    /// the SESSION's database context: measured on SQL Server 2022, <c>sp_configure</c> from <c>master</c>
+    /// yields <c>DatabaseID = 1</c> (which the master/model/msdb exclusion dropped before this change) and from
+    /// a user database yields that database's id (which the per-server excluded-database splice could drop).
+    /// The keep is an OR arm ABOVE both predicates, keyed on the message number rather than the text —
+    /// <c>Error = 15457</c> is populated on the row and is language-independent, while the TextData is the
+    /// raw error-log line (timestamp, spid, then the message). The other categories still sit under both
+    /// predicates: with a database excluded, its Object DDL is still dropped and its 15457 line is still kept.
+    /// </summary>
+    [Fact]
+    public void BuildQuery_KeepsTheReconfigureLine_OutsideEveryDatabasePredicate()
+    {
+        var text = Lf(DefaultTraceEventsCollector.Instance.BuildQuery(
+            MakeContext(excludedDatabases: new[] { "ReportingDB" })).Text);
+
+        const string keep = "(te.name = N'ErrorLog' AND ft.Error = 15457)";
+        Assert.Contains(keep, text, StringComparison.Ordinal);
+
+        /* The keep is the FIRST arm of the OR that follows the StartTime bound, and every database predicate
+           sits AFTER it — inside the other arm — so none of them can reach the 15457 row. */
+        var startTime = text.IndexOf("AND   ft.StartTime > ", StringComparison.Ordinal);
+        var keepAt = text.IndexOf(keep, StringComparison.Ordinal);
+        var systemDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4)", StringComparison.Ordinal);
+        var agDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) < 32761", StringComparison.Ordinal);
+        var excluded = text.IndexOf("(ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN (@excl_db_0))", StringComparison.Ordinal);
+        var curatedErrorLog = text.IndexOf("(te.name = N'ErrorLog')", StringComparison.Ordinal);
+        Assert.True(startTime > 0 && keepAt > startTime, "the 15457 keep must follow the StartTime bound");
+        Assert.True(systemDbs > keepAt, "the master/model/msdb exclusion must sit after (inside the other arm of) the 15457 keep");
+        Assert.True(agDbs > keepAt, "the contained-AG exclusion must sit after the 15457 keep");
+        Assert.True(excluded > keepAt, "the per-server excluded-database splice must sit after the 15457 keep");
+        Assert.True(curatedErrorLog > excluded, "the curated ErrorLog arm (all severities, database-gated) still exists under the predicates");
+
+        /* The OR arm shape, byte-exact: the keep, then the predicate-gated curated set. */
+        Assert.Contains(
+            "    " + keep + "\n    OR\n    (\n        ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4) /*master, model, msdb*/\n"
+            + "        AND ISNULL(ft.DatabaseID, 0) < 32761 /*exclude contained AG system databases*/\n"
+            + "        AND (ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN (@excl_db_0))\n"
+            + "        AND\n        (\n",
+            text, StringComparison.Ordinal);
+
+        /* Exactly ONE 15457 arm: the keep is not also spliced into the curated set (which would make it
+           database-gated again on that path and count the row twice in a reviewer's head). */
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, System.Text.RegularExpressions.Regex.Escape("ft.Error = 15457")).Count);
     }
 
     [Fact]

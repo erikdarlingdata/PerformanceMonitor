@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -37,10 +39,22 @@ namespace PerformanceMonitor.Analysis;
 /// SKUs), and a "change" is what <c>ConfigChangeDiff.DiffServerConfigChanges</c> derives from two
 /// consecutive snapshots. Two consequences are load-bearing and both are disclosed on the fact:</para>
 /// <list type="bullet">
-///   <item><description>The change TIME is the capture that first OBSERVED the new value, not the moment
-///   <c>RECONFIGURE</c> ran. The real change landed somewhere between the previous capture and this one —
-///   <see cref="MetaObservationGapHours"/> is that span, and when it exceeds the before-window the "before"
-///   half may already include the new value. The finding says "first observed at", never "changed at".</description></item>
+///   <item><description>The change TIME the snapshot can give is the capture that first OBSERVED the new
+///   value, not the moment <c>RECONFIGURE</c> ran. The real change landed somewhere between the previous
+///   capture and this one — <see cref="MetaObservationGapHours"/> is that span, and when it exceeds the
+///   before-window the "before" half may already include the new value. On that anchor the finding says
+///   "first observed at", never "changed at". <b>#3740 adds the clock the snapshot lacks</b>: the default
+///   trace records the error-log line <c>sp_configure</c> writes at the instant of the change (msg 15457,
+///   "Configuration option '%ls' changed from %ld to %ld. Run the RECONFIGURE statement to install.", an
+///   <c>ErrorLog</c> event with the real <c>StartTime</c>), and <see cref="ResolveTraceAnchor"/> joins the
+///   diffed change to that row. When one exists for the same option in <c>(previous capture, this
+///   capture]</c>, the ±4 h compare anchors on the trace's time, the span collapses to nothing, and the
+///   prose says "changed at … (default trace)"; <see cref="MetaAnchorClock"/> says which clock the fact
+///   used. When none exists — trace off, Azure SQL Database (no default trace), the row aged out of the
+///   trace's rollover files before the collector saw it, or a non-English instance whose message text the
+///   parser does not read — the observation anchor and every one of its disclosures stand unchanged. The
+///   snapshot diff stays the source of WHAT changed (the trace line carries the values too, but the diff
+///   is what the history tools already trust); the trace is only ever the source of WHEN.</description></item>
 ///   <item><description>Every setting that changed between the same two captures shares ONE change time,
 ///   so they share ONE compare — the data cannot attribute an outcome to one of two settings that were
 ///   observed together, and this class does not pretend to. One fact per change EVENT (capture), naming
@@ -80,8 +94,11 @@ namespace PerformanceMonitor.Analysis;
 /// study's 4× DB-time variance on an unchanged configuration), and the remediation prose repeats it. It does
 /// not fold into an incident — a configuration change is context for whatever else the pass found, not a
 /// symptom of it — and <c>AnomalyIncidentReconciler</c> is not touched. It does not cover
-/// <c>database_config</c> or <c>trace_flags</c> yet (slice two). It does not reach
-/// <c>get_analysis_facts</c>, which runs the fenced <c>CollectAndScoreFactsAsync</c> and not the pass.</para>
+/// <c>database_config</c> or <c>trace_flags</c> yet (slice two) — though <see cref="ResolveTraceAnchor"/>
+/// is written for them too: <c>ALTER DATABASE</c> and <c>DBCC TRACEON</c> leave their own trace lines with a
+/// <c>StartTime</c>, and slice two supplies a parser for those lines and reuses the join, the read and the
+/// metadata keys unchanged. It does not reach <c>get_analysis_facts</c>, which runs the fenced
+/// <c>CollectAndScoreFactsAsync</c> and not the pass.</para>
 /// </summary>
 public static class ConfigChangeAttribution
 {
@@ -104,6 +121,29 @@ public static class ConfigChangeAttribution
     public const int CompareWindowHours = 4;
 
     /// <summary>
+    /// The error-log message <c>sp_configure</c> writes at the instant a server setting changes —
+    /// "Configuration option '%ls' changed from %ld to %ld. Run the RECONFIGURE statement to install." —
+    /// which the default trace records as an <c>ErrorLog</c> event carrying this number in its <c>Error</c>
+    /// column (<c>default_trace_events.error_number</c>). Both services' trace reads key on the NUMBER, not
+    /// the text: it is populated on the row (measured on SQL Server 2022, severity 10) and it does not
+    /// change with the instance's language, while the text does. The collector keeps this row outside its
+    /// database predicates for the same reason (<c>DefaultTraceEventsCollector</c>, #3740).
+    /// </summary>
+    public const int ReconfigureMessageNumber = 15457;
+
+    /// <summary>
+    /// <see cref="MetaAnchorClock"/> value: the fact's change time is the config capture that first observed
+    /// the new value, with every observation disclosure in force.
+    /// </summary>
+    public const double AnchorSourceObservation = 0;
+
+    /// <summary>
+    /// <see cref="MetaAnchorClock"/> value: the fact's change time is the default trace's <c>StartTime</c> for
+    /// the sp_configure line that made the change — the moment it happened, to the trace's millisecond.
+    /// </summary>
+    public const double AnchorSourceDefaultTrace = 1;
+
+    /// <summary>
     /// Joins the changed setting names into <see cref="Fact.ObjectName"/> — the one string slot a fact
     /// has, since <see cref="Fact.Metadata"/> is doubles-only by contract. No <c>sys.configurations</c>
     /// name contains a semicolon, so the composer can split on it.
@@ -120,10 +160,29 @@ public static class ConfigChangeAttribution
 
     /// <summary>How many settings changed at this event (also the fact's Value).</summary>
     public const string MetaChangedSettings = "changed_settings";
-    /// <summary>The observed change time as Unix seconds — a DateTime cannot ride in a double map.</summary>
+    /// <summary>The change time the compare is ANCHORED on, as Unix seconds — a DateTime cannot ride in a
+    /// double map. The trace's <c>StartTime</c> when <see cref="MetaAnchorClock"/> is
+    /// <see cref="AnchorSourceDefaultTrace"/>, the observing capture's time otherwise (#3740). Readers that
+    /// want the capture regardless of anchor take <see cref="MetaObservedAtUnix"/>.</summary>
     public const string MetaChangeTimeUnix = "change_time_unix";
+    /// <summary>Which clock <see cref="MetaChangeTimeUnix"/> is in: <see cref="AnchorSourceObservation"/> (0) or
+    /// <see cref="AnchorSourceDefaultTrace"/> (1). A number because the metadata map is doubles-only; the two
+    /// named constants are the whole domain, and the composer reads the key through them. The key on the
+    /// wire is <c>anchor_source</c>; the constant is not named after it because <c>FactSourceRegistryTests</c>
+    /// sweeps every <c>Source = "…"</c> literal in the analysis assemblies as a fact-source stamp, and a
+    /// constant ending in <c>Source</c> would be read as one and fail the registry's set equality.</summary>
+    public const string MetaAnchorClock = "anchor_source";
+    /// <summary>The config capture that first observed the new value, as Unix seconds — always present, and
+    /// equal to <see cref="MetaChangeTimeUnix"/> on the observation anchor.</summary>
+    public const string MetaObservedAtUnix = "observed_at_unix";
+    /// <summary>On the trace anchor only: hours from the trace's change time to the capture that first observed
+    /// it — how late the snapshot was, which is a disclosure about this CARD's timing, not about the compare's
+    /// windows (those are anchored on the trace).</summary>
+    public const string MetaObservedLagHours = "observed_lag_hours";
     /// <summary>Hours from the previous config capture to the one that observed the change: the span the
-    /// real change landed in.</summary>
+    /// real change landed in. 0 on the trace anchor (#3740) — the trace stamps the change to the
+    /// millisecond, and a span of a few milliseconds is not a disclosure; the composer's span sentences
+    /// are gated on this being positive, so they fall silent by construction.</summary>
     public const string MetaObservationGapHours = "observation_gap_hours";
     /// <summary>Nominal hours in the before half (always <see cref="CompareWindowHours"/>).</summary>
     public const string MetaBeforeHours = "before_hours";
@@ -156,6 +215,10 @@ public static class ConfigChangeAttribution
     /// (<c>ConfigChangeDiff.ServerConfigChange.RequiresRestart</c>) — the change has not happened to the
     /// engine yet, and nothing SHOULD have moved.</summary>
     public static string RequiresRestartKey(string setting) => $"{setting}|requires_restart";
+    /// <summary>The default trace's change time for this setting as Unix seconds — present only for a setting
+    /// the trace anchor matched (#3740). On a multi-setting event the fact's anchor is the LATEST of these;
+    /// a setting without this key had no matching trace line in the span and rides the event's anchor.</summary>
+    public static string TraceChangeTimeUnixKey(string setting) => $"{setting}|trace_change_time_unix";
 
     /// <summary>Per-moved-key verdict: +1 worse, −1 better. Only non-stable rows get entries.</summary>
     public static string StatusKey(string factKey) => $"{factKey}|status";
@@ -199,6 +262,32 @@ public static class ConfigChangeAttribution
     {
         public TimeSpan ObservationGap => ChangeTime - PreviousCaptureTime;
     }
+
+    /// <summary>
+    /// One stored default-trace row as the services hand it here: the event time ALREADY de-skewed to naive
+    /// UTC (the stored <c>event_time</c> is the monitored server's local wall clock — <c>fn_trace_gettable</c>'s
+    /// <c>StartTime</c> — and each service subtracts the collected <c>server_properties.utc_offset_minutes</c>
+    /// exactly as every other reader of that column does; see <c>ServerLocalReadFrameDisciplineTests</c>), and
+    /// the raw <c>text_data</c>. Nothing else about the row matters to the join.
+    /// </summary>
+    public sealed record TraceLine(DateTime EventTimeUtc, string? TextData);
+
+    /// <summary>
+    /// One trace line read as a change: WHICH subject it names (a <c>sys.configurations</c> option for the
+    /// server_config slice; a database option or a trace flag for slice two), the values it states, and
+    /// when. Produced by a parser such as <see cref="ParseReconfigureLine"/>; consumed by
+    /// <see cref="ResolveTraceAnchor"/>, which is written against this record and not against the message
+    /// so that slice two supplies a parser and reuses the join.
+    /// </summary>
+    public sealed record TraceChange(string Subject, long? OldValue, long? NewValue, DateTime ChangedAtUtc);
+
+    /// <summary>
+    /// The trace's answer to WHEN: <see cref="ChangedAtUtc"/> is the anchor the compare uses — the LATEST
+    /// matched line, i.e. the moment the configuration the capture observed was complete — and
+    /// <see cref="Matched"/> is one line per setting the join found, keyed by the setting's own name (the
+    /// diff's spelling, not the message's), so the fact can say per setting which ones the trace dated.
+    /// </summary>
+    public sealed record TraceAnchor(DateTime ChangedAtUtc, IReadOnlyDictionary<string, TraceChange> Matched);
 
     /// <summary>The two halves of the compare, in the order <c>ComparePeriodsAsync</c> takes them.</summary>
     public sealed record CompareWindows(
@@ -275,6 +364,129 @@ public static class ConfigChangeAttribution
             clamped);
     }
 
+    /* ── the trace anchor (#3740) ── */
+
+    /// <summary>
+    /// Msg 15457 as the default trace stores it. The <c>TextData</c> of an <c>ErrorLog</c> trace event is the
+    /// RAW error-log line — <c>2026-09-20 01:32:16.91 spid95      Configuration option 'max degree of
+    /// parallelism' changed from 0 to 8. Run the RECONFIGURE statement to install.</c> (measured) — so the
+    /// pattern is anchored on the message's fixed words wherever they fall, never on the start of the
+    /// text. The option name is the <c>%ls</c> the engine formats in: the <c>sys.configurations</c> name,
+    /// which is what <c>server_config.configuration_name</c> holds, so the join needs no alias table. No
+    /// option name contains an apostrophe. The values are <c>%ld</c>: integers, matched with a sign so a
+    /// future negative could not silently fail the whole line. English text only — the number in
+    /// <c>error_number</c> is what selects the row, and a non-English instance's line simply does not
+    /// parse, which leaves that setting on the observation anchor rather than mis-dating it.
+    /// </summary>
+    private static readonly Regex ReconfigureLine = new(
+        @"Configuration option '(?<name>[^']+)' changed from (?<old>-?\d+) to (?<new>-?\d+)\.",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Reads one stored trace line as a server-configuration change, or null when the text is not msg 15457's
+    /// shape (any other ErrorLog write the caller's read let through, or a localized message). The subject is
+    /// the option name exactly as the message spells it; <see cref="ResolveTraceAnchor"/> compares it to the
+    /// diff's name case-insensitively because <c>sys.configurations</c> names are lower-case and the message
+    /// repeats them verbatim, but a match that depended on it would be brittle for no gain.
+    /// </summary>
+    public static TraceChange? ParseReconfigureLine(TraceLine line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        if (string.IsNullOrEmpty(line.TextData))
+            return null;
+
+        var m = ReconfigureLine.Match(line.TextData);
+        if (!m.Success)
+            return null;
+
+        return new TraceChange(
+            m.Groups["name"].Value.Trim(),
+            long.TryParse(m.Groups["old"].Value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var oldValue) ? oldValue : null,
+            long.TryParse(m.Groups["new"].Value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var newValue) ? newValue : null,
+            line.EventTimeUtc);
+    }
+
+    /// <summary>
+    /// The join, written once for every config slice: for each setting the diff says changed at
+    /// <paramref name="change"/>, find the trace line that MADE that change, and anchor the event on the
+    /// latest of them. A line qualifies when all of the following hold, each for a reason:
+    /// <list type="bullet">
+    ///   <item><description>Its time is in <c>(previous capture, this capture]</c>. The previous capture saw the
+    ///   old value and this one saw the new, so the change that produced what this capture observed happened
+    ///   in that span and nowhere else. The upper edge is inclusive because a line stamped at the capture's own
+    ///   instant was seen by it; the lower edge is exclusive because a line stamped at the previous capture's
+    ///   instant was seen by THAT capture. No padding on either side: the stored event time is de-skewed by a
+    ///   whole-minute offset, and padding the upper edge would let a change made just AFTER the capture — one
+    ///   this capture did not observe — anchor a compare of the wrong change.</description></item>
+    ///   <item><description>Its subject is the setting's name (ordinal, case-insensitive, trimmed).</description></item>
+    ///   <item><description>Its values are a real move that lands on what the capture observed:
+    ///   <c>old ≠ new</c> and <c>new</c> equals the diff's new configured value (in-use when the diff has no
+    ///   configured value). Both halves are measured necessities. <c>sp_configure</c> re-run with the current
+    ///   value still writes the line ("changed from 50 to 50", measured), and that no-op is not the change;
+    ///   and a span can hold several real moves (0 → 8 at 10:00, 8 → 4 at 11:00), of which the one that
+    ///   produced the observed value is the last whose <c>new</c> is that value. A line whose values do not
+    ///   parse cannot be shown to be the change and is not used.</description></item>
+    /// </list>
+    /// Among qualifying lines the LATEST wins (0 → 8, 8 → 4, 4 → 8 observed as 0 → 8 anchors on the last
+    /// 4 → 8: that is when the value the capture saw was installed). The event's anchor is the latest matched
+    /// setting's time — the moment the observed configuration was complete — and a setting no line matched
+    /// rides that anchor, disclosed per setting through <see cref="TraceChangeTimeUnixKey"/>. Returns null
+    /// when no setting matched, and the caller keeps the observation anchor.
+    ///
+    /// <para><paramref name="parse"/> is the slice's reader of a line — <see cref="ParseReconfigureLine"/> for
+    /// server_config. Slice two (database options, trace flags) supplies its own over the same
+    /// <see cref="TraceLine"/> shape and calls this method unchanged; nothing here knows what a subject is.
+    /// The lines the caller hands in should already be the slice's candidates (the services select
+    /// <c>error_number = 15457</c> in SQL) — the parser is the second filter, not the first.</para>
+    /// </summary>
+    public static TraceAnchor? ResolveTraceAnchor(
+        ChangeEvent change, IEnumerable<TraceLine> lines, Func<TraceLine, TraceChange?> parse)
+    {
+        ArgumentNullException.ThrowIfNull(change);
+        ArgumentNullException.ThrowIfNull(lines);
+        ArgumentNullException.ThrowIfNull(parse);
+
+        var inSpan = lines
+            .Where(l => l.EventTimeUtc > change.PreviousCaptureTime && l.EventTimeUtc <= change.ChangeTime)
+            .Select(parse)
+            .Where(c => c is not null)
+            .Select(c => c!)
+            .ToList();
+        if (inSpan.Count == 0)
+            return null;
+
+        var matched = new Dictionary<string, TraceChange>(StringComparer.Ordinal);
+        foreach (var setting in change.Changes)
+        {
+            var observedNew = setting.NewValueConfigured ?? setting.NewValueInUse;
+            if (observedNew is null)
+                continue;
+
+            var line = inSpan
+                .Where(c => string.Equals(c.Subject, setting.Name.Trim(), StringComparison.OrdinalIgnoreCase))
+                .Where(c => c.OldValue is not null && c.NewValue is not null && c.OldValue != c.NewValue && c.NewValue == observedNew)
+                .OrderByDescending(c => c.ChangedAtUtc)
+                .FirstOrDefault();
+            if (line is not null)
+                matched[setting.Name] = line;
+        }
+
+        return matched.Count == 0
+            ? null
+            : new TraceAnchor(matched.Values.Max(c => c.ChangedAtUtc), matched);
+    }
+
+    /// <summary>The server_config slice's join: <see cref="ResolveTraceAnchor"/> over <see cref="ParseReconfigureLine"/>.</summary>
+    public static TraceAnchor? ResolveServerConfigTraceAnchor(ChangeEvent change, IEnumerable<TraceLine> lines) =>
+        ResolveTraceAnchor(change, lines, ParseReconfigureLine);
+
+    /// <summary>The instant the compare and the fact anchor on: the trace's when there is one, the observing capture's otherwise.</summary>
+    public static DateTime AnchorTime(ChangeEvent change, TraceAnchor? anchor)
+    {
+        ArgumentNullException.ThrowIfNull(change);
+        return anchor?.ChangedAtUtc ?? change.ChangeTime;
+    }
+
     /// <summary>
     /// The coverage caveat the compare is flagged with — the same rule <c>compare_analysis</c> applies on
     /// both SKUs: a side that was partly observed or unobserved flags every verdict row. A null coverage
@@ -288,6 +500,9 @@ public static class ConfigChangeAttribution
     /// Builds the fact. <paramref name="compare"/> is null when the compare could not run at all (both
     /// collections threw, so both coverages are null and both fact lists are empty); an EMPTY compare over
     /// observed windows is not null — it is the "nothing moved" answer, and that is a finding too.
+    /// <paramref name="anchor"/> is the trace's answer to WHEN (#3740) or null for the observation anchor;
+    /// <paramref name="windows"/> must have been computed over <see cref="AnchorTime"/> of the same pair,
+    /// so the fact's change time and the compare's halves are one instant.
     /// </summary>
     public static Fact BuildFact(
         int serverId,
@@ -296,16 +511,23 @@ public static class ConfigChangeAttribution
         CompareWindows windows,
         ComparisonResult? compare,
         WindowCoverage? beforeCoverage,
-        WindowCoverage? afterCoverage)
+        WindowCoverage? afterCoverage,
+        TraceAnchor? anchor = null)
     {
         ArgumentNullException.ThrowIfNull(change);
         ArgumentNullException.ThrowIfNull(windows);
 
+        var anchorTime = AnchorTime(change, anchor);
         var metadata = new Dictionary<string, double>(StringComparer.Ordinal)
         {
             [MetaChangedSettings] = change.Changes.Count,
-            [MetaChangeTimeUnix] = new DateTimeOffset(DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Utc)).ToUnixTimeSeconds(),
-            [MetaObservationGapHours] = Math.Max(0, change.ObservationGap.TotalHours),
+            [MetaChangeTimeUnix] = Unix(anchorTime),
+            [MetaAnchorClock] = anchor is null ? AnchorSourceObservation : AnchorSourceDefaultTrace,
+            [MetaObservedAtUnix] = Unix(change.ChangeTime),
+            /* The span disclosure belongs to the observation anchor alone: with the trace's time in hand the
+               "somewhere in the N h since the previous snapshot" sentence would be false, and the composer
+               gates it on this value. */
+            [MetaObservationGapHours] = anchor is null ? Math.Max(0, change.ObservationGap.TotalHours) : 0,
             [MetaBeforeHours] = CompareWindowHours,
             [MetaAfterHoursObserved] = windows.AfterHoursObserved,
             [MetaAfterWindowClamped] = windows.AfterClamped ? 1 : 0,
@@ -317,6 +539,8 @@ public static class ConfigChangeAttribution
             metadata[MetaBeforeCoverageFraction] = beforeCoverage.Fraction;
         if (afterCoverage is not null)
             metadata[MetaAfterCoverageFraction] = afterCoverage.Fraction;
+        if (anchor is not null)
+            metadata[MetaObservedLagHours] = Math.Max(0, (change.ChangeTime - anchor.ChangedAtUtc).TotalHours);
 
         foreach (var c in change.Changes)
         {
@@ -325,6 +549,8 @@ public static class ConfigChangeAttribution
             if (c.OldValueConfigured is { } oldCfg) metadata[OldConfiguredKey(c.Name)] = oldCfg;
             if (c.NewValueConfigured is { } newCfg) metadata[NewConfiguredKey(c.Name)] = newCfg;
             metadata[RequiresRestartKey(c.Name)] = c.RequiresRestart ? 1 : 0;
+            if (anchor is not null && anchor.Matched.TryGetValue(c.Name, out var traced))
+                metadata[TraceChangeTimeUnixKey(c.Name)] = Unix(traced.ChangedAtUtc);
         }
 
         if (compare is not null)
@@ -360,6 +586,11 @@ public static class ConfigChangeAttribution
             Metadata = metadata
         };
     }
+
+    /// <summary>Naive UTC to Unix seconds. The store's timestamps are naive UTC (Kind Unspecified off both
+    /// readers), so the kind is stamped rather than converted.</summary>
+    private static double Unix(DateTime utc) =>
+        new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds();
 
     /// <summary>The setting names a fact's ObjectName carries, in the order they were joined.</summary>
     public static IReadOnlyList<string> SettingNames(Fact fact) =>

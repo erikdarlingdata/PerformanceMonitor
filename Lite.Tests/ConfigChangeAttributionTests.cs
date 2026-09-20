@@ -28,11 +28,20 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The events here are built from real <see cref="ConfigChangeDiff"/> output over planted snapshots,
 /// mapped exactly as the services map them, so a change in the diff's record shape breaks these pins
 /// rather than passing them over.</para>
+///
+/// <para>#3740 adds the trace anchor: the default trace's sp_configure line (msg 15457) as the source of
+/// WHEN, joined to the diffed change by <see cref="ConfigChangeAttribution.ResolveTraceAnchor"/>. The
+/// trace lines here carry the TextData shape measured on SQL Server 2022 — the raw error-log line, with
+/// its timestamp and spid prefix — so the parser is pinned against what the store actually holds. The
+/// Darling twin of the pure pins is <c>Darling.Tests/ConfigChangeTraceAnchorTests</c>; the DuckDB pipeline
+/// arms are in <see cref="ConfigChangeAttributionPipelineTests"/>.</para>
 /// </summary>
 public sealed class ConfigChangeAttributionTests
 {
     private static readonly DateTime T0 = new(2026, 9, 18, 14, 0, 0, DateTimeKind.Utc);
     private static readonly IReadOnlyDictionary<string, BaselineBucket> NoDispersion = new Dictionary<string, BaselineBucket>();
+    private const string Maxdop = "max degree of parallelism";
+    private const string Ctfp = "cost threshold for parallelism";
 
     /* ── the change events ── */
 
@@ -444,6 +453,276 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("`cost threshold for parallelism` 5 → 50, `max degree of parallelism` 0 → 8", advice.Investigation, StringComparison.Ordinal);
     }
 
+    /* ── the trace anchor (#3740) ── */
+
+    /// <summary>
+    /// The TextData of an ErrorLog trace event is the RAW error-log line — timestamp, spid, then the message
+    /// (measured) — so the parser must find msg 15457's fixed words mid-string, read the option name between
+    /// the quotes and both values, and reject everything else: another ErrorLog write, a line in another
+    /// language, an empty TextData. The option name is the sys.configurations spelling, which is what the diff
+    /// calls the setting, so no alias table stands between the two.
+    /// </summary>
+    [Fact]
+    public void ParseReconfigureLine_ReadsTheRawErrorLogLine_AndRejectsOtherText()
+    {
+        var line = new ConfigChangeAttribution.TraceLine(T0.AddHours(-2), RawLine(Maxdop, 0, 8));
+        var parsed = ConfigChangeAttribution.ParseReconfigureLine(line);
+
+        Assert.NotNull(parsed);
+        Assert.Equal(Maxdop, parsed!.Subject);
+        Assert.Equal(0, parsed.OldValue);
+        Assert.Equal(8, parsed.NewValue);
+        Assert.Equal(T0.AddHours(-2), parsed.ChangedAtUtc);
+
+        /* A name with parentheses and a large value — 'max server memory (MB)' 2147483647 → 65536. */
+        var memory = ConfigChangeAttribution.ParseReconfigureLine(
+            new ConfigChangeAttribution.TraceLine(T0, RawLine("max server memory (MB)", 2147483647, 65536)));
+        Assert.Equal("max server memory (MB)", memory!.Subject);
+        Assert.Equal(2147483647, memory.OldValue);
+        Assert.Equal(65536, memory.NewValue);
+
+        /* Not the message: another ErrorLog write that the SQL-side error_number filter would not let
+           through anyway, a localized line, an empty TextData, a null TextData. */
+        Assert.Null(ConfigChangeAttribution.ParseReconfigureLine(new ConfigChangeAttribution.TraceLine(T0,
+            "2026-09-18 13:00:00.12 spid7s      SQL Server has encountered 1 occurrence(s) of I/O requests taking longer than 15 seconds")));
+        Assert.Null(ConfigChangeAttribution.ParseReconfigureLine(new ConfigChangeAttribution.TraceLine(T0,
+            "2026-09-18 13:00:00.12 spid95      Die Konfigurationsoption 'max degree of parallelism' wurde von 0 in 8 geändert.")));
+        Assert.Null(ConfigChangeAttribution.ParseReconfigureLine(new ConfigChangeAttribution.TraceLine(T0, string.Empty)));
+        Assert.Null(ConfigChangeAttribution.ParseReconfigureLine(new ConfigChangeAttribution.TraceLine(T0, null)));
+    }
+
+    /// <summary>
+    /// The join's positive arm: a 15457 line for the SAME option, inside <c>(previous capture, this capture]</c>,
+    /// whose values move to the observed new value, anchors the event — and the fact built on it says so in
+    /// every place a reader could look: <c>anchor_source</c> = default trace, <c>change_time_unix</c> = the
+    /// trace's time, <c>observed_at_unix</c> = the capture, the observation gap collapsed to 0, the lag from
+    /// change to observation stated, and the per-setting trace stamp present. The compare windows, computed
+    /// over the anchor, are the ±4 h around the CHANGE — so a change 27 h before a fresh observation has a
+    /// complete after half where the observation anchor would have had a clamped one.
+    /// </summary>
+    [Fact]
+    public void ResolveTraceAnchor_MatchesTheSameOptionInTheSpan_AndTheFactSaysWhichClockItUsed()
+    {
+        var previous = T0.AddHours(-30);
+        var changedAt = T0.AddHours(-27);
+        var evt = MaxdopEvent(T0, previous);
+
+        var anchor = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(changedAt, RawLine(Maxdop, 0, 8)),
+        });
+
+        Assert.NotNull(anchor);
+        Assert.Equal(changedAt, anchor!.ChangedAtUtc);
+        var only = Assert.Single(anchor.Matched);
+        Assert.Equal(Maxdop, only.Key);
+        Assert.Equal(changedAt, only.Value.ChangedAtUtc);
+        Assert.Equal(changedAt, ConfigChangeAttribution.AnchorTime(evt, anchor));
+
+        var windows = ConfigChangeAttribution.WindowsFor(ConfigChangeAttribution.AnchorTime(evt, anchor), T0);
+        Assert.Equal(changedAt.AddHours(-4), windows.BeforeStart);
+        Assert.Equal(changedAt, windows.BeforeEnd);
+        Assert.Equal(changedAt.AddHours(4), windows.AfterEnd);
+        Assert.False(windows.AfterClamped);
+
+        var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, windows, compare: null, null, null, anchor);
+        var m = fact.Metadata;
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(new DateTimeOffset(changedAt).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaChangeTimeUnix]);
+        Assert.Equal(new DateTimeOffset(T0).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaObservedAtUnix]);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaObservationGapHours]);
+        Assert.Equal(27.0, m[ConfigChangeAttribution.MetaObservedLagHours], precision: 6);
+        Assert.Equal(new DateTimeOffset(changedAt).ToUnixTimeSeconds(), m[ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)]);
+        Assert.Equal(4.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 6);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaAfterWindowClamped]);
+
+        /* The observation-anchored twin of the same event, for contrast: the capture is the change time, the
+           gap is the full span, the after half is clamped to the pass end, and there is no lag key at all. */
+        var observed = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(T0, T0), compare: null, null, null);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, observed.Metadata[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(observed.Metadata[ConfigChangeAttribution.MetaChangeTimeUnix], observed.Metadata[ConfigChangeAttribution.MetaObservedAtUnix]);
+        Assert.Equal(30.0, observed.Metadata[ConfigChangeAttribution.MetaObservationGapHours], precision: 6);
+        Assert.False(observed.Metadata.ContainsKey(ConfigChangeAttribution.MetaObservedLagHours));
+        Assert.False(observed.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
+        Assert.Equal(1, observed.Metadata[ConfigChangeAttribution.MetaAfterWindowClamped]);
+    }
+
+    /// <summary>
+    /// The join's negative arms, each for a stated reason: a line for a DIFFERENT option in the span; a line
+    /// for the same option OUTSIDE the span on either side (at the previous capture's own instant — that
+    /// capture saw it — and after this capture — this capture did not); and no lines at all. Every one
+    /// leaves the caller on the observation anchor. A line stamped exactly at this capture's instant is
+    /// inside the span.
+    /// </summary>
+    [Fact]
+    public void ResolveTraceAnchor_ADifferentOption_OrALineOutsideTheSpan_DoesNotMatch()
+    {
+        var previous = T0.AddHours(-30);
+        var evt = MaxdopEvent(T0, previous);
+
+        Assert.Null(ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-2), RawLine(Ctfp, 5, 50)),
+        }));
+
+        Assert.Null(ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(previous, RawLine(Maxdop, 0, 8)),               /* at the previous capture: it saw this */
+            new ConfigChangeAttribution.TraceLine(previous.AddMinutes(-1), RawLine(Maxdop, 0, 8)), /* before it */
+            new ConfigChangeAttribution.TraceLine(T0.AddSeconds(1), RawLine(Maxdop, 0, 8)),        /* after this capture: it did not see this */
+        }));
+
+        Assert.Null(ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, Array.Empty<ConfigChangeAttribution.TraceLine>()));
+        Assert.Equal(T0, ConfigChangeAttribution.AnchorTime(evt, null)); /* the observation anchor IS the capture */
+
+        var atCapture = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0, RawLine(Maxdop, 0, 8)),
+        });
+        Assert.Equal(T0, atCapture!.ChangedAtUtc);
+    }
+
+    /// <summary>
+    /// The value rule, both halves measured: <c>sp_configure</c> re-run with the current value still writes
+    /// the line ("changed from 50 to 50"), and that no-op must not anchor; and a span can hold several real
+    /// moves, of which the one that produced the OBSERVED value is the last whose new value is that value.
+    /// A span whose lines never reach the observed value (0 → 4 when the capture saw 8) proves nothing about
+    /// when 8 arrived and does not anchor.
+    /// </summary>
+    [Fact]
+    public void ResolveTraceAnchor_SkipsTheNoOpRerun_AndTakesTheLastRealMoveToTheObservedValue()
+    {
+        var previous = T0.AddHours(-30);
+        var evt = MaxdopEvent(T0, previous);
+
+        /* 0 → 8 at −10 h, then a no-op 8 → 8 at −2 h: the change is the first line. */
+        var noOp = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-10), RawLine(Maxdop, 0, 8)),
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-2), RawLine(Maxdop, 8, 8)),
+        });
+        Assert.Equal(T0.AddHours(-10), noOp!.ChangedAtUtc);
+
+        /* 0 → 8, 8 → 4, 4 → 8: the value the capture saw was installed by the LAST line. */
+        var flapped = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-10), RawLine(Maxdop, 0, 8)),
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-6), RawLine(Maxdop, 8, 4)),
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-3), RawLine(Maxdop, 4, 8)),
+        });
+        Assert.Equal(T0.AddHours(-3), flapped!.ChangedAtUtc);
+
+        /* Order of arrival is not order of time: the same three lines handed newest-first anchor the same. */
+        var reversed = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-3), RawLine(Maxdop, 4, 8)),
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-6), RawLine(Maxdop, 8, 4)),
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-10), RawLine(Maxdop, 0, 8)),
+        });
+        Assert.Equal(T0.AddHours(-3), reversed!.ChangedAtUtc);
+
+        /* A move that never lands on the observed value is not the change the capture saw. */
+        Assert.Null(ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddHours(-10), RawLine(Maxdop, 0, 4)),
+        }));
+    }
+
+    /// <summary>
+    /// Two settings on one capture, one of them dated by the trace: the event anchors on the dated one (the
+    /// moment the observed configuration was complete), the matched map names only it, the fact carries the
+    /// per-setting stamp for it alone, and the prose says which setting the trace did not date. Two dated
+    /// settings anchor on the LATER line.
+    /// </summary>
+    [Fact]
+    public void ResolveTraceAnchor_TwoSettings_AnchorsOnTheLatestDatedOne_AndNamesTheUndated()
+    {
+        var previous = T0.AddHours(-2);
+        var snapshots = Snapshots(
+            (previous, Maxdop, 0, 0),
+            (previous, Ctfp, 5, 5),
+            (T0, Maxdop, 8, 8),
+            (T0, Ctfp, 50, 50));
+        var evt = Assert.Single(Events(snapshots, T0.AddHours(-4), T0));
+
+        var oneDated = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddMinutes(-50), RawLine(Maxdop, 0, 8)),
+        });
+        Assert.Equal(T0.AddMinutes(-50), oneDated!.ChangedAtUtc);
+        Assert.Equal(new[] { Maxdop }, oneDated.Matched.Keys.ToArray());
+
+        var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(oneDated.ChangedAtUtc, T0), compare: null, null, null, oneDated);
+        Assert.True(fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
+        Assert.False(fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Ctfp)));
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.Contains("changed at 2026-09-18 13:10 UTC (default trace", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"The trace dated 1 of the 2 settings; `{Ctfp}` had no matching line in the span between snapshots and shares this anchor.", advice.Investigation, StringComparison.Ordinal);
+
+        var bothDated = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[]
+        {
+            new ConfigChangeAttribution.TraceLine(T0.AddMinutes(-50), RawLine(Maxdop, 0, 8)),
+            new ConfigChangeAttribution.TraceLine(T0.AddMinutes(-49), RawLine(Ctfp, 5, 50)),
+        });
+        Assert.Equal(T0.AddMinutes(-49), bothDated!.ChangedAtUtc);
+        Assert.Equal(2, bothDated.Matched.Count);
+        var bothFact = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(bothDated.ChangedAtUtc, T0), compare: null, null, null, bothDated);
+        var bothAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { bothFact }.ToFactLookup())!;
+        Assert.DoesNotContain("The trace dated", bothAdvice.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The prose on the trace anchor: "changed at" with the source named, the snapshot's lateness stated as a
+    /// fact about the card rather than the compare, the compare sentence anchored on "the change", and the
+    /// observation anchor's span sentences GONE — their premise (the change landed somewhere in a span) is
+    /// false once the trace has dated it. A change observed within minutes says so instead of "0 h later".
+    /// The static fallback and the headline are unchanged in shape.
+    /// </summary>
+    [Fact]
+    public void Compose_OnTheTraceAnchor_SaysChangedAt_NamesTheTrace_AndDropsTheSpanSentences()
+    {
+        var evt = MaxdopEvent(T0, T0.AddHours(-30));
+        var changedAt = T0.AddHours(-27).AddMinutes(-12);
+        var anchor = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(evt, new[] { new ConfigChangeAttribution.TraceLine(changedAt, RawLine(Maxdop, 0, 8)) })!;
+        var (before, after) = Scored([Cpu(50), Wait("LCK", 0.05)], [Cpu(51), Wait("LCK", 0.052)]);
+        var compare = ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false);
+
+        var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(changedAt, T0), compare, FullCoverage(), FullCoverage(), anchor);
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+
+        Assert.Contains($"`{Maxdop}` 0 → 8 — changed at 2026-09-17 10:48 UTC (default trace: the sp_configure line, msg 15457).", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The configuration snapshot (taken on connect) first observed it 27.2 h later, at 2026-09-18 14:00 UTC; the compare below is anchored on the trace's time, not on that observation.", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("compared the 4 h before the change with the 4 h after it", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("first observed by the configuration snapshot", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("landed somewhere", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("when it was seen, not when it was made", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("may already reflect the new value", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("still filling in", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("nothing moved beyond band in the ±4 h compare", advice.Headline, StringComparison.Ordinal);
+
+        /* Frozen and read back the same. */
+        var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories([fact]));
+        FactAdvice.PopulateStoryText([story], [fact]);
+        Assert.Equal(advice.Investigation, FactAdvice.TryReadStoryText(story.StoryText)!.Investigation);
+
+        /* Observed within minutes of the change: no "0 h later". */
+        var prompt = MaxdopEvent(T0, T0.AddHours(-2));
+        var promptAnchor = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(prompt, new[] { new ConfigChangeAttribution.TraceLine(T0.AddMinutes(-3), RawLine(Maxdop, 0, 8)) })!;
+        var promptFact = ConfigChangeAttribution.BuildFact(1, prompt, 0, ConfigChangeAttribution.WindowsFor(T0.AddMinutes(-3), T0), compare, FullCoverage(), FullCoverage(), promptAnchor);
+        var promptAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { promptFact }.ToFactLookup())!;
+        Assert.Contains("first observed it at 2026-09-18 14:00 UTC, within minutes of the change.", promptAdvice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("h later", promptAdvice.Investigation, StringComparison.Ordinal);
+
+        /* And the observation anchor still reads exactly as #3720 wrote it. */
+        var observed = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(4)), compare, FullCoverage(), FullCoverage());
+        var observedAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { observed }.ToFactLookup())!;
+        Assert.Contains("first observed by the configuration snapshot at 2026-09-18 14:00 UTC", observedAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("landed somewhere in the 30 h since the previous snapshot", observedAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("compared the 4 h before the observation with", observedAdvice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("default trace", observedAdvice.Investigation, StringComparison.Ordinal);
+    }
+
     /// <summary>The static fallback exists for findings persisted before the composer, and the composer falls back to it when the fact is absent.</summary>
     [Fact]
     public void TheStaticBlock_Exists_AndIsTheFallbackWithoutTheFact()
@@ -485,6 +764,11 @@ public sealed class ConfigChangeAttributionTests
         Assert.Single(Events(
             Snapshots((previousCapture, "max degree of parallelism", 0, 0), (observedAt, "max degree of parallelism", 8, 8)),
             observedAt.AddHours(-4), observedAt));
+
+    /// <summary>Msg 15457's TextData as the default trace stores it (measured on SQL Server 2022): the raw
+    /// error-log line — timestamp, spid, six spaces, then the message.</summary>
+    private static string RawLine(string option, long oldValue, long newValue) =>
+        $"2026-09-17 10:48:00.91 spid95      Configuration option '{option}' changed from {oldValue} to {newValue}. Run the RECONFIGURE statement to install.";
 
     private static Fact Wait(string type, double fraction) => new()
     {

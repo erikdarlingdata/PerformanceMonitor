@@ -34,6 +34,14 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The Darling twin's wiring is byte-for-byte the same statement over <c>server_config</c> instead of
 /// <c>v_server_config</c> and the same call sequence; it has no in-process store to run against here, and
 /// its end-to-end test runs against the dev PostgreSQL in CI's Darling PostgreSQL job.</para>
+///
+/// <para>#3740 adds the trace-anchor arms: a stored msg 15457 line for the same option in the span between
+/// the two captures anchors the compare on the trace's time ("changed at", <c>anchor_source</c> = default
+/// trace, the after half complete where the observation anchor's would have been clamped); a line for a
+/// DIFFERENT option leaves the observation anchor untouched. Both plant the server at <b>UTC+10</b> and store
+/// the line's <c>event_time</c> in the server's local frame, as the collector does, so a read that forgot to
+/// de-skew would put the line ten hours in the future — outside the span — and the positive arm would fail on
+/// selection, not merely on the rendered hour.</para>
 /// </summary>
 public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -99,9 +107,13 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.Contains("27 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("not an accusation", advice.Remediation, StringComparison.Ordinal);
 
-        /* The compare ran over observed halves: the verdict counts are on the row, and it is not "unavailable". */
+        /* No trace line in the store: the observation anchor, and the fact says so (#3740). */
         Assert.NotNull(finding.RootFactMetadata);
-        Assert.Equal(0, finding.RootFactMetadata![ConfigChangeAttribution.MetaCompareUnavailable]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, finding.RootFactMetadata![ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(finding.RootFactMetadata[ConfigChangeAttribution.MetaChangeTimeUnix], finding.RootFactMetadata[ConfigChangeAttribution.MetaObservedAtUnix]);
+
+        /* The compare ran over observed halves: the verdict counts are on the row, and it is not "unavailable". */
+        Assert.Equal(0, finding.RootFactMetadata[ConfigChangeAttribution.MetaCompareUnavailable]);
         Assert.True(finding.RootFactMetadata.ContainsKey(ConfigChangeAttribution.MetaComparedKeys));
         Assert.Equal(1, finding.RootFactMetadata[ConfigChangeAttribution.MetaChangedSettings]);
         Assert.Equal(8, finding.RootFactMetadata[ConfigChangeAttribution.NewInUseKey(Maxdop)]);
@@ -171,6 +183,88 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.Equal(1.0, finding.RootFactMetadata[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);
     }
 
+    /* ── the trace anchor (#3740) ── */
+
+    /// <summary>The planted server's offset: UTC+10, the direction that would SUPPRESS the anchor if the
+    /// read forgot to de-skew (a local stamp read as UTC sits ten hours in the future, past the capture).</summary>
+    private const int ServerOffsetMinutes = 600;
+
+    /// <summary>
+    /// MAXDOP 0 captured 30 h ago, MAXDOP 8 captured 3 h ago, and a stored msg 15457 line for MAXDOP 0 → 8
+    /// stamped 5 h ago (UTC; stored at the server's local wall clock, +10 h): the finding anchors on the
+    /// trace's time. The prose says "changed at" that UTC hour and names the trace; the metadata says
+    /// <c>anchor_source</c> = default trace with the trace time as the change time and the capture as the
+    /// observation; and the after half is COMPLETE (4 h, not clamped) because 5 h ago + 4 h is in the past —
+    /// where the observation anchor, 3 h ago, would have reported 3 h clamped. That last pair is what the
+    /// anchor is FOR: the compare answers the question about the change, not about the snapshot.
+    /// </summary>
+    [Fact]
+    public async Task AMatchingTraceLineInTheSpan_AnchorsTheCompareOnTheTraceTime_AndSaysChangedAt()
+    {
+        var now = DateTime.UtcNow;
+        var changedAtUtc = now.AddHours(-5);
+        await PlantWaitSeriesAsync(now);
+        await PlantServerOffsetAsync(now);
+        await PlantServerConfigAsync(now.AddHours(-30), Maxdop, 0);
+        await PlantServerConfigAsync(now.AddHours(-3), Maxdop, 8);
+        await PlantReconfigureLineAsync(changedAtUtc, Maxdop, 0, 8);
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.Contains($"changed at {changedAtUtc:yyyy-MM-dd HH:mm} UTC (default trace: the sp_configure line, msg 15457)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("first observed it 2 h later", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("compared the 4 h before the change with the 4 h after it", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("first observed by the configuration snapshot", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("still filling in", advice.Investigation, StringComparison.Ordinal);
+
+        var m = finding.RootFactMetadata!;
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(new DateTimeOffset(DateTime.SpecifyKind(changedAtUtc, DateTimeKind.Utc)).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaChangeTimeUnix], precision: 0);
+        Assert.Equal(2.0, m[ConfigChangeAttribution.MetaObservedLagHours], precision: 1);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaObservationGapHours]);
+        Assert.True(m.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
+        Assert.Equal(4.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaAfterWindowClamped]);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaCompareUnavailable]);
+    }
+
+    /// <summary>
+    /// The control: the SAME store shape, but the stored 15457 line names a DIFFERENT option (cost threshold
+    /// for parallelism). The MAXDOP change is not dated by it, so the finding keeps the observation anchor
+    /// exactly as #3720 shipped it — "first observed", the 27 h span, the clamped 3 h after half — and says
+    /// so in <c>anchor_source</c>.
+    /// </summary>
+    [Fact]
+    public async Task ATraceLineForADifferentOption_LeavesTheObservationAnchor()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitSeriesAsync(now);
+        await PlantServerOffsetAsync(now);
+        await PlantServerConfigAsync(now.AddHours(-30), Maxdop, 0);
+        await PlantServerConfigAsync(now.AddHours(-3), Maxdop, 8);
+        await PlantReconfigureLineAsync(now.AddHours(-5), "cost threshold for parallelism", 5, 50);
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.Contains("first observed by the configuration snapshot at", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("27 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("default trace", advice.Investigation, StringComparison.Ordinal);
+
+        var m = finding.RootFactMetadata!;
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.False(m.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
+        Assert.Equal(27.0, m[ConfigChangeAttribution.MetaObservationGapHours], precision: 1);
+        Assert.Equal(3.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);
+        Assert.Equal(1, m[ConfigChangeAttribution.MetaAfterWindowClamped]);
+    }
+
     /* ── plants ── */
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
@@ -212,6 +306,52 @@ VALUES ($1, $2, $3, 'TestServer', $4, 50, $5, 0, 50, $5, 0)";
         P(_serverId);
         P(waitType);
         P(deltaWaitMs);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>The server's collected offset (<c>server_properties.utc_offset_minutes</c>, v42), which the
+    /// trace-anchor read uses to shift its span into the server's frame and de-skew the rows back.</summary>
+    private async Task PlantServerOffsetAsync(DateTime now)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name,
+     edition, product_version, product_level, engine_edition,
+     cpu_count, hyperthread_ratio, physical_memory_mb, utc_offset_minutes)
+VALUES ($1, $2, $3, 'TestServer', 'Developer Edition', '16.0.4265.3', 'RTM', 3, 8, 1, 16384, $4)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(now.AddHours(-30));
+        P(_serverId);
+        P(ServerOffsetMinutes);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// One stored msg 15457 line as the collector writes it: an ErrorLog event (class 22), <c>error_number</c>
+    /// 15457, severity 10, the TextData the raw error-log line (timestamp, spid, then the message — measured on
+    /// SQL Server 2022), and <c>event_time</c> in the SERVER's local wall clock (<c>fn_trace_gettable</c>'s
+    /// StartTime, stored raw): the UTC instant plus the planted offset.
+    /// </summary>
+    private async Task PlantReconfigureLineAsync(DateTime changedAtUtc, string option, long oldValue, long newValue)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO default_trace_events
+    (default_trace_event_id, collection_time, server_id, server_name,
+     event_time, event_name, event_class, spid, database_id, database_name, error_number, severity, text_data)
+VALUES ($1, $2, $3, 'TestServer', $4, 'ErrorLog', 22, 95, 1, 'master', 15457, 10, $5)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(changedAtUtc.AddMinutes(1));
+        P(_serverId);
+        P(changedAtUtc.AddMinutes(ServerOffsetMinutes));
+        P($"{changedAtUtc.AddMinutes(ServerOffsetMinutes):yyyy-MM-dd HH:mm:ss.ff} spid95      Configuration option '{option}' changed from {oldValue} to {newValue}. Run the RECONFIGURE statement to install.");
         await cmd.ExecuteNonQueryAsync();
     }
 

@@ -35,7 +35,9 @@ namespace Darling.Tests;
 ///
 /// <para><b>What each fact reaches, and what it does not.</b>
 /// <see cref="EveryLiteralSqlReadOfTheDefaultTrace_DeSkewsEventTime"/> covers the reads whose table name is a
-/// SQL literal — the two Darling constants and Lite's DuckDB read. The compose annotation query builds its
+/// SQL literal — the two Darling surface constants and Lite's DuckDB read, plus (#3740) the two analysis
+/// passes' trace-anchor reads, which bound the sp_configure line by the config captures' naive-UTC times
+/// and so de-skew for SELECTION as much as for the value. The compose annotation query builds its
 /// table name from the catalog at runtime, so no source scan can see it; that path is covered instead by
 /// <see cref="EveryAnnotationSourcesDeclaredFrame_MatchesItsOwnCollectorsQueryText"/>, which checks the
 /// DECLARED frame against the owning collector's own SQL, and by
@@ -88,6 +90,14 @@ public sealed class ServerLocalReadFrameDisciplineTests
             "the viewer's System Events tab: the same three, byte-identical to the MCP read above"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true,
             "Lite's DuckDB read: server-local window via GetTimeRangeServerLocal, then the row de-skewed in C#"),
+        /* #3740: the CONFIG_CHANGED attribution anchors on the sp_configure trace line. Its span is the two
+           config captures' naive-UTC times, so an un-de-skewed bound would put the line OUTSIDE the span on
+           every non-UTC server and the anchor would silently never resolve — the selection defect, not the
+           rendering one. */
+        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 3, false,
+            "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): one projection + both span bounds, byte-identical in form to the MCP read"),
+        ("Lite/Analysis/AnalysisService.cs", 0, true,
+            "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the one collected offset, then the row de-skewed in C#"),
     ];
 
     [Fact]

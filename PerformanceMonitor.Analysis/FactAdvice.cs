@@ -580,10 +580,16 @@ public static class FactAdvice
     /// fact <see cref="ConfigChangeAttribution"/> built; the setting names ride in ObjectName and the
     /// values in the doubles-only metadata under the keys that class spells.
     ///
-    /// <para><b>The words are chosen against three lies.</b> (1) "changed at" — the config snapshot runs on
-    /// connect, so the time on the fact is when the new value was first SEEN; the prose says "first
-    /// observed" and states the span since the previous snapshot, and when that span exceeds the
-    /// before-window it says the before half may already hold the new value. (2) A full four hours after
+    /// <para><b>The words are chosen against three lies.</b> (1) "changed at" on a clock that only saw the
+    /// value — the config snapshot runs on connect, so on the observation anchor the time on the fact is when
+    /// the new value was first SEEN; the prose says "first observed" and states the span since the previous
+    /// snapshot, and when that span exceeds the before-window it says the before half may already hold the
+    /// new value. When the fact is anchored on the default trace instead
+    /// (<see cref="ConfigChangeAttribution.MetaAnchorClock"/> = <see cref="ConfigChangeAttribution.AnchorSourceDefaultTrace"/>,
+    /// #3740), "changed at" is TRUE — the sp_configure line was stamped at the instant of the change — so the
+    /// prose says it, names the source, states how much later the snapshot first saw it, and drops the span
+    /// sentences, whose premise (the change landed somewhere in a span) no longer holds; a setting the trace
+    /// did not date on a multi-setting event is named as riding the event's anchor. (2) A full four hours after
     /// — when the change is younger than that, the after half is a partial and the prose says how much of
     /// it exists and that later passes complete it. (3) Cause — a before/after is not a causal test; the
     /// remediation says so in the compare tool's own terms and offers the reads that would firm it up.
@@ -628,21 +634,43 @@ public static class FactAdvice
 
         // ── when, and how honest "when" is ──
         var changeUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaChangeTimeUnix);
-        var observedAt = changeUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)changeUnix).UtcDateTime : (DateTime?)null;
+        var changeAt = changeUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)changeUnix).UtcDateTime : (DateTime?)null;
+        var traceAnchored = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAnchorClock) == ConfigChangeAttribution.AnchorSourceDefaultTrace;
         var gapHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservationGapHours);
         var beforeHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBeforeHours);
         if (beforeHours <= 0) beforeHours = ConfigChangeAttribution.CompareWindowHours;
 
         var inv = new StringBuilder();
         inv.Append(changeList);
-        inv.Append(observedAt is null
-            ? " — first observed by the configuration snapshot this window."
-            : $" — first observed by the configuration snapshot at {observedAt.Value:yyyy-MM-dd HH:mm} UTC.");
-        if (gapHours > 0)
+        if (traceAnchored && changeAt is not null)
         {
-            inv.Append($" The snapshot runs on connect, so the change itself landed somewhere in the {gapHours:0.#} h since the previous snapshot; this finding's time is when it was seen, not when it was made.");
-            if (gapHours > beforeHours)
-                inv.Append($" That span is longer than the {beforeHours:0} h before-window, so the \"before\" half may already reflect the new value and a null result here does not mean the change had no effect.");
+            /* #3740: the default trace saw the change happen, so "changed at" is the truth and the snapshot's
+               lateness is a fact about this card's arrival, not about the compare's windows. */
+            inv.Append($" — changed at {changeAt.Value:yyyy-MM-dd HH:mm} UTC (default trace: the sp_configure line, msg {ConfigChangeAttribution.ReconfigureMessageNumber}).");
+            var lagHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservedLagHours);
+            var observedUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservedAtUnix);
+            var observedAt = observedUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)observedUnix).UtcDateTime : (DateTime?)null;
+            if (observedAt is not null)
+            {
+                inv.Append(lagHours >= 0.1
+                    ? $" The configuration snapshot (taken on connect) first observed it {lagHours:0.#} h later, at {observedAt.Value:yyyy-MM-dd HH:mm} UTC; the compare below is anchored on the trace's time, not on that observation."
+                    : $" The configuration snapshot first observed it at {observedAt.Value:yyyy-MM-dd HH:mm} UTC, within minutes of the change.");
+            }
+            var undated = settings.Where(s => !fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(s))).ToList();
+            if (undated.Count > 0 && undated.Count < settings.Count)
+                inv.Append($" The trace dated {settings.Count - undated.Count} of the {settings.Count} settings; {string.Join(", ", undated.Select(s => $"`{s}`"))} had no matching line in the span between snapshots and shares this anchor.");
+        }
+        else
+        {
+            inv.Append(changeAt is null
+                ? " — first observed by the configuration snapshot this window."
+                : $" — first observed by the configuration snapshot at {changeAt.Value:yyyy-MM-dd HH:mm} UTC.");
+            if (gapHours > 0)
+            {
+                inv.Append($" The snapshot runs on connect, so the change itself landed somewhere in the {gapHours:0.#} h since the previous snapshot; this finding's time is when it was seen, not when it was made.");
+                if (gapHours > beforeHours)
+                    inv.Append($" That span is longer than the {beforeHours:0} h before-window, so the \"before\" half may already reflect the new value and a null result here does not mean the change had no effect.");
+            }
         }
 
         // ── the compare ──
@@ -664,7 +692,7 @@ public static class FactAdvice
             var afterClause = afterClamped
                 ? $"the {afterHours:0.#} h after it that exist so far — the after half is still filling in, and later passes complete it"
                 : $"the {afterHours:0.#} h after it";
-            inv.Append($" The engine compared the {beforeHours:0} h before the observation with {afterClause}.");
+            inv.Append($" The engine compared the {beforeHours:0} h before the {(traceAnchored ? "change" : "observation")} with {afterClause}.");
 
             if (pendingRestart.Count == settings.Count)
             {
@@ -2722,7 +2750,7 @@ public static class FactAdvice
             Headline:
                 "A server configuration setting changed inside the analysis window",
             Investigation:
-                "The configuration snapshot (taken on each connect) observed a sys.configurations value that differs from the previous snapshot's, and the engine compared the four hours before that observation with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. The frozen finding text states the setting, old → new, when it was first observed, and which metrics moved beyond their band — or that none did. `get_server_config_changes` lists the change; `compare_analysis` reruns the compare over any pair of windows.",
+                "The configuration snapshot (taken on each connect) observed a sys.configurations value that differs from the previous snapshot's, and the engine compared the four hours before the change with the four hours after it — anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option, on the observation otherwise — banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. The frozen finding text states the setting, old → new, when it changed or was first observed and which clock said so, and which metrics moved beyond their band — or that none did. `get_server_config_changes` lists the change; `compare_analysis` reruns the compare over any pair of windows.",
             Remediation:
                 "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the setting is the first suspect; `audit_config` grades the new value against guidance. If nothing moved, there is nothing to do.");
 

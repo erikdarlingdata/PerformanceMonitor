@@ -709,13 +709,64 @@ AND   capture_time >= COALESCE(
 ORDER BY configuration_name, capture_time";
 
     /// <summary>
+    /// This server's collected UTC offset for the trace-anchor read (#3740) — the same statement
+    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c> runs, inlined because the analysis pass holds a
+    /// DuckDB connection and not a <c>LocalDataService</c>. Skips NULL offsets rather than taking the newest
+    /// row blindly: the column arrived in schema v42 and a store migrated from earlier holds pre-v42
+    /// snapshots that predate it. <c>$1</c> server_id. No row means no offset yet, and the caller treats
+    /// local as UTC — <c>McpServerLocalWindow</c>'s decision, for the same reason (a server with no offset
+    /// almost always has no server-local rows either).
+    /// </summary>
+    internal const string ServerUtcOffsetForAttributionSql = @"
+SELECT utc_offset_minutes
+FROM v_server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The default trace's sp_configure lines for the attribution's trace anchor (#3740): every stored
+    /// <c>ErrorLog</c> row carrying msg 15457 (<see cref="ConfigChangeAttribution.ReconfigureMessageNumber"/>)
+    /// whose event time falls in <c>($2, $3]</c>. Selected on <c>error_number</c>, not on the text — the number
+    /// is populated on the row and does not change with the instance's language; the attribution parses the
+    /// text afterwards. Reads the <c>v_default_trace_events</c> archive view (hot UNION parquet) like the
+    /// System Events read does, so a line that has already aged into parquet still anchors.
+    ///
+    /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
+    /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw — while the capture times this span is made of
+    /// are naive UTC. Lite de-skews in C# rather than SQL, exactly as <c>LocalDataService.GetDefaultTraceEventsAsync</c>
+    /// does: the caller shifts BOTH bounds into the server's frame by the collected offset before binding
+    /// them, and subtracts the same offset from each returned row, so the bounds and the values can never
+    /// disagree about whose clock they are in (<c>ServerLocalReadFrameDisciplineTests</c> pins the row
+    /// de-skew). The Darling twin, <c>DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql</c>, spells
+    /// the same de-skew in SQL. One offset covers the span, so a span straddling a DST transition is off by an
+    /// hour on its far side — the single-snapshot approximation every reader of this column makes.</para>
+    /// </summary>
+    internal const string ReconfigureTraceLinesForAttributionSql = @"
+SELECT event_time, text_data
+FROM v_default_trace_events
+WHERE server_id = $1
+AND   error_number = 15457
+AND   event_time > $2
+AND   event_time <= $3
+ORDER BY event_time";
+
+    /// <summary>
     /// Step 2.5 of the pass (#3653 A10, Q2): if a <c>sys.configurations</c> value was first observed changed
-    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before that
-    /// observation and the (clamped) four hours after it, band the result with
+    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before the change
+    /// and the (clamped) four hours after it, band the result with
     /// <see cref="ComparisonBanding.Compare"/> exactly as <c>compare_analysis</c> would, and append ONE
     /// <c>CONFIG_CHANGED</c> fact carrying the verdict. <see cref="ConfigChangeAttribution"/> holds the
-    /// design — why one fact, why Information, why "first observed" and never "changed at"; this method is
-    /// the store read and the wiring, twin to <c>DarlingAnalysisService.AttributeConfigChangesAsync</c>.
+    /// design — why one fact, why Information, which clock "the change" is on; this method is the store
+    /// reads and the wiring, twin to <c>DarlingAnalysisService.AttributeConfigChangesAsync</c>.
+    ///
+    /// <para><b>Two clocks, in order (#3740).</b> The snapshot diff says WHAT changed and when it was first
+    /// observed; the default trace's sp_configure line, when the store holds one for the same option in the
+    /// span between the two captures, says WHEN it changed. <see cref="ResolveTraceAnchorAsync"/> reads and
+    /// joins those lines; the compare and the fact anchor on the trace's time when the join resolves and on
+    /// the observation otherwise, and the fact says which. The trace read has its own catch inside this
+    /// method's: a fault there costs the pass the trace anchor, not the card.</para>
     ///
     /// <para><b>Cost.</b> A compare is two full fact collections (the collector's thirty-one reads, twice)
     /// plus the baseline lookups, inside the pass budget. It runs only when a change is in-window — the
@@ -766,7 +817,9 @@ ORDER BY configuration_name, capture_time";
                 return;
 
             var latest = events[0];
-            var windows = ConfigChangeAttribution.WindowsFor(latest.ChangeTime, context.TimeRangeEnd);
+            var anchor = await ResolveTraceAnchorAsync(context, latest);
+            var anchorTime = ConfigChangeAttribution.AnchorTime(latest, anchor);
+            var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
             var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
@@ -781,17 +834,84 @@ ORDER BY configuration_name, capture_time";
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
             facts.Add(ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage));
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
 
             AppLogger.Info("AnalysisService",
                 $"Configuration change attributed for {context.ServerName}: {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
-                $"first observed at {latest.ChangeTime:u}, compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
+                $"{(anchor is null ? "first observed at" : "changed at")} {anchorTime:u} ({(anchor is null ? "configuration snapshot" : "default trace, msg 15457")}), " +
+                $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
                 $"{compare?.Worse ?? 0} worse, {compare?.Better ?? 0} better, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Warn("AnalysisService",
                 $"Configuration-change attribution failed for {context.ServerName}; the pass continues without the CONFIG_CHANGED card: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The trace half of step 2.5 (#3740): the stored sp_configure lines in the span between the two config
+    /// captures of <paramref name="change"/>, joined to its settings by
+    /// <see cref="ConfigChangeAttribution.ResolveServerConfigTraceAnchor"/>. Null — the observation anchor —
+    /// when no line matches (trace off, Azure SQL Database, the row aged out before collection, a
+    /// non-English message) AND when the read itself faults: the anchor is an improvement on a card that is
+    /// already true without it, so a store fault here is logged at Warning and costs only the anchor. An
+    /// abandonment still propagates to the caller's classified line (#2443).
+    ///
+    /// <para>The offset is read first and used twice — to shift both span bounds into the server's local
+    /// frame and to de-skew each returned row back to UTC — off the ONE resolved value, so the bounds and
+    /// the values cannot disagree about which clock they are in (the discipline
+    /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter).</para>
+    /// </summary>
+    private async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
+        AnalysisContext context, ConfigChangeAttribution.ChangeEvent change)
+    {
+        try
+        {
+            var lines = new List<ConfigChangeAttribution.TraceLine>();
+            using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
+            using (var connection = _duckDb.CreateConnection())
+            {
+                await connection.OpenAsync(context.CancellationToken);
+
+                var offset = 0;
+                using (var offsetCmd = connection.CreateCommand())
+                {
+                    offsetCmd.CommandText = ServerUtcOffsetForAttributionSql;
+                    offsetCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                    var scalar = await offsetCmd.ExecuteScalarAsync(context.CancellationToken);
+                    if (scalar is not null and not DBNull)
+                        offset = Convert.ToInt32(scalar);
+                }
+
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = ReconfigureTraceLinesForAttributionSql;
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                /* Server-local bounds: the stored event_time is the server's wall clock, so the UTC span is
+                   shifted INTO that frame by the collected offset (local = UTC + offset). */
+                cmd.Parameters.Add(new DuckDBParameter { Value = change.PreviousCaptureTime.AddMinutes(offset) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = change.ChangeTime.AddMinutes(offset) });
+
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    if (reader.IsDBNull(0))
+                        continue;
+                    /* De-skew server-local StartTime -> naive-UTC, the same subtraction the System Events read makes. */
+                    var eventTimeUtc = reader.GetDateTime(0).AddMinutes(-offset);
+                    lines.Add(new ConfigChangeAttribution.TraceLine(
+                        eventTimeUtc,
+                        reader.IsDBNull(1) ? null : reader.GetString(1)));
+                }
+            }
+
+            return ConfigChangeAttribution.ResolveServerConfigTraceAnchor(change, lines);
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            AppLogger.Warn("AnalysisService",
+                $"Default-trace anchor lookup failed for {context.ServerName}; the CONFIG_CHANGED card keeps its observation anchor: {ex.Message}");
+            return null;
         }
     }
 
