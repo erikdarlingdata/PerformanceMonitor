@@ -42,6 +42,13 @@ namespace PerformanceMonitorLite.Tests;
 /// the line's <c>event_time</c> in the server's local frame, as the collector does, so a read that forgot to
 /// de-skew would put the line ten hours in the future — outside the span — and the positive arm would fail on
 /// selection, not merely on the rendered hour.</para>
+///
+/// <para>Slice two (#3653 A10) adds the other two families through the same wiring: a <c>database_config</c>
+/// pair whose newer capture is in the window yields the finding with the database in its seam and its
+/// option in the prose; a <c>trace_flags</c> pair with a flag appearing yields it naming the flag; a
+/// database_config pair that differs ONLY in <c>log_reuse_wait_desc</c> yields nothing; and a server setting
+/// and a trace flag captured two seconds apart — one connect — are ONE finding naming both, with no
+/// "earlier event" counted. The server arms above are unchanged.</para>
 /// </summary>
 public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -265,6 +272,126 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.Equal(1, m[ConfigChangeAttribution.MetaAfterWindowClamped]);
     }
 
+    /* ── slice two: the database-config and trace-flag families ── */
+
+    private const string Db = "AdventureWorks";
+
+    /// <summary>
+    /// A database's recovery model captured FULL 30 h ago and SIMPLE 3 h ago: one finding, rooted at the key,
+    /// with the database in the finding's own seam, <c>change_family</c> = database, and the frozen prose
+    /// naming the database, the option and both values under the family's headline.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseOptionObservedInsideTheWindow_YieldsOneFinding_NamingTheDatabase()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitSeriesAsync(now);
+        await PlantDatabaseConfigAsync(now.AddHours(-30), Db, recoveryModel: "FULL", logReuseWait: "NOTHING");
+        await PlantDatabaseConfigAsync(now.AddHours(-3), Db, recoveryModel: "SIMPLE", logReuseWait: "LOG_BACKUP");
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        Assert.Null(service.WindowEmptyMessage);
+        var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+        Assert.Equal(Db, finding.DatabaseName);
+        Assert.Equal(ConfigChangeAttribution.InformationSeverity, finding.Severity, precision: 9);
+
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.StartsWith($"Database configuration changed: `{Db}` recovery_model FULL → SIMPLE", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("first observed by the configuration snapshot at", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("27 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("log_reuse_wait_desc", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("get_database_config_changes", advice.Remediation, StringComparison.Ordinal);
+
+        var m = finding.RootFactMetadata!;
+        Assert.Equal((double)(int)ConfigChangeAttribution.ChangeFamily.DatabaseConfig, m[ConfigChangeAttribution.MetaChangeFamily]);
+        Assert.Equal(1, m[ConfigChangeAttribution.MetaChangedSettings]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaCompareUnavailable]);
+        Assert.Equal(3.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);
+    }
+
+    /// <summary>A pair that differs only in <c>log_reuse_wait_desc</c> is a log-truncation wait, not a configuration change: no finding.</summary>
+    [Fact]
+    public async Task ALogReuseWaitFlip_IsNotAConfigurationChange()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitSeriesAsync(now);
+        await PlantDatabaseConfigAsync(now.AddHours(-30), Db, recoveryModel: "FULL", logReuseWait: "NOTHING");
+        await PlantDatabaseConfigAsync(now.AddHours(-3), Db, recoveryModel: "FULL", logReuseWait: "LOG_BACKUP");
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        Assert.Null(service.WindowEmptyMessage);
+        Assert.DoesNotContain(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+    }
+
+    /// <summary>
+    /// Trace flag 3226 on at both captures and 4199 appearing on the newer one, 3 h ago: one finding naming the
+    /// flag as enabled with its scope, <c>change_family</c> = trace flags, no database, observation anchor.
+    /// </summary>
+    [Fact]
+    public async Task ATraceFlagEnabledInsideTheWindow_YieldsOneFinding_NamingTheFlag()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitSeriesAsync(now);
+        await PlantTraceFlagAsync(now.AddHours(-30), 3226);
+        await PlantTraceFlagAsync(now.AddHours(-3), 3226);
+        await PlantTraceFlagAsync(now.AddHours(-3), 4199);
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+        Assert.Null(finding.DatabaseName);
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.StartsWith("Trace flag changed: trace flag 4199 enabled (GLOBAL)", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("get_trace_flag_changes", advice.Remediation, StringComparison.Ordinal);
+
+        var m = finding.RootFactMetadata!;
+        Assert.Equal((double)(int)ConfigChangeAttribution.ChangeFamily.TraceFlags, m[ConfigChangeAttribution.MetaChangeFamily]);
+        Assert.Equal(1, m[ConfigChangeAttribution.NewInUseKey("trace flag 4199")]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
+        Assert.Equal(27.0, m[ConfigChangeAttribution.MetaObservationGapHours], precision: 1);
+    }
+
+    /// <summary>
+    /// MAXDOP 0 → 8 captured 3 h ago and trace flag 4199 appearing two seconds after it — the two collectors of
+    /// one connect — are ONE finding: <c>change_family</c> = server + trace flags, both changes in the prose
+    /// under the folded headline, and NO earlier event counted, because there was none. The server setting
+    /// still has its trace anchor considered (no line here, so the observation stands).
+    /// </summary>
+    [Fact]
+    public async Task AServerSettingAndATraceFlagObservedAtOneConnect_AreOneFinding()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitSeriesAsync(now);
+        await PlantServerConfigAsync(now.AddHours(-30), Maxdop, 0);
+        await PlantServerConfigAsync(now.AddHours(-3), Maxdop, 8);
+        await PlantTraceFlagAsync(now.AddHours(-30).AddSeconds(2), 3226);
+        await PlantTraceFlagAsync(now.AddHours(-3).AddSeconds(2), 3226);
+        await PlantTraceFlagAsync(now.AddHours(-3).AddSeconds(2), 4199);
+
+        var service = new AnalysisService(_duckDb);
+        var findings = await service.AnalyzeAsync(_serverId, "TestServer");
+
+        var finding = Assert.Single(findings, f => f.RootFactKey == ConfigChangeAttribution.FactKey);
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.StartsWith("Configuration changed: 2 configuration changes observed together", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 4199 enabled (GLOBAL) — first observed", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("earlier configuration change", advice.Investigation, StringComparison.Ordinal);
+
+        var m = finding.RootFactMetadata!;
+        Assert.Equal(5, m[ConfigChangeAttribution.MetaChangeFamily]);
+        Assert.Equal(2, m[ConfigChangeAttribution.MetaChangedSettings]);
+        Assert.Equal(0, m[ConfigChangeAttribution.MetaEarlierEventsInWindow]);
+        Assert.Equal(8, m[ConfigChangeAttribution.NewInUseKey(Maxdop)]);
+        Assert.Equal(1, m[ConfigChangeAttribution.NewInUseKey("trace flag 4199")]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
+    }
+
     /* ── plants ── */
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
@@ -352,6 +479,60 @@ VALUES ($1, $2, $3, 'TestServer', $4, 'ErrorLog', 22, 95, 1, 'master', 15457, 10
         P(_serverId);
         P(changedAtUtc.AddMinutes(ServerOffsetMinutes));
         P($"{changedAtUtc.AddMinutes(ServerOffsetMinutes):yyyy-MM-dd HH:mm:ss.ff} spid95      Configuration option '{option}' changed from {oldValue} to {newValue}. Run the RECONFIGURE statement to install.");
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>One wide sys.databases capture row (slice two): the collector's shape with the two columns the
+    /// arms move set and the rest at plausible defaults, so every other of the 27 compares equal between captures.</summary>
+    private async Task PlantDatabaseConfigAsync(DateTime captureTime, string databaseName, string recoveryModel, string logReuseWait)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO database_config
+    (config_id, capture_time, server_id, server_name, database_name,
+     state_desc, compatibility_level, collation_name, recovery_model, is_read_only,
+     is_auto_close_on, is_auto_shrink_on, is_auto_create_stats_on, is_auto_update_stats_on,
+     is_auto_update_stats_async_on, is_read_committed_snapshot_on, snapshot_isolation_state,
+     is_parameterization_forced, is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
+     is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on, log_reuse_wait_desc, page_verify_option,
+     target_recovery_time_seconds, delayed_durability, is_accelerated_database_recovery_on,
+     is_memory_optimized_enabled, is_optimized_locking_on)
+VALUES ($1, $2, $3, 'TestServer', $4,
+        'ONLINE', 160, 'SQL_Latin1_General_CP1_CI_AS', $5, false,
+        false, false, true, true,
+        false, true, 'OFF',
+        false, true, false, false, false,
+        false, false, false, $6, 'CHECKSUM',
+        60, 'DISABLED', false,
+        false, false)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(captureTime);
+        P(_serverId);
+        P(databaseName);
+        P(recoveryModel);
+        P(logReuseWait);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>One enabled-flag row of a trace_flags capture (slice two): the collector writes one per flag
+    /// DBCC TRACESTATUS(-1) lists, global scope, and none at all when nothing is enabled.</summary>
+    private async Task PlantTraceFlagAsync(DateTime captureTime, int traceFlag)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO trace_flags
+    (config_id, capture_time, server_id, server_name, trace_flag, status, is_global, is_session)
+VALUES ($1, $2, $3, 'TestServer', $4, true, true, false)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(captureTime);
+        P(_serverId);
+        P(traceFlag);
         await cmd.ExecuteNonQueryAsync();
     }
 

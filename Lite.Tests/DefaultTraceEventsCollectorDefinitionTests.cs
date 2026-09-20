@@ -208,7 +208,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
 
         /* Exactly ONE 15457 arm: the keep is not also spliced into the curated set (which would make it
            database-gated again on that path and count the row twice in a reviewer's head). */
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, System.Text.RegularExpressions.Regex.Escape("ft.Error = 15457")).Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, System.Text.RegularExpressions.Regex.Escape("ft.Error = 15457")));
     }
 
     [Fact]

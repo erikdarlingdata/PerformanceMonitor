@@ -93,12 +93,66 @@ namespace PerformanceMonitor.Analysis;
 /// that a change caused anything (the compare tool's own description says so, citing the OtterTune field
 /// study's 4× DB-time variance on an unchanged configuration), and the remediation prose repeats it. It does
 /// not fold into an incident — a configuration change is context for whatever else the pass found, not a
-/// symptom of it — and <c>AnomalyIncidentReconciler</c> is not touched. It does not cover
-/// <c>database_config</c> or <c>trace_flags</c> yet (slice two) — though <see cref="ResolveTraceAnchor"/>
-/// is written for them too: <c>ALTER DATABASE</c> and <c>DBCC TRACEON</c> leave their own trace lines with a
-/// <c>StartTime</c>, and slice two supplies a parser for those lines and reuses the join, the read and the
-/// metadata keys unchanged. It does not reach <c>get_analysis_facts</c>, which runs the fenced
-/// <c>CollectAndScoreFactsAsync</c> and not the pass.</para>
+/// symptom of it — and <c>AnomalyIncidentReconciler</c> is not touched. It does not reach
+/// <c>get_analysis_facts</c>, which runs the fenced <c>CollectAndScoreFactsAsync</c> and not the pass.</para>
+///
+/// <para><b>Slice two: the other two configuration families, same fact (#3653 A10).</b> The store keeps three
+/// on-connect snapshot families and the history tools diff all three — <c>server_config</c> (slice one),
+/// <c>database_config</c> (<c>sys.databases</c>, one WIDE row per database, 27 option columns) and
+/// <c>trace_flags</c> (<c>DBCC TRACESTATUS(-1)</c>, a row per ENABLED flag). Slice two attributes the last two
+/// through the same fact, the same compare and the same prose grammar, keyed exactly <see cref="FactKey"/>
+/// so the one-fact-per-key rule above holds across families: a pass window holding a server change and a
+/// database change does not fire twice. Each <see cref="SettingChange"/> carries its <see cref="ChangeFamily"/>,
+/// the fact carries the event's families as <see cref="MetaChangeFamily"/> (a bit per family, since the
+/// metadata map is doubles-only and an event can span families — see the next paragraph), and the
+/// composer branches on the family per change: a database option reads "<c>`AdventureWorks` recovery_model
+/// FULL → SIMPLE</c>", a flag "<c>trace flag 4199 enabled (GLOBAL)</c>". Text values (a recovery model, a
+/// collation, a flag's scope) cannot ride in the doubles-only metadata, so they ride in
+/// <see cref="Fact.ObjectName"/> under the segment grammar <see cref="EncodeSegment"/> spells — the server
+/// family's segment is the bare option name slice one wrote, byte for byte — and a database option whose text
+/// parses as a number or a boolean ALSO lands in the numeric keys so an MCP reader can compare it. A fact
+/// whose every change belongs to ONE database carries that database in <see cref="Fact.DatabaseName"/>, the
+/// seam the finding stores already persist and the cards already show.</para>
+///
+/// <para><b>Changes observed at one connect are one event, whatever family they belong to.</b> The three
+/// config collectors run serially on every connect (frequency 0, both SKUs), each stamping its own
+/// <c>capture_time</c>, so a MAXDOP change and a trace-flag change made in the same maintenance window
+/// surface at the same reconnect as two captures seconds apart. Slice one's own argument applies across
+/// families exactly as it applied within one: two changes observed together share one observation time and
+/// one compare, and the data cannot say which of them moved a metric. Treating them as two events would make
+/// the later collector's family the card's subject by accident of run order and count the other as an
+/// "earlier event" whose own pass never existed. <see cref="MergeSameConnectEvents"/> therefore folds
+/// events of DIFFERENT families whose captures fall within <see cref="SameConnectToleranceMinutes"/> of each
+/// other into one event anchored on the LATEST capture (the moment the observed configuration was
+/// complete) with the EARLIEST previous capture (the widest honest span). Same-family events are never
+/// merged: two captures of one family are two connects, and the span between them is real information.</para>
+///
+/// <para><b>Which clock, per family — measured, not assumed.</b> The #3740 trace anchor is the server_config
+/// slice's alone, and <see cref="ResolveTraceAnchor"/> joins only server-family changes. Measured on SQL
+/// Server 2022 (2026-09-20): <c>DBCC TRACEON</c> / <c>TRACEOFF</c> DO write an <c>ErrorLog</c> trace event
+/// (msgs 17550 / 17551, severity 10, "DBCC TRACEON 1222, server process ID (SPID) 94. …") stamped with the
+/// SESSION's database — 1 from master — so <c>DefaultTraceEventsCollector</c>'s ErrorLog arm, which sits
+/// inside the master/model/msdb exclusion with 15457 as its only exemption, DROPS the line in the common
+/// case; and the line carries no old/new state, so a re-run on an already-enabled flag (which still writes
+/// 17550, measured) would mis-date the change to the re-run with no way to tell. <c>ALTER DATABASE SET
+/// &lt;option&gt;</c> writes msg 5084 to the ERRORLOG file but the default trace records NO ErrorLog event for
+/// it at all — only <c>Object:Altered</c> begin/commit pairs on the database with a NULL ObjectName and NULL
+/// TextData, a row that says a database-level DDL happened and not which option. Neither family has a trace
+/// subject the store holds today, so both anchor on the observation, with every observation disclosure in
+/// force; the collector-side arm for 17550/17551 is a follow-up, stated in the lane's report, not invented
+/// here.</para>
+///
+/// <para><b>Two blind spots inherited from the snapshots, stated.</b> (1) <c>log_reuse_wait_desc</c> is one
+/// of the 27 <c>database_config</c> columns and is not a configuration — it is the engine's live reason the
+/// log cannot truncate (NOTHING → LOG_BACKUP → NOTHING) and flips with no operator action; the history tools
+/// list it, but a finding that ran a ±4 h compare on it would attribute an outcome to weather, and because
+/// the most recent event is the fact's subject, such a flip would DISPLACE a real change from the card.
+/// <see cref="IsAttributableDatabaseSetting"/> excludes it; the other 26 are options an <c>ALTER DATABASE</c>
+/// (or a restore, an encryption scan, a state change) sets. (2) <c>TraceFlagsCollector</c> writes NO row when
+/// <c>DBCC TRACESTATUS(-1)</c> returns none, so a capture with zero enabled flags is invisible to the
+/// set-diff: "the last flag was disabled" and "the first flag was enabled" are both undetectable, and a
+/// flag's previous-capture span can be wider than the truth. The history tool shares the blind spot; this
+/// class inherits it rather than guessing, and the report names the sentinel-row fix as a follow-up.</para>
 /// </summary>
 public static class ConfigChangeAttribution
 {
@@ -144,11 +198,56 @@ public static class ConfigChangeAttribution
     public const double AnchorSourceDefaultTrace = 1;
 
     /// <summary>
-    /// Joins the changed setting names into <see cref="Fact.ObjectName"/> — the one string slot a fact
-    /// has, since <see cref="Fact.Metadata"/> is doubles-only by contract. No <c>sys.configurations</c>
-    /// name contains a semicolon, so the composer can split on it.
+    /// Joins the changed settings' segments (<see cref="EncodeSegment"/>) into <see cref="Fact.ObjectName"/> —
+    /// the one string slot a fact has, since <see cref="Fact.Metadata"/> is doubles-only by contract. No
+    /// <c>sys.configurations</c> name contains a semicolon, so the composer can split on it; a DATABASE name
+    /// could (any bracketed identifier can), and a database named with "; " in it would mis-split the card's
+    /// change list — the data on the fact is unaffected, only that card's rendering, and it is stated here
+    /// rather than guarded with a separator slice one's pins do not carry.
     /// </summary>
     public const string SettingSeparator = "; ";
+
+    /// <summary>
+    /// Captures from DIFFERENT families this close together are one connect, hence one event
+    /// (<see cref="MergeSameConnectEvents"/>). The on-load collectors run serially at connect, each under the
+    /// 60 s per-command deadline, and a healthy server stamps all three within seconds; five minutes covers a
+    /// pathological one with room, and two genuine reconnects five minutes apart with changes between them
+    /// is a reconnect storm whose two ±4 h compares are the same compare to within two per cent anyway.
+    /// Same-family captures are never merged whatever their spacing.
+    /// </summary>
+    public const int SameConnectToleranceMinutes = 5;
+
+    /// <summary>
+    /// The configuration families the fact can name — a bit each, because <see cref="MetaChangeFamily"/> is
+    /// a double and one event can span families (<see cref="MergeSameConnectEvents"/>). The numeric values
+    /// are the wire contract: <c>1</c> server (sys.configurations), <c>2</c> database (sys.databases options),
+    /// <c>4</c> trace flags (DBCC TRACESTATUS); a two-family event carries their sum.
+    /// </summary>
+    [Flags]
+    public enum ChangeFamily
+    {
+        /// <summary>A <c>sys.configurations</c> option (slice one).</summary>
+        ServerConfig = 1,
+        /// <summary>A <c>sys.databases</c> option on one database (slice two).</summary>
+        DatabaseConfig = 2,
+        /// <summary>A trace flag enabled, disabled or re-scoped (slice two).</summary>
+        TraceFlags = 4,
+    }
+
+    /// <summary>
+    /// The one <c>database_config</c> column the diff tracks that is NOT a configuration: the engine's live
+    /// reason the log cannot be truncated, which flips with no operator action. Excluded from attribution
+    /// (see the class remarks); the history tools still list it. A set so the day another status column
+    /// joins the wide row it is one line here.
+    /// </summary>
+    public static readonly IReadOnlySet<string> DatabaseStatusColumns = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "log_reuse_wait_desc",
+    };
+
+    /// <summary>True for a <c>database_config</c> setting the attribution treats as a configuration change.</summary>
+    public static bool IsAttributableDatabaseSetting(string? settingName) =>
+        !string.IsNullOrEmpty(settingName) && !DatabaseStatusColumns.Contains(settingName);
 
     /// <summary>
     /// Per-key metadata beyond this many moved rows is dropped and counted in <see cref="MetaMovedKeysOmitted"/>.
@@ -158,8 +257,14 @@ public static class ConfigChangeAttribution
 
     /* ── Metadata keys (doubles). Shared with the composer and the tests so the spelling lives once. ── */
 
-    /// <summary>How many settings changed at this event (also the fact's Value).</summary>
+    /// <summary>How many settings changed at this event, across families (also the fact's Value).</summary>
     public const string MetaChangedSettings = "changed_settings";
+    /// <summary>Which configuration families the event's changes belong to: the <see cref="ChangeFamily"/> bits
+    /// summed (1 server, 2 database, 4 trace flags; 5 = a server setting and a trace flag observed at one connect).
+    /// One key, one word, because the readers band and mute by key and a per-family key would split the family
+    /// that the one-fact-per-key rule keeps together; the per-change family is recoverable from the ObjectName
+    /// segments (<see cref="Changes"/>).</summary>
+    public const string MetaChangeFamily = "change_family";
     /// <summary>The change time the compare is ANCHORED on, as Unix seconds — a DateTime cannot ride in a
     /// double map. The trace's <c>StartTime</c> when <see cref="MetaAnchorClock"/> is
     /// <see cref="AnchorSourceDefaultTrace"/>, the observing capture's time otherwise (#3740). Readers that
@@ -232,11 +337,19 @@ public static class ConfigChangeAttribution
     private const string StatusSuffix = "|status";
 
     /// <summary>
-    /// One setting's move between two consecutive captures — <c>ConfigChangeDiff.ServerConfigChange</c>
-    /// without the change time (which is the event's) and without the display strings. Mapped at the
-    /// service, one line of LINQ, so this assembly need not reference the diff's home.
+    /// One setting's move between two consecutive captures, in any of the three families. For the server
+    /// family this is <c>ConfigChangeDiff.ServerConfigChange</c> without the change time (which is the
+    /// event's) and without the display strings — the six positional fields slice one defined, unchanged;
     /// <see cref="RequiresRestart"/> is the diff's derivation (non-dynamic AND configured ≠ in-use): the
-    /// configured value moved but the engine is still running the old one.
+    /// configured value moved but the engine is still running the old one. The trailing optional fields are
+    /// slice two's, filled by <see cref="ForDatabase"/> and <see cref="ForTraceFlag"/> and left at their
+    /// defaults for a server setting. Mapped at the service, one line of LINQ per family, so this assembly
+    /// need not reference the diff's home.
+    ///
+    /// <para><see cref="Name"/> is the change's identity on the fact: the metadata key stem
+    /// (<see cref="OldInUseKey"/> and friends) and what <see cref="SettingNames"/> returns for a server
+    /// setting. A database option is named <c>{database}.{setting}</c>, a flag <c>trace flag {n}</c>, so the
+    /// per-change keys of a mixed event cannot collide.</para>
     /// </summary>
     public sealed record SettingChange(
         string Name,
@@ -244,16 +357,84 @@ public static class ConfigChangeAttribution
         long? NewValueConfigured,
         long? OldValueInUse,
         long? NewValueInUse,
-        bool RequiresRestart)
+        bool RequiresRestart,
+        ChangeFamily Family = ChangeFamily.ServerConfig,
+        string? DatabaseName = null,
+        string? Setting = null,
+        string? OldText = null,
+        string? NewText = null,
+        string? Scope = null,
+        string? ChangeType = null)
     {
         /// <summary>True when the value the engine actually runs on moved — the case a compare can speak to.</summary>
         public bool InUseMoved => OldValueInUse != NewValueInUse;
+
+        /// <summary>
+        /// A <c>sys.databases</c> option on one database, from <c>ConfigChangeDiff.DatabaseConfigChange</c>: the
+        /// collected values are TEXT (the wide row's 27 columns cast to text so the diff walks them uniformly),
+        /// and they ride here as <see cref="OldText"/> / <see cref="NewText"/> (null = the column was NULL at
+        /// that capture). When both parse as a number or a boolean (<c>compatibility_level</c> 150 → 160,
+        /// <c>is_read_committed_snapshot_on</c> false → true) they land in the numeric in-use slots too, so the
+        /// fact's doubles carry them; a recovery model or a collation stays text-only. Never requires a restart.
+        /// </summary>
+        public static SettingChange ForDatabase(string databaseName, string setting, string? oldText, string? newText)
+        {
+            ArgumentNullException.ThrowIfNull(databaseName);
+            ArgumentNullException.ThrowIfNull(setting);
+            return new SettingChange(
+                $"{databaseName}.{setting}",
+                OldValueConfigured: null, NewValueConfigured: null,
+                OldValueInUse: TryNumeric(oldText), NewValueInUse: TryNumeric(newText),
+                RequiresRestart: false,
+                Family: ChangeFamily.DatabaseConfig,
+                DatabaseName: databaseName,
+                Setting: setting,
+                OldText: oldText,
+                NewText: newText);
+        }
+
+        /// <summary>
+        /// A trace flag's set-diff outcome, from <c>ConfigChangeDiff.TraceFlagChange</c>: <paramref name="changeType"/>
+        /// is the diff's word (<c>enabled</c> / <c>disabled</c> / <c>modified</c>), <paramref name="scope"/> its
+        /// GLOBAL / SESSION / UNKNOWN (the flag's CURRENT scope for enabled and modified, its LAST for disabled —
+        /// the diff carries one), and the statuses ride in the in-use slots as 0 / 1 (a flag absent from a
+        /// capture is off: null → 0) so the fact's doubles say which way it went. <see cref="Setting"/> is the
+        /// flag number as text.
+        /// </summary>
+        public static SettingChange ForTraceFlag(int traceFlag, string changeType, string scope, bool? previousStatus, bool? newStatus) =>
+            new(
+                $"trace flag {traceFlag}",
+                OldValueConfigured: null, NewValueConfigured: null,
+                OldValueInUse: previousStatus == true ? 1 : 0, NewValueInUse: newStatus == true ? 1 : 0,
+                RequiresRestart: false,
+                Family: ChangeFamily.TraceFlags,
+                Setting: traceFlag.ToString(CultureInfo.InvariantCulture),
+                OldText: previousStatus == true ? "ON" : "OFF",
+                NewText: newStatus == true ? "ON" : "OFF",
+                Scope: scope,
+                ChangeType: changeType);
+
+        /// <summary>A collected text value as a number when it is one: an integer, or a boolean (the casts on both
+        /// stores spell <c>true</c> / <c>false</c>) as 1 / 0. Null for anything else, including null.</summary>
+        internal static long? TryNumeric(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+            var t = text.Trim();
+            if (long.TryParse(t, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var n))
+                return n;
+            if (string.Equals(t, "true", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (string.Equals(t, "false", StringComparison.OrdinalIgnoreCase)) return 0;
+            return null;
+        }
     }
 
     /// <summary>
-    /// One config capture at which one or more settings were first seen with a new value.
-    /// <see cref="PreviousCaptureTime"/> is the capture before it — the other edge of the span the real
-    /// change landed in.
+    /// One connect at which one or more settings were first seen with a new value — one capture for a
+    /// single-family event, the LATEST of the captures for an event <see cref="MergeSameConnectEvents"/>
+    /// folded across families. <see cref="PreviousCaptureTime"/> is the capture before it — the other edge
+    /// of the span the real change landed in (the EARLIEST previous capture for a folded event: the widest
+    /// honest span).
     /// </summary>
     public sealed record ChangeEvent(
         DateTime ChangeTime,
@@ -261,6 +442,9 @@ public static class ConfigChangeAttribution
         IReadOnlyList<SettingChange> Changes)
     {
         public TimeSpan ObservationGap => ChangeTime - PreviousCaptureTime;
+
+        /// <summary>The families this event's changes belong to, as the summed bits <see cref="MetaChangeFamily"/> carries.</summary>
+        public ChangeFamily Families => Changes.Aggregate((ChangeFamily)0, (acc, c) => acc | c.Family);
     }
 
     /// <summary>
@@ -337,6 +521,53 @@ public static class ConfigChangeAttribution
             })
             .OrderByDescending(e => e.ChangeTime)
             .ToList();
+    }
+
+    /// <summary>
+    /// Folds events of DIFFERENT families observed at one connect into one event, NEWEST FIRST (slice two;
+    /// the class remarks say why). The input is each family's <see cref="GroupIntoEvents"/> output
+    /// concatenated in any order. Walking newest first, an event joins the open group when its capture is
+    /// within <see cref="SameConnectToleranceMinutes"/> of the group's LATEST capture and the group holds
+    /// none of its families yet; otherwise it opens a new group. The folded event's <see cref="ChangeEvent.ChangeTime"/>
+    /// is the latest member's (the moment the observed configuration was complete — the rule the trace anchor
+    /// applies to a multi-setting event), its <see cref="ChangeEvent.PreviousCaptureTime"/> the earliest
+    /// member's (a span that holds every member's real change is true for each of them; the narrowest would
+    /// be false for the one whose family last captured earlier), and its changes are ordered family, then
+    /// name, so a mixed event reads server setting, database option, trace flag. A single-family input
+    /// returns unchanged, so slice one's callers see exactly what they saw.
+    /// </summary>
+    public static List<ChangeEvent> MergeSameConnectEvents(IEnumerable<ChangeEvent> events)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+
+        var ordered = events.OrderByDescending(e => e.ChangeTime).ToList();
+        var merged = new List<ChangeEvent>(ordered.Count);
+        var tolerance = TimeSpan.FromMinutes(SameConnectToleranceMinutes);
+
+        foreach (var evt in ordered)
+        {
+            if (merged.Count > 0)
+            {
+                var open = merged[^1];
+                var sameConnect = open.ChangeTime - evt.ChangeTime <= tolerance;
+                var newFamily = (open.Families & evt.Families) == 0;
+                if (sameConnect && newFamily)
+                {
+                    merged[^1] = new ChangeEvent(
+                        open.ChangeTime,
+                        open.PreviousCaptureTime < evt.PreviousCaptureTime ? open.PreviousCaptureTime : evt.PreviousCaptureTime,
+                        open.Changes.Concat(evt.Changes)
+                            .OrderBy(c => c.Family)
+                            .ThenBy(c => c.Name, StringComparer.Ordinal)
+                            .ToList());
+                    continue;
+                }
+            }
+
+            merged.Add(evt);
+        }
+
+        return merged;
     }
 
     /// <summary>
@@ -434,10 +665,12 @@ public static class ConfigChangeAttribution
     /// when no setting matched, and the caller keeps the observation anchor.
     ///
     /// <para><paramref name="parse"/> is the slice's reader of a line — <see cref="ParseReconfigureLine"/> for
-    /// server_config. Slice two (database options, trace flags) supplies its own over the same
-    /// <see cref="TraceLine"/> shape and calls this method unchanged; nothing here knows what a subject is.
-    /// The lines the caller hands in should already be the slice's candidates (the services select
-    /// <c>error_number = 15457</c> in SQL) — the parser is the second filter, not the first.</para>
+    /// server_config, the only family with a trace subject the store holds (the class remarks carry the
+    /// measurement for the other two), so the join considers <see cref="ChangeFamily.ServerConfig"/> changes
+    /// only: a folded event's database option or trace flag rides the event's anchor and is named as undated.
+    /// Nothing else here knows what a subject is. The lines the caller hands in should already be the slice's
+    /// candidates (the services select <c>error_number = 15457</c> in SQL) — the parser is the second filter,
+    /// not the first.</para>
     /// </summary>
     public static TraceAnchor? ResolveTraceAnchor(
         ChangeEvent change, IEnumerable<TraceLine> lines, Func<TraceLine, TraceChange?> parse)
@@ -456,7 +689,7 @@ public static class ConfigChangeAttribution
             return null;
 
         var matched = new Dictionary<string, TraceChange>(StringComparer.Ordinal);
-        foreach (var setting in change.Changes)
+        foreach (var setting in change.Changes.Where(c => c.Family == ChangeFamily.ServerConfig))
         {
             var observedNew = setting.NewValueConfigured ?? setting.NewValueInUse;
             if (observedNew is null)
@@ -521,6 +754,7 @@ public static class ConfigChangeAttribution
         var metadata = new Dictionary<string, double>(StringComparer.Ordinal)
         {
             [MetaChangedSettings] = change.Changes.Count,
+            [MetaChangeFamily] = (double)(int)change.Families,
             [MetaChangeTimeUnix] = Unix(anchorTime),
             [MetaAnchorClock] = anchor is null ? AnchorSourceObservation : AnchorSourceDefaultTrace,
             [MetaObservedAtUnix] = Unix(change.ChangeTime),
@@ -548,7 +782,10 @@ public static class ConfigChangeAttribution
             if (c.NewValueInUse is { } newInUse) metadata[NewInUseKey(c.Name)] = newInUse;
             if (c.OldValueConfigured is { } oldCfg) metadata[OldConfiguredKey(c.Name)] = oldCfg;
             if (c.NewValueConfigured is { } newCfg) metadata[NewConfiguredKey(c.Name)] = newCfg;
-            metadata[RequiresRestartKey(c.Name)] = c.RequiresRestart ? 1 : 0;
+            /* requires_restart is a sys.configurations concept (is_dynamic); a database option and a flag take
+               effect when set, so the key is the server family's alone rather than a 0 on every row. */
+            if (c.Family == ChangeFamily.ServerConfig)
+                metadata[RequiresRestartKey(c.Name)] = c.RequiresRestart ? 1 : 0;
             if (anchor is not null && anchor.Matched.TryGetValue(c.Name, out var traced))
                 metadata[TraceChangeTimeUnixKey(c.Name)] = Unix(traced.ChangedAtUtc);
         }
@@ -572,13 +809,20 @@ public static class ConfigChangeAttribution
             metadata[MetaMovedKeysOmitted] = Math.Max(0, moved.Count - MaxMovedKeysInMetadata);
         }
 
+        /* The finding's database seam (persisted, shown on cards): filled only when EVERY change is a
+           database option on ONE database. A mixed event has a server-scoped member, and a two-database
+           event has no single database to claim; both stay server-scoped, and the prose names each database. */
+        var databases = change.Changes.Select(c => c.Family == ChangeFamily.DatabaseConfig ? c.DatabaseName : null).Distinct().ToList();
+        var databaseName = databases.Count == 1 && databases[0] is not null ? databases[0] : null;
+
         return new Fact
         {
             Source = FactSource,
             Key = FactKey,
             Value = change.Changes.Count,
             ServerId = serverId,
-            ObjectName = string.Join(SettingSeparator, change.Changes.Select(c => c.Name)),
+            DatabaseName = databaseName,
+            ObjectName = string.Join(SettingSeparator, change.Changes.Select(EncodeSegment)),
             /* Preset, never scored: see the class remarks. Both fields, because the mute filter and the
                story reader read Severity while ComparisonBanding's ladder reads BaseSeverity. */
             BaseSeverity = InformationSeverity,
@@ -592,7 +836,74 @@ public static class ConfigChangeAttribution
     private static double Unix(DateTime utc) =>
         new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds();
 
-    /// <summary>The setting names a fact's ObjectName carries, in the order they were joined.</summary>
+    /* ── the ObjectName segment grammar (slice two) ── */
+
+    /// <summary>Prefix of a database-option segment: <c>db|{setting}|{old}|{new}|{database}</c>. The database name
+    /// is LAST so a name containing the field separator survives a bounded split (a column name and a collected
+    /// option value never contain one).</summary>
+    public const string DatabaseSegmentPrefix = "db|";
+    /// <summary>Prefix of a trace-flag segment: <c>tf|{flag}|{changeType}|{scope}</c>.</summary>
+    public const string TraceFlagSegmentPrefix = "tf|";
+    private const char SegmentFieldSeparator = '|';
+
+    /// <summary>
+    /// One change as its ObjectName segment. A server setting is its bare option name — slice one's grammar,
+    /// unchanged, and no <c>sys.configurations</c> name starts with either prefix. A database option and a
+    /// flag carry the text the doubles-only metadata cannot: the values, the scope, the diff's change word.
+    /// A null collected value is an empty field, which <see cref="DecodeSegment"/> reads back as null.
+    /// </summary>
+    public static string EncodeSegment(SettingChange change)
+    {
+        ArgumentNullException.ThrowIfNull(change);
+        return change.Family switch
+        {
+            ChangeFamily.DatabaseConfig =>
+                $"{DatabaseSegmentPrefix}{change.Setting}{SegmentFieldSeparator}{change.OldText}{SegmentFieldSeparator}{change.NewText}{SegmentFieldSeparator}{change.DatabaseName}",
+            ChangeFamily.TraceFlags =>
+                $"{TraceFlagSegmentPrefix}{change.Setting}{SegmentFieldSeparator}{change.ChangeType}{SegmentFieldSeparator}{change.Scope}",
+            _ => change.Name,
+        };
+    }
+
+    /// <summary>
+    /// A segment read back as the change it encodes — the TEXT form: a server setting comes back as its name
+    /// with null values (the composer reads those off the metadata, as slice one did), a database option and a
+    /// flag with their text fields and the numeric slots re-derived the way <see cref="SettingChange.ForDatabase"/>
+    /// and <see cref="SettingChange.ForTraceFlag"/> derive them. A malformed prefixed segment (too few fields)
+    /// is read as a server setting named by the whole segment rather than thrown on: a card is not worth a pass.
+    /// </summary>
+    public static SettingChange DecodeSegment(string segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+        if (segment.StartsWith(DatabaseSegmentPrefix, StringComparison.Ordinal))
+        {
+            var parts = segment[DatabaseSegmentPrefix.Length..].Split(SegmentFieldSeparator, 4);
+            if (parts.Length == 4)
+                return SettingChange.ForDatabase(parts[3], parts[0], NullIfEmpty(parts[1]), NullIfEmpty(parts[2]));
+        }
+        else if (segment.StartsWith(TraceFlagSegmentPrefix, StringComparison.Ordinal))
+        {
+            var parts = segment[TraceFlagSegmentPrefix.Length..].Split(SegmentFieldSeparator, 3);
+            if (parts.Length == 3 && int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var flag))
+            {
+                var enabled = string.Equals(parts[1], "enabled", StringComparison.Ordinal);
+                var disabled = string.Equals(parts[1], "disabled", StringComparison.Ordinal);
+                return SettingChange.ForTraceFlag(flag, parts[1], parts[2], previousStatus: !enabled, newStatus: !disabled);
+            }
+        }
+
+        return new SettingChange(segment, null, null, null, null, false);
+    }
+
+    private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;
+
+    /// <summary>The changes a fact's ObjectName carries, decoded, in the order they were joined.</summary>
+    public static IReadOnlyList<SettingChange> Changes(Fact fact) =>
+        SettingNames(fact).Select(DecodeSegment).ToList();
+
+    /// <summary>The segments a fact's ObjectName carries, in the order they were joined — for a server-family
+    /// fact, the setting names (slice one's contract); for the other families, the encoded segments
+    /// <see cref="Changes"/> decodes.</summary>
     public static IReadOnlyList<string> SettingNames(Fact fact) =>
         string.IsNullOrEmpty(fact?.ObjectName)
             ? []

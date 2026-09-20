@@ -92,7 +92,7 @@ public sealed class LogTailOverlapThresholdPinTests
         Assert.Contains("PgServerLogTail.TailCteSql", Collectors("PgLogEventsCollector.cs"), StringComparison.Ordinal);
         Assert.DoesNotMatch(@"TailBytesLiteral\s*=\s*""\d+""", Collectors("PgLogEventsCollector.cs"));
         Assert.Equal(PgServerLogTail.TailBytes, deadlocks);
-        Assert.Equal(PgServerLogTail.TailBytes.ToString(CultureInfo.InvariantCulture), PgServerLogTail.TailBytesLiteral);
+        Assert.Equal(PgServerLogTail.TailBytesLiteral, PgServerLogTail.TailBytes.ToString(CultureInfo.InvariantCulture));
     }
 
     [Fact]

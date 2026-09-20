@@ -709,6 +709,55 @@ AND   capture_time >= COALESCE(
 ORDER BY configuration_name, capture_time";
 
     /// <summary>
+    /// The <c>database_config</c> snapshots the attribution diffs (#3653 A10, slice two): the same window
+    /// rule as <see cref="ServerConfigSnapshotsForAttributionSql"/> over the WIDE <c>sys.databases</c> row,
+    /// the 27 option columns CAST to VARCHAR in <c>ConfigChangeDiff.DatabaseConfigChangeSettingNames</c>
+    /// ORDER, which the diff walks positionally (the Configuration Changes tab's projection,
+    /// <c>LocalDataService.ReadDatabaseConfigSnapshotsAsync</c>, bounded below as well as above;
+    /// <c>ConfigChangeAttributionTests</c> pins the order against the diff's list). Reads the
+    /// <c>v_database_config</c> view like the Lite fact collector does. <c>$1</c> server_id, <c>$2</c> window
+    /// start, <c>$3</c> window end. The Darling twin is <c>DarlingAnalysisService.DatabaseConfigSnapshotsForAttributionSql</c>.
+    /// </summary>
+    internal const string DatabaseConfigSnapshotsForAttributionSql = @"
+SELECT capture_time, database_name,
+       CAST(state_desc AS VARCHAR), CAST(compatibility_level AS VARCHAR), CAST(collation_name AS VARCHAR),
+       CAST(recovery_model AS VARCHAR), CAST(is_read_only AS VARCHAR), CAST(is_auto_close_on AS VARCHAR),
+       CAST(is_auto_shrink_on AS VARCHAR), CAST(is_auto_create_stats_on AS VARCHAR),
+       CAST(is_auto_update_stats_on AS VARCHAR), CAST(is_auto_update_stats_async_on AS VARCHAR),
+       CAST(is_read_committed_snapshot_on AS VARCHAR), CAST(snapshot_isolation_state AS VARCHAR),
+       CAST(is_parameterization_forced AS VARCHAR), CAST(is_query_store_on AS VARCHAR),
+       CAST(is_encrypted AS VARCHAR), CAST(is_trustworthy_on AS VARCHAR), CAST(is_db_chaining_on AS VARCHAR),
+       CAST(is_broker_enabled AS VARCHAR), CAST(is_cdc_enabled AS VARCHAR),
+       CAST(is_mixed_page_allocation_on AS VARCHAR), CAST(log_reuse_wait_desc AS VARCHAR),
+       CAST(page_verify_option AS VARCHAR), CAST(target_recovery_time_seconds AS VARCHAR),
+       CAST(delayed_durability AS VARCHAR), CAST(is_accelerated_database_recovery_on AS VARCHAR),
+       CAST(is_memory_optimized_enabled AS VARCHAR), CAST(is_optimized_locking_on AS VARCHAR)
+FROM v_database_config
+WHERE server_id = $1
+AND   capture_time <= $3
+AND   capture_time >= COALESCE(
+        (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND capture_time < $2),
+        $2)
+ORDER BY database_name, capture_time";
+
+    /// <summary>
+    /// The <c>trace_flags</c> snapshots the attribution set-diffs (#3653 A10, slice two): the same window rule
+    /// over the per-enabled-flag rows. The baseline subquery finds the last capture WITH rows before the window
+    /// — the collector writes none when no flag is enabled, so a zero-flag capture is invisible here and to the
+    /// diff alike (the blind spot <c>ConfigChangeAttribution</c>'s remarks state). <c>$1</c> server_id, <c>$2</c>
+    /// window start, <c>$3</c> window end. The Darling twin is <c>DarlingAnalysisService.TraceFlagSnapshotsForAttributionSql</c>.
+    /// </summary>
+    internal const string TraceFlagSnapshotsForAttributionSql = @"
+SELECT capture_time, trace_flag, status, is_global, is_session
+FROM v_trace_flags
+WHERE server_id = $1
+AND   capture_time <= $3
+AND   capture_time >= COALESCE(
+        (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1 AND capture_time < $2),
+        $2)
+ORDER BY capture_time, trace_flag";
+
+    /// <summary>
     /// This server's collected UTC offset for the trace-anchor read (#3740) — the same statement
     /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c> runs, inlined because the analysis pass holds a
     /// DuckDB connection and not a <c>LocalDataService</c>. Skips NULL offsets rather than taking the newest
@@ -753,20 +802,34 @@ AND   event_time <= $3
 ORDER BY event_time";
 
     /// <summary>
-    /// Step 2.5 of the pass (#3653 A10, Q2): if a <c>sys.configurations</c> value was first observed changed
-    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before the change
-    /// and the (clamped) four hours after it, band the result with
+    /// Step 2.5 of the pass (#3653 A10, Q2 and slice two): if a configuration value was first observed
+    /// changed inside the pass window — a <c>sys.configurations</c> setting, a <c>sys.databases</c> option on
+    /// one database, or a trace flag — run <see cref="ComparePeriodsAsync"/> over the four hours before the
+    /// change and the (clamped) four hours after it, band the result with
     /// <see cref="ComparisonBanding.Compare"/> exactly as <c>compare_analysis</c> would, and append ONE
     /// <c>CONFIG_CHANGED</c> fact carrying the verdict. <see cref="ConfigChangeAttribution"/> holds the
-    /// design — why one fact, why Information, which clock "the change" is on; this method is the store
-    /// reads and the wiring, twin to <c>DarlingAnalysisService.AttributeConfigChangesAsync</c>.
+    /// design — why one fact, why Information, which clock "the change" is on, why changes of different
+    /// families observed at one connect are one event; this method is the store reads and the wiring, twin to
+    /// <c>DarlingAnalysisService.AttributeConfigChangesAsync</c>.
+    ///
+    /// <para><b>Three families, three reads, one event list.</b> Each family's snapshots are read with the
+    /// same window rule, diffed through its <c>ConfigChangeDiff</c> arm, mapped onto
+    /// <see cref="ConfigChangeAttribution.SettingChange"/> in one LINQ line per family (the database family
+    /// dropping <c>log_reuse_wait_desc</c> through <see cref="ConfigChangeAttribution.IsAttributableDatabaseSetting"/>
+    /// — a status, not an option), and grouped into events against ITS OWN capture times (the three collectors
+    /// stamp their own <c>capture_time</c>, seconds apart at one connect, so a shared list would put a
+    /// same-connect sibling capture where the previous connect belongs).
+    /// <see cref="ConfigChangeAttribution.MergeSameConnectEvents"/> then folds same-connect events across
+    /// families, and the most recent event is the card's subject.</para>
     ///
     /// <para><b>Two clocks, in order (#3740).</b> The snapshot diff says WHAT changed and when it was first
     /// observed; the default trace's sp_configure line, when the store holds one for the same option in the
     /// span between the two captures, says WHEN it changed. <see cref="ResolveTraceAnchorAsync"/> reads and
     /// joins those lines; the compare and the fact anchor on the trace's time when the join resolves and on
-    /// the observation otherwise, and the fact says which. The trace read has its own catch inside this
-    /// method's: a fault there costs the pass the trace anchor, not the card.</para>
+    /// the observation otherwise, and the fact says which. The trace read is the server family's alone — the
+    /// other two have no trace subject the store holds (measured; see the attribution's remarks) — so it runs
+    /// only when the subject event holds a server setting. It has its own catch inside this method's: a fault
+    /// there costs the pass the trace anchor, not the card.</para>
     ///
     /// <para><b>Cost.</b> A compare is two full fact collections (the collector's thirty-one reads, twice)
     /// plus the baseline lookups, inside the pass budget. It runs only when a change is in-window — the
@@ -808,16 +871,31 @@ ORDER BY event_time";
                 }
             }
 
-            var events = ConfigChangeAttribution.GroupIntoEvents(
+            var databaseSnapshots = await ReadDatabaseConfigSnapshotsAsync(context);
+            var traceFlagSnapshots = await ReadTraceFlagSnapshotsAsync(context);
+
+            var serverEvents = ConfigChangeAttribution.GroupIntoEvents(
                 ConfigChangeDiff.DiffServerConfigChanges(snapshots, context.TimeRangeStart, context.TimeRangeEnd)
                     .Select(c => (c.ChangeTime, new ConfigChangeAttribution.SettingChange(
                         c.ConfigurationName, c.OldValueConfigured, c.NewValueConfigured, c.OldValueInUse, c.NewValueInUse, c.RequiresRestart))),
                 snapshots.Select(s => s.CaptureTime));
+            var databaseEvents = ConfigChangeAttribution.GroupIntoEvents(
+                ConfigChangeDiff.DiffDatabaseConfigChanges(databaseSnapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                    .Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
+                    .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForDatabase(c.DatabaseName, c.SettingName, c.OldValue, c.NewValue))),
+                databaseSnapshots.Select(s => s.CaptureTime));
+            var traceFlagEvents = ConfigChangeAttribution.GroupIntoEvents(
+                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                    .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForTraceFlag(c.TraceFlag, c.ChangeType, c.Scope, c.PreviousStatus, c.NewStatus))),
+                traceFlagSnapshots.Select(s => s.CaptureTime));
+            var events = ConfigChangeAttribution.MergeSameConnectEvents(serverEvents.Concat(databaseEvents).Concat(traceFlagEvents));
             if (events.Count == 0)
                 return;
 
             var latest = events[0];
-            var anchor = await ResolveTraceAnchorAsync(context, latest);
+            var anchor = (latest.Families & ConfigChangeAttribution.ChangeFamily.ServerConfig) != 0
+                ? await ResolveTraceAnchorAsync(context, latest)
+                : null;
             var anchorTime = ConfigChangeAttribution.AnchorTime(latest, anchor);
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
@@ -837,7 +915,7 @@ ORDER BY event_time";
                 context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
 
             AppLogger.Info("AnalysisService",
-                $"Configuration change attributed for {context.ServerName}: {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
+                $"Configuration change attributed for {context.ServerName} ({latest.Families}): {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
                 $"{(anchor is null ? "first observed at" : "changed at")} {anchorTime:u} ({(anchor is null ? "configuration snapshot" : "default trace, msg 15457")}), " +
                 $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
                 $"{compare?.Worse ?? 0} worse, {compare?.Better ?? 0} better, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
@@ -847,6 +925,77 @@ ORDER BY event_time";
             AppLogger.Warn("AnalysisService",
                 $"Configuration-change attribution failed for {context.ServerName}; the pass continues without the CONFIG_CHANGED card: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The database family's half of step 2.5's snapshot read (slice two): <see cref="DatabaseConfigSnapshotsForAttributionSql"/>
+    /// into the diff's WIDE record, the 27 option columns read positionally after <c>capture_time</c> and
+    /// <c>database_name</c> — the same walk <c>LocalDataService.ReadDatabaseConfigSnapshotsAsync</c> makes for
+    /// the Configuration Changes tab. A NULL column is a null value the diff compares ordinally against the
+    /// other capture's. No catch of its own: a fault here is the caller's, and costs the pass the whole card
+    /// rather than a family of it, because a card that silently dropped one family would read as "nothing
+    /// changed there".
+    /// </summary>
+    private async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> ReadDatabaseConfigSnapshotsAsync(AnalysisContext context)
+    {
+        var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(context.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = DatabaseConfigSnapshotsForAttributionSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var values = new string?[ConfigChangeDiff.DatabaseConfigChangeSettingNames.Count];
+            for (var i = 0; i < values.Length; i++)
+            {
+                var ordinal = i + 2; /* capture_time, database_name precede the settings */
+                values[i] = reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+            }
+
+            rows.Add(new ConfigChangeDiff.DatabaseConfigSnapshot(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                values));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The trace-flag family's half of step 2.5's snapshot read (slice two): <see cref="TraceFlagSnapshotsForAttributionSql"/>
+    /// into the diff's per-flag record, the same mapping <c>LocalDataService.ReadTraceFlagSnapshotsAsync</c>
+    /// makes. No catch of its own, for the reason <see cref="ReadDatabaseConfigSnapshotsAsync"/> states.
+    /// </summary>
+    private async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> ReadTraceFlagSnapshotsAsync(AnalysisContext context)
+    {
+        var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(context.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = TraceFlagSnapshotsForAttributionSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            rows.Add(new ConfigChangeDiff.TraceFlagSnapshot(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : reader.GetBoolean(2),
+                reader.IsDBNull(3) ? null : reader.GetBoolean(3),
+                reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
+        }
+
+        return rows;
     }
 
     /// <summary>
