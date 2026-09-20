@@ -74,7 +74,8 @@ SELECT
     w.memory_free_bytes,
     w.memory_cached_bytes,
     w.memory_active_bytes,
-    w.configured_memory_bytes
+    w.configured_memory_bytes,
+    w.memory_buffers_bytes
 FROM pg_cpu_utilization AS w
 WHERE w.server_id = $1
 AND   w.collection_time >= $2
@@ -83,7 +84,7 @@ ORDER BY w.collection_time";
 
     /// <summary>One <c>pg_cpu_utilization</c> row's memory columns; every field nullable because a pre-V136 row (or a
     /// Performance Insights endpoint without <c>os.memory.*</c>) has them NULL.</summary>
-    internal readonly record struct HostMemorySample(long? TotalBytes, long? FreeBytes, long? CachedBytes, long? ActiveBytes, long? ConfiguredBytes);
+    internal readonly record struct HostMemorySample(long? TotalBytes, long? FreeBytes, long? CachedBytes, long? ActiveBytes, long? ConfiguredBytes, long? BuffersBytes = null);
 
     /// <summary>
     /// The window's host-memory summary, computed from the sample series in one pass. <c>Samples</c> is every row;
@@ -93,6 +94,9 @@ ORDER BY w.collection_time";
     /// <c>sustain</c> CONSECUTIVE memory-carrying rows of the run's MAXIMUM share — the worst share the host held for that
     /// long — and null when no such run exists (fewer memory rows than the sustain count, or every run broken by a
     /// memory-less row: a gap in the series is a gap in the evidence, not a continuation).
+    /// <c>PeakBuffersShare</c> is <c>memory_buffers_bytes / memory_total_bytes</c> at its widest — STATED, not folded into
+    /// the reclaimable share: the design defines reclaimable as free + cached, and on a database host the kernel's block
+    /// buffers are small; whether they join the share is the calibration's call, and the figure is on the fact for it.
     /// </summary>
     internal readonly record struct HostMemorySummary(
         int Samples,
@@ -103,13 +107,14 @@ ORDER BY w.collection_time";
         double? MinReclaimableShare,
         double? MeanReclaimableShare,
         double? SustainedMinReclaimableShare,
-        double? PeakActiveShare);
+        double? PeakActiveShare,
+        double? PeakBuffersShare);
 
     internal static HostMemorySummary SummariseHostMemory(IReadOnlyList<HostMemorySample> samples, int sustain)
     {
         var withMemory = 0;
         long? totalMin = null, totalMax = null, configuredMin = null;
-        double? minShare = null, peakActive = null, sustainedMin = null;
+        double? minShare = null, peakActive = null, sustainedMin = null, peakBuffers = null;
         var shareSum = 0.0;
         var run = new List<double>(Math.Max(sustain, 1));
 
@@ -140,6 +145,12 @@ ORDER BY w.collection_time";
                 peakActive = peakActive is { } p ? Math.Max(p, activeShare) : activeShare;
             }
 
+            if (s.BuffersBytes is { } buffers)
+            {
+                var buffersShare = Math.Clamp(buffers / (double)total, 0.0, 1.0);
+                peakBuffers = peakBuffers is { } pb ? Math.Max(pb, buffersShare) : buffersShare;
+            }
+
             run.Add(reclaimable);
             if (run.Count > sustain) run.RemoveAt(0);
             if (run.Count == sustain)
@@ -159,7 +170,8 @@ ORDER BY w.collection_time";
             MinReclaimableShare: minShare,
             MeanReclaimableShare: withMemory > 0 ? shareSum / withMemory : null,
             SustainedMinReclaimableShare: sustainedMin,
-            PeakActiveShare: peakActive);
+            PeakActiveShare: peakActive,
+            PeakBuffersShare: peakBuffers);
     }
 
     /// <summary>The memory terms as normalised from the snapshot; every optional term nullable so the fact states which
@@ -291,7 +303,8 @@ ORDER BY w.collection_time";
                         FreeBytes: reader.IsDBNull(2) ? null : reader.GetInt64(2),
                         CachedBytes: reader.IsDBNull(3) ? null : reader.GetInt64(3),
                         ActiveBytes: reader.IsDBNull(4) ? null : reader.GetInt64(4),
-                        ConfiguredBytes: reader.IsDBNull(5) ? null : reader.GetInt64(5)));
+                        ConfiguredBytes: reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                        BuffersBytes: reader.IsDBNull(6) ? null : reader.GetInt64(6)));
                 }
             }
 
@@ -398,6 +411,7 @@ ORDER BY w.collection_time";
         pressure.Metadata[PgTargetScorer.MemoryTotalMaxBytesKey] = host.TotalMaxBytes ?? host.TotalMinBytes.Value;
         if (host.SustainedMinReclaimableShare is { } sustained) pressure.Metadata[PgTargetScorer.HostMemorySustainedMinReclaimableShareKey] = sustained;
         if (host.PeakActiveShare is { } active) pressure.Metadata[PgTargetScorer.HostMemoryPeakActiveShareKey] = active;
+        if (host.PeakBuffersShare is { } buffers) pressure.Metadata[PgTargetScorer.HostMemoryPeakBuffersShareKey] = buffers;
         pressure.Metadata[PgTargetScorer.MemoryIsServerlessKey] = host.ConfiguredMinBytes is null ? 0 : 1;
         if (host.ConfiguredMinBytes is { } configured) pressure.Metadata[PgTargetScorer.MemoryConfiguredMinBytesKey] = configured;
         facts.Add(pressure);

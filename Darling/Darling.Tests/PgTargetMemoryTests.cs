@@ -63,7 +63,7 @@ public sealed class PgTargetMemoryTests
         Assert.Contains("ORDER BY w.collection_time", host, StringComparison.Ordinal);
         Assert.DoesNotContain("IS NOT NULL", host, StringComparison.Ordinal);
         Assert.DoesNotContain("GROUP BY", host, StringComparison.Ordinal);
-        foreach (var column in new[] { "memory_total_bytes", "memory_free_bytes", "memory_cached_bytes", "memory_active_bytes", "configured_memory_bytes" })
+        foreach (var column in new[] { "memory_total_bytes", "memory_free_bytes", "memory_cached_bytes", "memory_buffers_bytes", "memory_active_bytes", "configured_memory_bytes" })
             Assert.Contains(column, host, StringComparison.Ordinal);
     }
 
@@ -129,6 +129,10 @@ public sealed class PgTargetMemoryTests
            two .02 samples after it never make three — so the worst share HELD for three samples is 0.09, not 0.02. */
         Assert.Equal(0.09, summary.SustainedMinReclaimableShare!.Value, precision: 9);
         Assert.Equal(0.9, summary.PeakActiveShare!.Value, precision: 9);
+        Assert.Null(summary.PeakBuffersShare);   // no sample carried buffers
+        var withBuffers = PgTargetFactCollector.SummariseHostMemory([new(16 * GiB, GiB, GiB, 8 * GiB, null, 512 * MiB), new(16 * GiB, GiB, GiB, 8 * GiB, null, GiB)], sustain: 3);
+        Assert.Equal(1 / 16.0, withBuffers.PeakBuffersShare!.Value, precision: 9);
+        Assert.Equal(0.125, withBuffers.MinReclaimableShare!.Value, precision: 9);   // buffers are stated, not folded into free + cached
 
         /* Fewer memory rows than the sustain count → nothing sustained; a zero total is not a measurement. */
         var thin = PgTargetFactCollector.SummariseHostMemory([S(16 * GiB, 0.01), S(0, 0.01), S(16 * GiB, 0.01)], sustain: 3);

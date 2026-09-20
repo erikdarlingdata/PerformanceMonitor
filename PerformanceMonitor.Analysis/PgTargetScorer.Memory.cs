@@ -93,6 +93,9 @@ public static partial class PgTargetScorer
     public const string HostMemorySustainedMinReclaimableShareKey = "sustained_min_reclaimable_share";
     /// <summary>The window's peak <c>memory_active_bytes / memory_total_bytes</c> — what the working set was using at its widest.</summary>
     public const string HostMemoryPeakActiveShareKey = "peak_active_share";
+    /// <summary>The window's peak <c>memory_buffers_bytes / memory_total_bytes</c> — stated beside the reclaimable share, not
+    /// folded into it (the design's share is free + cached; the calibration decides whether buffers join it).</summary>
+    public const string HostMemoryPeakBuffersShareKey = "peak_buffers_share";
     /// <summary>The sustain count the collector applied (the scorer's constant, repeated onto the fact so the reader sees it).</summary>
     public const string HostMemorySustainSamplesKey = "sustain_samples";
     /// <summary>Metadata KEYS on the pressure fact's <c>unavailable</c> shape (the numeric-metadata idiom, one key per
