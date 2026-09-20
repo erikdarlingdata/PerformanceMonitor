@@ -105,6 +105,9 @@ public class AlertSeverityTests
     [InlineData("Collector Cost Digest")]
     [InlineData("Fleet Sweep Rollup")]
     [InlineData("Analysis Singles Digest")]
+    /* #3783: the first two CONDITIONS on the INFO tier — the store's TOAST slack and checkpointer pressure. */
+    [InlineData("Store TOAST Slack")]
+    [InlineData("Store Checkpointer Pressure")]
     public void DeliberateInfoMetrics_AreNotWarnings_InTheHistoryGridClassifier(string metric)
     {
         var (_, badge, _) = AlertSeverity.ForMetric(metric);

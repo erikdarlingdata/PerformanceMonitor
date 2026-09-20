@@ -511,6 +511,8 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
+            DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker
