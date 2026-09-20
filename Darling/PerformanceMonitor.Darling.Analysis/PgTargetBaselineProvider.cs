@@ -13,14 +13,16 @@ using PerformanceMonitor.Analysis.Baselines;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with TWO things swapped —
-/// which SQL computes a metric's hour×day-of-week buckets, and where the target's clock is read from (#3691,
-/// <c>PgTargetBaselineProvider.Clock.cs</c>). Everything else is inherited by construction rather than copied:
+/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with THREE things swapped —
+/// which SQL computes a metric's hour×day-of-week buckets, where the target's clock is read from (#3691,
+/// <c>PgTargetBaselineProvider.Clock.cs</c>), and which SQL computes a metric's buckets for ONE member of a
+/// population when the caller passes a key (#3691 lane 33, <c>PgTargetBaselineProvider.Statements.cs</c>).
+/// Everything else is inherited by construction rather than copied:
 /// the bucket cache, the naive-UTC parameter binding, the eight-column robust reader, the timeout
 /// classification (<see cref="PgBaselineProvider.IsCommandTimeout"/> — one definition,
 /// <c>BaselineTimeoutIsNamedTests</c>) and the degrade-to-<c>BaselineBucket.Empty</c> posture. The base
-/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/> and <see cref="PgBaselineProvider.ReadServerClockAsync"/>
-/// are the seams.
+/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/>, <see cref="PgBaselineProvider.ReadServerClockAsync"/>
+/// and <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/> are the seams.
 ///
 /// <para><b>The clock the buckets key on (#3749 Q6, then #3691).</b> Since #3749 the base binds six parameters, not
 /// three: <c>$1</c> server_id, <c>$2</c> window start and <c>$3</c> analysis time as before, then <c>$4..$6</c> —
@@ -124,7 +126,9 @@ per_collection AS (
     /// <c>now()</c>, so an anchored pass (#2506) baselines the 30 days before ITS window — and, since #3749, the
     /// three clock parameters <c>$4..$6</c> the scaffold's key consumes (class summary), which an arm never names.
     /// An arm's own text references only <c>$1..$3</c>; neither PostgreSQL nor Npgsql objects to the three it does
-    /// not use (measured in #3749), and the scaffold appended to it is where they are read.
+    /// not use (measured in #3749), and the scaffold appended to it is where they are read. An arm HERE never names
+    /// <c>$7</c> — that is the member key the keyed map's arms take (<see cref="GetPgTargetKeyedBaselineQuery"/>), and
+    /// the base binds it only on a keyed compute.
     /// </summary>
     internal static string? GetPgTargetBaselineQuery(string metricName) => metricName switch
     {
@@ -242,5 +246,33 @@ WITH clean AS (
     private static partial string? StatementMeanMsBaselineQuery();
     private static partial string? CpuBurnCoresBaselineQuery();
 
+    /// <summary>
+    /// The KEYED metric → SQL map (#3691 lane 33): the arms the five-argument
+    /// <see cref="PgBaselineProvider.GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/> resolves
+    /// through <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/>, one per metric that has a per-member shape.
+    /// Internal so Darling.Tests can pin every keyed query's table and shape ungated, as the unkeyed map is pinned.
+    /// Each arm is the unkeyed contract plus one thing: its member predicate on <c>$7</c>, the key bound as text
+    /// and cast to the column (<c>queryid = $7::BIGINT</c>) — so a keyed arm references exactly <c>$1..$7</c> where an
+    /// unkeyed one references exactly <c>$1..$6</c>, and the two-armed census in <c>LocalClockBucketKeyTests</c> holds
+    /// both. Today the family is statements, keyed by <c>queryid</c> (<c>PgTargetBaselineProvider.Statements.cs</c>):
+    /// <c>pg_statement_share</c>, the statement's share of the collection's total execution time (no unkeyed arm — the
+    /// server's share of itself is 1.0), and <c>pg_statement_mean_ms</c>, the statement's per-call mean beside lane
+    /// 27's server-wide unkeyed arm of the same name, so lane 27's detector can switch to the statement's own series
+    /// without a new name. A metric with no keyed shape answers null — "no baseline", as the base does for every
+    /// metric — never the unkeyed arm under a member's key.
+    /// </summary>
+    internal static string? GetPgTargetKeyedBaselineQuery(string metricName) => metricName switch
+    {
+        MetricNames.PgStatementShare => StatementShareKeyedBaselineQuery(),
+        MetricNames.PgStatementMeanMs => StatementMeanMsKeyedBaselineQuery(),
+
+        _ => null,
+    };
+
+    private static partial string? StatementShareKeyedBaselineQuery();
+    private static partial string? StatementMeanMsKeyedBaselineQuery();
+
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
+
+    protected override string? ResolveKeyedBaselineQuery(string metricName) => GetPgTargetKeyedBaselineQuery(metricName);
 }

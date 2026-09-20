@@ -242,7 +242,10 @@ public class BaselineSupplyTests
     /// hand list: the #3691 between-waves batch found two arms (lanes 11 and 15) whose tables a hand list had
     /// missed, and the next lane cannot miss one this way — an arm reading a table the floor lacks fails
     /// <see cref="BaselineServingRawCollectors_MatchTheRawReadingArms"/> by construction. A metric whose arm is
-    /// still a stub (null) contributes nothing, which is right: nothing is read, so nothing needs a floor.
+    /// still a stub (null) contributes nothing, which is right: nothing is read, so nothing needs a floor. Both arms
+    /// of the seam are swept (#3691 lane 33): the unkeyed map AND the keyed map behind <c>ResolveKeyedBaselineQuery</c>
+    /// — a keyed arm is a 30-day scan of its table like any other, and a keyed-only metric (<c>pg_statement_share</c>)
+    /// would otherwise read a table the derivation never saw.
     /// </summary>
     private static System.Collections.Generic.List<string> PgTargetBaselineSources()
     {
@@ -255,15 +258,34 @@ public class BaselineSupplyTests
         var tablesRead = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         foreach (var name in pgNames)
         {
-            var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(name);
-            if (sql is null) continue;   /* a stub arm reads nothing */
-            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(sql, @"\bFROM\s+(pg_\w+)"))
+            foreach (var sql in new[] { PgTargetBaselineProvider.GetPgTargetBaselineQuery(name), PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(name) })
             {
-                tablesRead.Add(m.Groups[1].Value);
+                if (sql is null) continue;   /* a stub arm, or a metric with no shape in this arm of the seam, reads nothing */
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(sql, @"\bFROM\s+(pg_\w+)"))
+                {
+                    tablesRead.Add(m.Groups[1].Value);
+                }
             }
         }
 
         return tablesRead.OrderBy(t => t, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The keyed half of the derivation is not vacuous (#3691 lane 33): the two statement arms read
+    /// <c>pg_statement_stats</c>, which is floored — a keyed-only metric's table reaches the floor set through this
+    /// sweep and no other.</summary>
+    [Fact]
+    public void TheKeyedArms_ReadAFlooredTable_AndTheDerivationSweepsThem()
+    {
+        foreach (var metric in new[] { MetricNames.PgStatementShare, MetricNames.PgStatementMeanMs })
+        {
+            var keyed = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(metric);
+            Assert.NotNull(keyed);
+            Assert.Contains("FROM pg_statement_stats", keyed, StringComparison.Ordinal);
+        }
+        Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgStatementShare));
+        Assert.Contains(CollectorNameFor("pg_statement_stats"), DarlingRetention.BaselineServingRawCollectors);
+        Assert.Contains("pg_statement_stats", PgTargetBaselineSources());
     }
 
     /// <summary>The purge floors by COLLECTOR name (<c>CollectorScheduleDefaults</c> keys), the derivation yields TABLE

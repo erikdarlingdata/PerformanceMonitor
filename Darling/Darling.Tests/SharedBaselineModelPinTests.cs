@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Threading;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Analysis;
 using Xunit;
@@ -64,11 +66,20 @@ public sealed class SharedBaselineModelPinTests
     public void PgBaselineProvider_BindsToTheSharedBaselineBucket()
     {
         // GetBaselineAsync returns Task<BaselineBucket>; pin the element type to the shared type —
-        // the SAME PerformanceMonitor.Analysis.Baselines.BaselineBucket Lite binds to.
-        var method = typeof(PgBaselineProvider).GetMethod(nameof(PgBaselineProvider.GetBaselineAsync));
-        Assert.NotNull(method);
-        var bucketType = method!.ReturnType.GetGenericArguments()[0];
-        Assert.Same(typeof(BaselineBucket), bucketType);
-        Assert.Equal(SharedAssembly, bucketType.Assembly.GetName().Name);
+        // the SAME PerformanceMonitor.Analysis.Baselines.BaselineBucket Lite binds to. BOTH overloads since #3691
+        // lane 33 (the unkeyed four-parameter lookup and the keyed five-parameter one): a keyed series returns the
+        // same shared bucket shape, never a keyed variant of it — the key belongs to the caller, not the bucket.
+        foreach (var signature in new[]
+        {
+            new[] { typeof(int), typeof(string), typeof(DateTime), typeof(CancellationToken) },
+            new[] { typeof(int), typeof(string), typeof(string), typeof(DateTime), typeof(CancellationToken) },
+        })
+        {
+            var method = typeof(PgBaselineProvider).GetMethod(nameof(PgBaselineProvider.GetBaselineAsync), signature);
+            Assert.NotNull(method);
+            var bucketType = method!.ReturnType.GetGenericArguments()[0];
+            Assert.Same(typeof(BaselineBucket), bucketType);
+            Assert.Equal(SharedAssembly, bucketType.Assembly.GetName().Name);
+        }
     }
 }

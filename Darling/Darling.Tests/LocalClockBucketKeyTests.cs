@@ -201,15 +201,29 @@ public sealed class LocalClockBucketKeyTests
             .Where(f => f.IsLiteral && f.FieldType == typeof(string))
             .Select(f => (string)f.GetRawConstantValue()!);
 
-    private static IEnumerable<(string Owner, string Metric, string Sql)> EveryBucketStatement()
+    /// <summary>
+    /// Every statement <c>ComputeBucketsAsync</c> can run, in BOTH arms of the seam (#3691 lane 33): the unkeyed
+    /// statements — the SQL Server arms, the legacy arms, the PostgreSQL-target arms — and the keyed statements the
+    /// PostgreSQL provider answers through <c>ResolveKeyedBaselineQuery</c> (the base declares none). <c>Keyed</c> is
+    /// the arm the statement was RETURNED BY, not anything read off its text, so the census below can hold each arm
+    /// to the parameters its bind actually supplies.
+    /// </summary>
+    private static IEnumerable<(string Owner, string Metric, string Sql, bool Keyed)> EveryBucketStatement()
     {
         foreach (var metric in AllDeclaredMetricNames())
         {
-            if (PgBaselineProvider.GetBaselineQuery(metric) is { } sql) yield return ("PgBaselineProvider", metric, sql);
-            if (PgBaselineProvider.GetLegacyBaselineQuery(metric) is { } legacy) yield return ("PgBaselineProvider.Legacy", metric, legacy);
-            if (PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric) is { } pg) yield return ("PgTargetBaselineProvider", metric, pg);
+            if (PgBaselineProvider.GetBaselineQuery(metric) is { } sql) yield return ("PgBaselineProvider", metric, sql, false);
+            if (PgBaselineProvider.GetLegacyBaselineQuery(metric) is { } legacy) yield return ("PgBaselineProvider.Legacy", metric, legacy, false);
+            if (PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric) is { } pg) yield return ("PgTargetBaselineProvider", metric, pg, false);
+            if (PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(metric) is { } keyed) yield return ("PgTargetBaselineProvider.Keyed", metric, keyed, true);
         }
     }
+
+    /// <summary>The distinct positional parameters a statement's text references, as numbers — <c>$7</c> is not
+    /// <c>$1</c>..<c>$6</c> plus a digit, and <c>$3</c> inside <c>$30</c> would be a false hit of the old
+    /// <c>Contains</c> check.</summary>
+    private static SortedSet<int> ReferencedParameters(string sql) =>
+        new(Regex.Matches(sql, @"\$(\d+)").Select(m => int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)));
 
     [Fact]
     public void TheLocalTimeExpression_IsTheSharedOne_AndBindsTheThreeClockParameters()
@@ -229,22 +243,33 @@ public sealed class LocalClockBucketKeyTests
 
     /// <summary>
     /// The enforcement the engines do not provide. Every statement <c>ComputeBucketsAsync</c> can run — the SQL
-    /// Server arms, the legacy arms, and every PostgreSQL-target arm the derived provider answers with — keys on
-    /// the local-time expression: by ending in the one scaffold, or (the two event-family arms) by extracting from
-    /// it by hand. And no arm anywhere still extracts from bare <c>collection_time</c>, which would run without
-    /// complaint and key on UTC.
+    /// Server arms, the legacy arms, every PostgreSQL-target arm the derived provider answers with, and (#3691 lane
+    /// 33) every KEYED arm — keys on the local-time expression: by ending in the one scaffold, or (the two
+    /// event-family arms) by extracting from it by hand. And no arm anywhere still extracts from bare
+    /// <c>collection_time</c>, which would run without complaint and key on UTC.
+    ///
+    /// <para><b>Two-armed on the parameters, never loosened (the Q6 owner's rule for the seam).</b> Neither PostgreSQL
+    /// nor DuckDB rejects a surplus bind (measured in #3749), so this census is the ONLY thing that makes an arm
+    /// consume the clock: an UNKEYED statement references exactly <c>$1..$6</c> — a <c>$7</c> there would fail at
+    /// execution on every pass, because the base binds six — and a KEYED statement references exactly <c>$1..$7</c>
+    /// — a keyed arm that forgot <c>$4..$6</c> would key on UTC silently, and one that forgot <c>$7</c> would serve
+    /// the population's buckets under a member's key. Exact sets, not "contains": <c>$3</c> inside <c>$30</c> is not
+    /// a reference to <c>$3</c>.</para>
     /// </summary>
     [Fact]
     public void EveryBucketStatement_KeysOnTheLocalClock_AndNoneOnBareCollectionTime()
     {
         var statements = EveryBucketStatement().ToList();
-        Assert.True(statements.Count >= 17, $"the census found only {statements.Count} bucket statements — an arm went missing");
+        Assert.True(statements.Count(s => !s.Keyed) >= 17, $"the census found only {statements.Count(s => !s.Keyed)} unkeyed bucket statements — an arm went missing");
+        Assert.True(statements.Count(s => s.Keyed) >= 2, $"the census found only {statements.Count(s => s.Keyed)} keyed bucket statements — a keyed arm went missing");
 
         var bareKey = new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase);
         var bareDate = new Regex(@"(?<![\w.])collection_time::DATE", RegexOptions.IgnoreCase);
         var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.Deadlock };
+        var unkeyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6 };
+        var keyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6, 7 };
 
-        foreach (var (owner, metric, sql) in statements)
+        foreach (var (owner, metric, sql, keyed) in statements)
         {
             var endsInScaffold = sql.EndsWith(PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal);
             var extractsLocal = sql.Contains("EXTRACT(HOUR FROM " + PgBaselineProvider.LocalCollectionTime + ")", StringComparison.Ordinal)
@@ -254,9 +279,19 @@ public sealed class LocalClockBucketKeyTests
             Assert.Equal(ownExtract.Contains(metric) && owner == "PgBaselineProvider", !endsInScaffold);
             Assert.DoesNotMatch(bareKey, sql);
             Assert.DoesNotMatch(bareDate, sql);
-            Assert.Contains("$3", sql, StringComparison.Ordinal);
-            foreach (var parameter in new[] { "$4", "$5", "$6" })
-                Assert.Contains(parameter, sql, StringComparison.Ordinal);
+            var referenced = ReferencedParameters(sql);
+            Assert.True(
+                (keyed ? keyedParameters : unkeyedParameters).SetEquals(referenced),
+                $"{owner}[{metric}] is {(keyed ? "keyed" : "unkeyed")} and references ${string.Join(", $", referenced)} — expected exactly $1..${(keyed ? 7 : 6)}");
+        }
+
+        /* The keyed arms' $7 is the member predicate on the arm's own column, cast from the text the base binds — never
+           a second clock parameter or a bound the base does not supply. */
+        foreach (var (owner, metric, sql, _) in statements.Where(s => s.Keyed))
+        {
+            Assert.Contains("queryid = $7::BIGINT", sql, StringComparison.Ordinal);
+            Assert.Equal("PgTargetBaselineProvider.Keyed", owner);
+            Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
         }
 
         /* The two hand-extracting arms shift the DATE the per-day mean divides by, too. */
