@@ -174,7 +174,13 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgStorageInnerTabIndex,
             "storage",
             "Storage",
-            new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats" },
+            /* pg_database_size_stats (V136, #3691) is PLACED here and not yet DRAWN: the per-database size series
+               is the Storage tab's question ("where is the space going") asked over time, and its panel lands
+               with the object-growth slice. Placing it now keeps the placement census truthful about which
+               screen owns it; the note below tells the operator it is collected and not yet shown, so the
+               registry does not claim a panel that is not there. ViewerCollectorCoverageTests carries the
+               matching UNBUILT UI entry, and both come off in the same PR as the panel. */
+            new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats", "pg_database_size_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is
                deliberately NOT on the Vacuum tab despite being what vacuum lag costs: that tab is the
@@ -190,7 +196,9 @@ internal static class ViewerPostgresTabs
             + "pgstattuple before rewriting anything. An index nothing scans is a candidate, never a "
             + "conclusion: check the constraint and validity columns beside it first. The column-statistics "
             + "panel is the INPUT those bloat estimates are computed from, and it answers a different "
-            + "question of its own: why the planner chose what it chose."),
+            + "question of its own: why the planner chose what it chose. The hourly per-database size series "
+            + "(pg_database_size_stats) is collected for this tab and not yet drawn — its growth panel lands "
+            + "with the object-growth work."),
     };
 
     /// <summary>The first PostgreSQL tab's index — what a PostgreSQL server's tab strip selects, since

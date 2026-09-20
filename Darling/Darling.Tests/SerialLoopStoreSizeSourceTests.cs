@@ -82,6 +82,16 @@ public sealed class SerialLoopStoreSizeSourceTests
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ServerStatus.cs"), 1,
             "the Viewer status bar's Database field — interactive, user-initiated, on the viewer's own "
             + "fan-out deadline, and nothing waits behind it but the operator who asked"),
+
+        /* V136 (#3691): a THIRD regime, and a different store — the MONITORED TARGET's, not this product's.
+           The per-database size collector runs pg_database_size(oid) over the target's pg_database once an
+           hour, on the collector's own cadence and command timeout, through the same three-outcome degrade
+           every collector gets; the walk it pays for is the target's files, on the target's disk, and
+           nothing on the serial loop waits behind it. It is exactly the SQL Server side's database_size_stats
+           read, in PostgreSQL. One occurrence, inside the query literal. */
+        (Path.Combine("PerformanceMonitor.Collectors", "PgDatabaseSizeStatsCollector.cs"), 1,
+            "the hourly per-database size collector — runs against the MONITORED TARGET, not the store, "
+            + "under the collector's own cadence and command timeout, off the serial loop"),
     };
 
     /// <summary>
@@ -312,7 +322,7 @@ public sealed class SerialLoopStoreSizeSourceTests
         Assert.True(
             unexpected.Count == 0,
             $"{unexpected.Count} file(s) run pg_database_size, which walks every file in the store "
-            + "(measured 3,177ms on a 225GiB store, and it tracks file count rather than bytes). The two "
+            + "(measured 3,177ms on a 225GiB store, and it tracks file count rather than bytes). The "
             + "places that may pay for it, and why, are: "
             + string.Join("; ", s_pgDatabaseSizeOwners.Select(o => $"{o.Relative} — {o.Why}"))
             + ". Say which regime yours is in, or read the recorded value from "

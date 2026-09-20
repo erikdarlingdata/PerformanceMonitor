@@ -211,7 +211,18 @@ public sealed class PgRegistryPanelPlacementTests
         /* Resolved means it reached a PANEL, not merely a method: a collector named inside a method that
            assigns no control would otherwise leave both rules with nothing to compare while this list
            stayed empty — the same invisible skip, one step further along. */
+        /* The ONE stated exemption, and what it is: pg_database_size_stats (V136, #3691) is written by its
+           collector and read by nothing yet — the analysis consumer (lane 32) and a Viewer panel are follow-on
+           lanes on #3691. It is PLACED on the Storage tab and not yet DRAWN; the tab's own note says so to the
+           operator, and ViewerCollectorCoverageTests / ViewerPostgresTabsTests carry the matching entries. It
+           is named here rather than silently skipped, and it leaves this list in the same PR as its
+           LoadPg…Async loader. Do not let a second collector join it: a series landing ahead of its screen is
+           a sequencing choice a PR states, not a category. */
+        var placedNotDrawn = new HashSet<string>(StringComparer.Ordinal) { "pg_database_size_stats" };
+        Assert.All(placedNotDrawn, c => Assert.Contains(c, chain.Collectors));
+
         var unresolved = chain.Collectors
+            .Where(c => !placedNotDrawn.Contains(c))
             .Where(c => Panels(chain, c).Count == 0)
             .Select(c => Methods(chain, c).Count == 0
                 ? $"{c} — no loader method names it"
