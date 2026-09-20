@@ -448,6 +448,73 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
+    /// The latest-snapshot reads are read by their stamp's one spelling. #3637 made <c>captured_at</c> the
+    /// census's word for "when this snapshot was taken" and <see cref="McpLatestSnapshotStampTests"/> holds
+    /// every latest read to it; four of them (<c>get_database_sizes</c>, <c>get_running_jobs</c>,
+    /// <c>get_server_properties</c>, <c>get_session_stats</c>) had stamped themselves as <c>collection_time</c>
+    /// before that vocabulary existed, and this page's Sessions tile read the old key — the one consumer outside
+    /// that census's boundary, and the reason the four sat in a named allowance instead of the roster (#3653
+    /// A15/A16). #3697 renamed the payloads on both SKUs and moved the tile. Nothing pinned the tile, and a key
+    /// drifting back fails silently: an absent key renders as the empty dash, the tile still draws, and the
+    /// snapshot's age — the one number that says whether a Stamped read is stale — quietly stops appearing.
+    ///
+    /// <para>Derived, not listed. Every read the stamp census rosters as Stamped or SearchBound publishes its
+    /// stamp ONCE at the top as <c>captured_at</c> and nothing under <c>collection_time</c> anywhere in its
+    /// payload (the census's negative sweep refuses the top-level key, and none of those tools projects the word
+    /// into a row either), so ANY descriptor this page binds to one of those reads that names
+    /// <c>collection_time</c> is a dead read — whether a stat tile over the top-level object or a table column
+    /// over its rows. Windowed reads are excluded on purpose: their <c>grants[]</c> rows carry a per-row
+    /// <c>collection_time</c> that IS a series column. The positive half is the one tile the item named: it must
+    /// show the stamp under the new word, so the pin cannot pass by the tile being deleted.</para>
+    /// </summary>
+    [Fact]
+    public void TheStampedReads_AreReadByTheirStamp_NeverTheRetiredKey()
+    {
+        var js = ServerTabsJs;
+
+        var stamped = McpLatestSnapshotStampTests.LatestTools
+            .Where(t => t.Shape is McpLatestSnapshotStampTests.Shape.Stamped or McpLatestSnapshotStampTests.Shape.SearchBound)
+            .Select(t => t.ToolName)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.True(stamped.IsSupersetOf(["get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats"]),
+            "the four reads this pin was written for have left the stamp roster — re-anchor before editing");
+
+        var arrays = DescriptorArraysIn(js);
+        var problems = new List<string>();
+        var examined = new List<string>();
+
+        foreach (var (read, arrayNames) in DescriptorArraysBoundIn(js))
+        {
+            if (!stamped.Contains(read)) continue;
+
+            foreach (var name in arrayNames)
+            {
+                Assert.True(arrays.TryGetValue(name, out var descriptors),
+                    $"{name}, bound to {read}, is not a top-level const array in server-tabs.js — the parser below needs re-anchoring");
+                examined.Add($"{read}/{name}");
+
+                if (Regex.IsMatch(descriptors, @"key:\s*""collection_time"""))
+                {
+                    problems.Add($"{read} is read through {name}, which names collection_time — a key no Stamped read publishes; its stamp is captured_at");
+                }
+            }
+        }
+
+        /* The four named reads must all have been reached, or the parser has silently stopped seeing the panels
+           and every assertion above passed on nothing. */
+        foreach (var read in new[] { "get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats" })
+        {
+            Assert.Contains(examined, e => e.StartsWith(read + "/", StringComparison.Ordinal));
+        }
+
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+
+        /* The positive half: the Sessions tile shows the stamp, under the word the census uses, as an age. */
+        Assert.True(arrays.TryGetValue("SESSION_STATS", out var sessionStats), "SESSION_STATS moved — re-anchor this pin");
+        Assert.Matches(@"\{ key: ""captured_at"", label: ""Collected"", format: ""reltime""", sessionStats);
+    }
+
+    /// <summary>
     /// Every viz a descriptor names is in the shipped vocabulary. The four kinds are the whole registry; a fifth
     /// would have to be added to panels.js's VIZ, to <c>KnownVizList</c> (or the composer could not offer it), to
     /// derive.js's <c>deriveVizConfig</c> and to the editor's config arms — so a page quietly introducing one
@@ -1101,6 +1168,52 @@ public sealed class ServerPageTabsTests
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
             yield return (m.Groups[1].Value, keys);
+        }
+    }
+
+    /// <summary>Every top-level <c>const NAME = [ ... ];</c> descriptor array in the module, by name. These are
+    /// the column and stat vocabularies the panels bind to (<c>*_COLUMNS</c>, <c>*_STATS</c>, <c>*_SERIES</c>);
+    /// the body is the text between the brackets, comments included.</summary>
+    private static Dictionary<string, string> DescriptorArraysIn(string js) =>
+        Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+            .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
+
+    /// <summary>
+    /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},
+    /// NAME, ...)</c>, <c>table("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
+    /// NAME }, { columns: NAME }])</c>. Each call is sliced by bracket balance rather than by regex because a
+    /// fanout's spec array nests objects inside an array inside the call; the read is the first read-shaped
+    /// literal in the call, and the arrays are every <c>*_COLUMNS</c> / <c>*_STATS</c> token in it. The
+    /// helpers' own definitions (<c>function stat(title, read, ...)</c>) carry no literal and are skipped.
+    /// String literals are NOT skipped: a bracket inside a title or an empty-state sentence is balanced in
+    /// practice, and a lone one would end the slice early — a silent miss on the arrays after it, never a false
+    /// alarm, which the caller's reach check on its named reads bounds.
+    /// </summary>
+    private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
+    {
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|table|fanout)\("))
+        {
+            var depth = 1;
+            var i = open.Index + open.Length;
+            while (depth > 0 && i < js.Length)
+            {
+                switch (js[i])
+                {
+                    case '(' or '[' or '{': depth++; break;
+                    case ')' or ']' or '}': depth--; break;
+                }
+                i++;
+            }
+
+            var call = js[open.Index..i];
+            var read = Regex.Match(call, "\"(get_[a-z0-9_]+|audit_config)\"");
+            if (!read.Success) continue;
+
+            var arrays = Regex.Matches(call, @"\b([A-Z][A-Z0-9_]*_(?:COLUMNS|STATS))\b")
+                .Select(m => m.Groups[1].Value)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            yield return (read.Groups[1].Value, arrays);
         }
     }
 }

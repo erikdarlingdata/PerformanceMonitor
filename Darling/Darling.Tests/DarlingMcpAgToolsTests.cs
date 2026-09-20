@@ -113,6 +113,56 @@ public sealed class DarlingMcpAgToolsSurfaceTests
         Assert.Contains("get_ag_health", DarlingMcpInstructions.Text, StringComparison.Ordinal);
         Assert.Contains("Availability Group", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #3653 A15/A16: the description says the two things the reader's own doc comment warns about, because a
+    /// caller reads the description and never the reader. <see cref="DarlingAgReader"/>'s summary carries two
+    /// bolded traps — <b>Latest collection per server</b> (the collectors write NO row for a server with no AGs,
+    /// so a dropped AG lingers as its last non-empty snapshot and the group's <c>collection_time</c> is the only
+    /// tell) and <b>What the badge deliberately does NOT band</b> (every severity restates a DMV state or health
+    /// string; lag and queue depth are raw magnitudes, so a badly lagging asynchronous secondary carries a healthy
+    /// severity) — and the description used to say neither. #3696 put both sentences on it, plus the trap inside
+    /// the second (the DMV reports 0 lag while data movement is suspended, so lag is read with
+    /// <c>is_suspended</c>). Nothing pinned them, and a description that loses a sentence fails nothing: the
+    /// reader's comment goes on being right in a file no agent opens.
+    ///
+    /// <para>Anchored on the reader's own paragraph headers first, so the pin fails with "re-anchor" if the
+    /// reader stops documenting a trap rather than passing against prose that no longer exists; then on the
+    /// description and the instructions paragraph — the two texts an agent reads before calling — for each
+    /// trap's mechanism, consequence and the field that tells it apart. Phrase matching rather than a
+    /// paraphrase test, because these are the exact words a reader would search for.</para>
+    /// </summary>
+    [Fact]
+    public void Description_SurfacesTheReadersTwoDocumentedTraps()
+    {
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAgReader.cs");
+        Assert.Contains("<b>Latest collection per server.</b>", reader, StringComparison.Ordinal);
+        Assert.Contains("<b>What the badge deliberately does NOT band: lag and queue depth.</b>", reader, StringComparison.Ordinal);
+
+        var description = ToolMethods()
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_ag_health")
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        /* Trap one, the stale snapshot: mechanism, consequence, tell. */
+        Assert.Contains("NO row for a server with no AGs", description, StringComparison.Ordinal);
+        Assert.Contains("last non-empty snapshot", description, StringComparison.Ordinal);
+        Assert.Contains("collection_time", description, StringComparison.Ordinal);
+
+        /* Trap two, the un-banded magnitudes: the negative on the word a caller would look for, the fields to
+           read instead, and the DMV's 0-while-suspended inside it. */
+        Assert.Contains("lag and queue depth are NOT banded", description, StringComparison.Ordinal);
+        Assert.Contains("secondary_lag_seconds", description, StringComparison.Ordinal);
+        Assert.Contains("is_suspended", description, StringComparison.Ordinal);
+        Assert.Contains("0 lag while data movement is suspended", description, StringComparison.Ordinal);
+
+        /* The instructions' AG paragraph is the other text an agent reads first; it carries the same two traps
+           in its own words, and the perspective trap (LOCAL-replica-only columns) it always had. */
+        var instructions = DarlingMcpInstructions.Text;
+        Assert.Contains("lag and queue depth are NOT banded", instructions, StringComparison.Ordinal);
+        Assert.Contains("the DMV reports lag as 0 (not null) while data movement is suspended", instructions, StringComparison.Ordinal);
+        Assert.Contains("keeps returning its last non-empty snapshot", instructions, StringComparison.Ordinal);
+        Assert.Contains("populated only for the LOCAL replica", instructions, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
