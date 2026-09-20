@@ -73,6 +73,12 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
                     if (pathKeys.Contains(PgTargetFactKeys.DeadlockRate) || pathKeys.Contains(PgTargetFactKeys.AnomalyDeadlockRate))
                         await CollectDeadlockExemplarsAsync(finding, context);
 
+                    /* Lane 29 of #3691: what the buffer cache HOLDS, beside the composite that said it is short. On the
+                       pressure key only — the composite scores 0 below its concerning line and ≥ 0.5 at it, so "on the
+                       path" is "fired"; the shared_buffers advisory rooting alone on a quiet server is not enriched. */
+                    if (pathKeys.Contains(PgTargetFactKeys.BufferCachePressure))
+                        await CollectBufferCompositionAsync(finding, context);
+
                     if (pathKeys.Any(k => k.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
                         || pathKeys.Contains(PgTargetFactKeys.TempSpill))
                     {
@@ -101,4 +107,6 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
     private partial Task CollectTopStatementsAsync(AnalysisFinding finding, AnalysisContext context, HashSet<string> pathKeys);
 
     private partial Task CollectDeadlockExemplarsAsync(AnalysisFinding finding, AnalysisContext context);
+
+    private partial Task CollectBufferCompositionAsync(AnalysisFinding finding, AnalysisContext context);
 }

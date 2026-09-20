@@ -69,6 +69,8 @@ internal static class PgTargetToolRecommendations
             new("get_pg_database_stats", "Per-database block hits and reads — the hit-ratio arm"),
             new("get_pg_io_stats", "Evictions and reads by backend type and context (PG 16+)"),
             new("get_pg_buffer_usage", "What the buffer cache holds right now, by relation"),
+            /* Lane 29 of #3691: the composition drill-down names the relation that holds the pool; this is the read for what reads it. */
+            new("get_pg_top_queries", "The heaviest statements with their shared_blks_read beside shared_blks_hit — which of them is missing the cache"),
         ],
         [PgTargetFactKeys.Tps] = DatabaseReads(),
         [PgTargetFactKeys.HitRatio] = DatabaseReads(),
