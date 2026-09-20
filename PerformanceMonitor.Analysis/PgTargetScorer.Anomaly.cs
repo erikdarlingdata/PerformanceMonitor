@@ -76,8 +76,10 @@ public static partial class PgTargetScorer
     /// The ratio at which a PostgreSQL ratio-family anomaly saturates at 1.0 — three times the firing multiple
     /// (<see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>), so the ramp runs 3× → 0.5 to 9× → 1.0: the same
     /// "saturate at a multiple of the anchor" METHOD the deviation ramp uses (2× its anchor), on the ratio axis.
-    /// unmeasured: chosen, not measured — calibrate against the per-server ratio distribution over
-    /// pg_database_stats and pg_wait_stats before the next release; the fact carries threshold_lineage = 0.
+    /// unmeasured: chosen, not measured — the 2026-09-20 calibration placed the firing multiple (see
+    /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>: TPS ratio p99.99 24.4, wait-rate ratio p99.9 31)
+    /// but nobody has asked where a ratio family should saturate, so the 9× stays a judgment — calibrate the ramp's
+    /// top against those same distributions before the next release; the fact carries threshold_lineage = 0.
     /// </summary>
     public const double RatioAnomalySaturation = 3.0 * AnomalyThresholds.PgRatioAnomalyThreshold;
 
@@ -177,7 +179,8 @@ public static partial class PgTargetScorer
         }
 
         var ratio = fact.Metadata.GetValueOrDefault("ratio");
-        /* unmeasured: PgRatioAnomalyThreshold / RatioAnomalySaturation — see their declarations. */
+        /* measured (2026-09-20, per family): PgRatioAnomalyThreshold; unmeasured: RatioAnomalySaturation — see their
+           declarations. The span is why the stamp above stays 0 even where the multiple is well placed. */
         if (ratio < AnomalyThresholds.PgRatioAnomalyThreshold) return 0.0;
         return 0.5 + 0.5 * Math.Min(
             (ratio - AnomalyThresholds.PgRatioAnomalyThreshold) / (RatioAnomalySaturation - AnomalyThresholds.PgRatioAnomalyThreshold), 1.0);

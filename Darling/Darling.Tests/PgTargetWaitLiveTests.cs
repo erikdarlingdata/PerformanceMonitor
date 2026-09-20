@@ -252,11 +252,11 @@ public sealed class PgTargetWaitLiveTests
                 foreach (var fact in shown)
                 {
                     var metadata = fact.GetProperty("metadata");
-                    /* #3691 lineage: only the LWLock rollup was graded on its own (fleet-measured) type bars — the
-                       Lock and IO rollups yielded to a standout past 0.15 (decided on the unmeasured standout bar)
-                       and the four standouts grade on the unmeasured per-event bars, so they say 0. */
-                    var expectedLineage = fact.GetProperty("key").GetString() == PgTargetFactKeys.WaitKey("LWLock", null) ? 1 : 0;
-                    Assert.Equal(expectedLineage, metadata.GetProperty("threshold_lineage").GetDouble());
+                    /* #3691 lineage, round 2: every Aurora fact says 1 — the LWLock rollup graded on its fleet-measured
+                       type bars (2026-09-19); the Lock and IO rollups yielded to a standout past 0.15 and the four
+                       standouts graded on the per-event bars, both measured by the 2026-09-20 per-event read (§C3).
+                       Round 1 had the standouts and the yielded rollups at 0; the stock side below still does. */
+                    Assert.True(metadata.GetProperty("threshold_lineage").GetDouble() == 1, fact.GetProperty("key").GetString());
                     Assert.False(metadata.TryGetProperty(PgTargetScorer.WaitIsSampledKey, out _), fact.GetProperty("key").GetString());
                 }
             }

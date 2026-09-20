@@ -120,12 +120,20 @@ public static partial class PgTargetScorer
     /// calibration read saw (1–17 reads an hour) from entering as noise at the finer grain — a quarter-hour's
     /// share of <see cref="IoMinimumOps"/>, so a sample admitted here would have been admitted at the hour grain
     /// had its hour run at the same rate. Lineage: the RESTORE threshold it serves is engine-defined (the shared
-    /// <c>BaselineMath.RestoreThreshold</c>); the 250 itself is <b>unmeasured</b> — chosen, not measured: the
-    /// calibration read (§B1) distributed reads per HOUR (per-server p50 spanning 1–790 k) and never a per-15-minute
-    /// read count, so calibrate against <c>pg_io_stats</c> at this grain before the next release. It is a
-    /// sample-ADMISSION floor, not a grading bar: the anomaly's fire/no-fire bars (<c>PgIoLatencyFloorMs</c>,
-    /// <c>PgIoLatencyFallbackMs</c>) stay measured and the fact keeps <c>threshold_lineage = 1</c>, and the floor is
-    /// published beside them as <c>bucket_reads_floor</c> so <c>get_analysis_facts</c> shows which reads counted.
+    /// <c>BaselineMath.RestoreThreshold</c>); the 250 itself is <b>measured</b> as an admission floor: reads per
+    /// 15-minute bucket over 14 days × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-20 (§C5,
+    /// <c>pg_io_stats</c>) — 57 % of the fleet's buckets carry fewer than 250 reads (62 % fewer than 1,000); per
+    /// server the share below the floor runs 0 – 100 % (median 70 %), and 25 of the 50 clusters have a MEDIAN of 0
+    /// reads per quarter-hour (the working set is cached). The floor is right for what it does — a ms-per-read over a
+    /// handful of reads is noise — and the read states its consequence rather than hiding it: at this grain a 30-day
+    /// hour-of-week bucket holds at most 17 samples, so excluding 57 – 100 % of them leaves HALF the fleet under the
+    /// 15-sample restore threshold, and their I/O baseline is the hour-of-DAY collapse (0.85 confidence) BY
+    /// CONSTRUCTION — honest, and stated on the fact's <c>baseline_tier</c>; the hour-of-week tier is restorable
+    /// only on the ~25 % of clusters that read continuously. Aurora population (Aurora storage; a stock local-disk
+    /// server's read counts are not yet measured). It is a sample-ADMISSION floor, not a grading bar: the anomaly's
+    /// fire/no-fire bars (<c>PgIoLatencyFloorMs</c>, <c>PgIoLatencyFallbackMs</c>) are measured (§B1) and the fact
+    /// carries <c>threshold_lineage = 1</c> — which this read now also supports — and the floor is published beside
+    /// them as <c>bucket_reads_floor</c> so <c>get_analysis_facts</c> shows which reads counted.
     /// The baseline and detector SQL carry the same literal beside a comment naming this constant;
     /// <c>PgTargetIoTests</c> pins the two equal.
     /// </summary>

@@ -15,10 +15,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The #3691 lineage flip, pinned to its evidence: every PostgreSQL bar the 2026-09-19 fleet calibration
-/// measured now carries a <c>measured</c> comment that names the calibration's DATE and POPULATION, the bars the
-/// calibration could not measure still say <c>unmeasured</c>, and each flipped scorer stamps the metadata flag
-/// that agrees with its comments.
+/// The #3691 lineage flips, pinned to their evidence: every PostgreSQL bar the fleet calibrations measured (the
+/// 2026-09-19 read of levels and the 2026-09-20 read of hour-of-week ratios, per-event wait fractions and reads per
+/// quarter-hour) now carries a <c>measured</c> comment that names ITS calibration's DATE and the POPULATION, the
+/// bars the calibrations could not measure still say <c>unmeasured</c>, and each flipped scorer stamps the metadata
+/// flag that agrees with its comments.
 ///
 /// <para><b>Why a pin on prose.</b> <see cref="PgTargetThresholdLineageTests"/> accepts any of the three marker
 /// words within six lines of a bar; it cannot tell a measured comment that cites its read from one that merely
@@ -28,11 +29,14 @@ namespace Darling.Tests;
 /// shape, (b) cites <c>2026-09-19</c>, and (c) names the population (<c>Aurora PostgreSQL clusters</c>). Moving
 /// a bar then means re-reading the fleet or rewriting the comment as unmeasured, and either is honest.</para>
 ///
-/// <para><b>What stays unmeasured, on purpose.</b> The wait STANDOUT bars (the calibration aggregated by type,
-/// not by event), the sampling floor, the session-count floors (read as a fraction of the ceiling, not as
-/// counts), the ratio families' firing multiple, and every co-fire boost. Those are pinned to still say so,
-/// because the flag contract — 0 = at least one chosen bar decided, 1 = every bar that decided is measured or
-/// engine-defined — depends on the unmeasured ones not quietly gaining the word.</para>
+/// <para><b>What stays unmeasured, on purpose.</b> The sampling floor and the sampled profile's bar (population 0
+/// on the fleet as of 2026-09-20 — no cluster runs <c>pg_wait_sampling</c>), the session-count floors (read as a
+/// fraction of the ceiling, not as counts), and every co-fire boost. Those are pinned to still say so, because the
+/// flag contract — 0 = at least one chosen bar decided, 1 = every bar that decided is measured or engine-defined —
+/// depends on the unmeasured ones not quietly gaining the word. The round-2 flips (the wait standout bars, read per
+/// event; the I/O admission floor, read per quarter-hour; the ratio multiple, read per family) cite 2026-09-20, and
+/// a constant's entry below names the date its block must cite — a round-1 citation above a round-2 bar is a stale
+/// read presented as the number's lineage.</para>
 ///
 /// <para>Reads the LF-normalised source (<see cref="RepoFile.ReadRepoFileLf"/>) because a comment block spans
 /// lines and is collapsed to one string before its citation is matched; declared in
@@ -41,44 +45,64 @@ namespace Darling.Tests;
 public sealed class PgTargetMeasuredLineageTests
 {
     private const string CalibrationDate = "2026-09-19";
+    /// <summary>The second read (batch C): hour-of-week ratios, per-event wait fractions, reads per 15-minute bucket.</summary>
+    private const string SecondCalibrationDate = "2026-09-20";
     private const string Population = "Aurora PostgreSQL clusters";
 
     private static readonly Regex s_constDeclaration = new(
         @"^\s*public\s+(?:const|static\s+readonly)\s+\w+\s+(\w+)\s*=", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>The bars the calibration measured, by file and constant — the flip list of the STEP brief, verbatim.
-    /// The wait rollup bars and the CPU bars are declared as pairs under one comment; the walk-up below skips a
-    /// sibling declaration so each member of a pair reads the shared block.</summary>
-    private static readonly (string File, string[] Constants)[] s_measured =
+    /// <summary>The bars the calibrations measured, by file, constant and the DATE of the read that placed them — the
+    /// flip lists of the two STEP briefs, verbatim. The wait rollup bars, the wait standout bars and the CPU bars
+    /// are declared as pairs under one comment; the walk-up below skips a sibling declaration so each member of a
+    /// pair reads the shared block.</summary>
+    private static readonly (string File, string Date, string[] Constants)[] s_measured =
     {
-        ("PgTargetScorer.Temp.cs", new[] { "TempSpillConcerningBytesPerSec", "TempSpillCriticalBytesPerSec" }),
-        ("PgTargetScorer.Vacuum.cs", new[] { "BacklogPersistenceSamples", "BacklogCriticalRatio", "BacklogManyTables" }),
-        ("PgTargetScorer.Database.cs", new[] { "DeadlockWarnPerHour", "DeadlockCriticalPerHour" }),
-        ("PgTargetScorer.Queries.cs", new[] { "BadActorShareConcerning", "BadActorShareCritical", "BadActorBusyFloor" }),
-        ("PgTargetScorer.Waits.cs", new[] { "WaitRollupConcerning", "WaitRollupCritical", "WaitIoConcerning", "WaitIoCritical" }),
-        ("PgTargetScorer.Cpu.cs", new[] { "CpuCapacityWarningPercent", "CpuCapacityCriticalPercent" }),
+        ("PgTargetScorer.Temp.cs", CalibrationDate, new[] { "TempSpillConcerningBytesPerSec", "TempSpillCriticalBytesPerSec" }),
+        ("PgTargetScorer.Vacuum.cs", CalibrationDate, new[] { "BacklogPersistenceSamples", "BacklogCriticalRatio", "BacklogManyTables" }),
+        ("PgTargetScorer.Database.cs", CalibrationDate, new[] { "DeadlockWarnPerHour", "DeadlockCriticalPerHour" }),
+        ("PgTargetScorer.Queries.cs", CalibrationDate, new[] { "BadActorShareConcerning", "BadActorShareCritical", "BadActorBusyFloor" }),
+        ("PgTargetScorer.Waits.cs", CalibrationDate, new[] { "WaitRollupConcerning", "WaitRollupCritical", "WaitIoConcerning", "WaitIoCritical" }),
+        /* Round 2 (#3691, batch C §C3): the per-EVENT read placed the standout bars — ≈ p99.6 / p99.99 of non-IO event buckets. */
+        ("PgTargetScorer.Waits.cs", SecondCalibrationDate, new[] { "WaitStandoutConcerning", "WaitStandoutCritical" }),
+        ("PgTargetScorer.Cpu.cs", CalibrationDate, new[] { "CpuCapacityWarningPercent", "CpuCapacityCriticalPercent" }),
         /* Lane 14 (#3691) added the idle-in-transaction duration bars, measured as the §B4 empty interval. */
-        ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationWarning", "ConnectionSaturationCritical", "IdleInTransactionShareBar", "IdleInTransactionWarningMs", "IdleInTransactionCriticalMs" }),
-        ("Baselines/AnomalyThresholds.cs", new[] { "PgTpsFloor", "PgTpsFallback", "PgCpuFloorPct", "PgCpuFallbackPct", "PgWaitProfileFallbackMsPerSec", "PgDeadlockRateFloorPerHour" }),
+        ("PgTargetScorer.Sessions.cs", CalibrationDate, new[] { "ConnectionSaturationWarning", "ConnectionSaturationCritical", "IdleInTransactionShareBar", "IdleInTransactionWarningMs", "IdleInTransactionCriticalMs" }),
+        /* Round 2 (§C5): the quarter-hour reads floor, measured as an ADMISSION floor (57 % of fleet buckets under it). */
+        ("PgTargetScorer.Io.cs", SecondCalibrationDate, new[] { "IoBaselineBucketMinimumReads" }),
+        ("Baselines/AnomalyThresholds.cs", CalibrationDate, new[] { "PgTpsFloor", "PgTpsFallback", "PgCpuFloorPct", "PgCpuFallbackPct", "PgWaitProfileFallbackMsPerSec", "PgDeadlockRateFloorPerHour" }),
+        /* Round 2 (§C2): the ratio multiple, read per family — the verdict differs by family and the comment says each. */
+        ("Baselines/AnomalyThresholds.cs", SecondCalibrationDate, new[] { "PgRatioAnomalyThreshold" }),
     };
 
-    /// <summary>The bars the calibration did NOT measure, which must still say so.</summary>
+    /// <summary>The bars the calibrations did NOT measure, which must still say so.</summary>
     private static readonly (string File, string[] Constants)[] s_stillUnmeasured =
     {
-        ("PgTargetScorer.Waits.cs", new[] { "WaitStandoutConcerning", "WaitStandoutCritical", "WaitSampledMinimumSamples", "WaitCoFireBoost" }),
+        ("PgTargetScorer.Waits.cs", new[] { "WaitSampledMinimumSamples", "WaitCoFireBoost" }),
         ("PgTargetScorer.Temp.cs", new[] { "TempCauseBoost" }),
         ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost" }),
         /* Lane 18 (#3691) added the offered-vs-delivered co-fire boost — a boost, unmeasured like its siblings. */
         ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost", "OfferedVsDeliveredBoost" }),
         /* Lane 24 (#3691): the stock SAMPLED profile's bar — the calibration read Aurora's exact deltas, not pg_wait_sampling. */
-        ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec" }),
+        ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgSampledWaitProfileFallbackMsPerSec" }),
+        /* The ratio families' ramp spans: the 2026-09-20 read placed the firing multiple, not where a ramp should top out. */
+        ("PgTargetScorer.Anomaly.cs", new[] { "RatioAnomalySaturation", "WaitProfileModifiedZSpan" }),
+    };
+
+    /// <summary>The sampled-wait bars (#3765 / lane 24) must state the reason they are STILL unmeasured after round 2:
+    /// the fleet has no <c>pg_wait_sampling</c> population to read (§C6), and the note keeps anyone from re-reading an
+    /// empty table for them.</summary>
+    private static readonly (string File, string Constant)[] s_sampledPopulationZero =
+    {
+        ("PgTargetScorer.Waits.cs", "WaitSampledMinimumSamples"),
+        ("Baselines/AnomalyThresholds.cs", "PgSampledWaitProfileFallbackMsPerSec"),
     };
 
     [Fact]
     public void EveryMeasuredBar_CitesTheCalibrationDateAndPopulation_InTheCommentAboveIt()
     {
         var offenders = new List<string>();
-        foreach (var (file, constants) in s_measured)
+        foreach (var (file, date, constants) in s_measured)
         {
             var lines = Source(file);
             foreach (var name in constants)
@@ -86,8 +110,8 @@ public sealed class PgTargetMeasuredLineageTests
                 var block = CommentBlockAbove(lines, name, file);
                 if (!block.Contains("measured", StringComparison.Ordinal) || block.Contains("unmeasured:", StringComparison.Ordinal))
                     offenders.Add($"{file}::{name} is not marked measured (or still carries the unmeasured marker)");
-                if (!block.Contains(CalibrationDate, StringComparison.Ordinal))
-                    offenders.Add($"{file}::{name} does not cite the calibration date {CalibrationDate}");
+                if (!block.Contains(date, StringComparison.Ordinal))
+                    offenders.Add($"{file}::{name} does not cite the calibration date {date}");
                 if (!block.Contains(Population, StringComparison.Ordinal))
                     offenders.Add($"{file}::{name} does not name the measured population ({Population})");
             }
@@ -95,7 +119,7 @@ public sealed class PgTargetMeasuredLineageTests
 
         Assert.True(
             offenders.Count == 0,
-            "A bar the 2026-09-19 fleet calibration measured must say so above its declaration, with the date and "
+            "A bar a fleet calibration measured must say so above its declaration, with that read's date and "
             + "the population — a measured comment without its read is the lie #3538 A5 names, and a moved bar under "
             + "a stale citation is the same lie one release later:" + Environment.NewLine + string.Join(Environment.NewLine, offenders));
     }
@@ -116,12 +140,20 @@ public sealed class PgTargetMeasuredLineageTests
         }
 
         Assert.True(offenders.Count == 0, string.Join(Environment.NewLine, offenders));
+
+        foreach (var (file, name) in s_sampledPopulationZero)
+        {
+            var block = CommentBlockAbove(Source(file), name, file);
+            Assert.Contains("Population 0 on the dogfood fleet as of " + SecondCalibrationDate, block, StringComparison.Ordinal);
+            Assert.Contains("pg_wait_sampling", block, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>The flag agrees with the comments file by file: a scorer whose every graded bar is now measured or
-    /// engine-defined stamps 1 and never 0; the wait scorer stamps by fact shape (rollup vs standout, Aurora vs
-    /// sampled) and so carries the conditional; the checkpoint and buffer scorers (not flipped — not applicable on
-    /// Aurora / not measured) still stamp 0 and never 1.</summary>
+    /// engine-defined stamps 1 and never 0; the wait scorer stamps by POPULATION (Aurora's measured deltas vs the
+    /// stock sampled estimate) on both its exits, now that the standout bars are measured too, and never a bare 0;
+    /// the checkpoint and buffer scorers (not flipped — not applicable on Aurora / not measured) and the ratio-anomaly
+    /// scorer (its ramp spans are chosen) still stamp 0 and never 1.</summary>
     [Fact]
     public void TheMetadataFlag_AgreesWithTheCommentsFileByFile()
     {
@@ -133,8 +165,11 @@ public sealed class PgTargetMeasuredLineageTests
         }
 
         var waits = string.Join("\n", Source("PgTargetScorer.Waits.cs"));
-        Assert.Contains("[\"threshold_lineage\"] = isMeasuredRollup ? 1 : 0;", waits, StringComparison.Ordinal);
-        Assert.Contains("[\"threshold_lineage\"] = 0;", waits, StringComparison.Ordinal);   /* the yielded rollup */
+        /* Both exits — the yielded rollup and the fraction ramp — stamp the population verdict; a bare 0 on the yield
+           path would be the round-1 "decided on the unmeasured standout bar" reading, which §C3 retired. */
+        Assert.Equal(2, Regex.Matches(waits, Regex.Escape("[\"threshold_lineage\"] = isMeasuredPopulation ? 1 : 0;")).Count);
+        Assert.DoesNotContain("[\"threshold_lineage\"] = 0;", waits, StringComparison.Ordinal);
+        Assert.DoesNotContain("[\"threshold_lineage\"] = 1;", waits, StringComparison.Ordinal);
 
         foreach (var file in new[] { "PgTargetScorer.Write.cs", "PgTargetScorer.Buffer.cs", "PgTargetScorer.Anomaly.cs" })
         {
