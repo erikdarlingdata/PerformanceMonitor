@@ -86,6 +86,19 @@ namespace Darling.Tests;
 /// captures peaking at 40 reads 93 / 97 CRITICAL from the level through the collector, the scorer and the real
 /// <c>analyze_server</c>; NULLing the column on the first 60 % of the window's instants drops it to the capture peak
 /// with the partial stamp and the unused level still shown; NULLing it everywhere reads 40 / 97 as v1 did.</para>
+///
+/// <para><b>The level-only card (#3691 lane 26).</b> Pinned: a window with NO capture and the level deciding composes
+/// the saturation fact with <c>numerator_source = 1</c>, <c>captures_with_rows = 0</c> and NONE of the capture-derived
+/// keys; every reader of those keys reads absence as "not measured" — the scorer grades the ratio the same with no
+/// arm matched, the parked-share amplifier asks for the KEY before the bar (source-pinned), the saturation ↔ idle
+/// edge opens in neither direction beside a fired idle fact, <c>ComparisonBanding.BaselinedValueFor</c> returns null
+/// (the absolute rule), the idle fact's cross-reference states the ratio without a "0% of the peak capture"; the
+/// advice replaces the breakdown with the no-capture sentence and says <c>get_pg_session_states</c> has no rows for
+/// the window; a fact WITH a capture reaches none of the new text, whichever numerator decided. Gated: a fifth server
+/// with the level server's series and ceiling and no <c>pg_session_states</c> row reads 93 / 97 CRITICAL through the
+/// collector and the real <c>analyze_server</c> with the exact key set, then falls SILENT (no fact at all) when the
+/// level is NULLed to 42 % and to none — v1's silence, kept where nothing honest can be graded; and the with-capture
+/// server's fact stamps lane 25's keys in lane 25's order (the byte-identity claim, executed).</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgTargetSessionsTests
@@ -104,6 +117,9 @@ public sealed class PgTargetSessionsTests
     /* Lane 25's server: pg_database_stats carries numbackends per database, the captures peak lower than the level. */
     private const string LevelServerName = "darling-pg-target-sessions-level";
     private static readonly int LevelServerId = ServerIdHelper.GetDeterministicHashCode(LevelServerName);
+    /* Lane 26's server: the same level series and ceiling, and NOT ONE session capture in the window — the level-only card. */
+    private const string QuietServerName = "darling-pg-target-sessions-quiet";
+    private static readonly int QuietServerId = ServerIdHelper.GetDeterministicHashCode(QuietServerName);
 
     /// <summary>A saturation fact as the collector composes it: 100 / 3 → 97 usable; the breakdown and the
     /// window shape are the e2e's planted figures unless overridden.</summary>
@@ -180,6 +196,40 @@ public sealed class PgTargetSessionsTests
             fact.Metadata[PgTargetScorer.NumbackendsPeakAgeKey] = levelPeakAgeSeconds;
         }
         return fact;
+    }
+
+    /// <summary>The level-only card (#3691 lane 26) as the collector composes it for a window with NO capture: the
+    /// level decided (coverage at or over the floor), <c>numerator_source = 1</c>, <c>captures_with_rows = 0</c>, the
+    /// ceiling keys — and NONE of the capture-derived keys (no <c>peak_total_sessions</c>, no split, no share, no
+    /// newest-capture figures, no <c>peak_age_s</c>, no <c>rows_redacted_share</c>).</summary>
+    private static Fact LevelOnly(double peakNumbackends, double numbackendsSamples = 241, double databaseStatsSamples = 241, double maxConnections = 100, double reserved = 3,
+        bool pendingRestart = false)
+    {
+        var usable = maxConnections - reserved;
+        return new Fact
+        {
+            Source = PgTargetSources.SessionsSource,
+            Key = PgTargetFactKeys.ConnectionSaturation,
+            Value = peakNumbackends / usable,
+            ServerId = 1,
+            Metadata =
+            {
+                ["saturation_ratio"] = peakNumbackends / usable,
+                [PgTargetScorer.SaturationNumeratorSourceKey] = PgTargetScorer.SaturationNumeratorNumbackends,
+                [PgTargetScorer.NumbackendsPartialKey] = 0,
+                [PgTargetScorer.NumbackendsSamplesKey] = numbackendsSamples,
+                [PgTargetScorer.DatabaseStatsSamplesKey] = databaseStatsSamples,
+                ["max_connections"] = maxConnections,
+                ["superuser_reserved_connections"] = reserved,
+                ["reserved_connections"] = 0,
+                ["usable_connections"] = usable,
+                ["max_connections_pending_restart"] = pendingRestart ? 1 : 0,
+                ["config_snapshot_age_s"] = 1_800,
+                ["captures_with_rows"] = 0,
+                [PgTargetScorer.PeakNumbackendsKey] = peakNumbackends,
+                [PgTargetScorer.NumbackendsPeakAgeKey] = 5_400,
+            },
+        };
     }
 
     private static Dictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
@@ -699,7 +749,145 @@ public sealed class PgTargetSessionsTests
         var statics = PgTargetAdvice.Static(PgTargetFactKeys.ConnectionSaturation)!;
         Assert.Contains("The numerator is pg_stat_database.numbackends where the store carries it", statics.Investigation, StringComparison.Ordinal);
         Assert.Contains("otherwise the peak session capture from pg_session_states", statics.Investigation, StringComparison.Ordinal);
-        Assert.Contains("The state breakdown always comes from the peak capture.", statics.Investigation, StringComparison.Ordinal);
+        /* Lane 26: the static block no longer says "always" — a window with no capture states the level alone. */
+        Assert.Contains("The state breakdown comes from the peak capture when the window stored one; a window with no capture states the level alone and says its states are unobserved.", statics.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("always comes from the peak capture", statics.Investigation, StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── the level-only card (lane 26) ───────────────────────── */
+
+    /// <summary>
+    /// A window with NO capture and the level deciding composes a saturation fact with none of the capture-derived
+    /// keys, and EVERY reader of those keys reads their absence as "not measured", never as 0: the scorer grades the
+    /// ratio the same (CRITICAL at 93 / 97, lineage 1, no arm matched); the parked-share amplifier asks for the KEY
+    /// before the bar (source-pinned) and cannot match; the saturation ↔ idle edge gate cannot open in either
+    /// direction beside a fired idle fact; #3713's compare banding (<see cref="ComparisonBanding.BaselinedValueFor"/>)
+    /// returns null — the absolute rule — where a capture-composed fact returns its <c>peak_total_sessions</c>; and the
+    /// idle fact's cross-reference sentence states the ratio without a "0% of the peak capture". The collector's
+    /// gating is pinned in source: the redaction gate and the holders read run only WITH a capture, and a window with
+    /// neither a capture nor a deciding level emits nothing (v1's silence, kept).
+    /// </summary>
+    [Fact]
+    public void TheLevelOnlyCard_CarriesNoCaptureKey_GradesTheSame_AndEveryReaderOfTheAbsentKeysReadsNotMeasured()
+    {
+        var card = LevelOnly(93);
+        Assert.Equal(93 / 97.0, card.Value, precision: 9);
+        Assert.Equal(PgTargetScorer.SaturationNumeratorNumbackends, card.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+        Assert.Equal(0, card.Metadata["captures_with_rows"]);
+        foreach (var absent in new[] { "peak_total_sessions", "peak_active_sessions", "peak_idle_in_transaction_sessions", "peak_other_sessions", "peak_idle_in_transaction_share", "latest_total_sessions", "latest_active_sessions", "latest_idle_in_transaction_sessions", "peak_age_s", "latest_age_s", "rows_redacted_share" })
+            Assert.False(card.Metadata.ContainsKey(absent), $"{absent} must be ABSENT on the level-only card, not 0");
+
+        /* The scorer: the same grade from the same ratio, lineage 1, no arm matched — three arms declared, none fires. */
+        Assert.Equal(1.0, PgTargetScorer.ScoreBase(card), precision: 9);
+        Assert.Equal(1, card.Metadata["threshold_lineage"]);
+        var alone = new List<Fact> { card };
+        new FactScorer().ScoreAll(alone);
+        Assert.Equal(1.0, card.Severity, precision: 9);
+        Assert.Equal(3, card.AmplifierResults.Count);
+        Assert.All(card.AmplifierResults, r => Assert.False(r.Matched));
+
+        /* The parked-share arm asks for the key, then the bar: absence is not 0 %. Source-pinned so a GetValueOrDefault
+           cannot creep back (it would read the same today and lie the day a 0 share is stamped). */
+        var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var parked = ((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.ConnectionSaturation])!).Cast<object>().First();
+        var predicate = (Func<Dictionary<string, Fact>, bool>)parked.GetType().GetProperty("Predicate")!.GetValue(parked)!;
+        Assert.False(predicate(Lookup(LevelOnly(93))));
+        Assert.True(predicate(Lookup(Saturation(90, idleInTransaction: 30))));
+        var scorerSource = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Sessions.cs");
+        Assert.Contains("self.Metadata.TryGetValue(\"peak_idle_in_transaction_share\", out var parkedShare)", scorerSource, StringComparison.Ordinal);
+        Assert.Contains("&& parkedShare >= IdleInTransactionShareBar", scorerSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetValueOrDefault(\"peak_idle_in_transaction_share\")", scorerSource, StringComparison.Ordinal);
+
+        /* The graph: a fired idle fact beside the level-only card opens NO edge either way — two stories, where a
+           capture-composed fact over the bar walks to the leaf (the sibling pin). */
+        var graph = new PgTargetRelationshipGraph();
+        var beside = new List<Fact> { LevelOnly(93), Parked(900_000, horizonAge: 5_000_000, recurring: 6) };
+        new FactScorer().ScoreAll(beside);
+        var lookup = beside.ToFactLookup();
+        Assert.Equal(1.0, beside[0].Severity, precision: 9);
+        Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.ConnectionSaturation, lookup));
+        Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.IdleInTransaction, lookup));
+        Assert.Equal(2, new InferenceEngine(graph).BuildStories(beside).Count);
+
+        /* Compare banding: no peak_total_sessions → null → the absolute rule; the capture-composed fact returns 40. */
+        Assert.Null(ComparisonBanding.BaselinedValueFor(LevelOnly(93)));
+        Assert.Equal(40, ComparisonBanding.BaselinedValueFor(WithLevel(Saturation(40, active: 15, idleInTransaction: 5), peakNumbackends: 93, numbackendsSamples: 241)));
+
+        /* The idle fact's cross-reference beside a fired level-only card: the ratio, and that the share is unobserved. */
+        var idleBlock = PgTargetAdvice.Compose(PgTargetFactKeys.IdleInTransaction, lookup)!;
+        Assert.Contains("PG_CONNECTION_SATURATION fired: the pool peaked at 96% of its usable ceiling (graded from pg_stat_database.numbackends with no session capture behind it, so its idle-in-transaction share is unobserved).", idleBlock.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("0% of the peak capture", idleBlock.Investigation, StringComparison.Ordinal);
+
+        /* The collector's gating, in source: no capture → no redaction gate, no holders read, the level still read, and
+           nothing emitted when the level did not decide; the capture keys are stamped under the capture flag. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetFactCollector.Sessions.cs"));
+        Assert.Contains("var hasCapture = rowsStored > 0 && peakTotal > 0;", code, StringComparison.Ordinal);
+        Assert.Contains("if (hasCapture && redactedShare >= PgTargetScorer.RedactedShareMajority)", code, StringComparison.Ordinal);
+        /* The holders read sits under its own capture flag: the `if (hasCapture)` immediately before it is the one
+           whose next code token is the call (single-line anchors, index-ordered — no LF reader needed). */
+        var holdersRead = code.IndexOf("await ReadIdleInTransactionAsync(connection", StringComparison.Ordinal);
+        var holdersGate = code.LastIndexOf("if (hasCapture)", holdersRead, StringComparison.Ordinal);
+        Assert.True(holdersGate > 0 && string.IsNullOrWhiteSpace(code[(holdersGate + "if (hasCapture)".Length)..holdersRead]), "the holders read runs only with a capture");
+        var noNumeratorReturn = code.IndexOf("else if (!hasCapture)", StringComparison.Ordinal);
+        var factBuilt = code.IndexOf("Key = PgTargetFactKeys.ConnectionSaturation", StringComparison.Ordinal);
+        Assert.True(noNumeratorReturn > 0 && noNumeratorReturn < factBuilt, "a window with neither a capture nor a deciding level returns before the fact is built");
+        /* The first read's row is optional now: the read is an `if (await … ReadAsync)` block, not a negated early return. */
+        Assert.Contains("if (await reader.ReadAsync(context.CancellationToken))", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (!await reader.ReadAsync(context.CancellationToken))", code[..code.IndexOf("var hasCapture", StringComparison.Ordinal)], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ComposeSessions_LevelOnly_StatesTheLevelAndThatStatesAreUnobserved_AndAFactWithACaptureIsByteIdenticalToLane25()
+    {
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(LevelOnly(93)))!;
+
+        /* The level's headline and division, as lane 25 states them. */
+        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3 — that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
+        /* THE SENTENCE: what the count is, and what is unobserved — in place of the breakdown, never a breakdown of zeros. */
+        Assert.Contains(" No session capture in the window: the count is pg_stat_database.numbackends — the backends attached to a database, every minute, whether or not any session tripped a capture rule — and state, application and idle-in-transaction shares are unobserved", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("a window with none is a pool that tripped no rule, not an empty one", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples; no capture stored session rows in the window.", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("State breakdown", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 active", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 sessions", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("newest capture", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("The capture peak was seen over", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARKED", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
+        /* The measured clause and its level sentence still stand. */
+        Assert.Contains("fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("That fleet read was of the capture peak; the level was read against the same ceilings on 2026-09-20", block.Investigation, StringComparison.Ordinal);
+        /* Remediation: the levers stand on the usable count; no parked sentence; the tool sentence says the capture
+           table has nothing for this window instead of pointing at it. */
+        Assert.StartsWith("Two capacity levers", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("Which lever applies needs the state breakdown, and no session capture was stored in this window (get_pg_session_states has no rows for it)", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("get_pg_server_config shows the ceiling and whether a change is pending restart.", block.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("shows the sessions behind the peak", block.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("idle in transaction", block.Remediation, StringComparison.Ordinal);
+
+        /* BYTE-IDENTITY for a fact WITH a capture: none of the level-only sentences appear, and lane 25's sentences do —
+           the sibling pins above hold the exact strings; this one holds that the new branch is unreachable with a
+           capture, whichever numerator decided. */
+        foreach (var withCapture in new[]
+        {
+            WithLevel(Saturation(40, active: 15, idleInTransaction: 5), peakNumbackends: 93, numbackendsSamples: 241),
+            WithLevel(Saturation(90), peakNumbackends: 93, numbackendsSamples: 101),
+            WithLevel(Saturation(90), peakNumbackends: 0, numbackendsSamples: 0),
+            Saturation(90),
+        })
+        {
+            var composed = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(withCapture))!;
+            Assert.DoesNotContain("No session capture in the window", composed.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("no capture stored session rows", composed.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("has no rows for it", composed.Remediation, StringComparison.Ordinal);
+            Assert.Contains("get_pg_session_states shows the sessions behind the peak by database, user and application; get_pg_server_config shows the ceiling and whether a change is pending restart.", composed.Remediation, StringComparison.Ordinal);
+            Assert.Contains("State breakdown at the peak", composed.Investigation, StringComparison.Ordinal);
+        }
+
+        /* Pending restart on the level-only card reads as it does on every other. */
+        var pending = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(LevelOnly(93, pendingRestart: true)))!;
+        Assert.Contains("A max_connections change is already pending a restart on this server", pending.Investigation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1220,9 +1408,22 @@ public sealed class PgTargetSessionsTests
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, BlindServerId, BlindServerName, "postgres", 18, ct);
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, ParkedServerId, ParkedServerName, "postgres", 18, ct);
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, LevelServerId, LevelServerName, "postgres", 18, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, QuietServerId, QuietServerName, "postgres", 18, ct);
 
             var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
             var windowStart = windowEnd.AddHours(-4);
+
+            /* Quiet (lane 26): the level server's numbackends series and ceiling exactly — and no pg_session_states row at
+               all. Before this lane the family said nothing here; now the level alone grades 93 / 97. */
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, QuietServerId, QuietServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+            {
+                var at = windowStart.AddMinutes(minute - 1);
+                var isLevelPeak = at == windowEnd.AddMinutes(-90);
+                await PlantLevelInstantAsync(connection, QuietServerId, QuietServerName, at,
+                    appdbBackends: isLevelPeak ? 60 : 20, reportsBackends: isLevelPeak ? 33 : 10, ct);
+            }
+            await PlantConfigSnapshotAsync(connection, QuietServerId, QuietServerName, windowEnd.AddMinutes(-30), ct);
 
             /* Level (lane 25): the same 25 h span witness, then every minute of the window as the V133 collector
                writes it — one row per database carrying numbackends (appdb 20, reports 10 → 30) plus the shared row
@@ -1444,10 +1645,54 @@ public sealed class PgTargetSessionsTests
             Assert.Equal(5 / 40.0, level.Metadata["peak_idle_in_transaction_share"], precision: 9);
             Assert.Equal(7_200, level.Metadata["peak_age_s"]);
             Assert.Equal(97, level.Metadata["usable_connections"]);
+            /* Lane 26's byte-identity claim, executed: a window WITH a capture stamps exactly lane 25's keys in lane 25's
+               order (the persisted payload a reader of get_analysis_facts sees), before the scorer adds its own. */
+            Assert.Equal(
+                new[]
+                {
+                    "saturation_ratio", PgTargetScorer.SaturationNumeratorSourceKey, PgTargetScorer.NumbackendsPartialKey, PgTargetScorer.NumbackendsSamplesKey, PgTargetScorer.DatabaseStatsSamplesKey,
+                    "peak_total_sessions", "peak_active_sessions", "peak_idle_in_transaction_sessions", "peak_other_sessions", "peak_idle_in_transaction_share",
+                    "latest_total_sessions", "latest_active_sessions", "latest_idle_in_transaction_sessions",
+                    "max_connections", "superuser_reserved_connections", "reserved_connections", "usable_connections", "max_connections_pending_restart", "config_snapshot_age_s",
+                    "captures_with_rows", "rows_redacted_share", "peak_age_s", "latest_age_s", PgTargetScorer.PeakNumbackendsKey, PgTargetScorer.NumbackendsPeakAgeKey,
+                },
+                level.Metadata.Keys.ToArray());
             new FactScorer().ScoreAll(levelFacts);
             Assert.Equal(1.0, level.BaseSeverity, precision: 9);
             Assert.Equal(1.0, level.Severity, precision: 9);
             Assert.Equal(1, level.Metadata["threshold_lineage"]);
+
+            /* ── THE LANE-26 EXIT CRITERION, collector half: no capture, the level decides — the level-only card. 93 / 97,
+               source 1, captures_with_rows 0, the level's own keys, and NONE of the capture-derived keys; no idle fact
+               and no permissions advisory (nothing was stored to be redacted). Graded CRITICAL with no arm matched. */
+            var quietContext = new AnalysisContext
+            {
+                ServerId = QuietServerId,
+                ServerName = QuietServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var quietFacts = await collector.CollectFactsAsync(quietContext);
+            var levelOnly = Assert.Single(quietFacts, f => f.Source == PgTargetSources.SessionsSource);
+            Assert.Equal(PgTargetFactKeys.ConnectionSaturation, levelOnly.Key);
+            Assert.Equal(93 / 97.0, levelOnly.Value, precision: 9);
+            Assert.Equal(PgTargetScorer.SaturationNumeratorNumbackends, levelOnly.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+            Assert.Equal(0, levelOnly.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+            Assert.Equal(93, levelOnly.Metadata[PgTargetScorer.PeakNumbackendsKey]);
+            Assert.Equal(5_400, levelOnly.Metadata[PgTargetScorer.NumbackendsPeakAgeKey]);
+            Assert.Equal(241, levelOnly.Metadata[PgTargetScorer.DatabaseStatsSamplesKey]);
+            Assert.Equal(241, levelOnly.Metadata[PgTargetScorer.NumbackendsSamplesKey]);
+            Assert.Equal(0, levelOnly.Metadata["captures_with_rows"]);
+            Assert.Equal(97, levelOnly.Metadata["usable_connections"]);
+            foreach (var absent in new[] { "peak_total_sessions", "peak_active_sessions", "peak_idle_in_transaction_sessions", "peak_other_sessions", "peak_idle_in_transaction_share", "latest_total_sessions", "latest_active_sessions", "latest_idle_in_transaction_sessions", "peak_age_s", "latest_age_s", "rows_redacted_share" })
+                Assert.False(levelOnly.Metadata.ContainsKey(absent), $"{absent} must be absent on the level-only card");
+            Assert.Null(ComparisonBanding.BaselinedValueFor(levelOnly));
+            new FactScorer().ScoreAll(quietFacts);
+            Assert.Equal(1.0, levelOnly.BaseSeverity, precision: 9);
+            Assert.Equal(1.0, levelOnly.Severity, precision: 9);
+            Assert.Equal(1, levelOnly.Metadata["threshold_lineage"]);
+            Assert.All(levelOnly.AmplifierResults, r => Assert.False(r.Matched));
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, anchored at the planted window's end (as_of) so
                every number is arithmetic, not timing. */
@@ -1562,6 +1807,53 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(40, metadata.GetProperty("peak_total_sessions").GetDouble());
                 Assert.Equal(1, metadata.GetProperty("threshold_lineage").GetDouble());
             }
+
+            /* ── THE LANE-26 EXIT CRITERION, through the real analyze_server: the level-only card at CRITICAL, the level's
+               headline, the no-capture sentence in place of the breakdown, no breakdown of zeros, no newest-capture
+               figure; get_analysis_facts shows source 1 and no peak_total_sessions. */
+            var quietJson = await DarlingMcpTools.AnalyzeServer(service, postgres, QuietServerName, 4, as_of: asOf);
+            using (var doc = JsonDocument.Parse(quietJson))
+            {
+                var root = doc.RootElement;
+                Assert.Equal("findings", root.GetProperty("status").GetString());
+                var findings = root.GetProperty("findings").EnumerateArray().ToList();
+                var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
+                Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                var advice = card.GetProperty("advice");
+                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
+                var investigation = advice.GetProperty("investigation").GetString()!;
+                Assert.Contains("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections", investigation, StringComparison.Ordinal);
+                Assert.Contains("No session capture in the window: the count is pg_stat_database.numbackends", investigation, StringComparison.Ordinal);
+                Assert.Contains("state, application and idle-in-transaction shares are unobserved", investigation, StringComparison.Ordinal);
+                Assert.Contains("numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples; no capture stored session rows in the window.", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("State breakdown", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("0 active", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("newest capture", investigation, StringComparison.Ordinal);
+                Assert.Contains("get_pg_session_states has no rows for it", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.MonitoringPermissions);
+                Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.IdleInTransaction);
+            }
+
+            var quietFactsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, QuietServerName, 4, PgTargetSources.SessionsSource, as_of: asOf);
+            using (var doc = JsonDocument.Parse(quietFactsJson))
+            {
+                var fact = Assert.Single(doc.RootElement.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                var metadata = fact.GetProperty("metadata");
+                Assert.Equal(1, metadata.GetProperty(PgTargetScorer.SaturationNumeratorSourceKey).GetDouble());
+                Assert.Equal(93, metadata.GetProperty(PgTargetScorer.PeakNumbackendsKey).GetDouble());
+                Assert.Equal(0, metadata.GetProperty("captures_with_rows").GetDouble());
+                Assert.False(metadata.TryGetProperty("peak_total_sessions", out _));
+                Assert.False(metadata.TryGetProperty("peak_idle_in_transaction_share", out _));
+                Assert.Equal(1, metadata.GetProperty("threshold_lineage").GetDouble());
+            }
+
+            /* ── The quiet store MID-MIGRATION and then PRE-V133: no capture AND the level not deciding is v1's silence — no
+               fact from this family at all, not a level-only card over a part window, and not a capture peak of 0. */
+            await NullNumbackendsAsync(connection, QuietServerId, before: windowEnd.AddMinutes(-100), ct);
+            Assert.DoesNotContain(await collector.CollectFactsAsync(quietContext), f => f.Source == PgTargetSources.SessionsSource);
+            await NullNumbackendsAsync(connection, QuietServerId, before: null, ct);
+            Assert.DoesNotContain(await collector.CollectFactsAsync(quietContext), f => f.Source == PgTargetSources.SessionsSource);
 
             /* ── The same store MID-MIGRATION: NULL the level on every instant older than the last 100 minutes — 101 of 241
                carry it (42 %, under the floor) — and the collector falls back to the capture peak, flags it partial,
@@ -1779,7 +2071,7 @@ VALUES ($1, $2, $3, $4, 'appdb',   1000, 10, 100, 9000, 0, 0, 0, NULL, $5),
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var ids = $"{BusyServerId}, {BlindServerId}, {ParkedServerId}, {QueuedServerId}, {SurgeServerId}, {LevelServerId}";
+        var ids = $"{BusyServerId}, {BlindServerId}, {ParkedServerId}, {QueuedServerId}, {SurgeServerId}, {LevelServerId}, {QuietServerId}";
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_session_states WHERE server_id IN ({ids}); " +
             $"DELETE FROM pg_server_config WHERE server_id IN ({ids}); " +

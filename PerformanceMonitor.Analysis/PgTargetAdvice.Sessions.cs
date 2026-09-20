@@ -30,7 +30,13 @@ namespace PerformanceMonitor.Analysis;
 /// used — not collected on this store, or carried by too few of the window's samples
 /// (<see cref="PgTargetScorer.NumbackendsPartialKey"/>). The idle-in-transaction share is always the capture's own
 /// (its denominator is the capture's <c>total_sessions</c>; <c>numbackends</c> has no state), and the prose says
-/// so where it states it beside a <c>numbackends</c> numerator.</para>
+/// so where it states it beside a <c>numbackends</c> numerator. <b>The level-only card</b> (#3691 lane 26 — a
+/// window with no capture, graded from <c>numbackends</c> alone; witnessed by the ABSENCE of
+/// <c>peak_total_sessions</c>): the division sentence and headline are the level's, the breakdown sentence is
+/// replaced by one saying the count is <c>pg_stat_database.numbackends</c> and that state, application and
+/// idle-in-transaction shares are unobserved, no share or newest-capture figure is stated, and the tool sentence says
+/// <c>get_pg_session_states</c> has no rows for the window rather than pointing at an empty page. A fact WITH a
+/// capture composes byte for byte as lane 25 left it.</para>
 ///
 /// <para>Where lane 2's <c>CONFIG_PG_WORK_MEM</c> context fact is in the set, the memory cost of raising <c>max_connections</c> is stated in this server's own <c>work_mem</c>, never an
 /// assumed one (D4 composition without RAM). The static block (an empty fact set — the read-time fallback for a
@@ -81,7 +87,8 @@ public static partial class PgTargetAdvice
             "pg_session_states, whose count includes PostgreSQL's own background processes (which hold no connection " +
             "slot, so that ratio reads a few points high — the safe direction for a cliff) and which the collector " +
             "stores only when some session had a transaction open past its floor, so that peak is over the captures " +
-            "that had something to report. The state breakdown always comes from the peak capture.",
+            "that had something to report. The state breakdown comes from the peak capture when the window stored one; " +
+            "a window with no capture states the level alone and says its states are unobserved.",
         Remediation:
             "Read the state breakdown of the peak capture first — active, idle in transaction, other — because it " +
             "says which lever applies. If idle-in-transaction sessions hold the slots, the pool is being filled by " +
@@ -194,6 +201,11 @@ public static partial class PgTargetAdvice
         var numbackendsSamples = fact.Metadata.GetValueOrDefault(PgTargetScorer.NumbackendsSamplesKey);
         var databaseStatsSamples = fact.Metadata.GetValueOrDefault(PgTargetScorer.DatabaseStatsSamplesKey);
         var hasLevelPeakAge = fact.Metadata.TryGetValue(PgTargetScorer.NumbackendsPeakAgeKey, out var levelPeakAgeSeconds);
+        /* The level-only card (#3691 lane 26): no capture in the window, so the collector stamped none of the
+           capture-derived keys. The same key #3713's banding asks for is the witness here — a fact with no
+           peak_total_sessions has no breakdown, no share, no newest capture to state, and the prose must not state a
+           0 for any of them. Only reachable with the level deciding (the collector emits nothing otherwise). */
+        var hasCapture = fact.Metadata.ContainsKey("peak_total_sessions");
         /* The figure the headline and the division state: the level when it decided, else the capture peak. */
         var numerator = fromNumbackends ? peakNumbackends : peak;
 
@@ -211,7 +223,13 @@ public static partial class PgTargetAdvice
                 $"At the window's peak capture{(hasPeakAge ? $", {FormatAge(peakAgeSeconds)} before the window's end" : string.Empty)}, {peak:0} sessions were connected against {usable:0} usable connections — max_connections {maxConnections:0} minus superuser_reserved_connections {reserved:0}{(reservedForRole > 0 ? $" minus reserved_connections {reservedForRole:0}" : string.Empty)} — that is {peak:0} / ({maxConnections:0} − {reserved:0}{(reservedForRole > 0 ? $" − {reservedForRole:0}" : string.Empty)}) = {ratio * 100:0}%.");
         }
         inv.Append(" PostgreSQL refuses the connection that would take a reserved slot unless the role is a superuser (FATAL: too many clients already / remaining connection slots are reserved), and it does not queue: for the application that asked, a refusal is an outage, not a slowdown.");
-        if (fromNumbackends)
+        if (fromNumbackends && !hasCapture)
+        {
+            /* No capture: say what the count IS and what was NOT observed, in place of the breakdown — never a
+               breakdown of zeros. */
+            inv.Append(" No session capture in the window: the count is pg_stat_database.numbackends — the backends attached to a database, every minute, whether or not any session tripped a capture rule — and state, application and idle-in-transaction shares are unobserved (the collector stores a session capture only when some session had a transaction open past its floor, so a window with none is a pool that tripped no rule, not an empty one). Whether these slots are held by working sessions or parked ones cannot be said from this window.");
+        }
+        else if (fromNumbackends)
         {
             inv.Append(CultureInfo.InvariantCulture,
                 $" State breakdown at the peak session capture ({peak:0} sessions{(hasPeakAge ? $", {FormatAge(peakAgeSeconds)} before the window's end" : string.Empty)}): {active:0} active, {idleInTransaction:0} idle in transaction, {other:0} other (idle client sessions and PostgreSQL's own background processes — checkpointer, walwriter, autovacuum — which that exception-driven series cannot tell apart). The numerator above is the level, not that capture: pg_stat_database.numbackends counts the backends attached to a database every minute whether or not any session tripped a capture rule, and none of the database-less background processes the capture's total includes, so it is the honest top of the fraction; the capture is the only series with STATE, so the breakdown and the idle-in-transaction share are its own, over its own {peak:0}.");
@@ -237,7 +255,10 @@ public static partial class PgTargetAdvice
         if (offeredVsDelivered)
             inv.Append(CultureInfo.InvariantCulture,
                 $" Connections rose to {(sessionSpikeRatio > 0 ? $"{sessionSpikeRatio:0.0}×" : "a level above")} this hour of the week's norm while throughput stayed at its norm{(tpsAnomalyRatio > 0 ? $" ({tpsAnomalyRatio:0.0}× its own)" : string.Empty)} — arrivals are queueing, not working: the server is accepting more connections than usual and completing no more transactions than usual, which is the shape of a pool at its cliff rather than a busier application.");
-        if (fromNumbackends)
+        if (fromNumbackends && !hasCapture)
+            inv.Append(CultureInfo.InvariantCulture,
+                $" numbackends carried a value at {numbackendsSamples:0} of the window's {databaseStatsSamples:0} one-minute pg_database_stats samples; no capture stored session rows in the window.");
+        else if (fromNumbackends)
             inv.Append(CultureInfo.InvariantCulture,
                 $" The capture peak was seen over {captures:0} {(captures == 1 ? "capture" : "captures")} that stored session rows (the collector stores a capture only when some session had a transaction open past its floor, so quiet minutes are absent from that series); the newest capture in the window had {latest:0} sessions; numbackends carried a value at {numbackendsSamples:0} of the window's {databaseStatsSamples:0} one-minute pg_database_stats samples.");
         else
@@ -270,7 +291,12 @@ public static partial class PgTargetAdvice
             rem.Append(", so the ceiling multiplies work_mem against the host's memory before shared_buffers is counted; ");
         }
         rem.Append("raising it lowers the safe work_mem and cache headroom on the same host, and it takes a restart (pg_settings.context = postmaster).");
-        rem.Append(" get_pg_session_states shows the sessions behind the peak by database, user and application; get_pg_server_config shows the ceiling and whether a change is pending restart.");
+        if (hasCapture)
+            rem.Append(" get_pg_session_states shows the sessions behind the peak by database, user and application; get_pg_server_config shows the ceiling and whether a change is pending restart.");
+        else
+            /* No capture was stored, so the session-states tool has nothing for this window; the pick between the two
+               levers needs a capture, and the sentence says so instead of pointing at an empty page. */
+            rem.Append(" Which lever applies needs the state breakdown, and no session capture was stored in this window (get_pg_session_states has no rows for it); a capture arrives when some session holds a transaction open past the collector's floor. get_pg_server_config shows the ceiling and whether a change is pending restart.");
 
         return s_saturationStatic with
         {
@@ -335,9 +361,14 @@ public static partial class PgTargetAdvice
             inv.Append(" Lock waits fired in the same window: an idle transaction still holds every row and relation lock it took, so those waiters are queued behind work nobody is doing.");
         if (factsByKey.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0)
         {
-            var share = saturation.Metadata.GetValueOrDefault("peak_idle_in_transaction_share");
-            inv.Append(CultureInfo.InvariantCulture,
-                $" PG_CONNECTION_SATURATION fired: the pool peaked at {saturation.Metadata.GetValueOrDefault("saturation_ratio") * 100:0}% of its usable ceiling with {share * 100:0}% of the peak capture idle in transaction{(share >= PgTargetScorer.IdleInTransactionShareBar ? " — parked transactions are the population filling the slots, and a bigger pool would only defer the refusal" : string.Empty)}.");
+            /* The share is the capture's; a level-only saturation card (#3691 lane 26) carries none, and an idle fact
+               beside one is a different window's or store's pairing — state the ratio alone rather than "0%". */
+            if (saturation.Metadata.TryGetValue("peak_idle_in_transaction_share", out var share))
+                inv.Append(CultureInfo.InvariantCulture,
+                    $" PG_CONNECTION_SATURATION fired: the pool peaked at {saturation.Metadata.GetValueOrDefault("saturation_ratio") * 100:0}% of its usable ceiling with {share * 100:0}% of the peak capture idle in transaction{(share >= PgTargetScorer.IdleInTransactionShareBar ? " — parked transactions are the population filling the slots, and a bigger pool would only defer the refusal" : string.Empty)}.");
+            else
+                inv.Append(CultureInfo.InvariantCulture,
+                    $" PG_CONNECTION_SATURATION fired: the pool peaked at {saturation.Metadata.GetValueOrDefault("saturation_ratio") * 100:0}% of its usable ceiling (graded from pg_stat_database.numbackends with no session capture behind it, so its idle-in-transaction share is unobserved).");
         }
         inv.Append(CultureInfo.InvariantCulture,
             $" The bars are {FormatDuration(PgTargetScorer.IdleInTransactionWarningMs)} and {FormatDuration(PgTargetScorer.IdleInTransactionCriticalMs)} of transaction duration, measured against the dogfood fleet: zero idle-in-transaction rows reached 60 s over 7 days across 50 clusters (maximum 27.7 s), so this is outside anything the measured population does (threshold_lineage = 1).");
