@@ -32,10 +32,12 @@ namespace Darling.Tests;
 /// compression band past what the hour can pay). The shape is <see cref="PgNumbackendsAndSampledMsRungTests"/>'s
 /// (V133) for the column half and the V129 log-events rung's for the table half.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>LongRunningQueryExclusionKnobRungTests</c>
-/// (V135) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current. When the next rung lands, those claims move on
-/// and what stays is everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this file carried when it landed (moved here off
+/// <c>LongRunningQueryExclusionKnobRungTests</c>, V135) moved on again to <c>QsCaptureModeRouteKnobToastRungTests</c>
+/// when V137 (#3796 / #3712 / #3783 — the Query Store capture modes, the route knob's store column and the plan
+/// dimension's TOAST bytes) landed on top of it. What stays is everything true of this rung wherever it sits:
+/// its name, its DDL, its probe sentinel at its own ordinal, and that a store which stopped here maps to
+/// exactly 136.</para>
 ///
 /// <para>The collector's own behaviour (the two privilege tests, templates collected, the NULL-total rule) is
 /// <c>Lite.Tests.PgDatabaseSizeStatsCollectorDefinitionTests</c>; the ingestor's memory arithmetic and the
@@ -48,7 +50,8 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
     private const int RungVersion = 136;
     private const int PreviousVersion = 135;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V137 appended its
+    /// own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 111;
 
     private const string SizeTable = "pg_database_size_stats";
@@ -65,14 +68,17 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("pg-database-size-and-host-memory", V136.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped being
+           true when V137 landed. The invariant that outlives the handoff is that the LADDER's top and the
+           declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -216,16 +222,16 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
         Assert.Equal(CollectorTargetEngine.PostgreSql, PgCpuUtilizationCollector.Instance.TargetEngine);
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites) --------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
+    /// The viewer probe's three sites carry this rung's sentinel, and a store that stopped here maps to it. The
     /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// only some of them shifts every LATER ordinal onto the wrong column. The top-arm claims (last argument,
+    /// returns the build's version) moved to <c>QsCaptureModeRouteKnobToastRungTests</c> with V137.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = '{SizeTable}')",
@@ -233,7 +239,6 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgDatabaseSizeStatsAndHostMemory", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -241,8 +246,9 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V137 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
@@ -254,14 +260,16 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's own literal — not the
+           build's version: the "returns StorageVersion.SchemaVersion" half of the top-arm claim moved to V137's
+           test with the top. */
         var thisArm = viewer.IndexOf("if (hasPgDatabaseSizeStatsAndHostMemory)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasLrqExclusionKnob)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V136 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V136 sentinel arm — a store that stopped here would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V136 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V136 arm sits below the previous rung's, so a V136 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table is named in the probe line and nowhere in the arm's prose. */
@@ -384,8 +392,12 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryLivePostgresTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
             /* A store that stopped one rung short: the new table gone, the six columns gone, the stamp gone.
-               MigrateAsync must apply EXACTLY this rung and put everything back. The CPU table is a hypertable
-               here (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
+               MigrateAsync must apply this rung and put everything back — and since V137 (#3796 / #3712 / #3783,
+               six nullable columns on three tables the store still has, every statement IF NOT EXISTS or
+               CREATE OR REPLACE or DO-guarded) landed above it, the climb is every rung from this one to the
+               ladder's top, counted against the ladder rather than as a literal (the V134 test's idiom); the
+               exact single-rung climb belongs to the top rung's own test. The CPU table is a hypertable here
+               (the fixture store converts them), so this is the ADD COLUMN the fleet will run. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE IF EXISTS collect.pg_database_size_stats");
             foreach (var column in new[] { "memory_total_bytes", "memory_free_bytes", "memory_cached_bytes", "memory_buffers_bytes", "memory_active_bytes", "configured_memory_bytes" })
             {
@@ -393,7 +405,7 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryLivePostgresTests
             }
 
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 136");
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 136), await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
