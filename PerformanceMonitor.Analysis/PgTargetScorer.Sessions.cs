@@ -20,10 +20,17 @@ namespace PerformanceMonitor.Analysis;
 /// outage for the application that asked, not a slowdown, so the ratio's top band is a full 1.0.
 ///
 /// <para><b>Where the ratio comes from.</b> The collector composes it (<c>PgTargetFactCollector.Sessions.cs</c>):
-/// the window's PEAK <c>total_sessions</c> from <c>pg_session_states</c>' denormalised totals over the ceiling read
-/// off lane 2's <c>CONFIG_PG_MAX_CONNECTIONS</c> / <c>CONFIG_PG_SUPERUSER_RESERVED</c> context facts, which sit in
-/// the in-memory fact list by the time the session family runs (emission order: Config before Sessions). This arm
-/// receives the composed fact and grades <c>saturation_ratio</c>; it never re-reads the config snapshot and never
+/// the window's PEAK backend count over the ceiling read off lane 2's <c>CONFIG_PG_MAX_CONNECTIONS</c> /
+/// <c>CONFIG_PG_SUPERUSER_RESERVED</c> context facts, which sit in the in-memory fact list by the time the session
+/// family runs (emission order: Config before Sessions). Since lane 25 of #3691 the NUMERATOR is
+/// <c>pg_stat_database.numbackends</c> (V133) — <c>SUM</c> over the databases at one <c>collection_time</c>, the
+/// window's peak of those instants: a universal one-minute LEVEL of backends attached to a database, sampled
+/// whether or not any session tripped a capture rule — and the exception-capture peak (<c>pg_session_states</c>'
+/// denormalised <c>total_sessions</c>, v1's only numerator) is the stated FALLBACK for a store whose rows do not
+/// carry the column yet. Which one decided rides the fact as <see cref="SaturationNumeratorSourceKey"/>, and
+/// BOTH readings stay in the metadata (<c>peak_total_sessions</c> for #3713's compare banding and the state
+/// breakdown; <see cref="PeakNumbackendsKey"/> for the level). This arm receives the composed fact and grades
+/// <c>saturation_ratio</c> the same way from either numerator; it never re-reads the config snapshot and never
 /// sees a fact set — the base-severity seam is one fact, by design.</para>
 ///
 /// <para><b>Lineage.</b> The CEILING is engine-defined: <c>max_connections</c> is the line PostgreSQL refuses at,
@@ -34,9 +41,13 @@ namespace PerformanceMonitor.Analysis;
 /// <c>max_connections</c> snapshot on all 50), sessions-over-ceiling per capture had a per-server p99 median of
 /// 0.021 and a fleet MAXIMUM of 0.103 — both bands sit deep in the measured empty interval, which is where a
 /// hard-FATAL cliff's bars belong. So every saturation fact carries <c>threshold_lineage = 1</c>: the ceiling is
-/// the engine's, the bands are measured against it. Caveat the constants repeat: the numerator read was
-/// <c>pg_session_states</c>' <c>total_sessions</c> (the exception-capture peak, the same figure this fact is
-/// composed from); <c>numbackends</c> (V133) is the honest population numerator and a re-measurement follows it.</para>
+/// the engine's, the bands are measured against it. Caveat the constants repeat: the numerator that read used was
+/// <c>pg_session_states</c>' <c>total_sessions</c> (the exception-capture peak — biased HIGH on a server that
+/// captures often and blind on one that never does; the fleet's captures per server ran 59 – 2,100 over 7 days);
+/// the fact is now composed from <c>numbackends</c> where the store carries it, whose distribution has not yet
+/// been read against the ceiling. The bars are not moved by that switch: 0.8 / 0.9 are fractions of the engine's
+/// own line, and a numerator that counts FEWER non-slot backends can only move the measured shape further into
+/// the empty interval, never out of it.</para>
 ///
 /// <para><b>Self-gating below the warning line, THREADPOOL's shape.</b> <see cref="FactScorer.ApplyThresholdFormula"/>
 /// grades ANY positive value below the concerning bar as a fraction of it, so a pool at 40% of its ceiling would
@@ -144,11 +155,68 @@ public static partial class PgTargetScorer
     /// measured: above the fleet maximum sessions-over-ceiling of 0.103 (per-server p99 median 0.021) over 7 days
     /// × 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-09-19 (pg_session_states total_sessions per
     /// capture against each server's usable ceiling) — the measured empty interval. Engine-neutral quantity,
-    /// Aurora population; the stock-PostgreSQL population is not yet measured, and the numbackends (V133)
-    /// re-measurement follows. The fact carries threshold_lineage = 1.
+    /// Aurora population; the stock-PostgreSQL population is not yet measured. That read's numerator was the
+    /// exception-capture peak; since #3691 lane 25 the fact's numerator is pg_stat_database.numbackends (V133)
+    /// where the store carries it, and the numbackends distribution against the ceiling is not yet measured —
+    /// the capture-peak reading was 10.3 % of ceiling at most, and a level that excludes the database-less
+    /// background processes the capture counted sits at or under it on the same servers. The bars do not move
+    /// with the numerator. The fact carries threshold_lineage = 1.
     /// </summary>
     public const double ConnectionSaturationWarning = 0.8;
     public const double ConnectionSaturationCritical = 0.9;
+
+    /// <summary>Metadata key on <see cref="PgTargetFactKeys.ConnectionSaturation"/> (#3691 lane 25): WHICH numerator
+    /// the collector divided by the ceiling — <see cref="SaturationNumeratorNumbackends"/> (1) for the window's peak
+    /// of <c>SUM(numbackends)</c> per <c>collection_time</c> over <c>pg_database_stats</c>, or
+    /// <see cref="SaturationNumeratorCapturePeak"/> (0) for the exception-capture peak <c>total_sessions</c> from
+    /// <c>pg_session_states</c>, v1's numerator and the fallback for a store whose rows do not carry the V133 column
+    /// (or carry it on fewer than <see cref="NumbackendsCoverageFloor"/> of the window's samples — see
+    /// <see cref="NumbackendsPartialKey"/>). Stamped on every saturation fact so a reader of <c>get_analysis_facts</c>
+    /// knows what the fraction's top was; absent from a fact built before this lane, which is read as 0.</summary>
+    public const string SaturationNumeratorSourceKey = "numerator_source";
+
+    /// <summary><see cref="SaturationNumeratorSourceKey"/> value: the numerator is <c>numbackends</c>.</summary>
+    public const int SaturationNumeratorNumbackends = 1;
+
+    /// <summary><see cref="SaturationNumeratorSourceKey"/> value: the numerator is the session captures' peak
+    /// <c>total_sessions</c> — exception-driven, and biased a few points HIGH by the database-less background
+    /// processes it counts.</summary>
+    public const int SaturationNumeratorCapturePeak = 0;
+
+    /// <summary>Metadata: the window's peak of <c>SUM(numbackends)</c> over the databases at one <c>collection_time</c>
+    /// — the server's backends attached to a database at that instant. Present whenever at least one instant in the
+    /// window carried the column, INCLUDING the partial-coverage fallback, so both readings are visible side by side
+    /// with <c>peak_total_sessions</c>; absent when no row in the window has it (a pre-V133 store).</summary>
+    public const string PeakNumbackendsKey = "peak_numbackends";
+
+    /// <summary>Metadata: how many seconds before the window's end the <see cref="PeakNumbackendsKey"/> instant was
+    /// — a different instant from <c>peak_age_s</c>, which stays the CAPTURE peak's age (the breakdown's instant).</summary>
+    public const string NumbackendsPeakAgeKey = "numbackends_peak_age_s";
+
+    /// <summary>Metadata: the distinct <c>collection_time</c>s in the window at which at least one database row carried
+    /// a non-NULL <c>numbackends</c> (the shared-relations row is always NULL and does not count against an instant).</summary>
+    public const string NumbackendsSamplesKey = "numbackends_samples";
+
+    /// <summary>Metadata: the distinct <c>collection_time</c>s the window's <c>pg_database_stats</c> holds at all — the
+    /// denominator <see cref="NumbackendsSamplesKey"/> is a coverage of.</summary>
+    public const string DatabaseStatsSamplesKey = "database_stats_samples";
+
+    /// <summary>Metadata stamp (0 / 1): 1 when the window had SOME <c>numbackends</c> instants but fewer than
+    /// <see cref="NumbackendsCoverageFloor"/> of its samples — a store mid-migration, or a collector restarted onto the
+    /// rung part-way through the window — so the collector fell back to the capture peak rather than call the
+    /// window's peak off a series that covers less than half of it. 0 otherwise (full coverage, or none at all).</summary>
+    public const string NumbackendsPartialKey = "numbackends_partial";
+
+    /// <summary>
+    /// The share of the window's <c>pg_database_stats</c> instants that must carry <c>numbackends</c> for it to be the
+    /// saturation numerator; under it the collector uses the capture peak and stamps <see cref="NumbackendsPartialKey"/>.
+    /// One half is a definitional majority, not a tuned bar (the <see cref="RedactedShareMajority"/> shape): the
+    /// column arrives with a rung and from then on every row has it, so a real store reads ~0 or ~1 and the only
+    /// windows between are the ones the rung landed inside — and a peak read over the sampled half of such a window
+    /// is a peak over half the window, which is the capture-peak lie in a new coat. There is nothing to calibrate;
+    /// the coverage rides the fact so a reader can see how close a window came.
+    /// </summary>
+    public const double NumbackendsCoverageFloor = 0.5;
 
     /// <summary>
     /// The share of the stored <c>pg_session_states</c> rows that came back <c>state_is_redacted</c> at or above
