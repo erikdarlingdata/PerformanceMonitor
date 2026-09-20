@@ -259,6 +259,9 @@ LIMIT 6";
            inert until lanes 27 / 28. */
         await DetectPlanRegressionAnomalies(context, anomalies);
         await DetectCpuBurnAnomalies(context, anomalies);
+        /* lane 38 (#3691): the instance total's growth rate against its own baseline (PgTargetAnomalyDetector.Growth.cs);
+           silent wherever total_bytes is NULL (a database the role may not size). */
+        await DetectDatabaseGrowthAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -274,6 +277,7 @@ LIMIT 6";
     private partial Task DetectSampledWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectPlanRegressionAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectCpuBurnAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectDatabaseGrowthAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;

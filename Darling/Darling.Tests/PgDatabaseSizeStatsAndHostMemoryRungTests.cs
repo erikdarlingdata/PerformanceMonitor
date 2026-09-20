@@ -288,7 +288,14 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
     /// reader of the six columns is <c>PgTargetFactCollector.Memory.cs</c> — its host read MUST name all six — and
     /// <c>PgTargetAdvice.Memory.cs</c> may name them in PROSE (the sentences that tell the operator what was read; a
     /// string literal in an advice block is not a read). Every other file still may not name them: a second reader
-    /// fails here until it is named deliberately. The size-table half stands until the object-growth lane lands.
+    /// fails here until it is named deliberately. <b>The size-table half was re-shaped the same way by lane 38 (#3691,
+    /// object growth):</b> the ONLY analysis readers of <c>pg_database_size_stats</c> are the growth family's three reads —
+    /// the trend read in <c>PgTargetFactCollector.Growth.cs</c>, the baseline arm in <c>PgTargetBaselineProvider.Growth.cs</c>
+    /// and the window read in <c>PgTargetAnomalyDetector.Growth.cs</c> — each of which MUST name the table; the
+    /// retention floor in <c>DailySummaryHorizon.cs</c> names it as a collector name (a purge floor, not a read); and
+    /// <c>PgTargetAdvice.Growth.cs</c> names it in prose. No MCP tool, viewer reader or web read names it yet —
+    /// <c>ServerPageTabsTests.KnownUnreadable</c> and the <c>ViewerCollectorCoverageTests</c> allow-list entry are about
+    /// SERVED and VIEWER reads and stand until one lands; an analysis fact is neither.
     /// </summary>
     [Fact]
     public void NoReaderNamesTheSizeTableOrTheMemoryColumnsYet()
@@ -298,6 +305,12 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
         {
             Assert.Contains(column, PerformanceMonitor.Darling.Analysis.PgTargetFactCollector.PgTargetMemoryHostSql, StringComparison.Ordinal);
         }
+
+        /* The size table's promised consumer landed too (lane 38): the growth family's three reads name it, and no other
+           analysis read does. */
+        Assert.Contains("FROM " + SizeTable, PerformanceMonitor.Darling.Analysis.PgTargetFactCollector.PgTargetDatabaseGrowthSql, StringComparison.Ordinal);
+        Assert.Contains("FROM " + SizeTable, PerformanceMonitor.Darling.Analysis.PgTargetBaselineProvider.GetPgTargetBaselineQuery(PerformanceMonitor.Analysis.Baselines.MetricNames.PgDatabaseGrowthBytesPerDay)!, StringComparison.Ordinal);
+        Assert.Contains("FROM " + SizeTable, PerformanceMonitor.Darling.Analysis.PgTargetAnomalyDetector.DatabaseGrowthWindowSql, StringComparison.Ordinal);
 
         foreach (var sql in new[] { DarlingPgCpuUtilizationReader.LatestCpuSql, DarlingPgCpuUtilizationReader.SamplesSinceSql, DarlingPgCpuUtilizationReader.HistorySql })
         {
@@ -335,7 +348,15 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
                     continue;
                 }
 
-                Assert.False(text.Contains(SizeTable, StringComparison.Ordinal), $"{file} names {SizeTable}: a consumer landed — lower ServerPageTabsTests.KnownUnreadable and drop the ViewerCollectorCoverageTests allow-list entry with it");
+                /* Lane 38: the growth family's three reads ARE the readers of the size table (asserted positively above);
+                   the retention floor names it as a collector name; the advice names it in prose. No other file is on this
+                   list — and these five still may not name a memory column (checked below). */
+                var sizeTableReader = name is "PgTargetFactCollector.Growth.cs" or "PgTargetBaselineProvider.Growth.cs" or "PgTargetAnomalyDetector.Growth.cs"
+                    or "DailySummaryHorizon.cs" or "PgTargetAdvice.Growth.cs";
+                if (!sizeTableReader)
+                {
+                    Assert.False(text.Contains(SizeTable, StringComparison.Ordinal), $"{file} names {SizeTable}: a second analysis reader of the size table landed — the only readers are the growth family's three (PgTargetFactCollector / PgTargetBaselineProvider / PgTargetAnomalyDetector .Growth.cs); name it here deliberately, or read the fact through get_analysis_facts instead. A SERVED read (an MCP tool) lowers ServerPageTabsTests.KnownUnreadable; a VIEWER read drops the ViewerCollectorCoverageTests allow-list entry");
+                }
                 if (name is "PgTargetFactCollector.Memory.cs" or "PgTargetAdvice.Memory.cs")
                 {
                     /* Lane 32: the collector's host read is THE reader of the six columns (asserted positively above);

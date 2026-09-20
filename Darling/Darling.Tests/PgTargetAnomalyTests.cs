@@ -76,6 +76,8 @@ public sealed class PgTargetAnomalyTests
         MetricNames.PgStatementMeanMs,
         /* lane 28 (#3691 v3): cores busy per collection over pg_kernel_stats — the self-hosted CPU proxy's bucket. */
         MetricNames.PgCpuBurnCores,
+        /* lane 38 (#3691): the instance total's growth in bytes per day per collection over pg_database_size_stats. */
+        MetricNames.PgDatabaseGrowthBytesPerDay,
     ];
 
     private static readonly (string Metric, string Table)[] s_metricTables =
@@ -93,6 +95,7 @@ public sealed class PgTargetAnomalyTests
         (MetricNames.PgSampledWaitMsPerSec, "pg_wait_sampling"),
         (MetricNames.PgStatementMeanMs, "pg_statement_stats"),
         (MetricNames.PgCpuBurnCores, "pg_kernel_stats"),
+        (MetricNames.PgDatabaseGrowthBytesPerDay, "pg_database_size_stats"),
     ];
 
     /* ───────────────────────── the baselines ───────────────────────── */
@@ -100,7 +103,7 @@ public sealed class PgTargetAnomalyTests
     [Fact]
     public void TheServedPgMetricNames_ArePgPrefixed_ServedOnlyByThePgTargetProvider_AndEndInTheOneScaffold()
     {
-        Assert.Equal(11, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(12, s_pgMetricNames.Distinct(StringComparer.Ordinal).Count());
         foreach (var metric in s_pgMetricNames)
         {
             Assert.StartsWith("pg_", metric, StringComparison.Ordinal);
@@ -171,7 +174,7 @@ public sealed class PgTargetAnomalyTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(detector);
         var lastV1 = code.IndexOf("await DetectWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
         Assert.True(lastV1 > 0);
-        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);", "await DetectPlanRegressionAnomalies(context, anomalies);", "await DetectCpuBurnAnomalies(context, anomalies);" })
+        foreach (var call in new[] { "await DetectIoAnomalies(context, anomalies);", "await DetectReplicationAnomalies(context, anomalies);", "await DetectWalVolumeAnomalies(context, anomalies);", "await DetectBlockingAnomalies(context, anomalies);", "await DetectPlanRegressionAnomalies(context, anomalies);", "await DetectCpuBurnAnomalies(context, anomalies);", "await DetectDatabaseGrowthAnomalies(context, anomalies);" })
             Assert.True(code.IndexOf(call, StringComparison.Ordinal) > lastV1, call + " must follow the five v1 detectors");
 
         foreach (var (file, lane) in new[]
@@ -304,6 +307,8 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.SampledWaitContribWindowSql,
         /* lane 28 (#3691 v3): the CPU-burn window read, the collector's text by alias */
         PgTargetAnomalyDetector.CpuBurnWindowSql,
+        /* lane 38 (#3691): the instance-growth window read over pg_database_size_stats */
+        PgTargetAnomalyDetector.DatabaseGrowthWindowSql,
     ];
 
     [Fact]
@@ -368,8 +373,8 @@ public sealed class PgTargetAnomalyTests
     /// #3691 between-waves batch re-pinned this from "five") the v2 detectors in their own partials — I/O (lane
     /// 11), replication (lane 12), WAL volume (lane 15) — and, since lane 17 filled its body, the wave-3 blocking
     /// detector, and since lanes 27 and 28 filled their bodies, the two v3 detectors (plan regression; CPU burn, on the
-    /// pair gate like lane 17's). Eleven; every exemption the between-waves batch and the v3 plumbing named is gone with
-    /// its stub.
+    /// pair gate like lane 17's), and since lane 38 the database-growth detector (pair gate too — an hourly growth series
+    /// is spiky by nature). Twelve; every exemption the between-waves batch and the v3 plumbing named is gone with its stub.
     /// </summary>
     [Fact]
     public void TheDetector_FencesEachOfTenFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
@@ -387,8 +392,8 @@ public sealed class PgTargetAnomalyTests
             Assert.Contains("_baselineProvider.GetBaselineAsync(", body, StringComparison.Ordinal);
         }
 
-        /* The six filled partials: one detector per file, the same fence and the same bucket read. */
-        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies"), ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies") })
+        /* The seven filled partials: one detector per file, the same fence and the same bucket read. */
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies"), ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies"), ("PgTargetAnomalyDetector.Growth.cs", "DetectDatabaseGrowthAnomalies") })
         {
             var partialCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
             Assert.Contains("private async partial Task " + detector + "(", partialCode, StringComparison.Ordinal);
@@ -446,12 +451,14 @@ public sealed class PgTargetAnomalyTests
            between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored),
            plus lane 24's stock sampled wait profile (the Aurora profile's ratio shape on another instrument), plus the
            two v3 anomalies the v3 plumbing registered by shape (plan regression — a statement's mean ms; CPU burn —
-           cores busy; both z-score, both deviation-scored). */
-        Assert.Equal(12, anomalyKeys.Count);
+           cores busy; both z-score, both deviation-scored), plus lane 38's database-growth anomaly (the instance total's
+           growth in bytes per day — z-score, deviation-scored, registered by the family that fills it). */
+        Assert.Equal(13, anomalyKeys.Count);
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalySampledWaitProfile));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyPlanRegression));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyCpuBurn));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyDatabaseGrowth));
 
         foreach (var key in anomalyKeys)
         {
@@ -694,7 +701,7 @@ public sealed class PgTargetAnomalyTests
             .Select(f => f.Name)
             .ToList();
         Assert.Equal(
-            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuBurnCoresFallback", "PgCpuBurnCoresFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec", "PgSessionCountFallback", "PgSessionCountFloor", "PgStatementMeanMsFallback", "PgStatementMeanMsFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
+            new[] { "PgBlockedSessionsFallback", "PgBlockedSessionsFloor", "PgCpuBurnCoresFallback", "PgCpuBurnCoresFloor", "PgCpuFallbackPct", "PgCpuFloorPct", "PgDatabaseGrowthFallbackBytesPerDay", "PgDatabaseGrowthFloorBytesPerDay", "PgDeadlockRateFallbackPerHour", "PgDeadlockRateFloorPerHour", "PgIoLatencyFallbackMs", "PgIoLatencyFloorMs", "PgRatioAnomalyThreshold", "PgSampledWaitProfileFallbackMsPerSec", "PgSessionCountFallback", "PgSessionCountFloor", "PgStatementMeanMsFallback", "PgStatementMeanMsFloor", "PgTpsFallback", "PgTpsFloor", "PgWaitProfileFallbackMsPerSec", "PgWalBytesFallbackPerSec", "PgWalBytesFloorPerSec" },
             pgConstants.Order(StringComparer.Ordinal).ToArray());
 
         var lines = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');

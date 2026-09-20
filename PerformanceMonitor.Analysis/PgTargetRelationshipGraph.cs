@@ -64,6 +64,9 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
         BuildPlanEdges();
         BuildKernelEdges();
         BuildHostMemoryEdges();
+        /* lane 38 (#3691): the object-growth chain (PgTargetRelationshipGraph.Growth.cs) — growth → the bloat trend on the
+           same database, and the growth-rate anomaly → the trend fact. */
+        BuildGrowthEdges();
     }
 
     private partial void BuildSaturationEdges();
@@ -78,6 +81,7 @@ public sealed partial class PgTargetRelationshipGraph : RelationshipGraph
     private partial void BuildPlanEdges();
     private partial void BuildKernelEdges();
     private partial void BuildHostMemoryEdges();
+    private partial void BuildGrowthEdges();
 
     /// <summary>
     /// The shared active-edge read, with the bad-actor alias resolved — see the class summary. Every edge

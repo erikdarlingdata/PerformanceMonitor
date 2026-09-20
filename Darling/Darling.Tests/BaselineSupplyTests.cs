@@ -208,7 +208,8 @@ public class BaselineSupplyTests
     /// and <c>pg_write_stats</c> since the #3691 between-waves batch, lanes 11 and 15 having reported theirs as out
     /// of their files; <c>pg_blocking_edges</c> since lane 17, whose <c>pg_blocked_sessions</c> arm reads it;
     /// <c>pg_wait_sampling</c> since lane 24, whose <c>pg_sampled_wait_ms_per_sec</c> arm reads it;
-    /// <c>pg_kernel_stats</c> since lane 28, whose <c>pg_cpu_burn_cores</c> arm reads it). The
+    /// <c>pg_kernel_stats</c> since lane 28, whose <c>pg_cpu_burn_cores</c> arm reads it;
+    /// <c>pg_database_size_stats</c> since lane 38, whose <c>pg_database_growth_bytes_per_day</c> arm reads it). The
     /// count is the SQL Server pair plus whatever the provider reads — the PostgreSQL half is derived
     /// (<see cref="PgTargetBaselineSources"/>), so a new arm moves this pin by itself. Membership is by COLLECTOR
     /// name (the purge resolves a schedule row, not a table), so each derived table is mapped to its collector through
@@ -218,7 +219,7 @@ public class BaselineSupplyTests
     public void BaselineServingRawCollectors_MatchTheRawReadingArms()
     {
         var pgSources = PgTargetBaselineSources();
-        Assert.Equal(11, pgSources.Count);  /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) + pg_statement_stats (lane 27) + pg_kernel_stats (lane 28) */
+        Assert.Equal(12, pgSources.Count);  /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) + pg_statement_stats (lane 27) + pg_kernel_stats (lane 28) + pg_database_size_stats (lane 38) */
         Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
@@ -300,7 +301,7 @@ public class BaselineSupplyTests
     public void PgTargetBaselineProvider_ReadsExactlyTheFlooredPgSources()
     {
         Assert.Equal(
-            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_stats", "pg_io_stats", "pg_kernel_stats", "pg_replication_stats", "pg_session_states", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "pg_write_stats" },
+            new[] { "pg_blocking_edges", "pg_cpu_utilization", "pg_database_size_stats", "pg_database_stats", "pg_io_stats", "pg_kernel_stats", "pg_replication_stats", "pg_session_states", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "pg_write_stats" },
             PgTargetBaselineSources());
         /* Lane 17's arm reads the log for its zero samples too; the log is not a collector table and needs no floor of
            this kind (DarlingRetentionHorizons.CollectionLogRetentionDays, twice the base, already covers the window). */

@@ -145,7 +145,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         var facts = new List<Fact>();
 
         /* #3691: the denominator for the collection caveat, stamped before any family runs so a pass that
-           failed at its first read still states "1 of 19" rather than "1 of 0". */
+           failed at its first read still states "1 of 20" rather than "1 of 0". */
         context.CollectionFamilyCount = s_familyCount;
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
@@ -178,6 +178,10 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         await CollectPlanFactsAsync(context, facts);
         await CollectKernelFactsAsync(context, facts);
         await CollectMemoryFactsAsync(context, facts);
+        /* lane 38 (#3691): the object-growth family, last — its trend reads only its own table, and its bloat co-fire
+           (a growing database whose bloat trend also grew) is decided in the scorer and the graph over the bloat family's
+           fact already in the list; declared and filled by the content lane in one PR (P3 declared no stub). */
+        await CollectGrowthFactsAsync(context, facts);
 
         return facts;
     }
@@ -233,4 +237,5 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     private partial Task CollectPlanFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectKernelFactsAsync(AnalysisContext context, List<Fact> facts);
     private partial Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts);
+    private partial Task CollectGrowthFactsAsync(AnalysisContext context, List<Fact> facts);
 }

@@ -66,7 +66,10 @@ public static partial class PgTargetScorer
             /* #3691 v3 plumbing: the plan-regression and CPU-burn anomalies are each a peak-vs-own-baseline z-score on
                one series (a statement's mean ms; cores busy) — registered by shape ahead of lanes 27 and 28. */
             or PgTargetFactKeys.AnomalyPlanRegression
-            or PgTargetFactKeys.AnomalyCpuBurn;
+            or PgTargetFactKeys.AnomalyCpuBurn
+            /* #3691 lane 38: the database-growth anomaly is a peak-vs-own-baseline z-score on one series (the instance
+               total's growth in bytes per day per collection) — registered by shape with the family that fills it. */
+            or PgTargetFactKeys.AnomalyDatabaseGrowth;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>

@@ -93,6 +93,10 @@ public sealed class PgTargetMeasuredLineageTests
         /* Lane 32 (#3691 v3): the memory family — the 2026-09-19 calibration ran before V136 landed the memory columns, so it
            read no reclaimable share and no overcommit ratio; the 1.0 line is engine-defined and is not listed here. */
         ("PgTargetScorer.Memory.cs", new[] { "OvercommitCriticalRatio", "HostMemoryReclaimableWarningShare", "HostMemoryReclaimableCriticalShare", "HostMemoryPressureSustainSamples", "OvercommitCriticalBandBoost", "HostMemoryCauseBoost" }),
+        /* Lane 38 (#3691): the object-growth family — pg_database_size_stats (V136) is one day old at the family's birth; the
+           2026-09-19 calibration ran before it existed, so every bar is chosen and the family stamps threshold_lineage = 0. */
+        ("PgTargetScorer.Growth.cs", new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples", "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" }),
+        ("Baselines/AnomalyThresholds.cs", new[] { "PgDatabaseGrowthFloorBytesPerDay", "PgDatabaseGrowthFallbackBytesPerDay" }),
         /* The ratio families' ramp spans: the 2026-09-20 read placed the firing multiple, not where a ramp should top out. */
         ("PgTargetScorer.Anomaly.cs", new[] { "RatioAnomalySaturation", "WaitProfileModifiedZSpan" }),
     };

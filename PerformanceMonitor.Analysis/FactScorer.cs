@@ -46,7 +46,7 @@ public class FactScorer
         "anomaly", "bad_actor", "blocking", "config", "coverage", "cpu", "database_config", "disk", "io",
         "jobs", "memory",
         PgTargetSources.BloatSource, PgTargetSources.BlockingSource, PgTargetSources.BufferSource, PgTargetSources.ConfigSource,
-        PgTargetSources.CpuSource, PgTargetSources.DatabaseSource, PgTargetSources.IoSource,
+        PgTargetSources.CpuSource, PgTargetSources.DatabaseSource, PgTargetSources.GrowthSource, PgTargetSources.IoSource,
         PgTargetSources.KernelSource, PgTargetSources.MemorySource, PgTargetSources.PlansSource,
         PgTargetSources.PostureSource, PgTargetSources.QueriesSource, PgTargetSources.ReplicationSource,
         PgTargetSources.SessionsSource, PgTargetSources.TempSource, PgTargetSources.VacuumSource,
