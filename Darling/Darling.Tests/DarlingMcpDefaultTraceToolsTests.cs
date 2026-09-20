@@ -233,7 +233,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             JsonAssert.Contains("\"total_events\": 2", json);
 
             /* Unknown server → the listing error; empty store → the miss. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, "darling-no-such-server")), StringComparison.Ordinal);
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName)));
 

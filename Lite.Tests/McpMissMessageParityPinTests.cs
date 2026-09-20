@@ -231,11 +231,20 @@ public sealed class McpMissMessageParityPinTests
            then). The envelope itself is built once in Common and is identical by construction; what lives
            twice is the sentence teaching an agent to branch on `status` rather than on prose, and a SKU that
            reworded it alone would teach one client to read a failure as text again. The example envelope is
-           pinned byte-for-byte because it is the one place the shape is spelled out for a reader. Each SKU's
-           trailing sentence on validation refusals is deliberately NOT here: Lite has no refusal that is the
-           envelope and Darling's PostgreSQL reads have a handful, so the two say different true things. */
+           pinned byte-for-byte because it is the one place the shape is spelled out for a reader. */
         "Every tool FAILURE — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
         "It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
+
+        /* #3739 — refusals one shape. The sentences that teach a caller the SIXTH status word: a refusal (a
+           parameter the tool cannot honor, a server name that resolves to nothing, a required parameter not
+           sent) is McpHelpers.Refusal's {status:"invalid", message, hints.parameter} envelope on both SKUs —
+           a WIRE CHANGE for the ~400 validation bails that answered with the validator's bare sentence until
+           then. Until #3739 each SKU carried its own trailing sentence here (Lite: "not this envelope";
+           Darling: "a handful of the PostgreSQL reads wrap that sentence in the same `error` envelope") because
+           the two said different true things; now they say the same true thing and the whole paragraph is
+           shared. The example envelope is pinned byte-for-byte for the reason the failure's is. */
+        "A REFUSAL — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
+        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. Six `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call).",
     };
 
     [Theory]

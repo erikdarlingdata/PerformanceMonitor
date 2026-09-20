@@ -84,7 +84,10 @@ internal static class DarlingFleetSweepEndpoints
     /// receive a complete-looking answer to a different one), a readable value goes through
     /// <see cref="McpHelpers.ValidateWindow"/>'s range check, and the anchor is parsed by the same
     /// authority every MCP read uses. Returns null and the resolved window on success, else the
-    /// refusal message.
+    /// refusal — the <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>, #3739) both arms, because
+    /// the shared validator answers that shape and a caller that reads the words should not have to know
+    /// which arm refused it. This surface's routes answer <c>{"error": sentence}</c> and unwrap it through
+    /// <see cref="McpHelpers.ErrorMessageOf"/> (see <see cref="SweepError"/>).
     /// </summary>
     internal static string? ValidateSpan(string? rawHours, string? asOf, out int hours, out DateTime endUtc)
     {
@@ -94,7 +97,7 @@ internal static class DarlingFleetSweepEndpoints
         if (rawHours is not null
             && !int.TryParse(rawHours, NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
         {
-            return $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{McpHelpers.MaxHoursBack}).";
+            return McpHelpers.Refusal("hours", $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{McpHelpers.MaxHoursBack}).");
         }
 
         return McpHelpers.ValidateWindow(hours, asOf, out endUtc);
@@ -104,16 +107,19 @@ internal static class DarlingFleetSweepEndpoints
     /// Validates the watch-item <c>?state=</c> filter: null (absent) selects the open-union-carried
     /// default view; one of the machine's four states selects that state; anything else is refused
     /// naming the legal values, because an unknown state matches nothing and an empty answer to a
-    /// typo is indistinguishable from a clean worklist.
+    /// typo is indistinguishable from a clean worklist. The refusal is the <c>invalid</c> envelope (#3739)
+    /// with <paramref name="parameterName"/> under <c>hints.parameter</c>: the web feed calls the knob
+    /// <c>state</c> and <c>get_sweep_reports</c> calls it <c>watch_state</c>, and the hint has to name the
+    /// one the caller actually sent.
     /// </summary>
-    internal static string? ValidateWatchState(string? state)
+    internal static string? ValidateWatchState(string? state, string parameterName = "state")
     {
         if (state is null || KnownWatchStates.Contains(state, StringComparer.Ordinal))
         {
             return null;
         }
 
-        return $"Unknown state '{state}'. Legal values: {string.Join(", ", KnownWatchStates)}; omit for open + carried.";
+        return McpHelpers.Refusal(parameterName, $"Unknown state '{state}'. Legal values: {string.Join(", ", KnownWatchStates)}; omit for open + carried.");
     }
 
     /// <summary>
@@ -262,6 +268,10 @@ internal static class DarlingFleetSweepEndpoints
     private static IResult JsonResult(JsonNode node) =>
         Results.Text(node.ToJsonString(), "application/json");
 
+    /// <summary>This surface's error body — <c>{"error": sentence}</c>, its own contract since #2506, kept
+    /// rather than switched to the read surface's envelope pass-through: <paramref name="message"/> may be the
+    /// <c>invalid</c> envelope the shared validators answer since #3739, so the sentence is read out of it
+    /// and a web client that reads <c>.error</c> is not handed JSON inside a string.</summary>
     private static IResult SweepError(string message, int statusCode) =>
-        Results.Text(new JsonObject { ["error"] = message }.ToJsonString(), "application/json", statusCode: statusCode);
+        Results.Text(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(message) }.ToJsonString(), "application/json", statusCode: statusCode);
 }

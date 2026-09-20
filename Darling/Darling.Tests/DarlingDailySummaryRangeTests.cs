@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -154,18 +155,18 @@ public sealed class DarlingDailySummaryRangeTests
             /* ── the span is bounded, and refused rather than clamped ── */
             Assert.StartsWith(
                 "Invalid days_back value '0'",
-                await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 0),
+                McpHelpers.ErrorMessageOf(await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 0)),
                 StringComparison.Ordinal);
             Assert.StartsWith(
                 "Invalid days_back value '367'",
-                await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 367),
+                McpHelpers.ErrorMessageOf(await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 367)),
                 StringComparison.Ordinal);
 
             /* A bad anchor is refused too, rather than silently answered as of now — the failure the whole
                parameter exists to remove. */
             Assert.StartsWith(
                 "Invalid as_of",
-                await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 30, "last tuesday"),
+                McpHelpers.ErrorMessageOf(await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 30, "last tuesday")),
                 StringComparison.Ordinal);
 
             bodySucceeded = true;

@@ -154,7 +154,9 @@ public sealed class DarlingMcpFleetSweepToolsTests
 
         var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, NullLogger.Instance, hoursBack, asOf, sweepId, watchState);
 
-        Assert.Contains(expectedFragment, result, StringComparison.Ordinal);
+        /* The refusal is the `invalid` envelope since #3739; the fragments are pinned on its sentence. */
+        Assert.True(McpHelpers.IsRefusalEnvelope(result), result);
+        Assert.Contains(expectedFragment, McpHelpers.ErrorMessageOf(result), StringComparison.Ordinal);
         /* A refusal, not a swallowed store error — the dead store was never reached. */
         Assert.DoesNotContain("Error during get_sweep_reports", result, StringComparison.Ordinal);
     }
@@ -170,7 +172,7 @@ public sealed class DarlingMcpFleetSweepToolsTests
         /* The out-of-range hours_back would refuse FIRST if the window were bound on this path. */
         var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, NullLogger.Instance, 999, null, "abc", null);
 
-        Assert.Contains("Invalid sweep_id value 'abc'", result, StringComparison.Ordinal);
+        Assert.Contains("Invalid sweep_id value 'abc'", McpHelpers.ErrorMessageOf(result), StringComparison.Ordinal);
     }
 
     /* ---------------- the shared builders: lane 3's shape pins cover this surface ---------------- */

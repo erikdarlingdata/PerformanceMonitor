@@ -127,7 +127,7 @@ public sealed class McpPlanTools
         [Description("Raw showplan XML content.")] string plan_xml)
     {
         if (string.IsNullOrWhiteSpace(plan_xml))
-            return "No plan XML provided.";
+            return McpHelpers.Refusal("plan_xml", "No plan XML provided.");
 
         try
         {

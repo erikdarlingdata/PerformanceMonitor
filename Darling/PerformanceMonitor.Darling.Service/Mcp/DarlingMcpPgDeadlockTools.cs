@@ -35,7 +35,7 @@ public sealed class DarlingMcpPgDeadlockTools
         if (validation != null) return validation;
 
         var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return McpHelpers.Status("error", limitError);
+        if (limitError != null) return limitError;
 
         try
         {
@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgDeadlockTools
         if (error != null) return error;
 
         var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return McpHelpers.Status("error", limitError);
+        if (limitError != null) return limitError;
 
         try
         {

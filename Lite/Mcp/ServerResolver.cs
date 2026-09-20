@@ -1,3 +1,4 @@
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -61,6 +62,13 @@ internal static class ServerResolver
     /// error string listing the available servers. Lets MCP tools collapse the repeated resolve-and-bail
     /// block to: var (resolved, error) = ResolveOrError(...); if (error != null) return error;
     /// resolved is default (not meaningful) whenever error is non-null — always bail on error first.
+    ///
+    /// <para><b>The miss is the <c>invalid</c> envelope, not a sentence (#3739).</b> The string handed back is
+    /// <see cref="McpHelpers.Refusal"/>'s <c>{"status":"invalid","message":"Could not resolve server. …",
+    /// "hints":{"parameter":"server_name"}}</c> — the same bytes Darling's resolver builds for the same miss —
+    /// so every tool that <c>return error;</c>s puts a status word on the wire without changing, and a client
+    /// that keys on <c>status</c> (which the instructions teach it to) sees a refusal rather than prose. The
+    /// sentence inside is byte-for-byte what it was; read it back through <see cref="McpHelpers.ErrorMessageOf"/>.</para>
     /// </summary>
     public static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         ServerManager serverManager,
@@ -68,7 +76,7 @@ internal static class ServerResolver
     {
         var resolved = Resolve(serverManager, serverName);
         return resolved is null
-            ? (default, $"Could not resolve server. Available servers:\n{ListAvailableServers(serverManager)}")
+            ? (default, McpHelpers.Refusal("server_name", $"Could not resolve server. Available servers:\n{ListAvailableServers(serverManager)}"))
             : (resolved.Value, null);
     }
 

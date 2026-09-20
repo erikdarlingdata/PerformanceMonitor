@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -472,7 +473,7 @@ public sealed class OversizedPlanSweepRunRecordTests
         var (_, error) = await DarlingServerResolver.ResolveOrErrorWithFleetSentinelAsync(null!, "not-a-server");
 
         Assert.NotNull(error);
-        Assert.Contains(DarlingServerResolver.FleetSentinelDisclosure, error, StringComparison.Ordinal);
+        Assert.Contains(DarlingServerResolver.FleetSentinelDisclosure, McpHelpers.ErrorMessageOf(error!), StringComparison.Ordinal);
     }
 
     /// <summary>

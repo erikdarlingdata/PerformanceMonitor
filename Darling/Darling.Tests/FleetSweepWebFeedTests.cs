@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -84,7 +85,9 @@ public sealed class FleetSweepWebFeedTests
         var error = DarlingFleetSweepEndpoints.ValidateSpan(rawHours, asOf, out _, out _);
 
         Assert.NotNull(error);
-        Assert.Contains(expectedFragment, error, StringComparison.Ordinal);
+        /* Both arms answer the `invalid` envelope since #3739 (the endpoint unwraps it into its own {"error"} body). */
+        Assert.True(McpHelpers.IsRefusalEnvelope(error), error);
+        Assert.Contains(expectedFragment, McpHelpers.ErrorMessageOf(error!), StringComparison.Ordinal);
     }
 
     /* ---- the watch-state filter ------------------------------------------------------------------------ */
@@ -125,8 +128,12 @@ public sealed class FleetSweepWebFeedTests
         var error = DarlingFleetSweepEndpoints.ValidateWatchState(state);
 
         Assert.NotNull(error);
-        Assert.Contains(FleetSweepWatchStateMachine.Carried, error, StringComparison.Ordinal);
-        Assert.Contains("omit for open + carried", error, StringComparison.Ordinal);
+        /* The `invalid` envelope since #3739, hints.parameter naming the web feed's knob; the words are pinned
+           on its sentence (the `+` alone would trip a raw-JSON Contains: the serializer escapes it). */
+        Assert.Equal("state", JsonDocument.Parse(error!).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        var sentence = McpHelpers.ErrorMessageOf(error!);
+        Assert.Contains(FleetSweepWatchStateMachine.Carried, sentence, StringComparison.Ordinal);
+        Assert.Contains("omit for open + carried", sentence, StringComparison.Ordinal);
     }
 
     /* ---- the wire shapes: FleetSweepPresentation ------------------------------------------------------- */

@@ -487,7 +487,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpBlockingTools.GetDeadlockTrend(postgres, ServerName), ServerName, "trend");
 
             /* Unknown server resolves to the listing error. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpBlockingTools.GetDeadlocks(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpBlockingTools.GetDeadlocks(postgres, "darling-no-such-server")), StringComparison.Ordinal);
 
             /* Empty store → the "empty" miss. */
             await DeleteRowsAsync(connection, ct, keepServer: true);

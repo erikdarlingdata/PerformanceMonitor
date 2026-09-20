@@ -22,6 +22,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -5319,9 +5320,10 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             if (target.Candidates.Count == 0)
             {
                 /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
-                   #2339 peer disclosure when another store declares coverage of the name. */
+                   #2339 peer disclosure when another store declares coverage of the name. The resolver hands it
+                   back as the `invalid` envelope since #3739; stderr is TEXT, so the sentence is read out of it. */
                 var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
-                error.WriteLine(missMessage ?? $"Could not resolve server '{serverName}'.");
+                error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
                 error.WriteLine("Nothing was changed.");
                 return 1;
             }

@@ -473,7 +473,9 @@ public sealed class ServerPageTabsTests
         var backendMessage = PerformanceMonitor.Common.McpHelpers.ValidateHoursBack(
             PerformanceMonitor.Common.McpHelpers.MaxHoursBack + 1);
         Assert.NotNull(backendMessage);
-        Assert.Matches("exceeds maximum of (\\d+) hours", backendMessage!);
+        /* The validator answers the `invalid` envelope since #3739 and the page reads its `message` (util.js's
+           non-2xx arm), so the seam the regex has to match is the sentence inside it. */
+        Assert.Matches("exceeds maximum of (\\d+) hours", PerformanceMonitor.Common.McpHelpers.ErrorMessageOf(backendMessage!));
 
         /* Parity: both the loader and the composites route read errors through the helper — no read-error site
            left on the raw path, or the tab mixes friendly notices with raw API strings. */

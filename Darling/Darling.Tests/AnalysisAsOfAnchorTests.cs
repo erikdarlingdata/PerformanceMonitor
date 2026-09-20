@@ -271,7 +271,7 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
                   bad anchor must never fall back to "now" and then run a real, persisting analysis. */
             Assert.StartsWith(
                 "Invalid as_of",
-                await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 1, "last tuesday"),
+                McpHelpers.ErrorMessageOf(await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 1, "last tuesday")),
                 StringComparison.Ordinal);
             Assert.Contains(
                 "future",

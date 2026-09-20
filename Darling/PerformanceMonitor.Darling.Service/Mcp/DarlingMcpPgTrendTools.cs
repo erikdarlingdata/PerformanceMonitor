@@ -146,8 +146,8 @@ public sealed class DarlingMcpPgTrendTools
            statement that does not exist. */
         if (requested && !long.TryParse(queryid!.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedQueryId))
         {
-            return McpHelpers.Status(
-                "error",
+            return McpHelpers.Refusal(
+                "queryid",
                 $"queryid '{queryid}' is not a 64-bit integer. PostgreSQL query ids are signed and often "
                 + "negative; pass the value from get_pg_top_queries exactly as it appears.");
         }

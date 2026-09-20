@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -43,7 +44,14 @@ namespace Darling.Tests;
 /// file-grain inventory (<c>FilesReturningTheJsonErrorEnvelope</c>) is retired, and a direct
 /// <c>Status("error", …)</c> inside a catch is now classified AD-HOC — it is the retired dialect coming back,
 /// and it fails by name. The envelope is executed here as a positive control, not trusted from its
-/// doc comment.</item>
+/// doc comment. <b>And the refusal is the fourth outcome, with its own word (#3739):</b> every value a tool
+/// hands back through the <c>if (error != null) return error;</c> idiom — the resolver's miss, a validator's
+/// refusal, roughly four hundred sites on both SKUs — is <c>McpHelpers.Refusal</c>'s <c>{"status":"invalid",
+/// message, hints.parameter}</c> envelope, built in the handful of PRODUCERS rather than at the sites; the
+/// census below walks every guarded pass-through to the value it passes and requires the producer to be a
+/// shared one, walks every bare-string return in a tool body into an exact roster, and holds that the
+/// failure word <c>error</c> has exactly one producer (<c>FormatError</c>) so a refusal can never wear it again
+/// — which is how nine PostgreSQL refusals (the issue counted seven; two more split the literal across a line break) answered HTTP 500 for a bad <c>limit</c> between #3719 and #3739.</item>
 /// <item><b>refuse what you cannot honor</b> — census-able: every bounded parameter reaches a shared validator
 /// (<c>McpHelpers.ValidateDaysBack</c> now covers the day-grained span, so the inline-refusal roster is
 /// empty), and no parameter is clamped against a ceiling. The <c>Math.Abs</c> arm is
@@ -229,10 +237,12 @@ public sealed class McpPayloadContractCensusTests
     /// <summary>
     /// The recognizer the consumers branch on (the web surface's HTTP mapping, the test guards that used to
     /// read <c>StartsWith("Error during")</c>), executed against the producer: it fires on <c>FormatError</c>'s
-    /// output and on a validation refusal built with <c>Status("error", …)</c>, tolerates leading whitespace
-    /// the way the web sniff does, and does NOT fire on a miss envelope, on a data payload whose first key
-    /// begins with <c>status</c>, or on the retired bare sentence. <c>ErrorMessageOf</c> unwraps the sentence
-    /// from the envelope and hands anything else back untouched.
+    /// output (and on a hand-built <c>Status("error", …)</c>, which is exactly why the tree may no longer
+    /// build one outside <c>FormatError</c> — see <see cref="TheFailureWord_HasOneProducer_OnBothSkus"/>),
+    /// tolerates leading whitespace the way the web sniff does, and does NOT fire on a miss envelope, on the
+    /// refusal envelope, on a data payload whose first key begins with <c>status</c>, or on the retired bare
+    /// sentence. <c>ErrorMessageOf</c> unwraps the sentence from either status-word envelope and hands anything
+    /// else back untouched.
     /// </summary>
     [Fact]
     public void TheErrorEnvelopeRecognizer_FiresOnTheProducer_AndNotOnItsNeighbours()
@@ -245,6 +255,7 @@ public sealed class McpPayloadContractCensusTests
 
         Assert.False(McpHelpers.IsErrorEnvelope(McpHelpers.Status("empty", "nothing")));
         Assert.False(McpHelpers.IsErrorEnvelope(McpHelpers.Status("precondition", "Query Store is off", new { statement = "ALTER DATABASE" })));
+        Assert.False(McpHelpers.IsErrorEnvelope(McpHelpers.Refusal("limit", "Invalid limit value '0'.")));
         Assert.False(McpHelpers.IsErrorEnvelope("{\"status_counts\":{\"error\":2}}"));
         Assert.False(McpHelpers.IsErrorEnvelope("{\"status\":\"error_count\",\"message\":\"x\"}"));
         Assert.False(McpHelpers.IsErrorEnvelope("Error during get_x: boom"));
@@ -253,8 +264,10 @@ public sealed class McpPayloadContractCensusTests
 
         Assert.Equal("Error during get_x: boom", McpHelpers.ErrorMessageOf(wire));
         Assert.Equal("Invalid limit value '0'.", McpHelpers.ErrorMessageOf(McpHelpers.Status("error", "Invalid limit value '0'.")));
+        Assert.Equal("Invalid limit value '0'.", McpHelpers.ErrorMessageOf(McpHelpers.Refusal("limit", "Invalid limit value '0'.")));
         Assert.Equal("Could not resolve server.", McpHelpers.ErrorMessageOf("Could not resolve server."));
         Assert.Equal("{\"status\":\"error\",oops", McpHelpers.ErrorMessageOf("{\"status\":\"error\",oops"));
+        Assert.Equal("{\"status\":\"invalid\",oops", McpHelpers.ErrorMessageOf("{\"status\":\"invalid\",oops"));
     }
 
     /// <summary>The classifier, witnessed against each shape as it appears in the tree — and against the one
@@ -312,6 +325,373 @@ public sealed class McpPayloadContractCensusTests
                 yield return Regex.Replace(ret.Groups[1].Value, @"\s+", " ").Trim();
             }
         }
+    }
+
+    /* ───────────────────────── rule: refusals one shape (#3739) ───────────────────────── */
+
+    /// <summary>
+    /// The bare STRING returns left in a tool body on either SKU — a <c>return "…";</c> or <c>return $"…";</c>
+    /// whose value reaches the wire as prose where every other outcome is JSON — with the reason each
+    /// survives. #3739 shaped every REFUSAL as <c>McpHelpers.Refusal</c>'s <c>invalid</c> envelope (in the
+    /// producers: the validators, both resolvers, the web dispatch's missing-parameter arm, and the handful of
+    /// tools that refuse a parameter of their own inline), so what is left here is not a refusal at all: three
+    /// MISS sentences that predate the four miss words and belong to #3703's lane, not this one. The roster is
+    /// exact so a new bare sentence fails by name — a refusal is <c>Refusal(parameter, sentence)</c>, a miss is
+    /// <c>Status(word, sentence)</c>, and a tool body has no third way to say no.
+    /// </summary>
+    public static readonly (string File, string Tool, string Sentence, string WhyItSurvives)[] BareSentenceReturns =
+    [
+        ("DarlingMcpDataTools.cs", "list_servers", "No servers are registered yet.",
+            "a MISS on an empty registry (nothing to list), not a refusal of the request — the miss-word lane's (#3703), where `empty` is its word"),
+        ("McpDiscoveryTools.cs", "list_servers", "No servers are configured.",
+            "the Lite twin of the above: a MISS on an empty ServerManager, the miss-word lane's (#3703)"),
+        ("McpPlanTools.cs", "analyze_query_store_plan", "Could not find connection details for server",
+            "a resolved server whose connection details are gone from the manager between resolve and read — the request was fine, so not `invalid`; an `unavailable` miss for #3703's lane"),
+    ];
+
+    /// <summary>The shared producers whose return a tool may pass through under <c>if (x != null) return x;</c>,
+    /// in three classes. REFUSALS: the two resolvers and every <c>McpHelpers</c> validator (each of which builds
+    /// <c>Refusal</c>), and the fleet-sweep watch-state validator (which does too). GATES: the engine-capability
+    /// and runtime-precondition probes on both SKUs, whose answer is a MISS envelope (<c>not_collected</c> /
+    /// <c>precondition</c>) computed above the read and passed through by the same idiom — not refusals, but
+    /// shared builders, which is what the sweep is holding. CARRIED: the health-parser family's
+    /// <c>CollectAsync</c>, whose <c>Collected.EarlyReturn</c> is a resolver or validator result carried through
+    /// the nine-tool helper that <see cref="CallsAValidatingHelper"/> already holds to the shared validators.</summary>
+    private static readonly Regex SharedPassThroughProducer = new(
+        @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync)\("
+        + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
+        + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
+        + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("
+        + @"|\b(?:Darling|Mcp)RuntimePrecondition\.(?:StatusAsync|GatedOffStatusAsync)\("
+        + @"|\bCollectAsync(?:<[^>]+>)?\(",
+        RegexOptions.Compiled);
+
+    /// <summary>A guarded pass-through: <c>if (x != null) return x;</c> / <c>if (x is not null) { return x; }</c>,
+    /// the idiom every resolve-and-bail and validate-and-bail site on both SKUs uses. The guard and the return
+    /// must name the SAME value, which is what makes this a pass-through of a producer's answer rather than a
+    /// tool's own early return.</summary>
+    private static readonly Regex GuardedPassThrough = new(
+        @"\bif\s*\(\s*([A-Za-z_]\w*(?:\.\w+)?)\s*(?:!=|is\s+not)\s*null\s*\)\s*\{?\s*return\s+\1\s*;",
+        RegexOptions.Compiled);
+
+    /// <summary>The floor under the guarded pass-through count: 463 at the time of writing across both SKUs
+    /// (196 resolver bails, 218 validator bails, 49 gate and carried pass-throughs — the ~190 + ~210 the issue counted). A sweep that found fewer has a
+    /// marker that stopped matching and would pass for free.</summary>
+    private const int GuardedPassThroughFloor = 300;
+
+    /// <summary>
+    /// Every REFUSAL a tool body on either SKU returns is the shared shape, and the bare sentences left are
+    /// exactly the rostered misses. Three sweeps over every tool span, each on the comments-and-strings-stripped
+    /// text so prose cannot open or close anything:
+    ///
+    /// <list type="number">
+    /// <item><b>Every guarded pass-through</b> (<c>if (x != null) return x;</c>) is walked back to the LAST
+    /// assignment of <c>x</c> before it — <c>var x = …</c>, <c>x = …</c>, or the destructure <c>var (…, x) = …</c>
+    /// — and the producer on its right-hand side must be one of <see cref="SharedPassThroughProducer"/>'s: a
+    /// resolver, a <c>McpHelpers</c> validator, the watch-state validator, a gate probe, or the health-parser
+    /// helper that carries one of those. A <c>??</c> chain counts when its first operand does. A pass-through
+    /// of anything else is a refusal built by hand somewhere the census cannot see, and fails by name.</item>
+    /// <item><b>Every <c>return</c> whose expression begins a string literal</b> (<c>"</c>, <c>$"</c>, <c>@"</c>)
+    /// is a bare sentence and must be in <see cref="BareSentenceReturns"/> — exactly, both ways.</item>
+    /// <item><b>Every <c>return McpHelpers.Status("invalid", …)</c> and every hand-serialized
+    /// <c>new { status = "invalid" … }</c></b> is a refusal built beside the builder rather than through it and
+    /// fails: the word is right, the shape (no <c>hints.parameter</c>) is not, and one producer is the point.
+    /// The write tools' <c>Outcome("invalid", …)</c> is NOT this — it is their own builder for a body that
+    /// will not parse, same word, same bytes, and #3615's write contract owns it.</item>
+    /// </list>
+    ///
+    /// <para>Bound: 244 tool methods; the guarded pass-through count has its own floor
+    /// (<see cref="GuardedPassThroughFloor"/>) so the idiom regex cannot silently stop matching while the
+    /// offender lists stay empty, and the resolver-sourced and validator-sourced counts are each floored at
+    /// 100 so neither producer class can vanish from the sweep unnoticed.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRefusal_ReturnsThroughTheSharedShape_AndTheBareSentenceRosterIsExact()
+    {
+        var passThroughs = 0;
+        var fromResolver = 0;
+        var fromValidator = 0;
+        var unshared = new List<string>();
+        var bare = new List<(string File, string Tool, string Sentence)>();
+        var handBuilt = new List<string>();
+
+        foreach (var (file, tool, span, _) in ToolMethods())
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(span);
+
+            foreach (Match guard in GuardedPassThrough.Matches(code))
+            {
+                passThroughs++;
+                /* A member guard (`c.EarlyReturn`) is walked back through its ROOT (`c`), whose producer is the
+                   helper that filled it. */
+                var root = guard.Groups[1].Value.Split('.')[0];
+                var producer = LastAssignmentOf(code, root, guard.Index);
+                if (producer is null)
+                {
+                    unshared.Add($"{file} {tool}: return {guard.Groups[1].Value}; (no assignment found in the tool body)");
+                    continue;
+                }
+
+                if (!SharedPassThroughProducer.IsMatch(producer))
+                {
+                    unshared.Add($"{file} {tool}: {guard.Groups[1].Value} = {producer}");
+                    continue;
+                }
+
+                if (producer.Contains("ResolveOrError", StringComparison.Ordinal) || producer.Contains("ResolveWithFingerprintName", StringComparison.Ordinal))
+                {
+                    fromResolver++;
+                }
+                else if (producer.Contains("McpHelpers.", StringComparison.Ordinal))
+                {
+                    fromValidator++;
+                }
+            }
+
+            foreach (var expression in ReturnExpressions(span, code))
+            {
+                if (expression.StartsWith('"') || expression.StartsWith("$\"", StringComparison.Ordinal) || expression.StartsWith("@\"", StringComparison.Ordinal))
+                {
+                    var opening = expression.IndexOf('"') + 1;
+                    var closing = expression.IndexOf('"', opening);
+                    var text = closing > opening ? expression[opening..closing] : expression[opening..];
+                    bare.Add((file, tool, text));
+                }
+                else if (expression.StartsWith("McpHelpers.Status(\"invalid\"", StringComparison.Ordinal)
+                    || Regex.IsMatch(expression, @"^JsonSerializer\.Serialize\(\s*new\s*\{\s*status\s*=\s*""invalid"""))
+                {
+                    handBuilt.Add($"{file} {tool}: return {expression}");
+                }
+            }
+        }
+
+        Assert.True(passThroughs >= GuardedPassThroughFloor, $"only {passThroughs} guarded pass-throughs were found across both SKUs; the idiom marker has stopped matching");
+        Assert.True(fromResolver >= 100, $"only {fromResolver} pass-throughs trace to a resolver; the resolver marker has stopped matching");
+        Assert.True(fromValidator >= 100, $"only {fromValidator} pass-throughs trace to a McpHelpers validator; the validator marker has stopped matching");
+
+        Assert.True(unshared.Count == 0,
+            "these tools pass a value through `if (x != null) return x;` that no shared producer built — a refusal is McpHelpers.Refusal(parameter, sentence), built where the sentence is, so the wire carries `invalid` and hints.parameter: "
+            + string.Join("; ", unshared));
+
+        Assert.True(handBuilt.Count == 0,
+            "these tools build the `invalid` envelope by hand beside McpHelpers.Refusal — route them through it so every refusal carries hints.parameter: "
+            + string.Join("; ", handBuilt));
+
+        var rostered = BareSentenceReturns.Select(r => (r.File, r.Tool, r.Sentence)).ToList();
+        var newBare = bare.Where(b => !rostered.Any(r => r.File == b.File && r.Tool == b.Tool && b.Sentence.StartsWith(r.Sentence, StringComparison.Ordinal))).ToList();
+        var gone = rostered.Where(r => !bare.Any(b => b.File == r.File && b.Tool == r.Tool && b.Sentence.StartsWith(r.Sentence, StringComparison.Ordinal))).ToList();
+        Assert.True(newBare.Count == 0,
+            "a tool body returns a bare sentence that is not a rostered miss — a refusal is McpHelpers.Refusal(parameter, sentence); a miss is McpHelpers.Status(word, sentence): ["
+            + string.Join("; ", newBare.Select(b => $"{b.File} {b.Tool}: \"{b.Sentence}\"")) + "]");
+        Assert.True(gone.Count == 0,
+            "rostered bare sentences no longer returned (the miss lane reached them — shrink the roster): ["
+            + string.Join("; ", gone.Select(g => $"{g.File} {g.Tool}: \"{g.Sentence}\"")) + "]");
+    }
+
+    /// <summary>
+    /// The failure word has ONE producer. <c>McpHelpers.Status("error", …)</c> appears nowhere in either SKU's
+    /// tool sources — not in a catch (the catch census holds that) and not above one either, which is where
+    /// the nine PostgreSQL refusals sat and answered HTTP 500 for a bad <c>limit</c> — and exactly once in
+    /// <c>McpHelpers.cs</c>, inside <c>FormatError</c>. Read off the strings-KEPT text because the literal is the
+    /// evidence; a refusal that wants a status word has <c>Refusal</c>, and a catch has <c>FormatError</c>.
+    /// </summary>
+    [Fact]
+    public void TheFailureWord_HasOneProducer_OnBothSkus()
+    {
+        var offenders = new List<string>();
+        var files = 0;
+        foreach (var (file, source) in ToolSources())
+        {
+            files++;
+            foreach (Match hit in Regex.Matches(StripComments(source), @"\bStatus\(\s*""error"""))
+            {
+                offenders.Add($"{file}: {EnclosingMember(CSharpSourceWalker.StripCommentsAndStrings(source), hit.Index)}");
+            }
+        }
+
+        Assert.True(files >= 60, $"only {files} tool sources were read across both SKUs");
+        Assert.True(offenders.Count == 0,
+            "the failure word is built by hand outside McpHelpers.FormatError — a caught exception is FormatError(tool, ex); a refusal is Refusal(parameter, sentence): " + string.Join("; ", offenders));
+
+        /* And in the helper itself, each word is spelled into Status exactly once: FormatError's and Refusal's. */
+        var helpers = StripComments(File.ReadAllText(RepoFile.PathTo("PerformanceMonitor.Common/Mcp/McpHelpers.cs")));
+        Assert.Single(Regex.Matches(helpers, @"\bStatus\(\s*""error"""));
+        Assert.Single(Regex.Matches(helpers, @"\bStatus\(\s*""invalid"""));
+    }
+
+    /// <summary>
+    /// The one refusal shape, EXECUTED rather than read off a doc comment: <c>Refusal</c>'s output parses, its
+    /// <c>status</c> is <c>invalid</c>, its <c>message</c> is the sentence untouched, its <c>hints.parameter</c> is
+    /// the parameter verbatim, and it is byte-for-byte what <c>Status("invalid", sentence, new { parameter })</c>
+    /// builds. Then every shared validator, driven past its bound, hands back exactly that envelope for exactly
+    /// its parameter — so the four hundred pass-through sites the census above walks are carrying the shape
+    /// this fact proves, not a look-alike. The recognizer fires on the producer and on the write tools'
+    /// <c>Outcome("invalid", …)</c> bytes, and not on its neighbours.
+    /// </summary>
+    [Fact]
+    public void TheOneRefusalShape_IsTheEnvelope_ExecutedThroughRefusal_AndEveryValidatorBuildsIt()
+    {
+        var wire = McpHelpers.Refusal("hours_back", "Invalid hours_back value '0'.");
+
+        using var envelope = JsonDocument.Parse(wire);
+        Assert.Equal("invalid", envelope.RootElement.GetProperty("status").GetString());
+        Assert.Equal("Invalid hours_back value '0'.", envelope.RootElement.GetProperty("message").GetString());
+        Assert.Equal("hours_back", envelope.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Equal(3, envelope.RootElement.EnumerateObject().Count());
+        Assert.Equal(McpHelpers.Status("invalid", "Invalid hours_back value '0'.", new { parameter = "hours_back" }), wire);
+
+        Assert.StartsWith(McpHelpers.InvalidEnvelopePrefix, wire, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(wire));
+        Assert.True(McpHelpers.IsRefusalEnvelope("  " + wire));
+        Assert.True(McpHelpers.IsRefusalEnvelope(JsonSerializer.Serialize(new { status = "invalid", message = "rule_id is required." }, McpHelpers.JsonOptions)));
+        Assert.False(McpHelpers.IsRefusalEnvelope(McpHelpers.FormatError("get_x", new InvalidOperationException("boom"))));
+        Assert.False(McpHelpers.IsRefusalEnvelope(McpHelpers.Status("empty", "nothing")));
+        Assert.False(McpHelpers.IsRefusalEnvelope("{\"status\":\"invalid_count\",\"message\":\"x\"}"));
+        Assert.False(McpHelpers.IsRefusalEnvelope("Invalid hours_back value '0'."));
+        Assert.False(McpHelpers.IsRefusalEnvelope(null));
+        Assert.False(McpHelpers.IsRefusalEnvelope(""));
+
+        /* Every validator, past its bound, IS Refusal(its parameter, its sentence) — and the sentence is the
+           pre-#3739 text, so the fragments the tool tests pin survive inside message. */
+        AssertRefusal(McpHelpers.ValidateHoursBack(0), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
+        AssertRefusal(McpHelpers.ValidateHoursBack(169), "hours_back", "hours_back value '169' exceeds maximum of 168 hours (7 days). Use a smaller value.");
+        AssertRefusal(McpHelpers.ValidateDaysBack(0, 60), "days_back", "Invalid days_back value '0'. Must be a positive integer (1-60).");
+        AssertRefusal(McpHelpers.ValidateTop(0), "limit", "Invalid limit value '0'. Must be a positive integer (1-1000).");
+        AssertRefusal(McpHelpers.ValidateTop(1001, "top"), "top", "top value '1001' exceeds maximum of 1000. Use a smaller value.");
+        AssertRefusal(McpHelpers.ValidateWindow(0, null, out _), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
+        AssertRefusal(McpHelpers.ValidateWindow(4, "last tuesday", out _), "as_of", "Invalid as_of value 'last tuesday'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', '2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.");
+        AssertRefusal(McpHelpers.ValidateUncappedWindow(-24, null, out _), "hours_back", "Invalid hours_back value '-24'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
+        AssertRefusal(McpHelpers.ResolveAsOf("2099-01-01T00:00:00Z", out _), "as_of", "as_of value '2099-01-01T00:00:00Z' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).");
+        AssertRefusal(McpHelpers.ParseSummaryDate("01/02/2026", out _), "summary_date", "Invalid summary_date value '01/02/2026'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
+        AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source", "Invalid source value 'perfmon'. Accepted values: dmv, xe. Omit it for all.");
+        AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms", "Invalid min_duration_ms value '-1'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
+
+        /* And the two producers outside McpHelpers that the census accepts as shared. */
+        AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state", "Unknown state 'garbage'. Legal values: pending, open, carried, closed; omit for open + carried.");
+        var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new DarlingServerResolver.RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
+        AssertRefusal(miss, "server_name", "Could not resolve server. Available servers:\nbox-a");
+    }
+
+    private static void AssertRefusal(string? wire, string parameter, string sentence)
+    {
+        Assert.NotNull(wire);
+        Assert.Equal(McpHelpers.Refusal(parameter, sentence), wire);
+        Assert.True(McpHelpers.IsRefusalEnvelope(wire));
+        Assert.Equal(sentence, McpHelpers.ErrorMessageOf(wire!));
+    }
+
+    /// <summary>The guarded pass-through idiom, witnessed on the shapes the tree uses and not on its
+    /// neighbours: the guard and the return must name the same value.</summary>
+    [Theory]
+    [InlineData("        if (error != null) return error;", true)]
+    [InlineData("        if (validation is not null) return validation;", true)]
+    [InlineData("        if (validation != null)\n        {\n            return validation;\n        }", true)]
+    [InlineData("            if (c.EarlyReturn != null) return c.EarlyReturn;", true)]
+    [InlineData("        if (limitError != null) return McpHelpers.Status(\"error\", limitError);", false)]
+    [InlineData("        if (error != null) return new Collected<T>(error, 0, \"\", new List<T>(), 0, null);", false)]
+    [InlineData("        if (rows.Count != 0) return rows;", false)]
+    public void TheGuardedPassThroughMatcher_FiresOnTheIdiom_AndNotOnItsNeighbours(string code, bool expected) =>
+        Assert.Equal(expected, GuardedPassThrough.IsMatch(code));
+
+    /// <summary>The producer walk, witnessed: a destructured resolver call, a plain validator assignment, a
+    /// re-assignment (the LAST one before the guard wins), a <c>??</c> chain, and a value no shared producer
+    /// built.</summary>
+    [Fact]
+    public void TheProducerWalk_FindsTheLastAssignment_AndClassifiesIt()
+    {
+        const string Body = """
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+                if (error != null) return error;
+
+                var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+                if (validation != null) return validation;
+                validation = McpHelpers.ValidateTop(top, "top");
+                if (validation != null) return validation;
+
+                var chained = McpHelpers.ValidateWindow(hours_back, as_of, out var end) ?? McpHelpers.ValidateTop(limit);
+                if (chained != null) return chained;
+
+                var homemade = group_by == "x" ? null : "group_by must be x";
+                if (homemade != null) return homemade;
+            """;
+        var code = CSharpSourceWalker.StripCommentsAndStrings(Body);
+        var guards = GuardedPassThrough.Matches(code);
+        Assert.Equal(5, guards.Count);
+
+        Assert.Matches(SharedPassThroughProducer, LastAssignmentOf(code, "error", guards[0].Index)!);
+        Assert.Contains("ValidateWindow", LastAssignmentOf(code, "validation", guards[1].Index)!, StringComparison.Ordinal);
+        Assert.Contains("ValidateTop", LastAssignmentOf(code, "validation", guards[2].Index)!, StringComparison.Ordinal);
+        Assert.Matches(SharedPassThroughProducer, LastAssignmentOf(code, "chained", guards[3].Index)!);
+        var homemade = LastAssignmentOf(code, "homemade", guards[4].Index);
+        Assert.NotNull(homemade);
+        Assert.DoesNotMatch(SharedPassThroughProducer, homemade!);
+    }
+
+    /// <summary>The right-hand side of the LAST assignment to <paramref name="name"/> that precedes
+    /// <paramref name="before"/> in <paramref name="code"/> (strings and comments blanked): a declaration, a
+    /// re-assignment, or a tuple destructure naming it in any position. Null when none precedes it.</summary>
+    private static string? LastAssignmentOf(string code, string name, int before)
+    {
+        var escaped = Regex.Escape(name);
+        var assignment = new Regex(
+            @"(?:\bvar\s+" + escaped + @"|(?<![\w.])" + escaped + @"|\bvar\s*\([^()]*\b" + escaped + @"\b[^()]*\))\s*=(?!=)\s*([^;]+);");
+        string? last = null;
+        foreach (Match m in assignment.Matches(code[..before]))
+        {
+            last = Regex.Replace(m.Groups[1].Value, @"\s+", " ").Trim();
+        }
+
+        return last;
+    }
+
+    /// <summary>Every <c>return …;</c> expression in a tool span, located on the stripped text (so a
+    /// <c>return</c> inside prose or a literal is not one, and a <c>;</c> inside a literal does not end one) and
+    /// read off a LENGTH-PRESERVING comments-only strip of the same span, so the offsets line up and the literal
+    /// that IS the evidence survives. Whitespace collapsed.</summary>
+    private static IEnumerable<string> ReturnExpressions(string span, string code)
+    {
+        var text = StripCommentsPreservingLength(span, code);
+        foreach (Match keyword in Regex.Matches(code, @"\breturn\b"))
+        {
+            var end = code.IndexOf(';', keyword.Index);
+            if (end < 0)
+            {
+                continue;
+            }
+
+            var expression = text[(keyword.Index + keyword.Length)..end];
+            yield return Regex.Replace(expression, @"\s+", " ").Trim();
+        }
+    }
+
+    /// <summary>Comments blanked, code AND string literals kept, every offset unchanged: the strings-blanked
+    /// text from the walker with each literal's bytes written back at the offset the walker reports for it.
+    /// Built on the walker's two entry points rather than a regex of its own so a delimiter the walker
+    /// understands cannot desynchronise this from <paramref name="code"/>.</summary>
+    private static string StripCommentsPreservingLength(string span, string code)
+    {
+        var buffer = code.ToCharArray();
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(span))
+        {
+            /* The opening delimiter sits just before the body; the walker blanks delimiters with the text, so
+               restore from one before the body to one past it — clamped, because a raw literal's delimiter is
+               longer than one quote and this only needs the FIRST quote back for the StartsWith tests. */
+            for (var i = Math.Max(0, start - 2); i < start; i++)
+            {
+                if (span[i] is '"' or '$' or '@')
+                {
+                    buffer[i] = span[i];
+                }
+            }
+
+            var to = Math.Min(span.Length, start + body.Length + 1);
+            for (var i = start; i < to; i++)
+            {
+                buffer[i] = span[i];
+            }
+        }
+
+        return new string(buffer);
     }
 
     /* ───────────────────────── rule: refuse what you cannot honor ───────────────────────── */
@@ -399,12 +779,13 @@ public sealed class McpPayloadContractCensusTests
     {
         Assert.Null(McpHelpers.ValidateDaysBack(1, 60));
         Assert.Null(McpHelpers.ValidateDaysBack(60, 60));
-        Assert.Equal("Invalid days_back value '0'. Must be a positive integer (1-60).", McpHelpers.ValidateDaysBack(0, 60));
-        Assert.Equal("Invalid days_back value '-7'. Must be a positive integer (1-60).", McpHelpers.ValidateDaysBack(-7, 60));
-        Assert.Equal("Invalid days_back value '61'. Must be a positive integer (1-60).", McpHelpers.ValidateDaysBack(61, 60));
-        Assert.Equal("Invalid days_back value '367'. Must be a positive integer (1-366).", McpHelpers.ValidateDaysBack(367, McpHelpers.MaxDailySummaryDaysBack));
+        /* The sentence rides the `invalid` envelope since #3739; the pin is about the words, read back out. */
+        Assert.Equal("Invalid days_back value '0'. Must be a positive integer (1-60).", McpHelpers.ErrorMessageOf(McpHelpers.ValidateDaysBack(0, 60)!));
+        Assert.Equal("Invalid days_back value '-7'. Must be a positive integer (1-60).", McpHelpers.ErrorMessageOf(McpHelpers.ValidateDaysBack(-7, 60)!));
+        Assert.Equal("Invalid days_back value '61'. Must be a positive integer (1-60).", McpHelpers.ErrorMessageOf(McpHelpers.ValidateDaysBack(61, 60)!));
+        Assert.Equal("Invalid days_back value '367'. Must be a positive integer (1-366).", McpHelpers.ErrorMessageOf(McpHelpers.ValidateDaysBack(367, McpHelpers.MaxDailySummaryDaysBack)!));
         /* The sentence shape is ValidateHoursBack's first sentence, word for word but for the parameter. */
-        Assert.StartsWith("Invalid hours_back value '0'. Must be a positive integer (1-", McpHelpers.ValidateHoursBack(0), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid hours_back value '0'. Must be a positive integer (1-", McpHelpers.ErrorMessageOf(McpHelpers.ValidateHoursBack(0)!), StringComparison.Ordinal);
     }
 
     /// <summary>A same-file <c>private static</c> member the span calls whose own body carries a validator call.</summary>

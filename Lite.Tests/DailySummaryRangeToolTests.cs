@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -174,18 +175,18 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
 
         Assert.StartsWith(
             "Invalid days_back value '0'",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 0),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 0)),
             StringComparison.Ordinal);
 
         Assert.StartsWith(
             "Invalid days_back value '367'",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 367),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 367)),
             StringComparison.Ordinal);
 
         /* An anchor we cannot use is refused, never silently treated as today. */
         Assert.StartsWith(
             "Invalid as_of",
-            await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 30, "last tuesday"),
+            McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 30, "last tuesday")),
             StringComparison.Ordinal);
     }
 

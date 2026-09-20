@@ -72,8 +72,8 @@ public sealed class DarlingMcpPgPlanTools
         {
             if (!long.TryParse(query_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
             {
-                return McpHelpers.Status(
-                    "error",
+                return McpHelpers.Refusal(
+                    "query_id",
                     $"query_id '{query_id}' is not a 64-bit integer. PostgreSQL queryids are signed int8 "
                     + "values and must be passed as their exact decimal text — if this one arrived through a "
                     + "JSON number it has already been rounded and no longer matches anything.");

@@ -130,7 +130,7 @@ public sealed class FactSourceRegistryTests
     {
         var refusal = McpHelpers.ValidateChoice("perfmon", FactScorer.KnownSources, "source");
         Assert.NotNull(refusal);
-        Assert.StartsWith("Invalid source value 'perfmon'", refusal, StringComparison.Ordinal);
+        Assert.StartsWith("Invalid source value 'perfmon'", McpHelpers.ErrorMessageOf(refusal!), StringComparison.Ordinal);
         Assert.Contains(string.Join(", ", FactScorer.KnownSources), refusal, StringComparison.Ordinal);
 
         Assert.Null(McpHelpers.ValidateChoice("waits", FactScorer.KnownSources, "source"));

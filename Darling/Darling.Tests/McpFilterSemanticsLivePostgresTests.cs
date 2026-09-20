@@ -198,9 +198,9 @@ public sealed class McpFilterSemanticsLivePostgresTests
             Assert.Contains("database_name 'NoSuchDb'", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* A13's third item, on the same fixture: the uncapped reads refuse a negative span. */
-            Assert.StartsWith("Invalid hours_back value '-24'", await DarlingMcpDataTools.GetCollectionLog(postgres, ServerName, -24), StringComparison.Ordinal);
-            Assert.StartsWith("Invalid hours_back value '0'", await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 0), StringComparison.Ordinal);
-            Assert.StartsWith("Invalid hours_back value '-1'", await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, -1), StringComparison.Ordinal);
+            Assert.StartsWith("Invalid hours_back value '-24'", McpHelpers.ErrorMessageOf(await DarlingMcpDataTools.GetCollectionLog(postgres, ServerName, -24)), StringComparison.Ordinal);
+            Assert.StartsWith("Invalid hours_back value '0'", McpHelpers.ErrorMessageOf(await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 0)), StringComparison.Ordinal);
+            Assert.StartsWith("Invalid hours_back value '-1'", McpHelpers.ErrorMessageOf(await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, -1)), StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -276,7 +276,7 @@ public sealed class McpFilterSemanticsLivePostgresTests
             Assert.Equal(expectedHorizon.ToString("yyyy-MM-dd"), todayRow.GetProperty("retention_horizon").GetString());
 
             /* summary_date is exact ISO-8601: the ambiguous spelling is refused, not guessed at. */
-            Assert.StartsWith("Invalid summary_date value '01/02/2026'", await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName, "01/02/2026"), StringComparison.Ordinal);
+            Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName, "01/02/2026")), StringComparison.Ordinal);
 
             /* A signal row surviving before the horizon (the purge has not reached it — gate-held, paused,
                or simply not yet run) turns the shell into past_horizon: the row is real, the verdict is

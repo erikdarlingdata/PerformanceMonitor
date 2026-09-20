@@ -375,11 +375,16 @@ export async function apiSend(method, path, body) {
 
 /**
  * Classify a completed Response into the same three-kind shape apiGet returns (shared by apiGet + apiSend):
- * an { "error": ... } body / non-2xx -> "error"; the {status, message[, hints]} envelope -> "empty" for the
- * four miss words and "error" for status "error" (#3653 Q11: every tool's caught exception is that envelope on
- * the MCP wire; the service maps it to a 500 {"error": sentence} before it reaches this page, so the 2xx arm
- * below is the belt-and-braces for a body that arrived unmapped — a failure must never render as a quiet
- * "nothing here" card); anything else (including a 204/empty body -> data:null) -> "data".
+ * a non-2xx -> "error", with the message read from an { "error": ... } body (the 500 arm and the bare-string
+ * 400 arm) or from the {status:"invalid", message} envelope (#3739: a REFUSAL — a parameter the tool cannot
+ * honor, a server name that resolves to nothing — is the envelope itself as a 400 body on /api/read/*, exactly
+ * as the mute-rule write routes have always answered invalid; its `message` is the sentence readErrorStrip and
+ * the tab error strips render, so the "window too wide" degrade keeps working); the {status, message[, hints]}
+ * envelope under 2xx -> "empty" for the four miss words and "error" for status "error" or "invalid" (#3653 Q11:
+ * every tool's caught exception is that envelope on the MCP wire; the service maps error to a 500 and invalid to
+ * a 400 before either reaches this page, so the 2xx arm below is the belt-and-braces for a body that arrived
+ * unmapped — a failure or a refusal must never render as a quiet "nothing here" card); anything else
+ * (including a 204/empty body -> data:null) -> "data".
  */
 async function classifyResponse(resp) {
   const raw = await resp.text();
@@ -392,15 +397,19 @@ async function classifyResponse(resp) {
     }
   }
 
+  const isEnvelope = body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string";
+
   if (!resp.ok) {
-    const msg = body && typeof body.error === "string" ? body.error : "Request failed (HTTP " + resp.status + ")";
+    const msg = body && typeof body.error === "string" ? body.error
+      : isEnvelope ? body.message
+      : "Request failed (HTTP " + resp.status + ")";
     return { kind: "error", message: msg, status: resp.status };
   }
 
   /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
      Data payloads never carry a top-level message, so this never misfires on real data. */
-  if (body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string") {
-    if (body.status === "error") {
+  if (isEnvelope) {
+    if (body.status === "error" || body.status === "invalid") {
       return { kind: "error", message: body.message, status: resp.status };
     }
     return { kind: "empty", status: body.status, message: body.message, hints: body.hints || null, data: body };

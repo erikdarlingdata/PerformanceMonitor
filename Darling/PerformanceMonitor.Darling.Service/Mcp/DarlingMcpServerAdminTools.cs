@@ -295,8 +295,12 @@ public sealed class DarlingMcpServerAdminTools
                     return Outcome("not_found", $"Could not resolve server '{server_name}': no monitored-server definitions exist in the central store (servers defined in darling.json are not removable through this tool).");
                 }
 
+                /* The read resolver's miss is the `invalid` envelope since #3739; this verb's outcome is
+                   `not_found` (a delete of something that is not there is a different word from a bad
+                   parameter), so the SENTENCE is lifted out of the resolver's envelope and re-wrapped in this
+                   one rather than nesting JSON inside JSON. */
                 var (_, missMessage) = DarlingServerResolver.ResolveOrError(definitions.Select(d => d.Server).ToList(), server_name);
-                return Outcome("not_found", missMessage ?? $"Could not resolve server '{server_name}'.");
+                return Outcome("not_found", missMessage is null ? $"Could not resolve server '{server_name}'." : McpHelpers.ErrorMessageOf(missMessage));
             }
 
             if (target.Candidates.Count > 1)

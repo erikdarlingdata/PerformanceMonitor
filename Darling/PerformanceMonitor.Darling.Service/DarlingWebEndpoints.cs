@@ -46,14 +46,18 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Response mapping.</b> The tools always return a string: a serialized JSON object/array for data (and
 /// for the <c>{"status", ...}</c> miss envelope), the <c>{"status":"error", ...}</c> envelope
 /// <c>McpHelpers.FormatError</c> builds when the body's try/catch caught an exception (#3653 Q11 — before that
-/// ruling the caught exception was a bare <c>"Error during ..."</c> string), or a bare validation/resolution
-/// message. The error envelope maps to 500; any other leading <c>{</c> or <c>[</c> passes through verbatim as
-/// <c>application/json</c> (200); any bare (non-JSON) string is a client-correctable error (bad parameter,
-/// unknown server) and maps to 400. Both error arms answer <c>{"error": "..."}</c> with the SENTENCE — the
-/// envelope's <c>message</c>, not the envelope — so the web surface keeps the one error body it has always
-/// had and a web client that reads <c>.error</c> is not handed JSON inside a string. The mapping is where the
-/// PostgreSQL tools' failures, which were already the envelope and therefore passed through as 200, become
-/// the 500 they always were.</para>
+/// ruling the caught exception was a bare <c>"Error during ..."</c> string), the <c>{"status":"invalid", ...}</c>
+/// envelope <c>McpHelpers.Refusal</c> builds when the tool refuses the request as given (#3739 — before that
+/// ruling a refusal was the validator's bare sentence), or, rarely now, a bare string. The error envelope maps
+/// to 500; the refusal envelope maps to 400 and is passed through AS the body (<c>application/json</c>), the
+/// shape the mute-rule write routes have always given <c>invalid</c>; any other leading <c>{</c> or <c>[</c>
+/// passes through verbatim as <c>application/json</c> (200); any bare (non-JSON) string maps to 400. The two
+/// error arms answer <c>{"error": "..."}</c> with the SENTENCE — the envelope's <c>message</c>, not the
+/// envelope — so the web surface keeps the one error body it has always had and a web client that reads
+/// <c>.error</c> is not handed JSON inside a string. The mapping is where the PostgreSQL tools' failures, which
+/// were already the envelope and therefore passed through as 200, became the 500 they always were, and where
+/// nine PostgreSQL refusals that borrowed the <c>error</c> word — and so answered 500 for a bad <c>limit</c>
+/// between #3719 and #3739 — became the 400 they always deserved.</para>
 ///
 /// <para><b>The pre-banded fleet.</b> <c>GET /api/fleet</c> and the <c>get_fleet_overview</c> MCP tool both read
 /// through <see cref="DarlingFleetReader"/> — the enriched per-server cards and the cross-server rollup, banded
@@ -864,6 +868,11 @@ public static class DarlingWebEndpoints
     /// 400 for the reason the read surface's mapping does. <c>unchanged</c> deliberately shares the success
     /// code: it is the retry-safe "already so" answer, and the envelope's own <c>status</c> field carries the
     /// distinction a caller might act on. Pure, so the whole table pins without a server.
+    ///
+    /// <para>Since #3739 the <c>invalid</c> → 400 arm is answered by the classifier's <c>Refusal</c> kind — the
+    /// same recognizer the read surface uses, so the two surfaces cannot disagree about the word — and the
+    /// <c>"invalid"</c> case in the parsed switch below is kept as the belt-and-braces for an envelope that was
+    /// serialized some other way (whitespace, a different key order) and so missed the prefix test.</para>
     /// </summary>
     internal static int MuteRuleEnvelopeStatus(string result, int successStatus = StatusCodes.Status200OK)
     {
@@ -871,6 +880,7 @@ public static class DarlingWebEndpoints
         {
             case ToolResponseKind.ServerError:
                 return StatusCodes.Status500InternalServerError;
+            case ToolResponseKind.Refusal:
             case ToolResponseKind.ClientError:
                 return StatusCodes.Status400BadRequest;
         }
@@ -894,13 +904,14 @@ public static class DarlingWebEndpoints
     }
 
     /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
-    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — except an error (the caught-exception envelope or
-    /// a bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as
-    /// <see cref="ToHttpResult"/> wraps the read surface's.</summary>
+    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — a refusal (<c>invalid</c>) included, which is the
+    /// shape the read surface adopted from here in #3739 — except an error (the caught-exception envelope or a
+    /// bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as <see cref="ToHttpResult"/>
+    /// wraps the read surface's.</summary>
     private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
     {
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
-        return ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
+        return ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
             ? Results.Text(result, "application/json", statusCode: httpStatus)
             : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
@@ -2747,7 +2758,8 @@ public static class DarlingWebEndpoints
 
     /* ─────────────────────────── response mapping ─────────────────────────── */
 
-    /// <summary>How a tool's returned string maps to an HTTP outcome.</summary>
+    /// <summary>How a tool's returned string maps to an HTTP outcome — the four kinds of outcome a tool has
+    /// (data or a miss; a failure; a refusal; a bare string nothing shapes any more), each with its code.</summary>
     internal enum ToolResponseKind
     {
         /// <summary>A serialized JSON object/array (data, or the {"status", ...} miss envelope) — 200 passthrough.</summary>
@@ -2758,26 +2770,51 @@ public static class DarlingWebEndpoints
         /// before that ruling — HTTP 500.</summary>
         ServerError,
 
-        /// <summary>Any other bare string (validation / resolution) — a client-correctable HTTP 400.</summary>
+        /// <summary>The tool REFUSED the request as given — the <c>{"status":"invalid", ...}</c> envelope
+        /// <c>McpHelpers.Refusal</c> builds (#3739: a parameter it cannot honor, a missing required one, a server
+        /// name that resolves to nothing) or a write tool's <c>Outcome("invalid", …)</c> for a body that will not
+        /// parse — a client-correctable HTTP 400 with the envelope itself as the body, on the read surface exactly
+        /// as the mute-rule write routes have always answered <c>invalid</c>.</summary>
+        Refusal,
+
+        /// <summary>Any other bare string — a client-correctable HTTP 400, wrapped as <c>{"error": ...}</c>.
+        /// Since #3739 the validators and resolvers no longer produce one; what still can is a store fault the
+        /// resolver reports as a sentence, and the two miss sentences the <c>list_servers</c> tools return on an
+        /// empty registry (#3703's lane).</summary>
         ClientError,
     }
 
     /// <summary>
-    /// Classifies a tool's returned string. The error envelope (<see cref="McpHelpers.IsErrorEnvelope"/> —
-    /// <c>{"status":"error", ...}</c>, what every tool catch returns since #3653 Q11) is the tool's
-    /// caught-exception shape (HTTP 500) and is tested FIRST, because it also begins with <c>{</c> and the
-    /// passthrough sniff would otherwise answer 200 over a failure — which is exactly what it did for the
-    /// PostgreSQL tools before this ordering existed. Any other leading <c>{</c> or <c>[</c> (after any
+    /// Classifies a tool's returned string. The two status-word envelopes are tested FIRST, because both begin
+    /// with <c>{</c> and the passthrough sniff would otherwise answer 200 over them — which is exactly what it
+    /// did for the PostgreSQL tools before this ordering existed: the error envelope
+    /// (<see cref="McpHelpers.IsErrorEnvelope"/> — <c>{"status":"error", ...}</c>, what every tool catch returns
+    /// since #3653 Q11) is the tool's caught-exception shape (HTTP 500); the refusal envelope
+    /// (<see cref="McpHelpers.IsRefusalEnvelope"/> — <c>{"status":"invalid", ...}</c>, what every validator and
+    /// both resolvers return since #3739, and what the write tools have always returned for a body that will
+    /// not parse) is the client-correctable shape (HTTP 400). Any other leading <c>{</c> or <c>[</c> (after any
     /// whitespace) is a serialized object/array and passes through; the bare <c>"Error during ..."</c> sentence
     /// the pre-#3653 helper built is kept as a server error so an un-migrated producer still maps to 500 rather
-    /// than to a client-correctable 400; anything else is a bare validation / resolution message (HTTP 400).
-    /// Pure so the whole mapping is unit-testable.
+    /// than to a client-correctable 400; anything else is a bare string and maps to 400.
+    ///
+    /// <para><b>The ruling this encodes (#3739).</b> #3719 pinned that a hand-built <c>Status("error", …)</c>
+    /// refusal answered 500 here, and said the word that tells a refusal from a failure was a ruling it did
+    /// not make. The ruling is <c>invalid</c>, widened from the write surface's "a body that will not parse" to
+    /// "the request as given cannot be served", and this arm is where it lands: a refusal is 400 (not the 500 a
+    /// fault gets, not the 200 the <c>{</c>-sniff would give it), the envelope is the body, and the read and
+    /// write surfaces read it by ONE rule — <see cref="MuteRuleEnvelopeStatus"/> goes through this same
+    /// classifier. Pure so the whole mapping is unit-testable.</para>
     /// </summary>
     internal static ToolResponseKind ClassifyToolResponse(string result)
     {
         if (McpHelpers.IsErrorEnvelope(result))
         {
             return ToolResponseKind.ServerError;
+        }
+
+        if (McpHelpers.IsRefusalEnvelope(result))
+        {
+            return ToolResponseKind.Refusal;
         }
 
         var trimmed = result.AsSpan().TrimStart();
@@ -2794,13 +2831,16 @@ public static class DarlingWebEndpoints
         return ToolResponseKind.ClientError;
     }
 
-    /// <summary>The read surface's HTTP answer. Both error arms carry the SENTENCE under <c>error</c>
-    /// (<see cref="McpHelpers.ErrorMessageOf"/> unwraps the envelope; a bare string is already the sentence),
-    /// so the body a web client reads is the same <c>{"error": "Error during get_x: ..."}</c> it read before
-    /// the tools' own wire shape changed.</summary>
+    /// <summary>The read surface's HTTP answer. A refusal is the envelope itself as the body under 400 — the
+    /// shape the mute-rule write routes have always answered <c>invalid</c> with, so <c>status</c>, <c>message</c>
+    /// and <c>hints.parameter</c> reach a web client exactly as they reach an MCP client (#3739). The two error
+    /// arms carry the SENTENCE under <c>error</c> (<see cref="McpHelpers.ErrorMessageOf"/> unwraps the envelope;
+    /// a bare string is already the sentence), so the body a web client reads for a failure is the same
+    /// <c>{"error": "Error during get_x: ..."}</c> it read before the tools' own wire shape changed.</summary>
     private static IResult ToHttpResult(string result) => ClassifyToolResponse(result) switch
     {
         ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
+        ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
         ToolResponseKind.ServerError => Results.Json(new { error = McpHelpers.ErrorMessageOf(result) }, statusCode: StatusCodes.Status500InternalServerError),
         _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
     };
@@ -2817,8 +2857,8 @@ public static class DarlingWebEndpoints
     /// <summary>
     /// The window ANCHOR from <c>?as_of=</c>; null when absent, which is what makes the window end at now.
     /// Passed through UNVALIDATED on purpose — the tool owns the parse and the refusal message, so the web and
-    /// MCP surfaces cannot disagree about what a bad anchor means, and the bare string reaches the same
-    /// <see cref="ToHttpResult"/> 400 mapping every other client-correctable message does.
+    /// MCP surfaces cannot disagree about what a bad anchor means, and the refusal envelope reaches the same
+    /// <see cref="ToHttpResult"/> 400 mapping every other client-correctable outcome does.
     /// </summary>
     private static string? AsOf(HttpContext context) => First(context, "as_of");
 
@@ -2832,7 +2872,10 @@ public static class DarlingWebEndpoints
         return value.Length > 0;
     }
 
-    private static Task<string> MissingParam(string key) => Task.FromResult($"Missing required parameter '{key}'.");
+    /// <summary>The dispatch layer's own refusal for a required text parameter the caller did not send — the
+    /// <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>, #3739) rather than the bare sentence it was, so
+    /// a missing <c>wait_type</c> answers with the same shape and the same 400 a tool's own refusal does.</summary>
+    private static Task<string> MissingParam(string key) => Task.FromResult(McpHelpers.Refusal(key, $"Missing required parameter '{key}'."));
 
     /// <summary>
     /// An OPTIONAL numeric parameter: true with null when the key is absent, true with the value when it
@@ -2863,8 +2906,10 @@ public static class DarlingWebEndpoints
         return parsed;
     }
 
+    /// <summary>The dispatch layer's refusal for a filter value it cannot read as a number — the <c>invalid</c>
+    /// envelope, for the reason <see cref="MissingParam"/> is.</summary>
     private static Task<string> UnparseableParam(string key) =>
-        Task.FromResult($"Invalid value for parameter '{key}'. Expected a number.");
+        Task.FromResult(McpHelpers.Refusal(key, $"Invalid value for parameter '{key}'. Expected a number."));
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

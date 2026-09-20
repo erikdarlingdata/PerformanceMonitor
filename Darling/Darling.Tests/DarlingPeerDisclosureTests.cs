@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -529,6 +530,17 @@ public sealed class DarlingPeerDisclosureTests
     private const string MissWithoutPeers =
         "Could not resolve server. Available servers:\nprod-sql-use1-beta-01";
 
+    /// <summary>The miss travels as the <c>invalid</c> envelope since #3739 (<c>McpHelpers.Refusal</c>, so the
+    /// ~190 tools that <c>return error;</c> put a status word on the wire); these pins are about the SENTENCE,
+    /// so each reads it back out of the envelope — and asserts, on the way, that the envelope is the one the
+    /// recognizer the web surface branches on actually fires for.</summary>
+    private static string Sentence(string? error)
+    {
+        Assert.NotNull(error);
+        Assert.True(McpHelpers.IsRefusalEnvelope(error), "the resolver's miss is not the `invalid` envelope: " + error);
+        return McpHelpers.ErrorMessageOf(error!);
+    }
+
     [Fact]
     public void ResolutionMiss_IsByteForByteUnchangedWithNothingDeclared()
     {
@@ -538,7 +550,15 @@ public sealed class DarlingPeerDisclosureTests
             DarlingPeerDirectory.Snapshot.Empty);
 
         Assert.Equal(default, resolved);
-        Assert.Equal(MissWithoutPeers, error);
+        Assert.Equal(MissWithoutPeers, Sentence(error));
+
+        /* The envelope around it, whole (#3739): the refusal word, the sentence as message, and the parameter
+           the caller has to fix — byte-equal to the shared builder, so this is the one shape and not a
+           look-alike. */
+        Assert.Equal(McpHelpers.Refusal("server_name", MissWithoutPeers), error);
+        using var envelope = JsonDocument.Parse(error!);
+        Assert.Equal("invalid", envelope.RootElement.GetProperty("status").GetString());
+        Assert.Equal("server_name", envelope.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
     }
 
     [Fact]
@@ -550,20 +570,20 @@ public sealed class DarlingPeerDisclosureTests
             TwoPeers());
 
         Assert.Equal(default, resolved);
-        Assert.NotNull(error);
+        var sentence = Sentence(error);
 
         /* The prefix and the local listing survive: 'Could not resolve server.' is what callers key off, and
            the local list is still the right answer to the commonest miss (a typo). */
-        Assert.StartsWith(MissWithoutPeers, error, StringComparison.Ordinal);
+        Assert.StartsWith(MissWithoutPeers, sentence, StringComparison.Ordinal);
 
-        Assert.Contains("'prod-sql-use2-beta-01' is not monitored HERE", error, StringComparison.Ordinal);
-        Assert.Contains("matches the declared coverage of peer store prod-sql-use2-monitor-01", error, StringComparison.Ordinal);
-        Assert.Contains("That is a SEPARATE Darling store", error, StringComparison.Ordinal);
-        Assert.Contains("this server cannot read it", error, StringComparison.Ordinal);
-        Assert.Contains($"This store covers: {Use1Covers}.", error, StringComparison.Ordinal);
+        Assert.Contains("'prod-sql-use2-beta-01' is not monitored HERE", sentence, StringComparison.Ordinal);
+        Assert.Contains("matches the declared coverage of peer store prod-sql-use2-monitor-01", sentence, StringComparison.Ordinal);
+        Assert.Contains("That is a SEPARATE Darling store", sentence, StringComparison.Ordinal);
+        Assert.Contains("this server cannot read it", sentence, StringComparison.Ordinal);
+        Assert.Contains($"This store covers: {Use1Covers}.", sentence, StringComparison.Ordinal);
 
         /* The peer that declared no patterns must not be blamed for a name it never claimed. */
-        Assert.DoesNotContain("prod-sql-pg-monitor-01", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("prod-sql-pg-monitor-01", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -574,14 +594,14 @@ public sealed class DarlingPeerDisclosureTests
             "some-other-box",
             TwoPeers());
 
-        Assert.NotNull(error);
-        Assert.Contains("'some-other-box' is not monitored HERE", error, StringComparison.Ordinal);
-        Assert.Contains("matches no declared peer store's coverage either", error, StringComparison.Ordinal);
+        var sentence = Sentence(error);
+        Assert.Contains("'some-other-box' is not monitored HERE", sentence, StringComparison.Ordinal);
+        Assert.Contains("matches no declared peer store's coverage either", sentence, StringComparison.Ordinal);
 
         /* Both peers are still disclosed: the declarations are prose plus optional patterns, not a live
            registry, so "no pattern matched" is not evidence the server is unmonitored. */
-        Assert.Contains("prod-sql-use2-monitor-01", error, StringComparison.Ordinal);
-        Assert.Contains("prod-sql-pg-monitor-01", error, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01", sentence, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -601,10 +621,10 @@ public sealed class DarlingPeerDisclosureTests
         var (_, error) = DarlingServerResolver.ResolveOrError(
             new[] { Registered("prod-sql-use1-beta-01") }, "prod-sql-use2-beta-01", overlapping);
 
-        Assert.NotNull(error);
-        Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", error, StringComparison.Ordinal);
-        Assert.Contains("Those are SEPARATE Darling stores", error, StringComparison.Ordinal);
-        Assert.DoesNotContain("That is a SEPARATE Darling store", error, StringComparison.Ordinal);
+        var sentence = Sentence(error);
+        Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", sentence, StringComparison.Ordinal);
+        Assert.Contains("Those are SEPARATE Darling stores", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("That is a SEPARATE Darling store", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -617,10 +637,10 @@ public sealed class DarlingPeerDisclosureTests
             "  ",
             TwoPeers());
 
-        Assert.NotNull(error);
-        Assert.StartsWith("Could not resolve server.", error, StringComparison.Ordinal);
-        Assert.Contains("That server is not monitored HERE", error, StringComparison.Ordinal);
-        Assert.DoesNotContain("matches the declared coverage", error, StringComparison.Ordinal);
+        var sentence = Sentence(error);
+        Assert.StartsWith("Could not resolve server.", sentence, StringComparison.Ordinal);
+        Assert.Contains("That server is not monitored HERE", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("matches the declared coverage", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -644,7 +664,7 @@ public sealed class DarlingPeerDisclosureTests
                 new[] { Registered("prod-sql-use1-beta-01") },
                 "prod-sql-use2-beta-01");
 
-            Assert.Contains("peer store box2 — the replicas", error, StringComparison.Ordinal);
+            Assert.Contains("peer store box2 — the replicas", Sentence(error), StringComparison.Ordinal);
         }
         finally
         {
@@ -657,6 +677,6 @@ public sealed class DarlingPeerDisclosureTests
             new[] { Registered("prod-sql-use1-beta-01") },
             "prod-sql-use2-beta-01");
 
-        Assert.Equal(MissWithoutPeers, afterReset);
+        Assert.Equal(MissWithoutPeers, Sentence(afterReset));
     }
 }
