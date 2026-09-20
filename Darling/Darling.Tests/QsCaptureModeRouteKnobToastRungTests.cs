@@ -463,6 +463,18 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
                     continue;
                 }
 
+                if (name is "DarlingMcpQueryStoreClutterTools.cs" or "DarlingMcpInstructions.cs")
+                {
+                    /* POINTERS, not readers (the V136 shape's PgTargetToolRecommendations exclusion): #3797's clutter tool
+                       landed beside this rung publishing `query_capture_mode = (string?)null` with `capture_mode_known =
+                       false` and a note that says the column lands with V137 — the payload KEY, so a caller's shape is
+                       stable, never a value read from the store — and the MCP instructions name the key in the prose
+                       that tells an agent what the tool will say. The positive half below holds them to exactly that:
+                       the moment either SELECTs the column from the health table, it is the (a) reader and this arm is
+                       retired deliberately. */
+                    continue;
+                }
+
                 foreach (var column in names)
                 {
                     if (column == "toast_bytes" && name is "DarlingPgTableBloatReader.cs" or "DarlingMcpPgTableBloatTools.cs")
@@ -476,6 +488,21 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
                     Assert.False(text.Contains(column, StringComparison.Ordinal),
                         $"{file} names {column}: a consumer landed — retire this pin's arm for that column deliberately (and, for (b), the rung doc's 'written by nothing and read by nothing' clause).");
                 }
+            }
+        }
+
+        /* The clutter tool (#3797) is a POINTER until it reads the column: the key is published null with the flag
+           beside it, and no SQL of its selects either capture mode from the health table. */
+        var clutterPath = System.IO.Path.Combine(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"), "Mcp", "DarlingMcpQueryStoreClutterTools.cs");
+        if (System.IO.File.Exists(clutterPath))
+        {
+            var clutter = WithoutComments(System.IO.File.ReadAllText(clutterPath));
+            Assert.Contains("query_capture_mode = (string?)null", clutter, StringComparison.Ordinal);
+            Assert.Contains("capture_mode_known = false", clutter, StringComparison.Ordinal);
+            Assert.DoesNotContain("wait_stats_capture_mode", clutter, StringComparison.Ordinal);
+            foreach (var read in System.Text.RegularExpressions.Regex.Matches(clutter, @"SELECT[\s\S]*?FROM\s+(?:collect\.)?v?_?query_store_health").Select(m => m.Value))
+            {
+                Assert.DoesNotContain("query_capture_mode", read, StringComparison.Ordinal);
             }
         }
 

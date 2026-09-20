@@ -579,7 +579,15 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await conn.OpenAsync();
-            Assert.Equal(63L, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
+            /* The climb lands on the CURRENT top, not on 63: a v62 database re-initialized today runs every block
+               above it in one InitializeAsync, and since v64 (#3796 / Darling V137, the Query Store capture modes)
+               landed on top of this rung that is 64 today and whatever the newest rung is tomorrow. The v63
+               HALF of the climb — both columns present, nullable, trailing, the old rows NULL — is what this
+               test owns, and it is asserted below; the literal top belongs to the newest Lite rung's own
+               test (QsCaptureModeRungTests.AV63Database_ClimbsToV64_AndItsOldRowsReadNull). The
+               PerfmonCounterTypeTests v61->v62 climb has read CurrentSchemaVersion for the same reason. */
+            Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
+            Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 63);
 
             foreach (var (table, column, type, before, view) in new[]
             {
