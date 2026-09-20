@@ -1032,7 +1032,8 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
             /* ---- server resolution flows through: an unknown name returns the listing error. */
             var unknown = await DarlingMcpDataTools.GetMemoryStats(postgres, "darling-no-such-server");
-            Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+            Assert.True(McpHelpers.IsRefusalEnvelope(unknown), unknown);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(unknown), StringComparison.Ordinal);
 
             /* ---- an EMPTY store for a tool returns the #1224 miss, not a throw. */
             await DeleteRowsAsync(connection, ct, keepServer: true);

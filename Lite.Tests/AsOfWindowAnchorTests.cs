@@ -155,13 +155,13 @@ public sealed class AsOfWindowAnchorTests : IClassFixture<SharedDuckDbFixture>, 
         await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-10), RecentWait, 1_000);
 
         var garbage = await McpWaitTools.GetWaitStats(_dataService, _serverManager, "TestServer", 4, 20, "last tuesday");
-        Assert.StartsWith("Invalid as_of", garbage, StringComparison.Ordinal);
+        Assert.StartsWith("Invalid as_of", McpHelpers.ErrorMessageOf(garbage), StringComparison.Ordinal);
         Assert.DoesNotContain(RecentWait, garbage, StringComparison.Ordinal);
 
         /* The one a general date parser would let through: "01/02/2026" is M/d/yyyy under the invariant
            culture, so a caller who meant 1 February would silently get a window around 2 January. */
         var ambiguous = await McpWaitTools.GetWaitStats(_dataService, _serverManager, "TestServer", 4, 20, "01/02/2026");
-        Assert.StartsWith("Invalid as_of", ambiguous, StringComparison.Ordinal);
+        Assert.StartsWith("Invalid as_of", McpHelpers.ErrorMessageOf(ambiguous), StringComparison.Ordinal);
 
         var future = await McpWaitTools.GetWaitStats(
             _dataService, _serverManager, "TestServer", 4, 20, DateTime.UtcNow.AddDays(1).ToString("o"));

@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -552,10 +553,60 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal("empty", miss.GetProperty("status").GetString());
         Assert.Contains("database_name 'NoSuchDb'", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
-        /* A13's third item: the uncapped reads refuse a negative span rather than flipping its sign. */
-        Assert.StartsWith("Invalid hours_back value '-24'", await McpHealthTools.GetCollectionLog(_dataService, _serverManager, ServerName, -24), StringComparison.Ordinal);
-        Assert.StartsWith("Invalid hours_back value '0'", await McpHealthTools.GetCurrentWaitsTrend(_dataService, _serverManager, ServerName, 0), StringComparison.Ordinal);
-        Assert.StartsWith("Invalid hours_back value '-1'", await McpHealthTools.GetBlockingStats(_dataService, _serverManager, ServerName, -1), StringComparison.Ordinal);
+        /* A13's third item: the uncapped reads refuse a negative span rather than flipping its sign — and the
+           refusal is the `invalid` envelope (#3739), its sentence read back out here. */
+        Assert.StartsWith("Invalid hours_back value '-24'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetCollectionLog(_dataService, _serverManager, ServerName, -24)), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid hours_back value '0'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetCurrentWaitsTrend(_dataService, _serverManager, ServerName, 0)), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid hours_back value '-1'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetBlockingStats(_dataService, _serverManager, ServerName, -1)), StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── #3739: a refusal carries a status word ───────────────────────── */
+
+    /// <summary>
+    /// Every REFUSAL a Lite tool answers is <c>McpHelpers.Refusal</c>'s <c>{"status":"invalid", message,
+    /// hints.parameter}</c> envelope — executed through the real tools against the real fixture rather than read
+    /// off the helper, because the helper being right proves nothing about whether the tools reach it. Until
+    /// #3739 each of these answered with the validator's bare sentence, the one outcome on the wire that was not
+    /// JSON; the sentence is unchanged inside <c>message</c> (the fragments pinned above survive), and
+    /// <c>hints.parameter</c> names the knob. The three producers a Lite tool has are each driven here: the
+    /// resolver's miss, a <c>McpHelpers</c> validator, and a tool's own inline refusal (<c>analyze_plan_xml</c>).
+    /// The Darling twin of this pin is <c>McpPayloadContractCensusTests</c>, whose source census walks both
+    /// SKUs' four hundred pass-through sites to their producers; this is the Lite half that RUNS.
+    /// </summary>
+    [Fact]
+    public async Task EveryRefusal_IsTheInvalidEnvelope_OnLite()
+    {
+        /* The resolver's miss — the ~90 Lite tools' first bail. */
+        var (_, miss) = ServerResolver.ResolveOrError(_serverManager, "no-such-server");
+        AssertRefusal(miss, "server_name", "Could not resolve server.");
+        AssertRefusal(await McpWaitTools.GetWaitStats(_dataService, _serverManager, "no-such-server"), "server_name", "Could not resolve server.");
+
+        /* A shared validator's refusal, reached through a tool. */
+        AssertRefusal(await McpWaitTools.GetWaitStats(_dataService, _serverManager, ServerName, 0), "hours_back", "Invalid hours_back value '0'.");
+        AssertRefusal(await McpWaitTools.GetWaitStats(_dataService, _serverManager, ServerName, 24, 0), "limit", "Invalid limit value '0'.");
+        AssertRefusal(await McpWaitTools.GetWaitStats(_dataService, _serverManager, ServerName, 24, 20, "last tuesday"), "as_of", "Invalid as_of value 'last tuesday'.");
+        AssertRefusal(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026"), "summary_date", "Invalid summary_date value '01/02/2026'.");
+
+        /* A tool's own inline refusal. */
+        AssertRefusal(McpPlanTools.AnalyzePlanXml("   "), "plan_xml", "No plan XML provided.");
+
+        /* And the neighbour it must not be confused with: a well-formed call on an empty store is a miss word
+           (or data), never `invalid` and never `error`. */
+        var quiet = await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName);
+        Assert.False(McpHelpers.IsRefusalEnvelope(quiet), quiet);
+        Assert.False(McpHelpers.IsErrorEnvelope(quiet), quiet);
+    }
+
+    private static void AssertRefusal(string? wire, string parameter, string sentenceStart)
+    {
+        Assert.NotNull(wire);
+        Assert.True(McpHelpers.IsRefusalEnvelope(wire), "not the `invalid` envelope: " + wire);
+        Assert.False(McpHelpers.IsErrorEnvelope(wire), "a refusal wearing the failure word: " + wire);
+        var envelope = Parse(wire!);
+        Assert.Equal("invalid", envelope.GetProperty("status").GetString());
+        Assert.Equal(parameter, envelope.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.StartsWith(sentenceStart, envelope.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith(sentenceStart, McpHelpers.ErrorMessageOf(wire!), StringComparison.Ordinal);
     }
 
     /* ───────────────────────── #3541 A9: retention ghosts ───────────────────────── */
@@ -620,7 +671,7 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal("collected", todayRow.GetProperty("data_state").GetString());
         Assert.Equal(horizon.ToString("yyyy-MM-dd"), todayRow.GetProperty("retention_horizon").GetString());
 
-        Assert.StartsWith("Invalid summary_date value '01/02/2026'", await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026"), StringComparison.Ordinal);
+        Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
     }
 
     /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock.</summary>

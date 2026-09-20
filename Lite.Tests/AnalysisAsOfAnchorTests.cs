@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -221,7 +222,7 @@ public sealed class AnalysisAsOfAnchorTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.StartsWith(
             "Invalid as_of",
-            await McpAnalysisTools.AnalyzeServer(service, _serverManager, null, 4, "last tuesday"),
+            McpHelpers.ErrorMessageOf(await McpAnalysisTools.AnalyzeServer(service, _serverManager, null, 4, "last tuesday")),
             StringComparison.Ordinal);
 
         Assert.Contains(

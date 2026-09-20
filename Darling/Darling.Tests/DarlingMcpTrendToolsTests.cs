@@ -690,7 +690,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Page life expectancy", ServerName)));
 
             /* an unknown server resolves to the listing error. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpTrendTools.GetMemoryTrend(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpTrendTools.GetMemoryTrend(postgres, "darling-no-such-server")), StringComparison.Ordinal);
 
             /* an EMPTY store returns the miss, not a throw. */
             await DeleteRowsAsync(connection, ct, keepServer: true);

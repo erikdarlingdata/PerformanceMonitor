@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -31,6 +32,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// fleet split across several Darling boxes does not answer "unknown server" where the true answer is "the
 /// other box has that one." Purely additive — see the <see cref="ResolveOrError(IReadOnlyList{RegisteredServer}, string, DarlingPeerDirectory.Snapshot)"/>
 /// overload.</para>
+///
+/// <para><b>The miss is the <c>invalid</c> envelope, not a sentence (#3739).</b> Every <c>error</c> this class
+/// hands back for a name that resolves to nothing is <see cref="McpHelpers.Refusal"/>'s
+/// <c>{"status":"invalid","message":"Could not resolve server. …","hints":{"parameter":"server_name"}}</c>, so
+/// the ~190 tools that <c>return error;</c> put a status word on the wire without any of them changing. The
+/// SENTENCE is unchanged — <see cref="MissSentence"/> still begins "Could not resolve server." and still
+/// carries the local listing and the peer disclosure — and the consumers that want the words (the CLI's
+/// stderr, the triage page's note, <c>remove_servers</c>' <c>not_found</c> outcome) read them back through
+/// <see cref="McpHelpers.ErrorMessageOf"/>. The one return here that is NOT a refusal — the registry read
+/// itself failing — stays a bare sentence on purpose: it is a store fault, not the caller's, and wearing
+/// <c>invalid</c> would tell them to fix a request that was fine.</para>
 /// </summary>
 internal static class DarlingServerResolver
 {
@@ -62,17 +74,32 @@ ORDER BY server_name";
         NpgsqlDataSource postgres,
         string? serverName)
     {
-        List<RegisteredServer> servers;
-        try
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        if (fault is not null)
         {
-            servers = await LoadEnabledAsync(postgres);
-        }
-        catch (Exception ex)
-        {
-            return (default, $"Could not read the servers registry from the Postgres store: {ex.Message}");
+            return (default, fault);
         }
 
         return ResolveOrError(servers, serverName);
+    }
+
+    /// <summary>
+    /// The registry read behind every resolving entry point, with its failure as a SENTENCE rather than a throw:
+    /// the tools' always-return-a-string contract holds instead of surfacing the MCP SDK's generic invocation
+    /// error. Deliberately not the <c>invalid</c> envelope and not <c>FormatError</c>: it is a store fault, not
+    /// the caller's request, and this seam knows no tool name to put under <c>hints.operation</c>. It maps to
+    /// the web surface's bare-string arm, which is the pre-#3739 behaviour, unchanged.
+    /// </summary>
+    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(NpgsqlDataSource postgres)
+    {
+        try
+        {
+            return (await LoadEnabledAsync(postgres), null);
+        }
+        catch (Exception ex)
+        {
+            return (new List<RegisteredServer>(), $"Could not read the servers registry from the Postgres store: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -117,10 +144,18 @@ ORDER BY server_name";
         }
 
         var (resolved, error) = await ResolveOrErrorAsync(postgres, serverName).ConfigureAwait(false);
+        if (error is null)
+        {
+            return (resolved, null);
+        }
 
-        return error is null
-            ? (resolved, null)
-            : (default, $"{error}{Environment.NewLine}{Environment.NewLine}{FleetSentinelDisclosure}");
+        /* The disclosure is appended to the SENTENCE, not to the string: since #3739 a miss is the `invalid`
+           envelope, and text appended to JSON lands outside its closing brace. So the sentence is read out,
+           the disclosure joined to it, and the envelope rebuilt around the whole — while a store fault, which is
+           a bare sentence (see LoadEnabledOrFaultAsync), carries the disclosure as text exactly as it did before,
+           so a caller who could not be answered still learns the name exists. */
+        var withDisclosure = $"{McpHelpers.ErrorMessageOf(error)}{Environment.NewLine}{Environment.NewLine}{FleetSentinelDisclosure}";
+        return (default, McpHelpers.IsRefusalEnvelope(error) ? McpHelpers.Refusal("server_name", withDisclosure) : withDisclosure);
     }
 
     /// <summary>
@@ -152,7 +187,9 @@ ORDER BY server_name";
     /// the peer disclosure is appended, naming the sibling store whose declared coverage matches. It is
     /// APPENDED rather than substituted because the local server listing is still the right answer to the
     /// commonest miss (a typo), and because the leading "Could not resolve server." is what callers key off.
-    /// With nothing declared the message is byte-for-byte what it was.</para>
+    /// With nothing declared the sentence is byte-for-byte what it was; since #3739 it travels as the
+    /// <c>message</c> of the <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>), and a caller that
+    /// keys off the words reads them through <see cref="McpHelpers.ErrorMessageOf"/>.</para>
     /// </summary>
     internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         IReadOnlyList<RegisteredServer> servers,
@@ -165,10 +202,25 @@ ORDER BY server_name";
             return (resolved.Value, null);
         }
 
+        return (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
+    }
+
+    /// <summary>
+    /// The miss SENTENCE — the local listing plus the #2339 peer disclosure when one applies — as text, which
+    /// <see cref="ResolveOrError(IReadOnlyList{RegisteredServer}, string, DarlingPeerDirectory.Snapshot)"/> wraps
+    /// in the <c>invalid</c> envelope (<see cref="ResolveOrErrorWithFleetSentinelAsync"/> reaches the same words
+    /// back through <see cref="McpHelpers.ErrorMessageOf"/> to append its own disclosure). Kept separate from
+    /// the envelope so text is appended to text and the envelope is built around a finished sentence.
+    /// </summary>
+    internal static string MissSentence(
+        IReadOnlyList<RegisteredServer> servers,
+        string? serverName,
+        DarlingPeerDirectory.Snapshot peers)
+    {
         var message = $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
-        return (default, disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}");
+        return disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}";
     }
 
     /// <summary>
@@ -201,14 +253,10 @@ ORDER BY server_name";
     public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
         ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName)
     {
-        List<RegisteredServer> servers;
-        try
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        if (fault is not null)
         {
-            servers = await LoadEnabledAsync(postgres);
-        }
-        catch (Exception ex)
-        {
-            return (default, $"Could not read the servers registry from the Postgres store: {ex.Message}");
+            return (default, fault);
         }
 
         var (resolved, error) = ResolveOrError(servers, serverName);

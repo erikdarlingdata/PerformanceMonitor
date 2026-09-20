@@ -416,7 +416,7 @@ public sealed class DarlingMcpTools
         if (validation != null) return validation;
 
         if (baseline_hours_back <= hours_back)
-            return "baseline_hours_back must be greater than hours_back. The baseline period must be earlier than the comparison period.";
+            return McpHelpers.Refusal("baseline_hours_back", "baseline_hours_back must be greater than hours_back. The baseline period must be earlier than the comparison period.");
 
         try
         {
@@ -993,7 +993,7 @@ public sealed class DarlingMcpTools
         {
             if (string.IsNullOrWhiteSpace(story_path_hash))
             {
-                return JsonSerializer.Serialize(new { status = "invalid", message = "story_path_hash is required." }, McpHelpers.JsonOptions);
+                return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
             int? serverId = null;

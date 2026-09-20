@@ -99,8 +99,8 @@ public sealed class DarlingMcpFleetSweepTools
                    and the miss would read as retention. */
                 if (!long.TryParse(sweep_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
                 {
-                    return $"Invalid sweep_id value '{sweep_id}'. Expected a whole number as a string, " +
-                        "exactly as the timeline's sweep_id field spells it.";
+                    return McpHelpers.Refusal("sweep_id", $"Invalid sweep_id value '{sweep_id}'. Expected a whole number as a string, " +
+                        "exactly as the timeline's sweep_id field spells it.");
                 }
 
                 var run = await FleetSweepStore.GetSweepAsync(postgres, id, CancellationToken.None);
@@ -115,7 +115,7 @@ public sealed class DarlingMcpFleetSweepTools
             var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (windowError != null) return windowError;
 
-            var stateError = DarlingFleetSweepEndpoints.ValidateWatchState(watch_state);
+            var stateError = DarlingFleetSweepEndpoints.ValidateWatchState(watch_state, parameterName: "watch_state");
             if (stateError != null) return stateError;
 
             var windowStart = windowEnd.AddHours(-hours_back);

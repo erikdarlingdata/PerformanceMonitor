@@ -250,9 +250,13 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     [InlineData("")]
     [InlineData("   ")]
     [InlineData(null)]
-    public void AnalyzePlanXml_EmptyOrWhitespace_ReturnsBareMessage(string? input)
+    public void AnalyzePlanXml_EmptyOrWhitespace_IsRefused(string? input)
     {
-        Assert.Equal("No plan XML provided.", DarlingMcpPlanTools.AnalyzePlanXml(input!));
+        /* The refusal is McpHelpers.Refusal's `invalid` envelope since #3739 (it was this bare sentence); the
+           sentence is unchanged inside it and the parameter is named. */
+        var refusal = DarlingMcpPlanTools.AnalyzePlanXml(input!);
+        Assert.Equal(McpHelpers.Refusal("plan_xml", "No plan XML provided."), refusal);
+        Assert.Equal("No plan XML provided.", McpHelpers.ErrorMessageOf(refusal));
     }
 
     [Theory]
@@ -495,7 +499,7 @@ public sealed class DarlingMcpPlanToolsLivePostgresTests
 
             /* ---- server resolution flows through the tool: an unknown name returns the listing error. */
             var unknown = await DarlingMcpPlanTools.AnalyzeQueryPlan(postgres, QueryHash, "darling-mcp-no-such-server");
-            Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(unknown), StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

@@ -244,9 +244,11 @@ public sealed class DarlingMcpToolsTests
 
         Assert.Equal(default, resolved);
         Assert.NotNull(error);
-        Assert.StartsWith("Could not resolve server.", error, StringComparison.Ordinal);
-        Assert.Contains("SQL2022", error, StringComparison.Ordinal);
-        Assert.Contains("Production (PROD1)", error, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(error), error);
+        var sentence = McpHelpers.ErrorMessageOf(error!);
+        Assert.StartsWith("Could not resolve server.", sentence, StringComparison.Ordinal);
+        Assert.Contains("SQL2022", sentence, StringComparison.Ordinal);
+        Assert.Contains("Production (PROD1)", sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -588,7 +590,7 @@ public sealed class DarlingMcpToolsTests
 
             var unknown = await DarlingMcpTools.GetAnalysisFindings(
                 analysisService, postgres, "darling-mcp-no-such-server", 24);
-            Assert.StartsWith("Could not resolve server.", unknown, StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(unknown), StringComparison.Ordinal);
             Assert.Contains(TestServerName, unknown, StringComparison.Ordinal);
 
             /* ---- mute via the tool: the muted envelope comes back and the row lands in

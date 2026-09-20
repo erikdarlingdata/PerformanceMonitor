@@ -72,14 +72,22 @@ internal static class McpHelpers
     }
 
     /// <summary>
-    /// Validates hours_back parameter. Returns null if valid, error message if invalid.
+    /// Validates hours_back parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid.
+    ///
+    /// <para><b>Every validator in this file returns the envelope, not the sentence (#3739).</b> The ~210
+    /// call sites on both SKUs read <c>if (error != null) return error;</c>, so the value a validator hands back
+    /// IS the tool's whole result — and until #3739 it was a bare sentence, the one outcome on the wire that
+    /// was not JSON. Shaping it here, in the handful of producers, is what shapes four hundred tool returns
+    /// without touching one of them. A caller that needs the WORDS (a test, a CLI, a web body that renders
+    /// text) reads them back through <see cref="ErrorMessageOf"/>; nothing concatenates a validator's return
+    /// any more, because it is no longer text.</para>
     /// </summary>
     public static string? ValidateHoursBack(int hoursBack)
     {
         if (hoursBack <= 0)
-            return $"Invalid hours_back value '{hoursBack}'. Must be a positive integer (1-{MaxHoursBack}).";
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer (1-{MaxHoursBack}).");
         if (hoursBack > MaxHoursBack)
-            return $"hours_back value '{hoursBack}' exceeds maximum of {MaxHoursBack} hours (7 days). Use a smaller value.";
+            return Refusal("hours_back", $"hours_back value '{hoursBack}' exceeds maximum of {MaxHoursBack} hours (7 days). Use a smaller value.");
         return null;
     }
 
@@ -100,7 +108,7 @@ internal static class McpHelpers
     public static string? ValidateDaysBack(int daysBack, int maxDaysBack)
     {
         if (daysBack <= 0 || daysBack > maxDaysBack)
-            return $"Invalid days_back value '{daysBack}'. Must be a positive integer (1-{maxDaysBack}).";
+            return Refusal("days_back", $"Invalid days_back value '{daysBack}'. Must be a positive integer (1-{maxDaysBack}).");
         return null;
     }
 
@@ -148,7 +156,7 @@ internal static class McpHelpers
 
         if (hoursBack <= 0)
         {
-            return $"Invalid hours_back value '{hoursBack}'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.";
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer — a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
         }
 
         return ResolveAsOf(asOf, out endUtc);
@@ -187,7 +195,7 @@ internal static class McpHelpers
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.";
+            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings — including 07/09/2026 — are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
         }
 
         date = DateTime.SpecifyKind(parsed, DateTimeKind.Utc).Date;
@@ -221,7 +229,7 @@ internal static class McpHelpers
             }
         }
 
-        return $"Invalid {paramName} value '{value}'. Accepted values: {string.Join(", ", accepted)}. Omit it for all.";
+        return Refusal(paramName, $"Invalid {paramName} value '{value}'. Accepted values: {string.Join(", ", accepted)}. Omit it for all.");
     }
 
     /// <summary>
@@ -324,13 +332,13 @@ internal static class McpHelpers
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', " +
-                   "'2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.";
+            return Refusal("as_of", $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', " +
+                   "'2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.");
         }
 
         if (parsed > now + AsOfFutureTolerance)
         {
-            return $"as_of value '{asOf}' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).";
+            return Refusal("as_of", $"as_of value '{asOf}' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).");
         }
 
         endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
@@ -338,14 +346,16 @@ internal static class McpHelpers
     }
 
     /// <summary>
-    /// Validates top/limit parameter. Returns null if valid, error message if invalid.
+    /// Validates top/limit parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid
+    /// (<c>hints.parameter</c> is <paramref name="paramName"/>, so a tool that calls this for <c>top</c> refuses
+    /// <c>top</c> by name).
     /// </summary>
     public static string? ValidateTop(int top, string paramName = "limit")
     {
         if (top <= 0)
-            return $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{MaxTop}).";
+            return Refusal(paramName, $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{MaxTop}).");
         if (top > MaxTop)
-            return $"{paramName} value '{top}' exceeds maximum of {MaxTop}. Use a smaller value.";
+            return Refusal(paramName, $"{paramName} value '{top}' exceeds maximum of {MaxTop}. Use a smaller value.");
         return null;
     }
 
@@ -411,9 +421,9 @@ internal static class McpHelpers
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
         if (minMs is { } value && !double.IsFinite(value))
-            return $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number — NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.";
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number — NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
         if (minMs is < 0)
-            return $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
         return null;
     }
 
@@ -495,12 +505,16 @@ internal static class McpHelpers
     /// top-level <c>message</c>, which is what lets a consumer tell the envelope from data without a schema
     /// (the web dashboard's <c>classifyResponse</c> relies on exactly that).</para>
     ///
-    /// <para><b>What it does NOT cover.</b> Validation refusals that are not caught exceptions — a bad
-    /// <c>hours_back</c>, an unresolvable <c>server_name</c> — are still the validators' bare sentences on
-    /// both SKUs, roughly four hundred return sites (a handful of PostgreSQL refusals wrap theirs in
-    /// <c>Status("error", …)</c>; most do not); that is a separate vocabulary question (which status word
-    /// distinguishes a client-correctable refusal from a failure, and how the web surface's 400/500 split
-    /// reads it) and is not decided here.</para>
+    /// <para><b>What it does NOT cover.</b> A REFUSAL — a request the tool cannot serve as given: a bad
+    /// <c>hours_back</c>, an unresolvable <c>server_name</c>, a required parameter that was not sent — is not
+    /// a failure and does not come through here. It has its own twin, <see cref="Refusal"/>, and its own
+    /// status word, <c>invalid</c> (#3739): the read threw nothing, the caller has something to fix, and a
+    /// web surface answers it 400 where a failure answers 500. Until #3739 those refusals were the validators'
+    /// bare sentences on both SKUs (roughly four hundred return sites) and nine PostgreSQL refusals wore this
+    /// helper's <c>error</c> word by hand, so the web surface read a client-correctable <c>limit</c> as a
+    /// server fault. The census that keeps the two words apart is
+    /// <c>McpPayloadContractCensusTests.EveryRefusal_ReturnsThroughTheSharedShape_AndTheBareSentenceRosterIsExact</c>;
+    /// the only producer of <c>Status("error", …)</c> anywhere is this method.</para>
     /// </summary>
     /// <param name="operation">The tool name (every call site passes it); echoed in the sentence and as <c>hints.operation</c>.</param>
     /// <param name="ex">The caught exception; only its <see cref="Exception.Message"/> reaches the wire.</param>
@@ -519,6 +533,48 @@ internal static class McpHelpers
     public static string ErrorSentence(string operation, Exception ex) => $"Error during {operation}: {ex.Message}";
 
     /// <summary>
+    /// The ONE wire shape a tool REFUSAL takes, on both SKUs — <see cref="FormatError"/>'s twin for the fourth
+    /// kind of outcome. A tool answers with data, with a miss (the four words <see cref="Status"/> documents), with
+    /// a failure (<c>error</c>: it threw), or with a refusal: the request AS GIVEN cannot be served — a parameter
+    /// the tool cannot honor, a required parameter that was not sent, a server name that resolves to nothing, a
+    /// write body that will not parse. The refusal is the same envelope with <c>status</c> = <c>invalid</c>, the
+    /// validator's sentence as <c>message</c> (unchanged from the bare-string era, so every pinned fragment and
+    /// every log grep survives), and the parameter named under <c>hints.parameter</c> so a client can branch
+    /// on WHAT to fix without parsing prose.
+    ///
+    /// <para><b>The word is <c>invalid</c>, widened, by ruling (#3739).</b> It was already the write tools'
+    /// word for a body that would not parse (<c>Outcome("invalid", …)</c> across the mute-rule, alert-settings,
+    /// custom-alert and custom-view verbs; the web write surface already mapped it to HTTP 400), and "a body
+    /// that will not parse" is one instance of "the request as given cannot be served". So the read surface
+    /// says the same word for the same kind of thing rather than coining a fifth one — <c>refused</c> /
+    /// <c>rejected</c> were considered and not added — and ONE rule maps it on both web surfaces: <c>invalid</c>
+    /// is 400, the envelope passed through as the body. <c>error</c> was the wrong word (the web reads it as a
+    /// 500, and nine PostgreSQL refusals that borrowed it answered 500 for a bad <c>limit</c>), and no word at
+    /// all was the state of the other four hundred: a bare sentence where every other outcome is JSON, which a
+    /// client keyed on <c>status</c> — what the instructions teach it to key on — could not classify.</para>
+    ///
+    /// <para><b>Why the hint is the PARAMETER and not the operation.</b> The producers of a refusal are the
+    /// shared validators and the server resolvers, which are called from four hundred tools and know nothing
+    /// about which one; what they DO know, every one of them, is the parameter they refused — and that is
+    /// also the thing the caller has to change. <see cref="FormatError"/> names the operation because a
+    /// failure's useful question is "which read broke"; a refusal's is "which knob".</para>
+    ///
+    /// <para><b>Where it is built.</b> In the producers, not at the call sites: the validators in this file
+    /// (<see cref="ValidateHoursBack"/>, <see cref="ValidateTop"/>, <see cref="ValidateDaysBack"/>,
+    /// <see cref="ResolveAsOf"/>, <see cref="ParseSummaryDate"/>, <see cref="ValidateChoice"/>,
+    /// <see cref="ValidateMinMs"/> and the two window validators over them), both SKUs' <c>ServerResolver</c>
+    /// miss, the web dispatch's missing-parameter refusal, and the handful of tools that refuse a parameter of
+    /// their own inline. The <c>if (error != null) return error;</c> idiom at every call site passes the
+    /// envelope through untouched, which is why four hundred sites did not need to change.</para>
+    /// </summary>
+    /// <param name="parameter">The parameter that was refused, by its wire name (<c>hours_back</c>, <c>server_name</c>, …); echoed as <c>hints.parameter</c>.</param>
+    /// <param name="sentence">The refusal itself: what was refused and what is accepted. Reaches the wire as <c>message</c>, verbatim.</param>
+    public static string Refusal(string parameter, string sentence)
+    {
+        return Status("invalid", sentence, new { parameter });
+    }
+
+    /// <summary>
     /// The bytes every error envelope begins with. <see cref="Status"/> serializes its anonymous object with
     /// <see cref="JsonOptions"/> (compact) and <c>status</c> first, so <c>{"status":"error",</c> is exact against
     /// the one producer — the closing quote and comma are part of it so a data payload whose first key merely
@@ -528,27 +584,48 @@ internal static class McpHelpers
     public const string ErrorEnvelopePrefix = "{\"status\":\"error\",";
 
     /// <summary>
-    /// Whether a tool result is the error envelope (a caught exception, or a PostgreSQL tool's validation
-    /// refusal). A prefix test rather than a parse: the callers are the HTTP status mapping on the web surface
-    /// and the test guards that used to read <c>StartsWith("Error during")</c>, both on the hot path of every
-    /// response, and a parse of a record-heavy data page to learn it is not an error would cost more than the
-    /// data did. Leading whitespace is tolerated the way the web surface's <c>{</c>-sniff tolerates it.
+    /// The bytes every refusal envelope begins with — <see cref="ErrorEnvelopePrefix"/>'s twin for
+    /// <see cref="Refusal"/>, exact against <see cref="Status"/> for the same reasons. It also matches the write
+    /// tools' <c>Outcome("invalid", …)</c>, which serialize the same anonymous shape through the same options:
+    /// that is the point, not an accident — one word, one recognizer, one HTTP code on both surfaces.
+    /// </summary>
+    public const string InvalidEnvelopePrefix = "{\"status\":\"invalid\",";
+
+    /// <summary>
+    /// Whether a tool result is the error envelope (a caught exception). A prefix test rather than a parse:
+    /// the callers are the HTTP status mapping on the web surface and the test guards that used to read
+    /// <c>StartsWith("Error during")</c>, both on the hot path of every response, and a parse of a
+    /// record-heavy data page to learn it is not an error would cost more than the data did. Leading whitespace
+    /// is tolerated the way the web surface's <c>{</c>-sniff tolerates it. Since #3739 a refusal is NOT this
+    /// envelope — it is <see cref="IsRefusalEnvelope"/>'s — so the two consumers that split 500 from 400 can
+    /// tell them apart with two prefix tests.
     /// </summary>
     public static bool IsErrorEnvelope(string? result) =>
         result is not null
         && result.AsSpan().TrimStart().StartsWith(ErrorEnvelopePrefix.AsSpan(), StringComparison.Ordinal);
 
     /// <summary>
+    /// Whether a tool result is the refusal envelope (<see cref="Refusal"/>, or a write tool's
+    /// <c>Outcome("invalid", …)</c>) — the client-correctable outcome the web surface answers 400 with the
+    /// envelope as the body. The same prefix test as <see cref="IsErrorEnvelope"/>, for the same reasons.
+    /// </summary>
+    public static bool IsRefusalEnvelope(string? result) =>
+        result is not null
+        && result.AsSpan().TrimStart().StartsWith(InvalidEnvelopePrefix.AsSpan(), StringComparison.Ordinal);
+
+    /// <summary>
     /// The sentence a human should read for a tool result: the envelope's <c>message</c> when the result is
-    /// the error envelope, the result itself otherwise (a bare validation refusal is already the sentence).
-    /// For the consumers that render an error as TEXT — the web surface's <c>{"error": …}</c> body, the
-    /// triage page's per-section error strip — so a failure is shown as the words that explain it rather than
-    /// as the JSON that carried them. An envelope that will not parse falls back to the raw result rather
-    /// than to nothing: hiding the payload is the one thing an error renderer must never do.
+    /// the error envelope OR the refusal envelope, the result itself otherwise (a bare string is already the
+    /// sentence). For the consumers that render an outcome as TEXT — the web surface's <c>{"error": …}</c>
+    /// body, the triage page's per-section error strip and its resolution note, the CLI's stderr, the
+    /// <c>not_found</c> outcome a write tool builds around the resolver's miss — so a failure or a refusal is
+    /// shown as the words that explain it rather than as the JSON that carried them. An envelope that will
+    /// not parse falls back to the raw result rather than to nothing: hiding the payload is the one thing an
+    /// error renderer must never do.
     /// </summary>
     public static string ErrorMessageOf(string result)
     {
-        if (!IsErrorEnvelope(result))
+        if (!IsErrorEnvelope(result) && !IsRefusalEnvelope(result))
         {
             return result;
         }
@@ -575,10 +652,15 @@ internal static class McpHelpers
     /// consumer can branch on the kind of nothing it got back. Data-bearing results keep their own
     /// shape and must NOT use this.
     ///
-    /// <para>The fifth status word, <c>error</c>, is a FAILURE rather than a miss and has its own builder:
-    /// a tool's <c>catch</c> returns <see cref="FormatError"/>, never this method directly, so one helper owns
-    /// the failure grammar. The direct <c>Status("error", …)</c> call survives only for a validation refusal
-    /// computed above the catch (a <c>limit</c> the tool cannot honor), which is a sentence, not an exception.</para>
+    /// <para>Two more status words ride this envelope and are NOT misses, and each has its own builder so one
+    /// helper owns its grammar: <c>error</c> is a FAILURE (the read threw) and is built ONLY by
+    /// <see cref="FormatError"/> — a tool's <c>catch</c> returns that, never this method directly, and since
+    /// #3739 nothing else builds <c>Status("error", …)</c> either (a refusal that borrowed the word answered
+    /// HTTP 500 for a bad <c>limit</c>); <c>invalid</c> is a REFUSAL (the request as given cannot be served — a
+    /// parameter the tool cannot honor, a required one not sent, an unresolvable server name, a write body that
+    /// will not parse) and is built by <see cref="Refusal"/>, or by the write tools' own <c>Outcome("invalid",
+    /// …)</c>, which is the same word and the same bytes. A client reads six words on the wire: four kinds of
+    /// nothing, one failure, one refusal.</para>
     /// </summary>
     /// <param name="status">
     /// One word from the small miss vocabulary:

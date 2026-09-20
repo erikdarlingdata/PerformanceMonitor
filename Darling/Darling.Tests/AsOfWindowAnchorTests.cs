@@ -571,7 +571,7 @@ public sealed class AsOfWindowAnchorLivePostgresTests
             /* 5. Refusals reach the caller as the tool's own message, not as a silently-different answer. */
             var future = await DarlingMcpDataTools.GetWaitStats(postgres, ServerName, 4, 20, DateTime.UtcNow.AddDays(1).ToString("o"));
             Assert.Contains("future", future, StringComparison.Ordinal);
-            Assert.StartsWith("Invalid as_of", await DarlingMcpDataTools.GetWaitStats(postgres, ServerName, 4, 20, "last tuesday"), StringComparison.Ordinal);
+            Assert.StartsWith("Invalid as_of", McpHelpers.ErrorMessageOf(await DarlingMcpDataTools.GetWaitStats(postgres, ServerName, 4, 20, "last tuesday")), StringComparison.Ordinal);
 
             /* 6. An anchor older than anything the store holds is the read's honest empty, not a refusal. */
             Assert.Equal(

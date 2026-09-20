@@ -446,7 +446,7 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             Assert.Equal(t.ToString("o"), scheduler.GetProperty("last_captured_at").GetString());
 
             /* an unknown server resolves to the listing error. */
-            Assert.StartsWith("Could not resolve server.", await DarlingMcpHealthParserTools.GetSystemHealth(postgres, "darling-no-such-server"), StringComparison.Ordinal);
+            Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, "darling-no-such-server")), StringComparison.Ordinal);
 
             /* An empty store is rung 4: nothing of any type was ever captured, so this is NOT a clean bill —
                "unavailable" with source_observed false (#3541 A12). It used to answer "empty", the same word

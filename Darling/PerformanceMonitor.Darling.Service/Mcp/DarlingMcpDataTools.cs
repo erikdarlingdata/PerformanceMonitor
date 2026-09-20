@@ -547,7 +547,7 @@ public sealed class DarlingMcpDataTools
         var rollUp = string.Equals(group_by, "host_object", StringComparison.OrdinalIgnoreCase);
         if (!rollUp && !string.Equals(group_by, "query_hash", StringComparison.OrdinalIgnoreCase))
         {
-            return McpHelpers.Status("invalid",
+            return McpHelpers.Refusal("group_by",
                 $"group_by must be 'query_hash' or 'host_object' (got '{group_by}').");
         }
 

@@ -455,7 +455,9 @@ internal static class DarlingTriageEndpoint
                     }
                     else
                     {
-                        notes.Add((JsonNode)error);
+                        /* The resolver's miss is the `invalid` envelope since #3739; a note on this page is TEXT,
+                           so the sentence is read back out of it rather than the JSON being shown as prose. */
+                        notes.Add((JsonNode)McpHelpers.ErrorMessageOf(error));
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -562,10 +564,11 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>Runs one section through its <c>/api/read</c> dispatch handler (a synthetic query string over
     /// the REAL binding + tool code), returning <c>{title, read, data}</c> on success — <c>data</c> is the
-    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool answered with a
-    /// bare message, caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11, reduced
-    /// to its sentence here because <c>error</c> on this page is TEXT the card renders), or threw. Never
-    /// throws: a broken section is one card on the page, not a dead page.</summary>
+    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool caught an
+    /// exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11), refused the request (its
+    /// <c>{"status":"invalid", ...}</c> envelope since #3739), answered with a bare message, or threw — each
+    /// reduced to its sentence here because <c>error</c> on this page is TEXT the card renders. Never throws: a
+    /// broken section is one card on the page, not a dead page.</summary>
     private static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,

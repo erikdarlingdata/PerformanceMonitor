@@ -328,7 +328,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         else
         {
             Assert.Null(date);
-            Assert.StartsWith($"Invalid summary_date value '{input}'", error, StringComparison.Ordinal);
+            Assert.StartsWith($"Invalid summary_date value '{input}'", McpHelpers.ErrorMessageOf(error!), StringComparison.Ordinal);
             Assert.Contains("yyyy-MM-dd", error, StringComparison.Ordinal);
         }
     }

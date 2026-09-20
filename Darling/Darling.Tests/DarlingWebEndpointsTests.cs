@@ -125,7 +125,7 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
     }
 
-    /* ── response-kind mapping (the error envelope -> 500, the '{'-sniff -> 200, miss envelope -> 200) ── */
+    /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
 
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
@@ -146,12 +146,13 @@ public sealed class DarlingWebEndpointsTests
     /// The PostgreSQL tools already answered with this envelope before the ruling, and the '{'-sniff was
     /// passing their failures through as 200 — the ordering this pins is the fix for that too.
     ///
-    /// <para>Stated rather than hidden: seven PostgreSQL VALIDATION refusals (<c>limit</c> on the deadlock,
-    /// log-event and server-config reads; <c>family</c> / <c>min_severity</c> on <c>get_pg_log_events</c>) are
-    /// hand-built <c>Status("error", …)</c> envelopes too, so they now answer 500 here where they answered
-    /// 200 before — neither code is the 400 a client-correctable refusal deserves. The envelope carries no
-    /// word that tells a refusal from a failure; choosing one is the vocabulary ruling this lane does not
-    /// make, and the third case below pins the present behaviour so that ruling changes it knowingly.</para>
+    /// <para>The third case is the ruling #3719 asked for, made (#3739): a hand-built <c>Status("error", …)</c>
+    /// around a refusal sentence is STILL read as a fault here — the classifier cannot know better — which is
+    /// exactly why the tree may no longer build one: nine PostgreSQL <c>limit</c> / <c>family</c> /
+    /// <c>min_severity</c> refusals wore this word and answered 500 for a typo between #3719 and #3739. They
+    /// now return <c>McpHelpers.Refusal</c>'s <c>invalid</c> envelope (the next fact), and
+    /// <c>McpPayloadContractCensusTests.TheFailureWord_HasOneProducer_OnBothSkus</c> holds that <c>FormatError</c>
+    /// is the only thing that builds the failure word.</para>
     /// </summary>
     [Fact]
     public void ClassifyToolResponse_TheErrorEnvelope_IsServerError()
@@ -163,6 +164,42 @@ public sealed class DarlingWebEndpointsTests
             DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.Status("error", "Invalid limit value '0'. Must be a positive integer (1-1000).")));
     }
 
+    /// <summary>
+    /// The REFUSAL is the <c>{"status":"invalid", ...}</c> envelope and it is a 400 (#3739) — tested against the
+    /// REAL producers, not a hand-written literal: <c>McpHelpers.Refusal</c> itself, every shared validator past
+    /// its bound, both resolvers' miss, the web dispatch's own missing-parameter arm, and the write tools'
+    /// <c>Outcome("invalid", …)</c> bytes, which the same recognizer must fire on so the read and write surfaces
+    /// read one word by one rule. It is tested BEFORE the <c>{</c>-sniff (which would answer 200 over it — what
+    /// the nine PostgreSQL refusals got before #3719) and is NOT the error envelope (which would answer 500 —
+    /// what they got after it). Neither code was the 400 a client-correctable refusal deserves; this is it.
+    /// </summary>
+    [Fact]
+    public void ClassifyToolResponse_TheInvalidEnvelope_IsARefusal()
+    {
+        var wire = McpHelpers.Refusal("limit", "Invalid limit value '0'. Must be a positive integer (1-1000).");
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(wire));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse("  " + wire));
+
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateHoursBack(9999)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateTop(0)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ValidateWindow(4, "not-a-time", out _)!));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(McpHelpers.ParseSummaryDate("01/02/2026", out _)!));
+
+        var (_, miss) = DarlingServerResolver.ResolveOrError(
+            new[] { new DarlingServerResolver.RegisteredServer(1, "SQL2022", null) }, "no-such-server", DarlingPeerDirectory.Snapshot.Empty);
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal, DarlingWebEndpoints.ClassifyToolResponse(miss!));
+
+        /* The write tools' own builder — same word, same bytes, same code. */
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.Refusal,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"status\":\"invalid\",\"message\":\"rule_id is required.\"}"));
+
+        /* And the neighbours it must not fire on: a data key that begins with the word, a miss envelope. */
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"status\":\"invalid_count\",\"message\":\"x\"}"));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough,
+            DarlingWebEndpoints.ClassifyToolResponse("{\"invalid\":true}"));
+    }
+
     /// <summary>The pre-#3653 bare sentence is still a 500: an un-migrated producer must not fall through to
     /// the client-correctable 400 arm, which would tell a caller to fix a request that was fine.</summary>
     [Fact]
@@ -170,11 +207,18 @@ public sealed class DarlingWebEndpointsTests
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError,
             DarlingWebEndpoints.ClassifyToolResponse("Error during get_wait_stats: connection reset"));
 
+    /// <summary>The bare-string arm survives as the floor under everything the producers no longer emit: the
+    /// four sentences here WERE the wire shape of these refusals until #3739 (they are the envelope's <c>message</c>
+    /// now, and classify as <c>Refusal</c> above); what still reaches this arm is a store fault the resolver
+    /// reports as a sentence and the <c>list_servers</c> miss on an empty registry. Kept at 400 so a producer
+    /// nobody shaped is still refused rather than passed through as data.</summary>
     [Theory]
     [InlineData("Could not resolve server. Available servers:\nSQL2022")]
     [InlineData("Invalid hours_back value '9999'. Must be a positive integer (1-168).")]
     [InlineData("Missing required parameter 'wait_type'.")]
     [InlineData("baseline_hours_back must be greater than hours_back.")]
+    [InlineData("Could not read the servers registry from the Postgres store: connection refused")]
+    [InlineData("No servers are registered yet. The service registers each monitored server on its first successful connection.")]
     [InlineData("")]
     public void ClassifyToolResponse_OtherBareStrings_AreClientErrors(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ClientError, DarlingWebEndpoints.ClassifyToolResponse(result));
@@ -268,9 +312,18 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{\"status\":\"unchanged\",\"mute_rule\":{}}", 200, 200)]    // retry-safe "already so" shares the success code; the envelope carries the distinction
     [InlineData("{\"status\":\"deleted\",\"rule_id\":\"x\"}", 200, 200)]
     [InlineData("{\"status\":\"invalid\",\"message\":\"bad field\"}", 201, 400)]   // a refusal outranks whatever success the route hoped for
+    [InlineData("{\"status\":\"invalid\",\"message\":\"Invalid limit value '0'.\",\"hints\":{\"parameter\":\"limit\"}}", 200, 400)] // McpHelpers.Refusal's bytes (#3739): the same word, the same 400, by the same rule as the read surface
     [InlineData("{\"status\":\"not_found\",\"message\":\"no rule\"}", 200, 404)]
+    [InlineData("{ \"status\" : \"invalid\", \"message\": \"spaced\" }", 200, 400)]       // the parsed switch's belt-and-braces: an envelope serialized some other way still reads as invalid
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
+
+    /// <summary>The refusal a shared producer builds reaches the write surface's status mapping through the
+    /// same classifier arm the read surface uses (#3739): one recognizer, one word, one code — executed
+    /// against the real builder rather than a literal.</summary>
+    [Fact]
+    public void MuteRuleEnvelopeStatus_TheSharedRefusal_IsAClientError() =>
+        Assert.Equal(400, DarlingWebEndpoints.MuteRuleEnvelopeStatus(McpHelpers.Refusal("rule_id", "rule_id is required."), 201));
 
     [Fact]
     public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError()

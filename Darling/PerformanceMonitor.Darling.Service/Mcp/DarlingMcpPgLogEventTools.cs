@@ -43,14 +43,16 @@ public sealed class DarlingMcpPgLogEventTools
         if (validation != null) return validation;
 
         var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return McpHelpers.Status("error", limitError);
+        if (limitError != null) return limitError;
 
         /* The family filter is a closed vocabulary and a typo in it must not read as "no events of that
-           kind" — an unknown family is the caller's mistake, said as one. */
+           kind" — an unknown family is the caller's mistake, said as one: the `invalid` envelope (#3739), not the
+           `error` word this and the min_severity refusal below wore until then, which the web surface read as
+           a server fault and answered 500 for a typo. */
         var familyFilter = string.IsNullOrWhiteSpace(family) ? null : family.Trim().ToLowerInvariant();
         if (familyFilter is not null && !PgLogFamilies.IsKnown(familyFilter))
         {
-            return McpHelpers.Status("error",
+            return McpHelpers.Refusal("family",
                 $"family '{family}' is not one this pipeline classifies. Known families: "
                 + string.Join(", ", PgLogFamilies.All.Where(f => f != PgLogFamilies.Other)) + ".");
         }
@@ -62,7 +64,7 @@ public sealed class DarlingMcpPgLogEventTools
         minRank = PgLogEntry.RankOf(severityLabel);
         if (minRank == 0)
         {
-            return McpHelpers.Status("error",
+            return McpHelpers.Refusal("min_severity",
                 $"min_severity '{min_severity}' is not a PostgreSQL severity label. Use one of LOG, INFO, "
                 + "NOTICE, WARNING, ERROR, FATAL, PANIC (ranked by seriousness in that order).");
         }
