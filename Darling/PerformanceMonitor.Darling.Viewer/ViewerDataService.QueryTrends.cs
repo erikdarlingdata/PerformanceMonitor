@@ -33,7 +33,7 @@ public sealed class QueryTrendPoint
 /// One routed Performance-Trends series and what it actually covers (#3653): the points, the tier they were
 /// read from, and the coverage description — the MCP trio's <c>DurationTrendResult</c> shape (#3590), so the
 /// chart can SAY what it served the way the tool's payload does (<c>source</c>, <c>effective_start</c>,
-/// <c>truncated</c>) rather than plotting four days under an axis that says seven.
+/// <c>window_truncated</c>) rather than plotting four days under an axis that says seven.
 /// </summary>
 /// <param name="Points">The plotted points, oldest first; a NULL-rate row is not among them (see the reader).</param>
 /// <param name="Tier">The tier <see cref="DurationTrendRouting.ResolveTier"/> picked: raw per-collection rows, or the hourly rollup.</param>

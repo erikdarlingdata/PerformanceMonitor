@@ -53,11 +53,28 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// get_procedure_duration_trend read the hourly rollup for a window raw cannot hold and
 /// get_query_store_duration_trend reads the corrected rollup for the region it has materialized (#2736) —
 /// and every one of them publishes <c>source</c>, <c>effective_start</c>, <c>effective_hours_back</c>,
-/// <c>truncated</c> and <c>bucket</c>, on the data path and on the empty one. "Quiet, widen hours_back" is
+/// <c>window_truncated</c> and <c>bucket</c>, on the data path and on the empty one. "Quiet, widen hours_back" is
 /// said only where widening can help: a window whose head the store no longer holds says that instead,
 /// because the rows were dropped, not absent, and a wider window cannot recover them. Lite's twins publish
 /// the same fields with Lite's truth (raw, unbounded within its retention), so the contract is one shape
 /// across SKUs even where the depth differs.
+/// </para>
+///
+/// <para>
+/// <b>The window floor is spelled <c>window_truncated</c>, not <c>truncated</c> (#3653 item 17).</b> Until
+/// #3653 the flag above rode under the page dialect's key, and #3703's vocabulary census found the homonym:
+/// on twenty-odd paged tools <c>truncated</c> is the caller's <c>limit</c> biting (observed off a
+/// <c>cap + 1</c> fetch, beside <c>*_returned</c>, remedied by a bigger <c>limit</c>); here it was the store's
+/// REACH — the head of the served series sits later than the requested start because the tier that answered
+/// no longer holds the window's head — beside <c>effective_start</c> / <c>effective_hours_back</c>, and no
+/// <c>limit</c> changes it. One key, two facts, opposite remedies. The window-floor fact now takes #3703's
+/// <c>&lt;bound&gt;_truncated</c> dialect on both SKUs (Lite's <c>McpQueryTools.WriteDisclosure</c> is the twin)
+/// and on <c>get_query_store_top</c> in <see cref="DarlingMcpDataTools"/>; every tool that publishes it carries
+/// <see cref="McpHelpers.WindowTruncatedDescription"/>, which names the wire change. The C# members that
+/// carry the fact (<c>DurationTrendResult.Truncated</c>, <c>QueryHistoryResult.Truncated</c>,
+/// <see cref="DarlingTrendReader.TruncationSlack"/>, <see cref="DarlingTrendReader.DescribeCoverage"/>) keep
+/// their names — the rename is the WIRE key, and <c>McpPayloadContractCensusTests</c> holds it: a bare
+/// <c>truncated</c> published beside <c>effective_hours_back</c> on either SKU is red by name.
 /// </para>
 ///
 /// <para>
@@ -372,7 +389,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
@@ -456,7 +473,10 @@ public sealed class DarlingMcpTrendTools
                 source = history.Source,
                 effective_start = history.EffectiveStartUtc.ToString("o"),
                 effective_hours_back = Math.Round((now - history.EffectiveStartUtc).TotalHours, 1),
-                truncated = history.Truncated,
+                /* #3653 item 17: the WINDOW floor, under its own key. `truncated` on this surface is the page
+                   cut (limit bit); this is the tier's reach falling short of the requested start, and the two
+                   want opposite remedies — see the class remarks and McpHelpers.WindowTruncatedDescription. */
+                window_truncated = history.Truncated,
                 bucket = history.Source == "raw" ? "per-collection" : "1 hour",
                 aggregate_note = aggregated
                     ? "Served from the hourly rollup because the requested window reaches past the raw tier's "
@@ -475,7 +495,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -537,7 +557,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. On the per-collection (raw) route each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -583,7 +603,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -684,7 +704,8 @@ public sealed class DarlingMcpTrendTools
     /// What a tiered trend says about itself beside its points (#2353's vocabulary, applied to the trio by
     /// #3541 A2): which tier served (<c>source</c>), where the served series actually begins
     /// (<c>effective_start</c>, <c>effective_hours_back</c>), whether that head sits later than asked
-    /// (<c>truncated</c>), the grain of a point (<c>bucket</c>), and the prose a degraded tier owes the reader
+    /// (<c>window_truncated</c> — the window floor, not the page dialect's <c>truncated</c>; #3653 item 17), the
+    /// grain of a point (<c>bucket</c>), and the prose a degraded tier owes the reader
     /// (<c>aggregate_note</c>, null on raw). <c>Routing</c> is the Query Store sibling's #2736 seam detail and
     /// is emitted only when the rollup route was taken — the other two have no seam to describe.
     /// </summary>
@@ -702,7 +723,12 @@ public sealed class DarlingMcpTrendTools
                otherwise carry a trailing Z the points do not, which reads as two frames in one payload. */
             envelope["effective_start"] = DateTime.SpecifyKind(EffectiveStartUtc, DateTimeKind.Unspecified).ToString("o");
             envelope["effective_hours_back"] = Math.Round((WindowEndUtc - EffectiveStartUtc).TotalHours, 1);
-            envelope["truncated"] = Truncated;
+            /* The window floor under its own key (#3653 item 17). This was `truncated` until #3653, the same
+               spelling every paged tool uses for its limit biting, and a client that had learned that meaning
+               here read "raise the limit" off a fact no limit changes. Lite's WriteDisclosure writes the same
+               key at the same position; McpPayloadContractCensusTests fails a bare `truncated` beside
+               `effective_hours_back` on either SKU. The C# member stays `Truncated` — the wire key renamed. */
+            envelope["window_truncated"] = Truncated;
             envelope["bucket"] = Bucket;
             envelope["aggregate_note"] = AggregateNote;
             if (Routing is not null)
@@ -732,7 +758,7 @@ public sealed class DarlingMcpTrendTools
     /// <summary>
     /// The routed trio's disclosure for an EMPTY answer: the tier is described from its floor rather than from
     /// a first point it does not have. Where the tier's oldest instant is measured and sits above the requested
-    /// start, that instant is what the read could reach — <c>effective_start</c> says so and <c>truncated</c>
+    /// start, that instant is what the read could reach — <c>effective_start</c> says so and <c>window_truncated</c>
     /// follows <see cref="DarlingTrendReader.TruncationSlack"/>, exactly as it would had a point been there.
     /// Unmeasured, the requested start stands (#2353's rule: an empty result narrows nothing it cannot describe).
     /// A floor beyond the window's END is clamped to the end: the tier held none of the window, and

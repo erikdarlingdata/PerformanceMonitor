@@ -109,7 +109,7 @@ public sealed class DarlingPerformanceTrendsReadTests
             {
                 AssertDisclosureBlock(envelope);
                 Assert.Equal("raw", envelope.GetProperty("source").GetString());
-                Assert.False(envelope.GetProperty("truncated").GetBoolean());
+                Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
             }
 
             /* Not asserted: effective_hours_back on the empty raw answers. It is derived from the store's
@@ -168,7 +168,7 @@ public sealed class DarlingPerformanceTrendsReadTests
                 ScratchPostgres — so raw is also the only tier here), and the series the store held begins
                 at the 20-minutes-ago seed — the unrated first collection, kept since #3541 A12 exactly so
                 effective_start can say so — and the head sits three-plus hours past the requested start,
-                which is what `truncated` means. The point is that the label matches the data rather than
+                which is what `window_truncated` means (the window floor, #3653 item 17). The point is that the label matches the data rather than
                 the request.
             */
             Assert.Equal("raw", procs.GetProperty("source").GetString());
@@ -176,7 +176,7 @@ public sealed class DarlingPerformanceTrendsReadTests
             Assert.Equal(JsonValueKind.Null, procs.GetProperty("aggregate_note").ValueKind);
             Assert.False(procs.TryGetProperty("routing", out _));
             Assert.Equal(procTrend[0].GetProperty("time").GetString(), procs.GetProperty("effective_start").GetString());
-            Assert.True(procs.GetProperty("truncated").GetBoolean());
+            Assert.True(procs.GetProperty("window_truncated").GetBoolean());
             var effectiveHours = procs.GetProperty("effective_hours_back").GetDouble();
             Assert.InRange(effectiveHours, 0.2, 0.5);
 
@@ -241,7 +241,7 @@ public sealed class DarlingPerformanceTrendsReadTests
     internal static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "truncated", "bucket", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());
@@ -302,7 +302,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
 /// <para>Live rather than a string pin because the load-bearing claims are about which RELATION answered
 /// and what it computed: that the rollup-served point is the hour's summed work over the bucket width
 /// (no LAG, so no first-point question at all), that the payload's <c>source</c> / <c>effective_start</c> /
-/// <c>truncated</c> describe the served series rather than the request, and that the empty branch on this
+/// <c>window_truncated</c> describe the served series rather than the request, and that the empty branch on this
 /// route names an unserved head instead of a quiet window. The raw-only read of the SAME fixture is
 /// asserted beside it as the revert-proof: put the raw-only read back and the rates, the point count and
 /// the <c>source</c> word all go red, not just the routing.</para>
@@ -389,7 +389,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Contains("3,600 seconds", queries.GetProperty("aggregate_note").GetString(), StringComparison.Ordinal);
         Assert.StartsWith("2026-03-04T10:00:00", queries.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.Equal(2.0, queries.GetProperty("effective_hours_back").GetDouble());
-        Assert.True(queries.GetProperty("truncated").GetBoolean(), "the served series begins four hours after the requested start");
+        Assert.True(queries.GetProperty("window_truncated").GetBoolean(), "the served series begins four hours after the requested start");
 
         var queryTrend = queries.GetProperty("trend");
         Assert.Equal(2, queryTrend.GetArrayLength());
@@ -466,7 +466,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal("hourly", unserved.GetProperty("source").GetString());
         Assert.StartsWith("2026-03-04T09:00:00", unserved.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.Equal(0.0, unserved.GetProperty("effective_hours_back").GetDouble());
-        Assert.True(unserved.GetProperty("truncated").GetBoolean());
+        Assert.True(unserved.GetProperty("window_truncated").GetBoolean());
 
         /* ── and get_query_trend, the read whose routing the trio now shares, over the same rows: the same
               tier, the same coverage words, the rollup's per-hour sums for the one query. ── */

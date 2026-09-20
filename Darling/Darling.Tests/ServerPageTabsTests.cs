@@ -418,6 +418,29 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
+    /// The query-trend drill-down reads the WINDOW floor off the key the payload publishes it under (#3653 item
+    /// 17: <c>window_truncated</c>, beside <c>effective_hours_back</c>), and not off the page dialect's
+    /// <c>truncated</c> it was spelled as before. This is the one place on the web client that reads the
+    /// window floor, and the failure mode of reading the old key is silent: <c>undefined</c> is falsy, so the
+    /// "history starts N hours back" notice would simply stop appearing while the chart plotted a series that
+    /// begins later than the axis says. The sentence itself is kept word for word; only the key moved. The
+    /// stat tiles that read a bare <c>truncated</c> lower in the file read page cuts and are not this fact.
+    /// </summary>
+    [Fact]
+    public void TheQueryTrendDrillDown_ReadsTheWindowFloorOffItsOwnKey()
+    {
+        var draw = ServerTabsJs.IndexOf("async function drawQueryTrend(", StringComparison.Ordinal);
+        Assert.True(draw >= 0, "drawQueryTrend moved");
+        var end = ServerTabsJs.IndexOf("\n}\n", draw, StringComparison.Ordinal);
+        var body = ServerTabsJs[draw..end];
+
+        Assert.Contains("if (trend.data.window_truncated) {", body, StringComparison.Ordinal);
+        Assert.Contains("trend.data.effective_hours_back", body, StringComparison.Ordinal);
+        Assert.Contains("History for this query starts ", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("trend.data.truncated", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every viz a descriptor names is in the shipped vocabulary. The four kinds are the whole registry; a fifth
     /// would have to be added to panels.js's VIZ, to <c>KnownVizList</c> (or the composer could not offer it), to
     /// derive.js's <c>deriveVizConfig</c> and to the editor's config arms — so a page quietly introducing one

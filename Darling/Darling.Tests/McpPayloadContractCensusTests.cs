@@ -8,11 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -66,10 +69,13 @@ namespace Darling.Tests;
 /// with the reason each keeps its name (a second bound, a source-side cut, the withheld summary, a homonym);
 /// the band canon is one spelling (PascalCase) and every other severity-word literal is rostered with the
 /// vocabulary it actually belongs to; and every statement-terminal literal <c>LIMIT</c> is inventoried. Each
-/// roster is an equality that fails when a spelling appears or disappears without the roster moving.
-/// <b>Residue, stated rather than hidden:</b> <c>truncated</c> carries two facts — the page cut, and on the #2364
-/// trend family and <c>get_query_store_top</c> the WINDOW floor (the store's retention did not reach the whole
-/// window) — and separating them is a rename across a file another lane holds; the PostgreSQL severity-token
+/// roster is an equality that fails when a spelling appears or disappears without the roster moving. The
+/// residue the vocabulary lane left — <c>truncated</c> carrying two facts, the page cut and, on the #2364 trend
+/// family and <c>get_query_store_top</c>, the WINDOW floor (the store's retention did not reach the whole
+/// window) — is resolved by #3653 item 17: the window floor is <c>window_truncated</c> on both SKUs, classified
+/// below as the second bound it is, and <see cref="TheWindowFloor_IsSpelledWindowTruncated_BesideItsReach_AndNeverBareTruncated_OnBothSkus"/>
+/// fails a bare <c>truncated</c> written beside <c>effective_hours_back</c> by file and line.
+/// <b>Residue, stated rather than hidden:</b> the PostgreSQL severity-token
 /// ladder (<c>ok / info_* / warning[_*] / critical_*</c>) is a different vocabulary from the band, and folding
 /// it in is a reshape (band + reason) for the maintainer; <c>shown</c> survives beside an honest total because
 /// four <c>PgTarget*</c> tests read it and that fence stands.</item>
@@ -1113,12 +1119,22 @@ public sealed class McpPayloadContractCensusTests
     /// <item><b>A second bound in the same payload</b> — <see cref="SecondBoundCutKeys"/>: <c>get_blocking</c> /
     /// <c>get_deadlocks</c> under a <c>dedup_key</c> scan the window up to a stated ceiling BEFORE the page is
     /// cut, and the two cuts are two facts a caller acts on differently (raise <c>limit</c>, or narrow the
-    /// window). The second is spelled <c>&lt;bound&gt;_truncated</c>, observed the same way.</item>
+    /// window). The second is spelled <c>&lt;bound&gt;_truncated</c>, observed the same way. <b>The WINDOW
+    /// floor is the other member of this class (#3653 item 17):</b> on the #2364 / #2353 trend family
+    /// (<c>get_query_trend</c>, the duration-trend trio, both SKUs) and on <c>get_query_store_top</c> the bound
+    /// is the store's REACH — the served series begins later than the requested start because the tier that
+    /// answered no longer holds the window's head — published beside <c>effective_start</c> /
+    /// <c>effective_hours_back</c> and observed off the head of the served series against the shared
+    /// ninety-minute slack (<c>DarlingTrendReader.TruncationSlack</c> / <c>McpQueryTools.TruncationSlack</c>),
+    /// not off a <c>cap + 1</c> fetch, because no cap is involved: nothing the caller sends changes it. Until
+    /// #3653 it rode under the page dialect's <c>truncated</c>, and a client that had learned that spelling read
+    /// "raise the limit" off a fact no limit changes. It is <c>window_truncated</c> now, and the census below
+    /// holds the two facts apart rather than trusting the roster alone.</item>
     /// <item><b>The prose beside the flag</b> — <see cref="CutNoteKeys"/>: <c>truncation_note</c> is the
     /// <c>*_note</c> idiom every disclosure on the surface uses, null when nothing was cut. Three tools carry
-    /// it; on <c>get_query_store_top</c> the <c>truncated</c> it explains is the #2364 WINDOW floor (the store's
-    /// raw retention did not reach the whole window) — the same key, a different fact, and the residue this
-    /// classification leaves (see the class summary).</item>
+    /// it; on <c>get_query_store_top</c> the flag it explains is <c>window_truncated</c>, the #2364 WINDOW floor
+    /// (the store's raw retention did not reach the whole window) — the note keeps its name because it is the
+    /// prose for THIS flag and <c>*_note</c> is the idiom, not because the flag is a page cut.</item>
     /// <item><b>Source-side cuts</b> — <see cref="SourceSideCutKeys"/>: the capture, the chain or the text was
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
@@ -1145,12 +1161,14 @@ public sealed class McpPayloadContractCensusTests
     [
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
+            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite)"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
         ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
-            "the prose beside truncated: on get_analysis_findings (both SKUs) the WindowCoveringLimit read cap, observed off a cap + 1 fetch; on get_query_store_top the #2364 window floor — the store's raw retention did not reach the whole requested window"),
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
@@ -1189,9 +1207,17 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] RetiredCutSpellings = ["limit_reached", "history_capped"];
 
     /// <summary>A payload key at initializer indent: <c>name = …</c>, or the shorthand <c>name,</c> alone on
-    /// its line. Keys only — the value side is not read — so a local named <c>truncated</c> assigned in the
-    /// body is counted once, where it is emitted.</summary>
-    private static readonly Regex PayloadKey = new(@"^\s+([a-z][a-z0-9_]*)\s*(?:=(?!=)|,\s*$)", RegexOptions.Compiled | RegexOptions.Multiline);
+    /// its line — or, since #3653 item 17, an ordered-envelope write <c>envelope["name"] = …</c>, the idiom the
+    /// trend disclosure block uses on both SKUs so its data and empty envelopes are built by one method (the
+    /// window floor was invisible to this census while it matched initializers only, which is how the
+    /// homonym survived a roster that read as complete). Keys only — the value side is not read — so a local
+    /// named <c>truncated</c> assigned in the body is counted once, where it is emitted. Group 1 is the
+    /// initializer key, group 2 the envelope key; <see cref="KeyOf"/> reads whichever fired.</summary>
+    private static readonly Regex PayloadKey = new(
+        @"^\s+(?:([a-z][a-z0-9_]*)\s*(?:=(?!=)|,\s*$)|[A-Za-z_][A-Za-z0-9_]*\[""([a-z][a-z0-9_]*)""\]\s*=(?!=))",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    private static string KeyOf(Match key) => key.Groups[1].Success ? key.Groups[1].Value : key.Groups[2].Value;
 
     /// <summary>Every spelling a cut has been given or could plausibly be given next: the fourteen the
     /// inventory found, plus the shapes a new page cut would most likely take (<c>*_reached</c>, <c>*_capped</c>,
@@ -1219,7 +1245,7 @@ public sealed class McpPayloadContractCensusTests
             files++;
             foreach (Match key in PayloadKey.Matches(StripComments(source)))
             {
-                var name = key.Groups[1].Value;
+                var name = KeyOf(key);
                 if (!AboutACut.IsMatch(name))
                 {
                     continue;
@@ -1266,6 +1292,7 @@ public sealed class McpPayloadContractCensusTests
     [Theory]
     [InlineData("truncated", true)]
     [InlineData("scan_truncated", true)]
+    [InlineData("window_truncated", true)]
     [InlineData("limit_reached", true)]
     [InlineData("history_capped", true)]
     [InlineData("cap_hit", true)]
@@ -1320,6 +1347,281 @@ public sealed class McpPayloadContractCensusTests
         Assert.Contains("McpHelpers.BoundPage(runs, RunsReadPerTable)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("history_capped", source, StringComparison.Ordinal);
         Assert.DoesNotContain(">= RunsReadPerTable", source, StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── rule: one vocabulary — the window floor (#3653 item 17) ───────────────────────── */
+
+    /// <summary>
+    /// <b>The window floor is spelled <c>window_truncated</c>, beside its reach, and never bare <c>truncated</c>.</b>
+    /// The roster equality above says <c>window_truncated</c> exists and where; it cannot say that the FACT is
+    /// never published under the page dialect's key again, because a bare <c>truncated</c> is the page dialect
+    /// and the roster permits it everywhere. This census holds the fact apart by its NEIGHBOURS: the window
+    /// floor is the one cut that rides beside <c>effective_hours_back</c> (the #2353 / #2364 reach vocabulary —
+    /// how far back the served series actually begins), and a page cut never does. So the population is
+    /// every block on both SKUs that writes <c>effective_hours_back</c> as a payload key — an anonymous-type
+    /// initializer (<c>get_query_trend</c>, <c>get_query_store_top</c>) or the ordered envelope the trend
+    /// disclosure writes through one method (<c>TrendDisclosure.WriteTo</c> on Darling, <c>WriteDisclosure</c>
+    /// on Lite, serving the duration-trend trio's data AND empty envelopes and Lite's <c>get_query_trend</c>) —
+    /// and inside each such block the flag must be <c>window_truncated</c>, <c>effective_start</c> must stand
+    /// beside it, and <c>truncated</c> must not appear. The block is the innermost brace pair around the reach
+    /// key, found over the walker's strings-blanked text so a brace inside a message cannot open or close it.
+    ///
+    /// <para>Why <c>effective_hours_back</c> and not <c>window_start</c>: <c>get_query_heatmap</c> publishes
+    /// <c>window_start</c> / <c>window_end</c> (the requested axis) beside a bare <c>truncated</c> that IS the page
+    /// dialect — its cell cap, observed off <c>limit + 1</c>, with <c>first_time_bin</c> / <c>last_time_bin</c>
+    /// saying which bins survived. A discriminator on <c>window_start</c> would flag that tool for spelling its
+    /// page cut correctly. The reach vocabulary is the one only the window floor speaks.</para>
+    ///
+    /// <para><see cref="WindowFloorBlocks"/> is an EQUALITY on (file, idiom, count): a new publisher of the
+    /// reach vocabulary fails until it is rostered, and a rostered one that stops publishing fails until the
+    /// roster shrinks. <see cref="WindowFloorTools"/> is the description half — every tool whose payload can
+    /// carry the flag names it through <see cref="McpHelpers.WindowTruncatedDescription"/>, which is executed
+    /// here for the three things it must say (the key, the reach beside it, the wire change), and no other
+    /// tool carries the clause. The two rosters are two halves of one contract and are held separately
+    /// because the trio's four tool bodies reach the envelope through helpers the tool-span slicer does not
+    /// follow. The checker is run on a synthetic offender and a synthetic page cut first, so a matcher that
+    /// stopped matching reads as red, not as a clean sweep.</para>
+    /// </summary>
+    public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
+    [
+        ("DarlingMcpDataTools.cs", "initializer", 1),
+        ("DarlingMcpTrendTools.cs", "envelope", 1),
+        ("DarlingMcpTrendTools.cs", "initializer", 1),
+        ("McpQueryTools.cs", "envelope", 1),
+    ];
+
+    public static readonly (string File, string Tool)[] WindowFloorTools =
+    [
+        ("DarlingMcpDataTools.cs", "get_query_store_top"),
+        ("DarlingMcpTrendTools.cs", "get_procedure_duration_trend"),
+        ("DarlingMcpTrendTools.cs", "get_query_duration_trend"),
+        ("DarlingMcpTrendTools.cs", "get_query_store_duration_trend"),
+        ("DarlingMcpTrendTools.cs", "get_query_trend"),
+        ("McpQueryTools.cs", "get_procedure_duration_trend"),
+        ("McpQueryTools.cs", "get_query_duration_trend"),
+        ("McpQueryTools.cs", "get_query_store_duration_trend"),
+        ("McpQueryTools.cs", "get_query_trend"),
+    ];
+
+    /// <summary>The reach key: the one neighbour only the window floor has.</summary>
+    private const string ReachKey = "effective_hours_back";
+
+    /// <summary>The window-floor spelling, and the page dialect's word it must never wear again in the same block.</summary>
+    private const string WindowFloorKey = "window_truncated";
+    private const string PageCutKey = "truncated";
+
+    /// <summary>
+    /// Every block in <paramref name="source"/> that writes <see cref="ReachKey"/> as a payload key, with the
+    /// idiom it used, the 1-based line of the reach write, and every payload key written in the same block.
+    /// Comments blanked and literals kept for the key match (so <c>envelope["key"]</c> is readable), literals
+    /// blanked for the brace walk (so a message cannot open a block), both at the source's own offsets.
+    /// </summary>
+    internal static List<(string Idiom, int Line, SortedSet<string> Keys)> WindowFloorBlocksIn(string source)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var text = StripCommentsPreservingLength(source, code);
+        var writes = PayloadKey.Matches(text).Select(m => (Match: m, Key: KeyOf(m))).ToList();
+
+        var blocks = new List<(string Idiom, int Line, SortedSet<string> Keys)>();
+        var opened = new HashSet<int>();
+        foreach (var (match, _) in writes.Where(w => w.Key == ReachKey))
+        {
+            /* The match begins at the line's indent (or at a blanked comment line above it — `^\s+` spans them);
+               the key itself is the first non-blank, and that is the offset the brace walk starts from. */
+            var at = match.Index + match.Value.Length - match.Value.TrimStart().Length;
+            var (open, close) = EnclosingBlock(code, at);
+            if (!opened.Add(open))
+            {
+                continue;
+            }
+
+            var keys = new SortedSet<string>(
+                writes.Where(w => w.Match.Index > open && w.Match.Index < close).Select(w => w.Key),
+                StringComparer.Ordinal);
+            var line = text.AsSpan(0, at).Count('\n') + 1;
+            blocks.Add((match.Groups[1].Success ? "initializer" : "envelope", line, keys));
+        }
+
+        return blocks;
+    }
+
+    /// <summary>The innermost <c>{ … }</c> around <paramref name="at"/> in strings-blanked code: back to the
+    /// first unmatched opener, forward to its match.</summary>
+    private static (int Open, int Close) EnclosingBlock(string code, int at)
+    {
+        var depth = 0;
+        var open = -1;
+        for (var i = at; i >= 0; i--)
+        {
+            if (code[i] == '}')
+            {
+                depth++;
+            }
+            else if (code[i] == '{')
+            {
+                if (depth == 0)
+                {
+                    open = i;
+                    break;
+                }
+
+                depth--;
+            }
+        }
+
+        Assert.True(open >= 0, $"no block encloses offset {at}");
+
+        depth = 0;
+        for (var i = open; i < code.Length; i++)
+        {
+            if (code[i] == '{')
+            {
+                depth++;
+            }
+            else if (code[i] == '}' && --depth == 0)
+            {
+                return (open, i);
+            }
+        }
+
+        Assert.Fail($"the block opened at offset {open} never closes");
+        return default;
+    }
+
+    [Fact]
+    public void TheWindowFloor_IsSpelledWindowTruncated_BesideItsReach_AndNeverBareTruncated_OnBothSkus()
+    {
+        var found = new List<(string File, string Idiom, int Line, SortedSet<string> Keys)>();
+        foreach (var (file, source) in ToolSources())
+        {
+            found.AddRange(WindowFloorBlocksIn(source).Select(b => (file, b.Idiom, b.Line, b.Keys)));
+        }
+
+        /* The homonym, by file and line: the window floor wearing the page dialect's spelling. */
+        var bare = found.Where(b => b.Keys.Contains(PageCutKey)).Select(b => $"{b.File}:{b.Line} ({b.Idiom})").ToList();
+        Assert.True(bare.Count == 0,
+            $"the window floor is published as bare `{PageCutKey}` beside `{ReachKey}` — that is the page dialect's word for a limit biting, and this fact is the store's reach; spell it `{WindowFloorKey}` (#3653 item 17): "
+            + string.Join("; ", bare));
+
+        var unspelled = found.Where(b => !b.Keys.Contains(WindowFloorKey)).Select(b => $"{b.File}:{b.Line} ({b.Idiom}) writes [{string.Join(", ", b.Keys)}]").ToList();
+        Assert.True(unspelled.Count == 0,
+            $"a block publishes the reach (`{ReachKey}`) without the window floor (`{WindowFloorKey}`) beside it: " + string.Join("; ", unspelled));
+
+        var unanchored = found.Where(b => !b.Keys.Contains("effective_start")).Select(b => $"{b.File}:{b.Line} ({b.Idiom})").ToList();
+        Assert.True(unanchored.Count == 0,
+            $"`{WindowFloorKey}` says the served head sits later than asked; `effective_start` is where — the block publishes the flag without the instant: " + string.Join("; ", unanchored));
+
+        /* The roster, as an equality on (file, idiom, count): a fifth publisher of the reach vocabulary joins
+           here or fails here. */
+        var census = found
+            .GroupBy(b => (b.File, b.Idiom))
+            .Select(g => (g.Key.File, g.Key.Idiom, g.Count()))
+            .OrderBy(b => b.File, StringComparer.Ordinal).ThenBy(b => b.Idiom, StringComparer.Ordinal)
+            .ToArray();
+        var roster = WindowFloorBlocks
+            .OrderBy(b => b.File, StringComparer.Ordinal).ThenBy(b => b.Idiom, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(roster.SequenceEqual(census),
+            "the window-floor publishers moved: rostered [" + string.Join("; ", roster.Select(r => $"{r.File} {r.Idiom} ×{r.Blocks}"))
+            + "], found [" + string.Join("; ", census.Select(c => $"{c.File} {c.Idiom} ×{c.Item3}")) + "]");
+    }
+
+    /// <summary>The checker on inputs whose verdict is known, so a dead matcher cannot pass as a clean tree: a
+    /// window floor under the page dialect's key is an offender; a page cut with a brace in its message is not
+    /// a window-floor block at all; the envelope idiom is read, and a key written in a nested block counts as
+    /// the enclosing block's (a conditional bare <c>truncated</c> would be no less the homonym).</summary>
+    [Fact]
+    public void TheWindowFloorChecker_FlagsTheHomonym_AndPassesAPageCut()
+    {
+        const string offender = """
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                truncated,
+                queries = result
+            }, McpHelpers.JsonOptions);
+            """;
+        var blocks = WindowFloorBlocksIn(offender);
+        var block = Assert.Single(blocks);
+        Assert.Equal("initializer", block.Idiom);
+        Assert.Equal(6, block.Line);
+        Assert.Contains(PageCutKey, block.Keys);
+        Assert.DoesNotContain(WindowFloorKey, block.Keys);
+
+        const string pageCut = """
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                window_start = windowEnd.AddHours(-hours_back).ToString("o"),
+                note = $"the cap {limit} bit — {cells.Count} of them",
+                cells_returned = cells.Count,
+                truncated,
+            }, McpHelpers.JsonOptions);
+            """;
+        Assert.Empty(WindowFloorBlocksIn(pageCut));
+
+        const string envelope = """
+            public void WriteTo(Dictionary<string, object?> envelope)
+            {
+                envelope["source"] = Source;
+                envelope["effective_start"] = EffectiveStartUtc.ToString("o");
+                envelope["effective_hours_back"] = Math.Round((WindowEndUtc - EffectiveStartUtc).TotalHours, 1);
+                envelope["window_truncated"] = Truncated;
+                if (Routing is not null)
+                {
+                    envelope["routing"] = Routing;
+                }
+            }
+            """;
+        var written = Assert.Single(WindowFloorBlocksIn(envelope));
+        Assert.Equal("envelope", written.Idiom);
+        Assert.Equal(new[] { "effective_hours_back", "effective_start", "routing", "source", "window_truncated" }, written.Keys.ToArray());
+    }
+
+    [Fact]
+    public void EveryWindowFloorTool_CarriesTheSharedClause_AndNoOtherToolDoes()
+    {
+        /* The description half: the attribute text between the tool marker and the method, by source, so Lite's
+           tools are read the same way Darling's are. */
+        var carrying = ToolMethods()
+            .Where(t =>
+            {
+                var method = t.Span.IndexOf("public static", StringComparison.Ordinal);
+                return (method < 0 ? t.Span : t.Span[..method]).Contains("McpHelpers.WindowTruncatedDescription", StringComparison.Ordinal);
+            })
+            .Select(t => (t.File, t.Tool))
+            .OrderBy(t => t.File, StringComparer.Ordinal).ThenBy(t => t.Tool, StringComparer.Ordinal)
+            .ToArray();
+        var roster = WindowFloorTools.OrderBy(t => t.File, StringComparer.Ordinal).ThenBy(t => t.Tool, StringComparer.Ordinal).ToArray();
+        Assert.True(roster.SequenceEqual(carrying),
+            "the tools carrying McpHelpers.WindowTruncatedDescription moved: rostered [" + string.Join(", ", roster.Select(r => $"{r.File}/{r.Tool}"))
+            + "], found [" + string.Join(", ", carrying.Select(c => $"{c.File}/{c.Tool}")) + "]");
+
+        /* The clause itself, executed: the key, the reach beside it, the wire change, and the leading space
+           every appended description constant carries (BaselineDiscontinuities.DescriptionSentence's shape). */
+        var clause = McpHelpers.WindowTruncatedDescription;
+        Assert.StartsWith(" ", clause, StringComparison.Ordinal);
+        Assert.Contains(WindowFloorKey, clause, StringComparison.Ordinal);
+        Assert.Contains("effective_start / effective_hours_back", clause, StringComparison.Ordinal);
+        Assert.Contains("not a page cut", clause, StringComparison.Ordinal);
+        Assert.Contains("spelled truncated before #3653", clause, StringComparison.Ordinal);
+
+        /* And by reflection on the SKU this project can load: the Darling five really do publish the clause in
+           the attribute an MCP client reads, ahead of the discontinuities sentence they end with. */
+        var darling = new[] { typeof(DarlingMcpTrendTools), typeof(DarlingMcpDataTools) }
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            .Select(m => (Name: m.GetCustomAttribute<McpServerToolAttribute>()?.Name, Method: m))
+            .Where(x => x.Name is not null)
+            .ToDictionary(x => x.Name!, x => x.Method.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparer.Ordinal);
+        foreach (var (file, tool) in WindowFloorTools.Where(t => t.File.StartsWith("Darling", StringComparison.Ordinal)))
+        {
+            Assert.True(darling.TryGetValue(tool, out var description), $"{tool} ({file}) is not a Darling MCP tool");
+            Assert.Contains(clause, description!, StringComparison.Ordinal);
+            Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
+        }
     }
 
     /* ───────────────────────── rule: one vocabulary — severity words ───────────────────────── */
