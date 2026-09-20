@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -115,6 +116,47 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("granted memory joined per point", description, StringComparison.Ordinal);
         Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
         Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 A15/A16: the web catalogue's line for get_query_duration_trend said "percentiles". The payload has
+    /// never carried one — <c>SerializeTrend</c>, the helper the duration trio shares, publishes
+    /// <c>elapsed_ms_per_second</c> and <c>executions_per_second</c> per point, a rate over the collection's
+    /// stored interval on the raw route and over the bucket width on the hourly one — and the tool's own
+    /// description has said so since #3541 A12. The catalogue (<see cref="DarlingWebEndpoints.CatalogDescriptors"/>)
+    /// is what the web client's view composer and the reads listing show a human choosing a read, so it was
+    /// the one place a wrong word about this read was still standing. #3696 corrected the line; this pins the
+    /// correction against BOTH ends so they cannot drift apart again: the line names the two rates the
+    /// serializer publishes, the serializer still publishes exactly those, and across the whole catalogue the
+    /// word "percentile" appears only negated — no read here computes one. A read that genuinely returns a
+    /// percentile (none does today) would add itself beside this sentence rather than fall through it.
+    /// </summary>
+    [Fact]
+    public void QueryDurationTrend_CatalogueLine_NamesTheRatesThePayloadCarries_NotPercentiles()
+    {
+        var line = DarlingWebEndpoints.CatalogDescriptors["get_query_duration_trend"].Description;
+        Assert.Contains("ms/sec", line, StringComparison.Ordinal);
+        Assert.Contains("executions/sec", line, StringComparison.Ordinal);
+        Assert.Contains("not percentiles", line, StringComparison.Ordinal);
+
+        /* The payload side: the shared serializer's point projection, and no percentile of anything in it. */
+        var source = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTrendTools.cs"));
+        var at = source.IndexOf("private static string SerializeTrend(", StringComparison.Ordinal);
+        Assert.True(at > 0, "SerializeTrend moved — re-anchor this pin");
+        var end = source.IndexOf("\n    }\n", at, StringComparison.Ordinal);
+        var body = source[at..end];
+        Assert.Contains("elapsed_ms_per_second = p.Value", body, StringComparison.Ordinal);
+        Assert.Contains("executions_per_second = p.ExecutionsPerSecond", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("percentile", body, StringComparison.OrdinalIgnoreCase);
+
+        /* And the whole catalogue: "percentile" only ever as a negation. */
+        var claims = DarlingWebEndpoints.CatalogDescriptors
+            .Where(kv => System.Text.RegularExpressions.Regex.IsMatch(kv.Value.Description, @"(?<!not )percentiles?", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            .Select(kv => kv.Key)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(claims.Length == 0,
+            "catalogue line(s) claim a percentile no read computes: " + string.Join(", ", claims));
     }
 
     [Fact]
