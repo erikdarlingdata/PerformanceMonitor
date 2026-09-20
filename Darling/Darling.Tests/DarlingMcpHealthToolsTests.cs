@@ -134,7 +134,13 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
            SAME ordinal (13) and judged by the SAME DailySummaryRetention.StateFor. */
         Assert.True(sql.IndexOf("AS collection_runs", StringComparison.Ordinal) < sql.IndexOf("AS signal_sources_present", StringComparison.Ordinal),
             "signal_sources_present must trail collection_runs so the positional reads before it stay put");
-        Assert.Equal(DailySummaryRetention.SignalSourceCount, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
+        /* #3653 A6: seven arms still, but the queries arm reads the COUNT (q.c) rather than the day (q.d),
+           because the routed statement's not-carried row carries the day with a NULL count and a day the
+           rollup never carried is not a source that holds the day. Six day-arms plus the one count-arm is the
+           SignalSourceCount; Lite's copy (no rollup tier, no not-carried row) keeps seven day-arms. */
+        Assert.Equal(DailySummaryRetention.SignalSourceCount - 1, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN q\.c IS NULL THEN 0 ELSE 1 END"));
+        Assert.DoesNotContain("CASE WHEN q.d IS NULL THEN 0 ELSE 1 END", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CASE WHEN cl.d IS NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CASE WHEN al.d IS NULL", sql, StringComparison.Ordinal);
         Assert.EndsWith("ORDER BY s.d", sql.TrimEnd(), StringComparison.Ordinal);
@@ -296,9 +302,16 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Contains("days_before_horizon", rangeText, StringComparison.Ordinal);
         Assert.Contains("data_state=purged", rangeText, StringComparison.Ordinal);
         Assert.Contains("NEVER Healthy", rangeText, StringComparison.Ordinal);
+        /* #3653 A6: the null the count can now carry and the list that names its days, on BOTH tools, spelled
+           the same — an agent reading unique_queries=null has to be told it is "not carried" and not "none". */
+        Assert.Contains("unique_queries=null", rangeText, StringComparison.Ordinal);
+        Assert.Contains("days_missing", rangeText, StringComparison.Ordinal);
 
         var single = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_daily_summary");
-        Assert.Contains("data_state=purged", single.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        var singleText = single.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("data_state=purged", singleText, StringComparison.Ordinal);
+        Assert.Contains("unique_queries is null", singleText, StringComparison.Ordinal);
+        Assert.Contains("days_missing", singleText, StringComparison.Ordinal);
         var date = single.GetParameters().Single(p => p.Name == "summary_date");
         Assert.Contains("yyyy-MM-dd ONLY", date.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
     }

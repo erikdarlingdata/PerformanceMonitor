@@ -448,6 +448,49 @@ export function fileIoPanel(server, ctx) {
   return panel;
 }
 
+/**
+ * The Daily Health Calendar (#2484): the desktop viewer's month grid as a table, plus the one disclosure its
+ * rows cannot carry on their own.
+ *
+ * #3653 A6: a day the store's rollup tier never materialized for this server answers `unique_queries: null`
+ * (NOT 0 — the tier did not carry the day; nothing says the server ran no queries) and the read names every
+ * such day in `days_missing[]`. The cell renders that null as "not materialized" through DAILY_RANGE_COLUMNS,
+ * but one blank in one column of a thirty-row grid is easy to read past, so the read's list is rendered as ONE
+ * notice line above the rows. A composite rather than a table() descriptor because table()'s `noteKey` carries
+ * a server-authored STRING (#3278) and this disclosure is a server-authored LIST: the dates are the server's,
+ * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is a fixed
+ * 30 days and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
+ * calendar drawn over six hours is not a calendar.
+ */
+export function dailyCalendarPanel(server) {
+  const { panel, body } = panelShell("Daily Health Calendar", "last 30 days (UTC)");
+  (async () => {
+    const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+
+    const grid = VIZ.table(res.data, {
+      rowsKey: "days",
+      columns: DAILY_RANGE_COLUMNS,
+      emptyText:
+        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+    });
+
+    const missing = Array.isArray(res.data.days_missing) ? res.data.days_missing : [];
+    if (!missing.length) return mount(body, grid);
+    const plural = missing.length === 1 ? "" : "s";
+    mount(body, [
+      noticeStrip(
+        "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+          "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+          " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+      ),
+      grid,
+    ]);
+  })();
+  return panel;
+}
+
 /** Reshape flat rows into per-series points, keeping the top `maxSeries` series by peak value. */
 function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
   const byTime = new Map();
@@ -580,18 +623,9 @@ export const SERVER_TABS = [
       stat("Daily Summary", "get_daily_summary", { server }, DAILY_STATS, "today (UTC)", 2),
       /* #2484: the month range behind the desktop viewer's Performance Calendar. A SECOND read rather than a
          wider get_daily_summary, which is also why it can sit beside the tile above: a tab must not fetch one
-         read twice, so the today tile and the month grid cannot be the same read. The span is a fixed 30 days
-         and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
-         calendar drawn over six hours is not a calendar. */
-      table(
-        "Daily Health Calendar",
-        "get_daily_summary_range",
-        { server, days_back: 30 },
-        "days",
-        DAILY_RANGE_COLUMNS,
-        "last 30 days (UTC)",
-        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one."
-      ),
+         read twice, so the today tile and the month grid cannot be the same read. A composite since #3653 A6
+         (dailyCalendarPanel) so the read's days_missing[] can be rendered as one line above the grid. */
+      dailyCalendarPanel(server),
     ],
   },
 
@@ -2283,7 +2317,17 @@ const DAILY_RANGE_COLUMNS = [
   { key: "health_band", label: "Band" },
   { key: "top_wait_type", label: "Top wait" },
   { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
-  { key: "unique_queries", label: "Unique queries", format: "int" },
+  /* #3653 A6: null is "not carried at this tier" (the rollup never materialized this server's day), which is
+     the opposite claim from 0 and from the page's "—" ("there was none of this"), so it gets its own words;
+     dailyCalendarPanel lists the same days above the grid from the read's days_missing[]. */
+  {
+    key: "unique_queries",
+    label: "Unique queries",
+    render: (row) =>
+      row.unique_queries == null
+        ? el("span", { class: "muted", title: "The rollup tier that answers this day never materialized it for this server; the day is listed above the grid." }, ["not materialized"])
+        : document.createTextNode(Number(row.unique_queries).toLocaleString(undefined, { maximumFractionDigits: 0 })),
+  },
   { key: "blocking_events", label: "Blocking", format: "int" },
   { key: "max_block_duration_ms", label: "Peak block", format: "ms" },
   { key: "deadlock_count", label: "Deadlocks", format: "int" },

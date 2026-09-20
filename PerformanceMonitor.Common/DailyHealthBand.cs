@@ -532,18 +532,31 @@ namespace PerformanceMonitor.Common
         /// The day-detail key-metrics one-liner from a day's roll-up: top wait type, high-CPU sample count,
         /// total wait time, and unique query count. Formatting lives here (shared by both apps, unit-testable)
         /// so the two hosts render the line identically.
+        ///
+        /// <para>#3653 A6: <paramref name="uniqueQueries"/> is <c>null</c> when the store's rollup tier never
+        /// carried the day for this server (Darling's routed calendar; Lite always hands a count), and the line
+        /// says <see cref="UniqueQueriesNotMaterialized"/> rather than printing 0 — a skipped day is not a quiet
+        /// one, and this line is the only place either calendar renders the count.</para>
         /// </summary>
-        public static string BuildKeyMetricsLine(string? topWaitType, long highCpuEvents, decimal totalWaitSeconds, long uniqueQueries)
+        public static string BuildKeyMetricsLine(string? topWaitType, long highCpuEvents, decimal totalWaitSeconds, long? uniqueQueries)
         {
             var wait = string.IsNullOrWhiteSpace(topWaitType) ? "none" : topWaitType;
             var totalWait = totalWaitSeconds < 1000
                 ? totalWaitSeconds.ToString("N1", CultureInfo.InvariantCulture) + " s"
                 : (totalWaitSeconds / 60).ToString("N1", CultureInfo.InvariantCulture) + " min";
+            var queries = uniqueQueries is { } count
+                ? count.ToString("N0", CultureInfo.InvariantCulture)
+                : UniqueQueriesNotMaterialized;
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Unique queries: {3:N0}",
-                wait, highCpuEvents, totalWait, uniqueQueries);
+                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Unique queries: {3}",
+                wait, highCpuEvents, totalWait, queries);
         }
+
+        /// <summary>What the key-metrics line prints for a day whose query count the rollup tier did not carry
+        /// (#3653 A6) — the desktop twin of the wire's <c>unique_queries: null</c> + <c>days_missing</c>. Not
+        /// "0" and not a dash: the dash is the grids' "there was none of this", which is the opposite claim.</summary>
+        public const string UniqueQueriesNotMaterialized = "not materialized at this tier";
 
         /// <summary>The non-empty per-signal lines for a collected day (no terminal "quiet"/"no-data" handling —
         /// callers add their own). The order matches the tooltip; the blocking line carries the peak block

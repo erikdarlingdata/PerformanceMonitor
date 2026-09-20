@@ -219,6 +219,23 @@ public sealed class RetentionTierRouterTests
         Assert.True(unionAt > rollupReadAt && rawReadAt > unionAt, "the raw half is the UNION ALL tail, after the rollup half");
         Assert.True(tailGateAt > rawReadAt, "the raw half must be gated to the days past the ceiling, or a day gets two rows");
 
+        /* #3653 A6: the THIRD member — the days at or below the ceiling the rollup holds no row for while its
+           source still holds admitted rows — emits the day with a NULL count, after the raw tail, gated on the
+           same ceiling from the other side (b.d < last_day + 1 day) so no day can be both "past the ceiling,
+           answered from raw" and "below it, not carried". Its two probes are the hole scan's, per server: NOT
+           EXISTS on the routed relation, EXISTS on the relation's registered SOURCE (the daily's is the legacy
+           hourly it is hierarchical from; the hourly's is raw query_stats, read as collect.query_stats and not
+           through the passthrough view, so the raw-read count above stays one). DailySummaryNotCarriedTests
+           carries the rest of this member's pins; this one holds the ORDER and the gate. */
+        var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
+        var notCarriedGateAt = sql.IndexOf("AND b.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
+        Assert.True(notCarriedAt > tailGateAt, "the not-carried member is the last UNION ALL member, after the raw tail");
+        Assert.True(notCarriedGateAt > notCarriedAt, "the not-carried member is gated to the days at or below the ceiling");
+        Assert.Contains($"SELECT 1 FROM collect.{expectedRelation} AS r", sql[notCarriedAt..], StringComparison.Ordinal);
+        var expectedSource = tier == RetentionTier.Daily ? TimescaleSupport.QueryStatsHourlyView : "query_stats";
+        Assert.Contains($"SELECT 1 FROM collect.{expectedSource} AS s", sql[notCarriedAt..], StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+
         /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })
         {

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -141,7 +142,14 @@ public static class DailySummarySql
             s.d AS day,
             COALESCE(w.total_wait_sec, 0) AS total_wait_sec,
             w.top_wait_type,
-            COALESCE(q.c, 0) AS unique_queries,
+            /* #3653 A6: the count when the queries CTE holds the day with one, 0 when it does not hold the day,
+               and NULL when it holds the day WITHOUT a count — the routed form's "not carried at this tier" row
+               (QueriesCteForCagg's third member). On raw the CTE never produces a NULL count (a COUNT is never
+               NULL), so here this is the old COALESCE-to-zero by another spelling, and the spelling is what lets one
+               outer select serve every tier without a second projection swap. Measurement contract rule 1
+               (MeasurementContractCensusTests): what was not measured is NULL, never 0 — the daily calendar
+               is an instance of it. The readers keep the NULL (long?) and name the day in days_missing[]. */
+            CASE WHEN q.d IS NULL THEN 0 ELSE q.c END AS unique_queries,
             COALESCE(dl.c, 0) AS deadlock_count,
             COALESCE(NULLIF(b.c, 0), dm.c, 0) AS blocking_events,
             COALESCE(cp.c, 0) AS high_cpu_events,
@@ -164,9 +172,14 @@ public static class DailySummarySql
                past the horizon is a purged shell, some sources past it is a day the purge has not reached.
                A source counts as present when its grouped CTE produced a row for the day, which for cpu is
                "any sample" (the FILTER is inside the aggregate) and for waits is "any positive delta".
-               Appended LAST, after collection_runs, for the same ordinal reason. */
+               Appended LAST, after collection_runs, for the same ordinal reason.
+               #3653 A6: the queries arm reads the COUNT rather than the day, because the routed form's
+               not-carried row (QueriesCteForCagg) carries the day with a NULL count — the rollup holds no row
+               for that day, so it is not a source that holds the day, and counting it present would turn a
+               purged shell whose one surviving "signal" is a day the tier never carried into past_horizon.
+               On raw a queries row always carries a count, so the two spellings agree there. */
             (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN q.d IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN q.c IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
@@ -222,13 +235,76 @@ public static class DailySummarySql
     /// hourly tier's ceiling day reads its own partial rollup rather than a mix. Bounded by shape: the ceiling
     /// is one indexed <c>max(bucket)</c> per server and the raw half is at most two days of one server.</para>
     ///
-    /// <para><b>What this does NOT do.</b> A day the rollup skipped BELOW its ceiling (the un-materialized
-    /// tail a &gt;24 h outage leaves, see <c>RetentionTierRouter</c>) still has no row and still prints 0; the
-    /// honest answer there is NULL ("not carried at this tier", contract rule 5), and that is a payload-shape
-    /// change — the reader, the model, the MCP tool and both calendars — which belongs to the census lane's
-    /// vocabulary rather than to a Storage-only edit. Lite's twin has no rollup tier and is untouched.</para>
+    /// <para><b>The days the rollup skipped BELOW its ceiling are NULL, not 0 (#3653 A6, the last clause).</b>
+    /// A day at or below this server's ceiling for which the rollup holds no row was, until this, a day the
+    /// LEFT JOIN missed and the outer select printed as <c>unique_queries = 0</c> beside that day's real wait,
+    /// CPU and deadlock numbers. Zero says "measured, nothing ran"; what happened is that the tier never
+    /// materialized the day. The shape that leaves such a day is the one <see cref="RetentionTierRouter"/>'s
+    /// essay and <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/> describe: a service down longer
+    /// than a refresh policy's <c>start_offset</c> resumes with a refresh that opens at <c>now - start_offset</c>,
+    /// and every bucket between the last pre-outage refresh's window end and the outage is skipped for good
+    /// unless something refreshes it by hand. #3731 does exactly that at the next service start, so the case is
+    /// rarer than it was and not gone: between the first post-resume policy refresh (which moves the ceiling
+    /// past the skipped days and makes them "below" it) and the next start, and for any hole past the
+    /// per-start cap, the calendar still reads the skipped day. The honest answer is NULL — "not carried at
+    /// this tier" — which is the measurement contract's rule 1 (what was not measured is NULL, never 0;
+    /// <c>MeasurementContractCensusTests</c>) applied to a calendar cell.</para>
+    ///
+    /// <para><b>The witness is the hole scan's own definition, per server, at day grain — not a second
+    /// one.</b> <see cref="TimescaleSupport.MaterializationHoleScanSql"/> calls a bucket a hole when the
+    /// materialization holds NO row for it AND the aggregate's SOURCE holds at least one row in it that the
+    /// aggregate's own <c>WHERE</c> admits. The third member of the <c>queries</c> CTE asks the same two
+    /// questions of every day at or below the ceiling, with <c>server_id = $1</c> on both probes (this is one
+    /// server's calendar) and the day as the bucket: no rollup row for this server that day, and a source row
+    /// for this server that day the aggregate would have produced output from. The source, its time column
+    /// and its filter are read off <see cref="TimescaleSupport.MaterializationHoleTargets"/> — the repair's own
+    /// target list — so the daily tier probes <c>query_stats_hourly</c> (its hierarchical source, 90 days),
+    /// the hourly tier probes raw <c>query_stats</c> (4 days), and the interval-honest successor's probe
+    /// carries <c>sample_interval_seconds IS DISTINCT FROM 0</c> (<see cref="TimescaleSupport.MaterializationHoleSourceFilterFor"/>)
+    /// so a day holding only restart rows is not called a hole. The second probe is what keeps the disclosure
+    /// honest where the raw table was simply empty: a server that ran nothing that day has no source row, no
+    /// rollup row, and is not named — its 0 is what raw would have said. It also bounds what this can see: a
+    /// day whose source rows the purge has already taken is undecidable by any witness and reads as it did;
+    /// on the daily tier that is a day older than the hourly's 90 days, which is also the alert log's horizon —
+    /// the longest-lived spine source — so such a day is at most a boundary-day shell, already banded NoData
+    /// by its retention state. A day BELOW the relation's floor that the source still holds
+    /// (the straddle the router's essay accepts "with no signal to the caller") answers the same two probes
+    /// the same way, so this is also that reader's partial-coverage notice, for as long as the source holds
+    /// the day. Each probe is one index range per day — the materialization's <c>(server_id, bucket)</c>
+    /// group index, the source's <c>(server_id, time)</c> index — over a series of at most a year of days, so
+    /// the cost follows the window's length and not the tables' weight, the scan's own argument.</para>
+    ///
+    /// <para><b>A bucket holding zero distinct hashes is not a case.</b> The rollup groups by <c>query_hash</c>,
+    /// so a bucket exists only where a source row did, and every bucket carries at least one hash: a row in the
+    /// rollup half of this CTE always has <c>c &gt;= 1</c>. "Carried with a count of 0" cannot occur, which is
+    /// why the not-carried row can be told apart by <c>c IS NULL</c> alone and needs no flag column. The outer
+    /// select projects <c>CASE WHEN q.d IS NULL THEN 0 ELSE q.c END</c> so the NULL survives the join; the
+    /// readers keep it as <c>long?</c> and list the day in <c>days_missing[]</c>. The day joins the spine
+    /// through <c>queries</c> like any other, so it is printed — its source proves it was collected — and its
+    /// presence arm reads the count, not the day, so it is not counted as a source that holds the day.</para>
+    ///
+    /// <para>Lite's twin has no rollup tier: its calendar reads raw DuckDB, where every day inside retention is
+    /// the source itself, and is untouched.</para>
     /// </summary>
-    private static string QueriesCteForCagg(string relation) => $"""
+    private static string QueriesCteForCagg(string relation)
+    {
+        /* The repair's own target row for this relation: the source it aggregates, that source's time column and
+           the CREATE its filter is read from. Looked up rather than restated so the calendar's idea of "what the
+           rollup reads" cannot drift from the scan's. A relation the registry does not know is refused here,
+           before it reaches the store as a 42P01. */
+        var target = TimescaleSupport.MaterializationHoleTargets
+            .FirstOrDefault(t => string.Equals(t.View, relation, StringComparison.Ordinal));
+        if (target.View is null)
+        {
+            throw new ArgumentException(
+                $"'{relation}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                nameof(relation));
+        }
+
+        var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
+        var sourceFilter = filter.Length == 0 ? string.Empty : $"\n          AND {filter}";
+
+        return $"""
         queries_ceiling AS (
             SELECT date_trunc('day', max(bucket)) AS last_day
             FROM collect.{relation}
@@ -245,8 +321,26 @@ public static class DailySummarySql
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
               AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
             GROUP BY 1
+            UNION ALL
+            /* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
+               source still holds rows the rollup's own WHERE admits -- "not carried at this tier". One row per
+               such day with a NULL count; the outer select passes it through as unique_queries = NULL and the
+               readers list the day in days_missing[]. The two probes are the hole scan's
+               (TimescaleSupport.MaterializationHoleScanSql, the #3731 repair), per server, at day grain. A day
+               the source has no admitted row for is not named: the rollup is honestly empty there. */
+            SELECT b.d, NULL::bigint AS c
+            FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS b(d)
+            WHERE b.d < $3
+              AND b.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+              AND NOT EXISTS (
+                SELECT 1 FROM collect.{relation} AS r
+                WHERE r.server_id = $1 AND r.bucket >= b.d AND r.bucket < b.d + INTERVAL '1 day')
+              AND EXISTS (
+                SELECT 1 FROM collect.{target.Source} AS s
+                WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'{sourceFilter})
         ),
         """;
+    }
 
     /// <summary>
     /// #1661: the daily summary SQL for <paramref name="tier"/>. Raw returns the frozen constant untouched; a
@@ -266,6 +360,12 @@ public static class DailySummarySql
     /// parameterised: the daily has no successor (it is hierarchical from the legacy hourly —
     /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). The one-argument form keeps the legacy for
     /// callers that have not probed, which is what every pre-#3653 pin reads.
+    ///
+    /// <para>#3653 A6: the routed text differs between the legacy and the successor in the relation name AND in
+    /// the not-carried probe's source filter — the successor's own <c>WHERE</c>, read off its CREATE — so the
+    /// two are no longer one text with a name swapped; <c>IntervalHonestHourlyRollupTests</c> pins both
+    /// differences and nothing else. A <paramref name="hourlyRelation"/> that is not a registered continuous
+    /// aggregate is refused with an <see cref="ArgumentException"/> rather than sent to the store.</para>
     /// </summary>
     public static string RangeSqlFor(RetentionTier tier, string hourlyRelation)
     {

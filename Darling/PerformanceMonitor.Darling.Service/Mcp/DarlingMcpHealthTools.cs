@@ -88,7 +88,7 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows - the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded - banded on the counts as read, which are measurements there; the collection-error share has no denominator). unique_queries is null (NOT 0) when the rollup tier that answers a day older than the raw window never materialized this server's day while the rollup's source still holds the day's rows - 'not carried at this tier', not 'no queries ran' - and days_missing names that day (empty otherwise); the service repairs such a day at its next start, and the band does not read this count.")]
     public static async Task<string> GetDailySummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -167,6 +167,12 @@ public sealed class DarlingMcpHealthTools
                    its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
                 collection_runs = row.CollectionRuns,
                 blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                /* #3653 A6, additive and trailing: the ONE key name the range tool spells the same way. A
+                   unique_queries of null above means the rollup tier never carried this day for this server
+                   (DarlingHealthReader.DailySummaryReadRow says what that is); this names the day so a caller
+                   reading the null has the disclosure beside it rather than only in the description. Empty on
+                   every carried day, which is every raw-tier day. */
+                days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString("yyyy-MM-dd") } : Array.Empty<string>(),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -175,7 +181,7 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION — INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do — the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy — a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record — it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict.")]
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went - scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION - INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do - the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy - a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record - it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict. A window older than the raw query window answers unique_queries from a rollup tier; a day that tier never materialized for this server while the rollup's source still holds the day's rows carries unique_queries=null (NOT 0 - 'not carried at this tier', not 'no queries ran') and is listed in days_missing (empty when every day was carried); the service repairs such days at its next start, and the band does not read this count.")]
     public static async Task<string> GetDailySummaryRange(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -282,6 +288,12 @@ public sealed class DarlingMcpHealthTools
                     collection_runs = row.CollectionRuns,
                     blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
                 }),
+                /* #3653 A6, additive and TRAILING: the days whose unique_queries above is null — the rollup
+                   tier that answered this window never carried them for this server while its source still
+                   holds their rows (DarlingHealthReader.DailySummaryRangeReadResult.DaysMissing derives the
+                   list from the rows, so it cannot disagree with the nulls). Empty when every day was carried,
+                   which is every raw-tier window. One key name, spelled the same on get_daily_summary. */
+                days_missing = range.DaysMissing.Select(day => day.ToString("yyyy-MM-dd")),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

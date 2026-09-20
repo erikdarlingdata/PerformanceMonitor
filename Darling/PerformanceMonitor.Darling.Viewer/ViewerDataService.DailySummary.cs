@@ -161,7 +161,11 @@ public sealed partial class ViewerDataService
             SummaryDate = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
             TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
             TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            UniqueQueries = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
+            /* #3653 A6: a NULL unique_queries is the routed statement's "not carried at this tier" (the rollup
+               never materialized this server's day while its source still holds the rows) and is KEPT as null
+               — the 0L this used to substitute drew a measured-zero on the day-detail panel for a day the tier
+               skipped. The MCP reader (DarlingHealthReader) makes the same read at the same ordinal. */
+            UniqueQueries = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
             DeadlockCount = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
             BlockingEvents = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
             HighCpuEvents = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
@@ -200,7 +204,12 @@ public class DailySummaryRow
     public DateTime ReferenceUtc { get; set; } = DateTime.UtcNow;
     public decimal TotalWaitTimeSec { get; set; }
     public string TopWaitType { get; set; } = "";
-    public long UniqueQueries { get; set; }
+
+    /// <summary>Distinct queries seen that day, or <c>null</c> when the rollup tier that answered the window
+    /// never carried this server's day (#3653 A6) — "not materialized", which the day-detail panel renders as
+    /// such rather than as 0. Lite's row keeps <c>long</c>: it has no rollup tier, so raw is always the
+    /// source, and a day inside retention is measured by construction.</summary>
+    public long? UniqueQueries { get; set; }
     public long DeadlockCount { get; set; }
     public long BlockingEvents { get; set; }
     public long HighCpuEvents { get; set; }
