@@ -48,7 +48,7 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_databaseGrowthStatic = new(
         Headline: "A database has grown past the line across the fourteen-day lookback",
         Investigation:
-            "pg_database_size_stats samples every database's pg_database_size() hourly, and the instance total beside it. " +
+            "pg_database_size_stats samples every database's size hourly (the engine's own per-database size figure), and the instance total beside it. " +
             "This finding is a TREND, never a spot size: the latest size against the earliest sample inside a fourteen-day " +
             "lookback ending at the analysis window, graded only when the growth is both at least 1 GB and at least 10 % of " +
             "where the database started (25 % and 10 GB is the critical line). Both lines are chosen, not measured — the " +
@@ -189,7 +189,7 @@ public static partial class PgTargetAdvice
         {
             case PgTargetScorer.GrowthReasonAllUnsized:
                 headline = "No database's size could be read in the lookback — the monitoring role may size none of them";
-                inv.Append("Every row carried size_bytes NULL: pg_database_size() requires CONNECT on the database or membership in pg_read_all_stats, and the collector writes NULL rather than failing where the role has neither. ");
+                inv.Append("Every row carried size_bytes NULL: sizing a database requires CONNECT on it or membership in pg_read_all_stats, and the collector writes NULL rather than failing where the role has neither. ");
                 rem.Append("Grant the monitoring role pg_read_all_stats (or CONNECT on each database it should size); the hourly collector's next samples then carry sizes and the trend begins from there. Counter-objective: the role can read every database's statistics. ");
                 break;
             default:

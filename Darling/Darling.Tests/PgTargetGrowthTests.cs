@@ -399,7 +399,10 @@ public sealed class PgTargetGrowthTests
         Assert.Contains("total_bytes - LAG(total_bytes) OVER series AS raw_growth_bytes", window, StringComparison.Ordinal);
         Assert.Contains("GREATEST(raw_growth_bytes, 0)::DOUBLE PRECISION * 86400.0 / interval_sec AS bytes_per_day", window, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2 - INTERVAL '2 hours'", window, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time >= $2\n", window, StringComparison.Ordinal);
+        /* The in-window filter on the rated CTE — matched newline-insensitively, because the literal is CRLF on a Windows
+           checkout and LF on this one. Two occurrences: the reach-back bound and the in-window filter. */
+        Assert.Matches(new Regex(@"AND   collection_time >= \$2\r?\n"), window);
+        Assert.Equal(2, Regex.Matches(window, @"collection_time >= \$2\b").Count);
         Assert.Contains("AVG(bytes_per_day) AS mean_bytes_per_day", window, StringComparison.Ordinal);
 
         /* The pair gate, by text: peak AND mean handed to the gate. */
