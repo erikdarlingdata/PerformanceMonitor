@@ -8,9 +8,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -218,6 +216,100 @@ public sealed class MaterializationHoleRepairTests
         Assert.Equal(1, CountOf(worker, "TimescaleSupport.RepairMaterializationHolesAsync("));
     }
 
+    /// <summary>
+    /// #3756: the ONE summary line per start is the worker's and it is UNCONDITIONAL. The lie this pins
+    /// against: the pass's first cut wrote a summary only when it had repaired, deferred or failed something
+    /// (Debug otherwise), so on the first store to carry it a zero-hole start, a start whose scan threw before
+    /// its first probe and a start that never reached the scan all left the same absence. Source-order pins,
+    /// the shape of the launch pin above: the runner takes the returned tally, and the very next statement is
+    /// the INFORMATION line — no <c>if</c> between them — naming every count the tally carries; the
+    /// cancellation arm writes its own, different line and rethrows; and the pass writes NO summary of its own
+    /// any more, so a start cannot get two. The tally the line reports is pinned live in
+    /// <see cref="MaterializationHoleRepairLiveTests"/> on a zero-hole pass and on a straddled one.
+    /// </summary>
+    [Fact]
+    public void Worker_WritesTheSummaryLine_Unconditionally_AndThePassWritesNoneOfItsOwn()
+    {
+        var worker = ReadWorkerSource();
+
+        var runnerAt = worker.IndexOf("private async Task RunMaterializationHoleRepairAsync(", StringComparison.Ordinal);
+        Assert.True(runnerAt > 0, "the runner must still exist under its name");
+        var runner = worker.Substring(runnerAt, worker.IndexOf("private void ReconcileSweepGate(", runnerAt, StringComparison.Ordinal) - runnerAt);
+
+        var callAt = runner.IndexOf("var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);", StringComparison.Ordinal);
+        var lineAt = runner.IndexOf("_logger.LogInformation(", StringComparison.Ordinal);
+        var templateAt = runner.IndexOf("\"TimescaleDB: materialization hole scan (#3653 Q10) — {Scanned} aggregate(s) walked", StringComparison.Ordinal);
+        Assert.True(callAt > 0, "the runner must take the returned tally, not discard it");
+        Assert.True(lineAt > callAt, "the summary line follows the call");
+        Assert.True(templateAt > lineAt, "the first INFORMATION line after the call is the summary");
+
+        /* UNCONDITIONAL: nothing between the call and the line decides whether to write it. A bare `if (`
+           anywhere in that span is the regression this pin exists for. */
+        var between = runner.Substring(callAt, lineAt - callAt);
+        Assert.DoesNotContain("if (", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("return;", between, StringComparison.Ordinal);
+
+        /* Every count the tally carries is named, and the elapsed is the pass's own. */
+        var template = runner.Substring(templateAt, runner.IndexOf("\",", templateAt, StringComparison.Ordinal) - templateAt);
+        foreach (var placeholder in new[] { "{Scanned}", "{Skipped}", "{HolesFound}", "{BucketsFound}", "{HolesRepaired}", "{BucketsRepaired}", "{Forced}", "{HolesDeferred}", "{BucketsDeferred}", "{Remaining}", "{Failures}", "{ElapsedMs}" })
+        {
+            Assert.Contains(placeholder, template, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("deferred past the cap", template, StringComparison.Ordinal);
+        Assert.Contains("isolated failure(s)", template, StringComparison.Ordinal);
+        Assert.Contains("summary.Elapsed.TotalMilliseconds", runner, StringComparison.Ordinal);
+
+        /* The third absence: a scan cut short by shutdown writes its own, DIFFERENT line and rethrows so the
+           drain still sees the cancellation it was written for. */
+        var cancelAt = runner.IndexOf("catch (OperationCanceledException)", StringComparison.Ordinal);
+        Assert.True(cancelAt > lineAt, "the cancellation arm follows the summary line");
+        var cancelArm = runner.Substring(cancelAt, runner.IndexOf("catch (Exception ex)", cancelAt, StringComparison.Ordinal) - cancelAt);
+        Assert.Contains("was cancelled before it could report", cancelArm, StringComparison.Ordinal);
+        Assert.Contains("throw;", cancelArm, StringComparison.Ordinal);
+
+        /* And the connection-open / outside-isolation failure keeps its WARNING, so all three outcomes of a
+           launched scan differ from one another and from the absence a never-launched scan leaves. */
+        Assert.Contains("Materialization-hole repair could not run", runner, StringComparison.Ordinal);
+
+        /* The pass itself no longer writes a summary: one owner, one line per start. The per-hole, per-deferral
+           and per-failure lines stay — they are the detail the summary counts. */
+        var storage = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.MaterializationHoles.cs");
+        Assert.DoesNotContain("aggregate(s) scanned", storage, StringComparison.Ordinal);
+        Assert.DoesNotContain("no holes.", storage, StringComparison.Ordinal);
+        Assert.Contains("passClock.Elapsed", storage, StringComparison.Ordinal);
+        Assert.Contains("holesFound += ranges.Count;", storage, StringComparison.Ordinal);
+        Assert.Contains("bucketsFound += holes.Count;", storage, StringComparison.Ordinal);
+        Assert.Contains("had {Buckets} bucket(s) in [{Start}, {End})", storage, StringComparison.Ordinal);
+        Assert.Contains("left for the next start", storage, StringComparison.Ordinal);
+        Assert.Contains("could not scan or repair {View} this start", storage, StringComparison.Ordinal);
+    }
+
+    /// <summary>The tally's shape is the line's shape: every count the worker names is a member, and the
+    /// straddle arithmetic the record's summary states holds on a hand-built instance — so a reader of the
+    /// line can be told, from a pin rather than prose, how found relates to repaired and deferred.</summary>
+    [Fact]
+    public void TheTally_CarriesEveryCountTheLineNames_AndStatesTheStraddleArithmetic()
+    {
+        /* One 26-bucket hole under a 24-bucket cap: found once, repaired 24, deferred 2 — the buckets add up,
+           the ranges do not (the split counts on both sides). */
+        var straddled = new TimescaleSupport.MaterializationHoleRepairSummary(
+            AggregatesScanned: 5, AggregatesSkipped: 18, HolesFound: 1, BucketsFound: 26, HolesRepaired: 1, BucketsRepaired: 24,
+            HolesDeferred: 1, BucketsDeferred: 2, HolesRemaining: 0, Failures: 0, HolesForced: 0, Elapsed: TimeSpan.FromMilliseconds(1234));
+
+        Assert.Equal(straddled.BucketsFound, straddled.BucketsRepaired + straddled.BucketsDeferred);
+        Assert.Equal(straddled.HolesFound + 1, straddled.HolesRepaired + straddled.HolesDeferred);
+        Assert.Equal(1234, (long)straddled.Elapsed.TotalMilliseconds);
+
+        /* Zero-hole: every count zero except the walk itself, and the elapsed still carries the cost of proving
+           it — the shape the worker's line reports on the start the issue was filed about. */
+        var zero = straddled with { HolesFound = 0, BucketsFound = 0, HolesRepaired = 0, BucketsRepaired = 0, HolesDeferred = 0, BucketsDeferred = 0 };
+        Assert.Equal(0, zero.BucketsFound);
+        Assert.Equal(zero.BucketsFound, zero.BucketsRepaired + zero.BucketsDeferred);
+        Assert.Equal(5, zero.AggregatesScanned);
+        Assert.True(zero.Elapsed > TimeSpan.Zero);
+    }
+
     private static int CountOf(string text, string needle)
     {
         var count = 0;
@@ -229,18 +321,11 @@ public sealed class MaterializationHoleRepairTests
         return count;
     }
 
-    private static string ReadWorkerSource([CallerFilePath] string thisFile = "")
-    {
-        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.False(dir is null, "could not locate the repo root from the test source path");
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
+    /// <summary>The worker's source, raw — every anchor here sits on one line. Through <see cref="RepoFile"/>
+    /// rather than a private root walk (#3756 retired this file's own; RepoFileAdoptionTests says why one
+    /// authority).</summary>
+    private static string ReadWorkerSource() =>
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 }
 
 /// <summary>
@@ -347,6 +432,13 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Equal(0, summary.Failures);
         Assert.True(summary.AggregatesScanned >= 1);
 
+        /* #3756: the tally the worker's one summary line reports, on a pass that found something — found is
+           what the scan saw before the cap, and buckets found is exactly what was repaired plus deferred. */
+        Assert.Equal(1, summary.HolesFound);
+        Assert.Equal(2, summary.BucketsFound);
+        Assert.Equal(summary.BucketsFound, summary.BucketsRepaired + summary.BucketsDeferred);
+        Assert.True(summary.Elapsed > TimeSpan.Zero, "the pass times itself");
+
         /* THE OUTAGE SHAPE CLOSES ON THE PLAIN REFRESH — the engine logged the skipped region as invalid when
            the post-resume refresh advanced the threshold past it. Pinned, because the first cut of the pass
            assumed the opposite; if a TimescaleDB ever stops doing this the forced path still closes it and this
@@ -355,7 +447,10 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Contains($"{view} had 2 bucket(s) in [{H(3):O}, {H(5):O})", log.Joined, StringComparison.Ordinal);
         Assert.Contains("one refresh over exactly those bounds closed it", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("a plain refresh left it standing", log.Joined, StringComparison.Ordinal);
-        Assert.Contains("(0 needed the forced refresh)", log.Joined, StringComparison.Ordinal);
+        /* #3756: the pass writes NO summary of its own any more — the worker's unconditional line is the one
+           owner — so the forced count is read off the tally above, not off a line. */
+        Assert.DoesNotContain("needed the forced refresh", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("aggregate(s) scanned", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("still shows", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("left for the next start", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("could not scan or repair", log.Joined, StringComparison.Ordinal);
@@ -364,10 +459,27 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Equal(new[] { H(0), H(1), H(2), H(3), H(4), H(9), H(10) }, await MaterializedBucketsAsync(connection, view, ct));
         Assert.Empty(await ScanAsync(connection, target, materialization.Value, H(0), H(10), ct));
 
-        /* A second pass finds nothing to do. */
-        var again = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, DateTime.UtcNow, ct);
+        /* A second pass finds nothing to do — and (#3756) STILL RETURNS THE WALK: this is the zero-hole tally
+           the worker's line reports on the start the issue was filed about. The aggregates were probed (scanned
+           is not zero), nothing was found, nothing repaired, nothing deferred, nothing failed, and the elapsed
+           carries the cost of proving it. A pass that fell silent here would read the same as one that never
+           ran; a pass that returns this cannot. */
+        var quietLog = new CapturingTestLogger();
+        var again = await TimescaleSupport.RepairMaterializationHolesAsync(connection, quietLog, DateTime.UtcNow, ct);
         Assert.Equal(0, again.HolesRepaired);
         Assert.Equal(0, again.Failures);
+        Assert.Equal(0, again.HolesFound);
+        Assert.Equal(0, again.BucketsFound);
+        Assert.Equal(0, again.BucketsRepaired);
+        Assert.Equal(0, again.HolesDeferred);
+        Assert.Equal(0, again.BucketsDeferred);
+        Assert.Equal(0, again.HolesRemaining);
+        Assert.Equal(0, again.HolesForced);
+        Assert.True(again.AggregatesScanned >= 1, "a zero-hole pass still walked the aggregates");
+        Assert.Equal(TimescaleSupport.MaterializationHoleTargets.Count, again.AggregatesScanned + again.AggregatesSkipped);
+        Assert.True(again.Elapsed > TimeSpan.Zero, "a zero-hole pass still took time to prove it");
+        Assert.DoesNotContain("Information:", quietLog.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("Warning:", quietLog.Joined, StringComparison.Ordinal);
 
         /* THE HOLE WITH NO INVALIDATION BEHIND IT: H1's rows deleted from the materialization hypertable directly
            (a DELETE on the materialization logs nothing; it is the shape a refresh cut short after consuming its
@@ -426,6 +538,112 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
 
         await RefreshAsync(connection, view, H(12), H(13), ct);
         Assert.Contains(H(12), await MaterializedBucketsAsync(connection, view, ct));
+    }
+
+    /// <summary>
+    /// #3756's second named pin: the tally on a pass that repaired one hole and deferred one. ONE contiguous
+    /// 26-bucket hole under the hourly cap of 24 — the straddle <see cref="TimescaleSupport.CapMaterializationHoleRepairs"/>
+    /// splits — so found, repaired and deferred are all non-zero on the same pass and the arithmetic the
+    /// record states is measured rather than argued: buckets found is repaired plus deferred exactly, and the
+    /// range counts exceed found by one because the split reports on both sides. The next pass finds the two
+    /// deferred buckets as the one remaining hole and repairs them; the pass after that is the zero-hole walk.
+    ///
+    /// <para>Planted entirely below the hourly refresh policy's window (<c>now - 1 day</c>) so a background
+    /// policy run landing mid-test cannot repair part of the hole and move the counts, and entirely above the raw
+    /// retention horizon so the scan reaches every bucket of it.</para>
+    /// </summary>
+    [Fact]
+    public async Task OneHoleRepairedAndOneDeferred_TheTallyCarriesFoundRepairedAndDeferredExactly_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live materialization-hole tally test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled,
+            "The live hole-tally test needs TimescaleDB: a materialization hole exists only in a materialization.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        var cap = TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.HourlyBucket);
+        Assert.Equal(24, cap);
+
+        /* H0 materialized (the floor), H1..H26 collected and never refreshed (26 buckets of hole, cap + 2),
+           H27 collected and refreshed (the ceiling). H28 = now - 32 h sits below the policy window; H0 = now - 60 h
+           sits well inside the 4-day raw horizon. */
+        var h0 = TimescaleSupport.AlignDown(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified), TimescaleSupport.HourlyBucket).AddHours(-60);
+        DateTime H(int n) => h0.AddHours(n);
+        Assert.True(H(28) < DateTime.UtcNow - TimescaleSupport.HourlyRefreshStartSpan, "the whole plant must sit below the hourly policy window");
+        Assert.True(H(0) > DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, "the whole plant must sit inside the raw horizon");
+
+        await InsertHoursAsync(connection, new[] { 0 }, H, ct);
+        await RefreshAsync(connection, view, H(0), H(1), ct);
+        await InsertHoursAsync(connection, Enumerable.Range(1, 26).ToArray(), H, ct);
+        await InsertHoursAsync(connection, new[] { 27 }, H, ct);
+        await RefreshAsync(connection, view, H(27), H(28), ct);
+
+        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == view);
+        var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, view, ct);
+        Assert.NotNull(materialization);
+        Assert.Equal(new[] { H(0), H(27) }, await MaterializedBucketsAsync(connection, view, ct));
+        Assert.Equal(Enumerable.Range(1, 26).Select(H).ToArray(), await ScanAsync(connection, target, materialization.Value, H(0), H(27), ct));
+
+        /* PASS ONE: one hole found (26 buckets), 24 repaired, 2 deferred past the cap — on the same pass. */
+        var log = new CapturingTestLogger();
+        var first = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.UtcNow, ct);
+
+        Assert.Equal(0, first.Failures);
+        Assert.Equal(1, first.HolesFound);
+        Assert.Equal(26, first.BucketsFound);
+        Assert.Equal(1, first.HolesRepaired);
+        Assert.Equal(24, first.BucketsRepaired);
+        Assert.Equal(1, first.HolesDeferred);
+        Assert.Equal(2, first.BucketsDeferred);
+        Assert.Equal(0, first.HolesRemaining);
+        Assert.Equal(first.BucketsFound, first.BucketsRepaired + first.BucketsDeferred);
+        Assert.Equal(first.HolesFound + 1, first.HolesRepaired + first.HolesDeferred);
+        Assert.True(first.AggregatesScanned >= 1);
+        Assert.True(first.Elapsed > TimeSpan.Zero);
+
+        /* The detail lines the tally counts: the repair over exactly [H1, H25) and the deferral of exactly
+           [H25, H27), named with its bounds and the cap; no summary line from the pass itself. */
+        Assert.Contains($"{view} had 24 bucket(s) in [{H(1):O}, {H(25):O})", log.Joined, StringComparison.Ordinal);
+        Assert.Contains($"{view} has a further 2 bucket(s) of hole in [{H(25):O}, {H(27):O}) left for the next start", log.Joined, StringComparison.Ordinal);
+        Assert.Contains("this start's cap for it is 24 bucket(s)", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("aggregate(s) scanned", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("could not scan or repair", log.Joined, StringComparison.Ordinal);
+        Assert.Equal(Enumerable.Range(0, 25).Concat(new[] { 27 }).Select(H).ToArray(), await MaterializedBucketsAsync(connection, view, ct));
+        Assert.Equal(new[] { H(25), H(26) }, await ScanAsync(connection, target, materialization.Value, H(0), H(27), ct));
+
+        /* PASS TWO: the deferred remainder is the one hole now — found, repaired whole, nothing deferred. */
+        var second = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.UtcNow, ct);
+        Assert.Equal(0, second.Failures);
+        Assert.Equal(1, second.HolesFound);
+        Assert.Equal(2, second.BucketsFound);
+        Assert.Equal(1, second.HolesRepaired);
+        Assert.Equal(2, second.BucketsRepaired);
+        Assert.Equal(0, second.HolesDeferred);
+        Assert.Equal(0, second.BucketsDeferred);
+        Assert.Equal(0, second.HolesRemaining);
+        Assert.Equal(Enumerable.Range(0, 28).Select(H).ToArray(), await MaterializedBucketsAsync(connection, view, ct));
+
+        /* PASS THREE: the zero-hole walk, with the walk still in the tally. */
+        var third = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.UtcNow, ct);
+        Assert.Equal(0, third.HolesFound);
+        Assert.Equal(0, third.BucketsFound);
+        Assert.Equal(0, third.HolesRepaired);
+        Assert.Equal(0, third.HolesDeferred);
+        Assert.Equal(0, third.Failures);
+        Assert.True(third.AggregatesScanned >= 1);
+        Assert.True(third.Elapsed > TimeSpan.Zero);
     }
 
     private static async Task InsertHoursAsync(NpgsqlConnection connection, int[] hours, Func<int, DateTime> at, CancellationToken ct)

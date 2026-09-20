@@ -58,7 +58,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// OLDEST FIRST — the oldest hole is the one the source's retention is about to make permanent. Anything past
 /// the cap is logged with its bounds and left for the next start. Every hole repaired is one INFORMATION line
 /// with its bounds, its bucket count, its duration, which refresh closed it and what the re-scan found
-/// afterwards; failure is isolated per aggregate, the #1775 shape.</para>
+/// afterwards; failure is isolated per aggregate, the #1775 shape. The pass does NOT write its own
+/// end-of-pass summary: it RETURNS its tally (<see cref="MaterializationHoleRepairSummary"/>) and the
+/// worker writes the ONE summary line per start, unconditionally (#3756). The first cut wrote a summary
+/// here only when something happened and a Debug line otherwise, so the first store to carry the scan
+/// produced a log in which a start that found nothing, a start whose scan threw before its first probe and
+/// a start that never reached the scan read identically; the line that proves the scan RAN belongs to the
+/// caller that knows what a start is and owns the other two outcomes (a connection that would not open, a
+/// shutdown that cut it short).</para>
 ///
 /// <para><b>Plain refresh first, FORCED only on a measured remainder — the backfill's own escalation shape
 /// (<see cref="RollupBackfill.RunSliceAsync"/> then <see cref="RollupBackfill.RepairAsync"/>), and the order was
@@ -290,16 +297,35 @@ ORDER BY b.bucket";
         return (repair, deferred);
     }
 
-    /// <summary>What one start's pass did, for the summary line and the live test. <see cref="HolesForced"/>
-    /// counts the holes the plain refresh left standing and the forced one had to close.</summary>
+    /// <summary>
+    /// What one start's pass did — the whole tally the worker's one unconditional summary line reports (#3756)
+    /// and the live test asserts. Every count the line names is carried here rather than re-derived by the
+    /// caller, so the line cannot say something the pass did not measure.
+    ///
+    /// <para><see cref="AggregatesScanned"/> is the aggregates the scan actually probed ("walked");
+    /// <see cref="AggregatesSkipped"/> the ones it had a reason not to (not a continuous aggregate on this
+    /// store, never materialized, or a span entirely below the source's horizon). <see cref="HolesFound"/>
+    /// counts the contiguous hole RANGES the scan saw across every aggregate, BEFORE the cap, and
+    /// <see cref="BucketsFound"/> the buckets those ranges span — so <c>BucketsFound == BucketsRepaired +
+    /// BucketsDeferred</c> always, while <c>HolesRepaired + HolesDeferred</c> exceeds <c>HolesFound</c> by one
+    /// for every range the cap split (the straddle <see cref="CapMaterializationHoleRepairs"/> describes: one
+    /// hole as the scan saw it, two lines as the repair reported it). Buckets are the unambiguous currency;
+    /// the range counts are how the per-hole lines are numbered. <see cref="HolesRemaining"/> is buckets still
+    /// reading as holes after both refresh paths; <see cref="Failures"/> the aggregates whose scan or repair
+    /// threw and was isolated; <see cref="HolesForced"/> the holes the plain refresh left standing and the
+    /// forced one had to close. <see cref="Elapsed"/> is the pass's own wall clock from entry to return —
+    /// the detect, every probe, every refresh — and not the caller's connection open.</para>
+    /// </summary>
     public sealed record MaterializationHoleRepairSummary(
-        int AggregatesScanned, int AggregatesSkipped, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced);
+        int AggregatesScanned, int AggregatesSkipped, int HolesFound, int BucketsFound, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced, TimeSpan Elapsed);
 
     /// <summary>
     /// THE PASS: scan every registered continuous aggregate for materialization holes and close each with one
     /// forced, targeted refresh, oldest first, up to the per-aggregate cap. <paramref name="utcNow"/> is the
     /// service clock, the scan's horizon anchor; bound as a parameter, never written as <c>now()</c> in store
-    /// SQL (the <see cref="BaselineBackfillProbeSql(string, string)"/> zone reasoning). Returns what it did.
+    /// SQL (the <see cref="BaselineBackfillProbeSql(string, string)"/> zone reasoning). Returns what it did,
+    /// as the complete tally — and ONLY returns it: the one summary line per start is the caller's (#3756;
+    /// the type summary says why), so a pass that finds nothing returns zeros rather than falling silent.
     /// Failure-isolated per aggregate; a store without the extension, or an aggregate that is a plain fallback
     /// view, is skipped with a Debug line. See the type summary for the design.
     /// </summary>
@@ -311,8 +337,14 @@ ORDER BY b.bucket";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        /* #3756: the pass times itself from here, so the summary's Elapsed is the scan's own cost — detect,
+           probes, refreshes — and not whatever the caller did to get a connection. */
+        var passClock = Stopwatch.StartNew();
+
         var scanned = 0;
         var skipped = 0;
+        var holesFound = 0;
+        var bucketsFound = 0;
         var holesRepaired = 0;
         var bucketsRepaired = 0;
         var holesDeferred = 0;
@@ -325,7 +357,7 @@ ORDER BY b.bucket";
         if (!await DetectAsync(connection, cancellationToken))
         {
             logger?.LogDebug("Materialization-hole repair (#3653): no TimescaleDB on this store, nothing to scan.");
-            return new MaterializationHoleRepairSummary(0, MaterializationHoleTargets.Count, 0, 0, 0, 0, 0, 0, 0);
+            return new MaterializationHoleRepairSummary(0, MaterializationHoleTargets.Count, 0, 0, 0, 0, 0, 0, 0, 0, 0, passClock.Elapsed);
         }
 
         var disclosure = new RefreshDisclosure(message => logger?.LogWarning(
@@ -377,6 +409,13 @@ ORDER BY b.bucket";
                 }
 
                 var ranges = MergeContiguousBuckets(holes, target.BucketWidth);
+
+                /* #3756: found is counted as the scan saw it — contiguous ranges and the buckets they span — BEFORE
+                   the cap decides what this start repairs and what it leaves, so the summary can say "found"
+                   independently of "repaired" and "deferred" (the record's summary states the arithmetic). */
+                holesFound += ranges.Count;
+                bucketsFound += holes.Count;
+
                 var (repair, deferred) = CapMaterializationHoleRepairs(ranges, MaterializationHoleRepairCapBuckets(target.BucketWidth), target.BucketWidth);
 
                 foreach (var (start, end) in repair)
@@ -442,21 +481,13 @@ ORDER BY b.bucket";
             }
         }
 
-        var summary = new MaterializationHoleRepairSummary(scanned, skipped, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced);
-        if (holesRepaired > 0 || holesDeferred > 0 || failures > 0)
-        {
-            logger?.LogInformation(
-                "Materialization-hole repair (#3653): {Scanned} aggregate(s) scanned, {Skipped} skipped (never materialized, or not a continuous aggregate here), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred to the next start, {Remaining} bucket(s) still reading as holes after repair, {Failures} aggregate(s) failed.",
-                scanned, skipped, holesRepaired, bucketsRepaired, holesForced, holesDeferred, bucketsDeferred, holesRemaining, failures);
-        }
-        else
-        {
-            logger?.LogDebug(
-                "Materialization-hole repair (#3653): {Scanned} aggregate(s) scanned, {Skipped} skipped, no holes.",
-                scanned, skipped);
-        }
-
-        return summary;
+        /* #3756: no summary line here — the tally goes back to the caller, whose one INFORMATION line per start
+           is written whatever the counts are. The conditional summary this replaced (Information when something
+           happened, Debug otherwise) is the exact shape the issue names: at the level a production log is read,
+           a zero-hole start wrote nothing, and nothing is also what a start that never reached the scan writes. */
+        passClock.Stop();
+        return new MaterializationHoleRepairSummary(
+            scanned, skipped, holesFound, bucketsFound, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced, passClock.Elapsed);
     }
 
     /// <summary>The hole buckets of one aggregate over <c>[from, to]</c> inclusive, oldest first.</summary>
