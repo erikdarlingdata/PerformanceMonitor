@@ -666,10 +666,16 @@ public sealed class PgCpuCapacityHeadroomTests
     public void TheIngestorRequestsExactlyTheMetricsItStores()
     {
         var requested = RdsCpuIngestor.RequestedMetrics;
+        var memory = RdsCpuIngestor.HostMemoryMetrics;
+        var all = RdsCpuIngestor.AllMetrics;
 
-        /* Four distinct names — a duplicate would make the count right and the coverage wrong. */
+        /* Four capacity names and five memory names (V136, #3691), nine distinct in the first request — a
+           duplicate would make the count right and the coverage wrong. */
         Assert.Equal(4, requested.Count);
-        Assert.Equal(requested.Count, requested.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(5, memory.Count);
+        Assert.Equal(9, all.Count);
+        Assert.Equal(all.Count, all.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(requested.Concat(memory), all);
 
         /* Each requested name reaches a column, proven by the row the ingestor builds: give every metric a
            distinguishable value at one timestamp and every payload column must come back carrying one.
@@ -677,11 +683,16 @@ public sealed class PgCpuCapacityHeadroomTests
         var stored = PgCpuUtilizationCollector.Instance.PayloadColumns.Select(c => c.Name).ToList();
 
         Assert.Equal(
-            new[] { "sample_time", "cpu_percent", "acu_utilization_percent", "serverless_capacity_acu", "max_configured_acu" },
+            new[]
+            {
+                "sample_time", "cpu_percent", "acu_utilization_percent", "serverless_capacity_acu", "max_configured_acu",
+                "memory_total_bytes", "memory_free_bytes", "memory_cached_bytes", "memory_buffers_bytes", "memory_active_bytes",
+                "configured_memory_bytes",
+            },
             stored);
 
         var sample = Assert.Single(RdsCpuIngestor.BuildSamples(
-            requested
+            all
                 .Select((metric, i) => Point(metric, Now, 10.0 + i))
                 .ToList(),
             watermark: null));
@@ -697,6 +708,60 @@ public sealed class PgCpuCapacityHeadroomTests
                 sample.ServerlessCapacityAcu,
                 sample.MaxConfiguredAcu,
             });
+
+        /* The five memory names, each ×1,024 into its own byte column (V136) — distinct kilobyte inputs, distinct
+           byte outputs, in the metric list's order. */
+        Assert.Equal(
+            new long?[] { 14 * 1024L, 15 * 1024L, 16 * 1024L, 17 * 1024L, 18 * 1024L },
+            new long?[]
+            {
+                sample.MemoryTotalBytes,
+                sample.MemoryFreeBytes,
+                sample.MemoryCachedBytes,
+                sample.MemoryBuffersBytes,
+                sample.MemoryActiveBytes,
+            });
+
+        /* The derived column: the SAME capacity sample the row stores as serverless_capacity_acu (12.0 here),
+           × 2 GiB per ACU. Not a tenth metric — a tenth metric would be a second reading of one figure. */
+        Assert.Equal(12L * PgCpuUtilizationCollector.BytesPerAcu, sample.ConfiguredMemoryBytes);
+        Assert.Equal(2L * 1024 * 1024 * 1024, PgCpuUtilizationCollector.BytesPerAcu);
+    }
+
+    /// <summary>
+    /// The memory arithmetic in isolation (V136, #3691): kilobytes × 1,024 rounded to whole bytes (PI's minute
+    /// average can be fractional), ACU × 2 GiB rounded likewise, and null stays null through both — a NULL
+    /// memory column is "not sampled", never 0.
+    /// </summary>
+    [Fact]
+    public void TheMemoryArithmetic_IsKilobytesTimes1024_AndAcuTimes2GiB_AndNullStaysNull()
+    {
+        Assert.Equal(16_384_000L, RdsCpuIngestor.KilobytesToBytes(16_000.0));
+        Assert.Equal(1_536L, RdsCpuIngestor.KilobytesToBytes(1.5));
+        Assert.Equal(1_075L, RdsCpuIngestor.KilobytesToBytes(1.0498));   // 1,074.99 → rounded, not truncated
+        Assert.Null(RdsCpuIngestor.KilobytesToBytes(null));
+
+        Assert.Equal(4L * 2 * 1024 * 1024 * 1024, RdsCpuIngestor.AcuToBytes(4.0));
+        Assert.Equal((long)Math.Round(4.5 * PgCpuUtilizationCollector.BytesPerAcu), RdsCpuIngestor.AcuToBytes(4.5));
+        Assert.Null(RdsCpuIngestor.AcuToBytes(null));
+
+        /* A provisioned instance class publishes no capacity metric: the CPU row exists, the memory five are
+           filled, configured_memory_bytes is NULL — the instance-class table is not collected, and the total
+           IS the host's figure there. */
+        var provisioned = Assert.Single(RdsCpuIngestor.BuildSamples(
+            new[]
+            {
+                Point("os.cpuUtilization.total.avg", Now, 12.0),
+                Point("os.memory.total.avg", Now, 16_000_000.0),
+                Point("os.memory.free.avg", Now, 1_000_000.0),
+            },
+            watermark: null));
+
+        Assert.Equal(16_000_000L * 1024, provisioned.MemoryTotalBytes);
+        Assert.Equal(1_000_000L * 1024, provisioned.MemoryFreeBytes);
+        Assert.Null(provisioned.MemoryCachedBytes);
+        Assert.Null(provisioned.ServerlessCapacityAcu);
+        Assert.Null(provisioned.ConfiguredMemoryBytes);
     }
 
     /// <summary>
@@ -732,12 +797,29 @@ public sealed class PgCpuCapacityHeadroomTests
         });
 
         Assert.Equal("answered", answered);
-        Assert.Equal(2, asked.Count);
+        Assert.Equal(3, asked.Count);
 
-        /* First the four, then the one — and the one is the CPU metric, not merely a shorter list. */
-        Assert.Equal(RdsCpuIngestor.RequestedMetrics, asked[0]);
-        Assert.Equal(new[] { "os.cpuUtilization.total.avg" }, asked[1].ToArray());
-        Assert.Equal(RdsCpuIngestor.CpuOnlyMetrics, asked[1]);
+        /* First the nine, then the four, then the one — and the one is the CPU metric, not merely a shorter
+           list. The middle step is V136's (#3691): it is EXACTLY the pre-V136 request, so a target whose
+           Performance Insights rejects os.memory.* loses the memory columns and nothing the CPU table had. */
+        Assert.Equal(RdsCpuIngestor.AllMetrics, asked[0]);
+        Assert.Equal(RdsCpuIngestor.RequestedMetrics, asked[1]);
+        Assert.Equal(new[] { "os.cpuUtilization.total.avg" }, asked[2].ToArray());
+        Assert.Equal(RdsCpuIngestor.CpuOnlyMetrics, asked[2]);
+
+        /* A rejection of the memory names ALONE stops at the middle step: the capacity four are answered on
+           the second call and the CPU metric is never asked for by itself. */
+        var memoryOnlyRejected = new List<IReadOnlyList<string>>();
+        var capacity = await RdsCpuIngestor.WithCapacityFallbackAsync(metrics =>
+        {
+            memoryOnlyRejected.Add(metrics);
+            return metrics.Any(m => m.StartsWith("os.memory.", StringComparison.Ordinal))
+                ? throw new InvalidArgumentException("The specified metric is not a known metric")
+                : Task.FromResult("capacity");
+        });
+        Assert.Equal("capacity", capacity);
+        Assert.Equal(2, memoryOnlyRejected.Count);
+        Assert.Equal(RdsCpuIngestor.RequestedMetrics, memoryOnlyRejected[1]);
 
         /* An authorization refusal is a DIFFERENT fault and is not retried: one attempt, then out, so the
            runner still classifies it as PERMISSIONS instead of seeing a second call's failure. */
@@ -763,7 +845,8 @@ public sealed class PgCpuCapacityHeadroomTests
                 throw new InvalidArgumentException("still rejected");
             }));
 
-        Assert.Equal(2, twice);
+        /* Three attempts — one per step of the ladder — then out. */
+        Assert.Equal(3, twice);
     }
 
     /// <summary>
@@ -793,6 +876,21 @@ public sealed class PgCpuCapacityHeadroomTests
         Assert.DoesNotContain("os.acuUtilization.avg", RdsCpuIngestor.RequestedMetrics);
         Assert.DoesNotContain("os.serverlessDatabaseCapacity.avg", RdsCpuIngestor.RequestedMetrics);
         Assert.DoesNotContain("os.maxConfiguredAcu.avg", RdsCpuIngestor.RequestedMetrics);
+
+        /* The five memory names (V136, #3691), as literals, taken from Performance Insights' published Aurora
+           PostgreSQL counter list — each documented there in KILOBYTES, which is the ×1,024 the ingestor applies.
+           The same asymmetry applies: `os.memory.total` without the statistic suffix is not a metric PI knows. */
+        Assert.Equal(
+            new[]
+            {
+                "os.memory.total.avg",
+                "os.memory.free.avg",
+                "os.memory.cached.avg",
+                "os.memory.buffers.avg",
+                "os.memory.active.avg",
+            },
+            RdsCpuIngestor.HostMemoryMetrics.ToArray());
+        Assert.All(RdsCpuIngestor.HostMemoryMetrics, m => Assert.EndsWith(".avg", m, StringComparison.Ordinal));
     }
 
     /// <summary>

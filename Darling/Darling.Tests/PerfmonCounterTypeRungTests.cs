@@ -145,7 +145,9 @@ public sealed class PerfmonCounterTypeRungTests
         }
 
         /* No table, no collector: the censuses did not move. */
-        Assert.Equal(71, TimescaleSupport.HypertableCount);
+        /* 72 since V136 (#3691) added pg_database_size_stats; this rung itself added none. Restated as the current
+           census figure rather than as "unchanged from before", which is the claim the line makes. */
+        Assert.Equal(72, TimescaleSupport.HypertableCount);
         Assert.Equal(7, PerfmonStatsCollector.Instance.PayloadColumns.Count);
     }
 

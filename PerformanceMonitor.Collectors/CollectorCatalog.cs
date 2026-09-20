@@ -98,6 +98,11 @@ public static class CollectorCatalog
         PgBufferUsageCollector.Instance,
         PgIndexBloatCollector.Instance,
         PgCpuUtilizationCollector.Instance,
+        /* #3691 (V136): the per-database size series — a plain hourly read of the shared catalog. Its table
+           is generated from PayloadColumns like every other, and V136 is pinned to be identical to that
+           generation. (V136's other series, host memory, is six columns on pg_cpu_utilization's row rather
+           than a table of its own — see that collector's doc for why.) */
+        PgDatabaseSizeStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>

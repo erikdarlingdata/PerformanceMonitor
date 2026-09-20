@@ -215,6 +215,7 @@ public static class PgMigrations
         new Migration(133, "pg-numbackends-and-sampled-ms", V133Sql),
         new Migration(134, "time-honesty", V134Sql),
         new Migration(135, "lrq-exclusion-knob", V135Sql),
+        new Migration(136, "pg-database-size-and-host-memory", V136Sql),
     };
 
     /// <summary>
@@ -1391,6 +1392,93 @@ ALTER TABLE config.config_alert_settings
         DEFAULT ARRAY['NT AUTHORITY\SYSTEM', 'NT AUTHORITY\NETWORK SERVICE']::text[];";
 
     /// <summary>
+    /// V136 — two PostgreSQL-target series the analysis engine had no source for (#3691, design §4b and
+    /// §6): <c>collect.pg_database_size_stats</c>, the hourly per-database size series — a NEW table — and the
+    /// host's memory from AWS Performance Insights, SIX COLUMNS on <c>collect.pg_cpu_utilization</c>. One rung
+    /// for both, deliberately: they unblock the same wave of consumer lanes (object growth, the memory
+    /// composition checks), and the ladder rule is one un-landed rung at a time.
+    ///
+    /// <para><b>Why memory is columns on the CPU row and not <c>pg_host_memory</c>, the table the plan
+    /// named.</b> Two reasons, and the second is the one that decided it. The memory counters ARE the CPU
+    /// row: one <c>GetResourceMetrics</c> response, one minute stamp, one watermark, one COPY — a sibling table
+    /// would re-store the same identity under a second name with its own resume point. And every collector
+    /// table is a hypertable: <c>TimescaleSupport.CompressionPhaseBandMinutes</c> spreads them at three per
+    /// minute, a 73rd hypertable widens the band 24→25 minutes, the heaviest hourly refresh's window shrinks
+    /// 18→17 and its watch line drops 900→850 s — BELOW the 896 s recorded ceiling. The grid's own doc calls
+    /// that a scheduling decision (#3035, #3044, #3107), not a renumbering, and it is not this rung's to make.
+    /// A 72nd hypertable fits exactly (72 / 3 = 24); six nullable columns cost nothing. V130 made the same
+    /// choice for the log-event numbers, for the same reasons.</para>
+    ///
+    /// <para><b>The new table is exactly what the generator emits</b>, column for column — the V104 rule
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> enforces. A fresh store
+    /// builds it from the generated schema at V1 and this CREATE no-ops (<c>IF NOT EXISTS</c>); a store that
+    /// climbed here gets it from this text. One generated index, on <c>(server_id, collection_time)</c>.
+    /// Hypertable conversion, one-day chunks, compression segmented by <c>server_id</c> and the retention policy
+    /// follow from the catalog entry on the service's next start, as for every collector table. All value
+    /// columns nullable, matching the generated schema this must be identical to.</para>
+    ///
+    /// <para><b>The six columns are added in TWO places and both are required</b> — the V101 rule. V106's
+    /// CREATE carries them for the fresh population (walked from the generator at V1, and never re-run on a
+    /// store that has the table); this rung's ALTER carries them for the store that built the nine-column
+    /// table first. <c>ADD COLUMN IF NOT EXISTS</c> is a no-op on the fresh store that already has them.
+    /// <b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung on a collector table (V80,
+    /// V81, V127, V128, V130, V133): a pre-V136 row never had a memory sample taken, NULL is the honest value,
+    /// and a nullable no-default ADD COLUMN is catalog-only on a compressed hypertable (V127/V128/V133 verified
+    /// the shape live on 2.28.1). No view — the PostgreSQL collector tables have no <c>v_</c> passthrough.</para>
+    ///
+    /// <para><b><c>pg_database_size_stats</c>: BYTES, and NULL where the role may not size a database.</b>
+    /// <c>size_bytes</c> is <c>pg_database_size(oid)</c>; <c>total_bytes</c> is the instance total denormalized
+    /// onto every row of a collection (the <c>pg_session_states.total_sessions</c> shape — one read, no GROUP
+    /// BY) and is NULL when ANY database's size is, because a sum over the databases this role can see is not
+    /// the instance total. A database the role lacks <c>CONNECT</c> on and is not <c>pg_read_all_stats</c> for
+    /// — the vendor-owned database on a managed target — is a row with <c>size_bytes NULL</c>, never 0 and
+    /// never a failed collection. Templates are collected and flagged (<c>is_template</c>), not skipped. The
+    /// only contract a later join against the store's own <c>collect.store_metrics</c> (V53, <c>total_bytes</c>
+    /// = <c>pg_total_relation_size</c>) or the SQL Server side's size columns depends on is <c>*_bytes
+    /// bigint</c> naming and naive-UTC timestamps, and both are kept. Hourly, a year of retention: ~6,000 rows
+    /// a day fleet-wide.</para>
+    ///
+    /// <para><b>The memory columns: the CPU row's source, the CPU row's minute.</b> The <c>os.memory.*</c>
+    /// counters are named in the <c>GetResourceMetrics</c> request <c>RdsCpuIngestor</c> already makes — more
+    /// metric names on one call rather than a second API, a second IAM grant or a second collector cycle. The
+    /// five <c>memory_*_bytes</c> columns are PI's kilobyte counters × 1024; <c>configured_memory_bytes</c> is
+    /// the minute's Serverless v2 capacity × 2 GiB per ACU (vendor-defined) and NULL on a provisioned instance
+    /// class. <b>A stock PostgreSQL target has no <c>pg_cpu_utilization</c> row at all</b> — there is no OS
+    /// source from inside the engine — and that absence is the answer a consumer must read as
+    /// <c>unavailable</c>, never as "no memory". A store that monitors only SQL Server or only self-hosted
+    /// PostgreSQL carries one more empty table, six more empty columns, and nothing else changes.</para>
+    ///
+    /// <para><b>Nothing reads the new table or the six columns yet</b>, and the rung says so rather than
+    /// implying a consumer: the composition checks, the object-growth family and the disk-free read are
+    /// #3691's later slices, and the point of landing the series first is that they have a day of rows when
+    /// those land. No backfill — a series starts when it starts. Lite stores neither
+    /// (<c>DuckDbSchemaGenerator.StoredCollectors</c> is the SQL Server set), so the rung has no DuckDB twin.</para>
+    /// </summary>
+    private const string V136Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_database_size_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    size_bytes bigint,
+    total_bytes bigint,
+    is_template boolean,
+    allows_connections boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_database_size_stats_time
+    ON collect.pg_database_size_stats(server_id, collection_time);
+
+ALTER TABLE collect.pg_cpu_utilization
+    ADD COLUMN IF NOT EXISTS memory_total_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_free_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_cached_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_buffers_bytes bigint,
+    ADD COLUMN IF NOT EXISTS memory_active_bytes bigint,
+    ADD COLUMN IF NOT EXISTS configured_memory_bytes bigint;";
+
+    /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
     /// successful connect) and the per-run collection_log. Column names deliberately mirror
     /// Lite's DuckDB schema so viewer/analysis SQL can twin across stores — including
@@ -2296,7 +2384,7 @@ ALTER TABLE analysis_findings
     /// V53 — the store self-metrics table (#2068): the hourly fleet-level sweep
     /// (<see cref="StoreSelfMetrics"/>) persists the store's OWN size/compression/growth series here — one
     /// row per hypertable (total / pre- / post-compression bytes, chunk count), one per payload dimension
-    /// table (total bytes, row count), and one whole-store summary row (pg_database_size + the
+    /// table (total bytes, row count), and one whole-store summary row (pg_database_size_stats + the
     /// enabled-server count) per run — so capacity forecasting is a stored query instead of ad-hoc
     /// archaeology over a chunk catalog whose raw window is 4 days.
     /// <para>Deliberately a PLAIN table, and deliberately NOT a collector: it is not in
@@ -4201,7 +4289,13 @@ CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
     cpu_percent double precision,
     acu_utilization_percent double precision,
     serverless_capacity_acu double precision,
-    max_configured_acu double precision
+    max_configured_acu double precision,
+    memory_total_bytes bigint,
+    memory_free_bytes bigint,
+    memory_cached_bytes bigint,
+    memory_buffers_bytes bigint,
+    memory_active_bytes bigint,
+    configured_memory_bytes bigint
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time

@@ -30,10 +30,11 @@ namespace Darling.Tests;
 /// <see cref="SelfDiskWarnGbFloorRungTests"/>'s (V126), one knob on, for a knob that is TWO LISTS and not a
 /// number, and whose default is not empty.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <c>TimeHonestyRungTests</c> (V134) when
-/// this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's connect-time gate
-/// refuses a store that is actually current. When the next rung lands, those claims move on and what stays is
-/// everything true of this rung wherever it sits.</para>
+/// <para>The "I am the top rung" claims this file carried when it landed (moved here off <c>TimeHonestyRungTests</c>,
+/// V134) moved on again to <c>PgDatabaseSizeAndHostMemoryRungTests</c> when V136 (#3691 — the per-database size
+/// series and the Performance Insights host-memory table) landed on top of it. What stays is everything true of
+/// this rung wherever it sits: its name, its DDL, its probe sentinel at its own ordinal, and that a store which
+/// stopped here maps to exactly 135.</para>
 ///
 /// <para>The engine side — the prefix / exact match rule, the seeds themselves, the two per-arm counts, both
 /// SKUs' reads — is <see cref="LongRunningQueryExclusionsTests"/> and <c>AlertEngineTests</c>, and landed one PR
@@ -45,7 +46,8 @@ public sealed class LongRunningQueryExclusionKnobRungTests
     private const int RungVersion = 135;
     private const int PreviousVersion = 134;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V136 appended its
+    /// own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 110;
 
     private const string ProgramsColumn = "long_running_query_excluded_program_name_prefixes";
@@ -56,14 +58,17 @@ public sealed class LongRunningQueryExclusionKnobRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("lrq-exclusion-knob", V135.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped being
+           true when V136 landed. The invariant that outlives the handoff is that the LADDER's top and the
+           declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -137,16 +142,16 @@ public sealed class LongRunningQueryExclusionKnobRungTests
         return count;
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------ */
+    /* ---- the probe (three sites) --------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
+    /// The viewer probe's three sites carry this rung's sentinel, and a store that stopped here maps to it. The
     /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently.
+    /// only some of them shifts every LATER ordinal onto the wrong column. The top-arm claims (last argument,
+    /// returns the build's version) moved to <c>PgDatabaseSizeAndHostMemoryRungTests</c> with V136.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"table_name = 'config_alert_settings'\n                                                     AND   column_name = '{ProgramsColumn}'",
@@ -154,7 +159,6 @@ public sealed class LongRunningQueryExclusionKnobRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasLrqExclusionKnob", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -162,8 +166,9 @@ public sealed class LongRunningQueryExclusionKnobRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V136 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
@@ -175,14 +180,16 @@ public sealed class LongRunningQueryExclusionKnobRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's own literal — not the
+           build's version: the "returns StorageVersion.SchemaVersion" half of the top-arm claim moved to V136's
+           test with the top. */
         var thisArm = viewer.IndexOf("if (hasLrqExclusionKnob)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasTimeHonesty)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V135 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V135 sentinel arm — a store that stopped here would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V135 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V135 arm sits below the previous rung's, so a V135 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table and columns are named in the probe line and nowhere in the arm's prose. */
