@@ -226,7 +226,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (88 tools) | On request (156 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (88 tools) | On request (157 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -363,7 +363,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 88 tools; **Darling** exposes 156 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 88 tools; **Darling** exposes 157 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|

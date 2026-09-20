@@ -202,6 +202,21 @@ public sealed class CrossAppMcpToolInventoryPinTests
            shrinks. */
         "get_oversized_plan_backlog",
 
+        /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
+           collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats
+           plan identities, and the query_store_health options row; per server the non-sleep QDS_* wait deltas
+           and the Query Store memory clerk. Unlike most entries above this IS a "not ported yet", and the
+           brief that built it said so after checking: Lite has EVERY input. Its collection_log carries the
+           same fanout_item_count / slowest_item / slowest_item_ms columns (Schema.cs, written by
+           RemoteCollectorService), its query_store_stats / query_store_health / wait_stats / memory_clerks
+           tables are generated from the same shared collector definitions, and the plan-churn arm needs only
+           plan_id on the fact rows - not the query_store_plan_map / query_plan_dim pair, which Lite does not
+           have and which the Darling reader does not read either. A Lite twin is a DuckDB port of
+           DarlingQueryStoreClutterReader's four statements (percentile_disc becomes quantile_disc) over the
+           same pure QueryStoreClutter judgment. Sequenced behind the Darling reader + MCP tool and the two
+           viewer surfaces (#3797's own ordering); port it, then remove this entry - the ratchet only shrinks. */
+        "get_query_store_clutter",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
