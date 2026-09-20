@@ -425,8 +425,8 @@ public sealed class DarlingManagedPostgresTests
 
         /* A positive control on the enumeration itself: an empty or one-element set would make every
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
-           silent failure this shape invites. Eleven blocks as of #3175. */
-        Assert.Equal(11, markers.Length);
+           silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing). */
+        Assert.Equal(12, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -983,6 +983,367 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(
             DarlingManagedPostgres.BuildHardwareFingerprint(fourGb, 40),
             DarlingManagedPostgres.BuildHardwareFingerprint(0, 40));
+    }
+
+    /* ===================== v12 wal sizing (#3802) ===================== */
+
+    private const long OneGb = 1024L * 1024 * 1024;
+
+    /// <summary>
+    /// The v12 WAL-sizing block (#3802) at the mid case: 64 GB free on a 120 GB data volume, PostgreSQL 18.
+    /// <c>max_wal_size</c> lands on 8192MB (64 / 8 = 8 GB, on the ladder exactly), <c>min_wal_size</c> at a
+    /// quarter of it, and <c>checkpoint_completion_target</c> is NOT written because 18's default is already
+    /// 0.9. Asserted as LAST-OCCURRENCE values, because that is what PostgreSQL honours and what makes this
+    /// block an override of v4's fixed 4GB rather than a hope.
+    ///
+    /// <para>The stamp line is the mechanism: it records the derived rung and the major, and the every-start
+    /// check compares against it. The comment line records the headroom the block came from, in the same
+    /// formatting as the start's log line, so an operator reading postgresql.conf can see why 8192MB without
+    /// the service log. Both are comments to PostgreSQL and neither is an assignment.</para>
+    /// </summary>
+    [Fact]
+    public void WalSizingConfAppend_PinsV12Marker_AndDerivesFromDataVolumeHeadroom()
+    {
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, postgresMajor: 18);
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV12, block, StringComparison.Ordinal);
+        Assert.Equal("8192MB", LastSettingValue(block, "max_wal_size"));
+        Assert.Equal("2048MB", LastSettingValue(block, "min_wal_size"));
+        Assert.Null(LastSettingValue(block, "checkpoint_completion_target"));
+
+        /* The stamp under the marker is exactly what the every-start check will compare against. */
+        var stamp = DarlingManagedPostgres.BuildWalSizingStamp(new DarlingManagedPostgres.WalSettings(8192, 2048), 18);
+        Assert.StartsWith(DarlingManagedPostgres.ConfWalSizingStampPrefix, stamp, StringComparison.Ordinal);
+        Assert.Contains("\n" + stamp + "\n", block, StringComparison.Ordinal);
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, stamp));
+
+        /* The provenance comment carries the same GB figures the log line does, from the same formatter. */
+        Assert.Contains("# derived from 64.0 GB free of 120.0 GB on the data volume", block, StringComparison.Ordinal);
+        Assert.Equal("64.0", DarlingManagedPostgres.FormatGb(64 * OneGb));
+        Assert.Equal("31.5", DarlingManagedPostgres.FormatGb(31 * OneGb + OneGb / 2));
+
+        /* Exactly two assignments: the blocks compose, they don't compete. Every other block's settings are
+           absent, and v4's max_connections in particular is NOT restated. */
+        Assert.Equal(
+            new[] { "max_wal_size", "min_wal_size" },
+            SettingNames(block).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.DoesNotContain("max_connections", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("maintenance_work_mem", block, StringComparison.Ordinal);
+
+        /* No v8 fingerprint line, or the v8 staleness check silently stops checking. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The formula at its boundaries (#3802): <c>clamp(free / 8, 1 GB, 16 GB)</c> floored to the 1-2-4-8-16 GB
+    /// ladder, <c>min_wal_size = max(80 MB, max / 4)</c>. The three cases the issue named — tiny disk to the
+    /// floor, huge disk to the cap, mid to 8 GB — plus the rung edges that make the ladder a ladder: 31 GB free
+    /// floors to 2 GB and 32 GB reaches 4 GB; 127 GB stays at 8 GB and 128 GB reaches the cap. The 32 GB row is
+    /// the one that lands where v4's fixed 4GB sat, and everything under it heals DOWN from v4.
+    /// </summary>
+    [Theory]
+    [InlineData(2, 1024, 256)]        /* tiny disk: 2 / 8 = 256 MB -> clamped to the 1 GB floor (PostgreSQL's own default); min at 256 MB */
+    [InlineData(8, 1024, 256)]        /* exactly one floor's worth: 8 / 8 = 1 GB */
+    [InlineData(16, 2048, 512)]       /* first rung above the floor */
+    [InlineData(31, 2048, 512)]       /* 3.875 GB floors to the 2 GB rung, not up to 4 */
+    [InlineData(32, 4096, 1024)]      /* v4's old constant, now derived */
+    [InlineData(64, 8192, 2048)]      /* mid: the issue's example */
+    [InlineData(127, 8192, 2048)]     /* 15.875 GB floors to 8 GB: the last rung before the cap needs a full 128 GB free */
+    [InlineData(128, 16384, 4096)]    /* the cap, reached exactly */
+    [InlineData(1024, 16384, 4096)]   /* huge disk: 1 TB / 8 = 128 GB -> the maintainer's 16 GB ceiling */
+    [InlineData(0, 1024, 256)]        /* nothing free: the floor, never zero */
+    public void DeriveWalSettings_PerTier(long freeGb, int maxWalMb, int minWalMb)
+    {
+        var settings = DarlingManagedPostgres.DeriveWalSettings(freeGb * OneGb);
+
+        Assert.Equal(maxWalMb, settings.MaxWalSizeMb);
+        Assert.Equal(minWalMb, settings.MinWalSizeMb);
+
+        /* The block writes exactly these figures in PostgreSQL's MB grammar. */
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(freeGb * OneGb, 2 * freeGb * OneGb + OneGb, 18);
+        Assert.Equal(maxWalMb.ToString(CultureInfo.InvariantCulture) + "MB", LastSettingValue(block, "max_wal_size"));
+        Assert.Equal(minWalMb.ToString(CultureInfo.InvariantCulture) + "MB", LastSettingValue(block, "min_wal_size"));
+    }
+
+    /// <summary>
+    /// A negative reading derives as the floor, not as garbage and not as an exception — the caller gates on an
+    /// authoritative read and never passes one, but the formula must be total over its domain regardless.
+    /// And the 80 MB <c>min_wal_size</c> floor is real code, not a comment: it is never binding on the ladder
+    /// (the 1 GB rung yields 256 MB), which this asserts so a future rung below 320 MB knows where the floor
+    /// would bite.
+    /// </summary>
+    [Fact]
+    public void DeriveWalSettings_NegativeReading_DerivesTheFloor_AndTheMinFloorIsNotBindingOnTheLadder()
+    {
+        var settings = DarlingManagedPostgres.DeriveWalSettings(-1);
+
+        Assert.Equal(1024, settings.MaxWalSizeMb);
+        Assert.Equal(256, settings.MinWalSizeMb);
+        Assert.True(settings.MinWalSizeMb * 1024L * 1024L > DarlingManagedPostgres.MinWalSizeFloorBytes);
+    }
+
+    /// <summary>
+    /// <c>checkpoint_completion_target = 0.9</c> is written ONLY below PostgreSQL 14, whose release notes read
+    /// <i>"Change checkpoint_completion_target default to 0.9 (Stephen Frost). The previous default was
+    /// 0.5."</i> On 14 and later the line is omitted: re-stating a default buys nothing and would read as a
+    /// decision the block did not make. An unreadable major (0) pins it — a no-op where the default is already
+    /// 0.9 and the fix where it is not. The start line's clause is pinned beside the decision it reports.
+    /// </summary>
+    [Theory]
+    [InlineData(12, true)]
+    [InlineData(13, true)]
+    [InlineData(0, true)]     /* PG_VERSION unreadable */
+    [InlineData(14, false)]
+    [InlineData(16, false)]
+    [InlineData(17, false)]
+    [InlineData(18, false)]   /* the bundled runtime */
+    public void WalSizingConfAppend_PinsCheckpointCompletionTarget_OnlyBelowPg14(int postgresMajor, bool pinned)
+    {
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, postgresMajor);
+
+        Assert.Equal(pinned, DarlingManagedPostgres.PinsCheckpointCompletionTarget(postgresMajor));
+        Assert.Equal(pinned ? "0.9" : null, LastSettingValue(block, "checkpoint_completion_target"));
+
+        var note = DarlingManagedPostgres.DescribeCheckpointCompletionTarget(postgresMajor);
+        if (pinned)
+        {
+            Assert.StartsWith("pinned at 0.9", note, StringComparison.Ordinal);
+            Assert.Contains(postgresMajor > 0 ? "defaulted to 0.5" : "PG_VERSION unreadable", note, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(FormattableString.Invariant($"left at PostgreSQL {postgresMajor}'s default 0.9"), note);
+        }
+
+        /* The stamp carries the major, so a pg_upgrade across the 14 boundary re-authors the block once — and
+           only once: the same major stamps identically. */
+        var settings = DarlingManagedPostgres.DeriveWalSettings(64 * OneGb);
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, DarlingManagedPostgres.BuildWalSizingStamp(settings, postgresMajor)));
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, DarlingManagedPostgres.BuildWalSizingStamp(settings, postgresMajor + 1)));
+    }
+
+    /// <summary>
+    /// THE STABILITY PROPERTY (#3802): free disk moving WITHIN a rung is not a change. The check runs on every
+    /// start and compares the last stamp exactly, so — v8's lesson, with more force, because free disk moves
+    /// by gigabytes between any two starts on a store that compresses and drops chunks — an exact quotient
+    /// would append a fresh block per start, forever. Four readings between 64 GB and just under 128 GB all
+    /// stamp as the 8 GB rung; the two readings that cross a rung boundary do not, so the ladder cannot mask a
+    /// real change either. The setting lines are identical across the rung even though the provenance comment
+    /// records the reading that produced them.
+    /// </summary>
+    [Fact]
+    public void WalSizingStamp_HeadroomDriftWithinARung_IsNotAChange()
+    {
+        var conf = "max_wal_size = 4GB\n" + DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, 18);
+
+        foreach (var freeGb in new[] { 64L, 70L, 100L, 127L })
+        {
+            var stamp = DarlingManagedPostgres.BuildWalSizingStamp(DarlingManagedPostgres.DeriveWalSettings(freeGb * OneGb), 18);
+            Assert.True(
+                DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(conf, stamp),
+                $"{freeGb} GB free should be the same rung as 64 GB, not a change");
+
+            var drifted = DarlingManagedPostgres.BuildWalSizingConfAppend(freeGb * OneGb, 120 * OneGb, 18);
+            foreach (var setting in SettingNames(drifted))
+            {
+                Assert.Equal(LastSettingValue(conf, setting), LastSettingValue(drifted, setting));
+            }
+        }
+
+        /* Crossing a rung boundary in either direction IS a change. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(
+            conf, DarlingManagedPostgres.BuildWalSizingStamp(DarlingManagedPostgres.DeriveWalSettings(128 * OneGb), 18)));
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(
+            conf, DarlingManagedPostgres.BuildWalSizingStamp(DarlingManagedPostgres.DeriveWalSettings(63 * OneGb), 18)));
+    }
+
+    /// <summary>
+    /// THE HEAL-DOWN CASE the issue asked for (#3802): a block written at 16384MB on a roomy volume, a volume
+    /// that has since shrunk to 32 GB free. The last stamp is stale, the block is re-authored, and the value in
+    /// force is 4096MB by last-occurrence-wins — the old block is preserved, never edited. Then the resize-back
+    /// case that makes "last stamp" rather than "any stamp" the rule: with both stamps in the file, the 16 GB
+    /// one is PRESENT but not LAST, so a volume that grew back re-derives instead of latching on the 4 GB
+    /// block it would otherwise leave in force.
+    /// </summary>
+    [Fact]
+    public void WalSizingStamp_HealsDown_WhenHeadroomShrinks_AndTheLastStampDecides()
+    {
+        var roomy = DarlingManagedPostgres.DeriveWalSettings(1024 * OneGb);
+        var tight = DarlingManagedPostgres.DeriveWalSettings(32 * OneGb);
+        Assert.Equal(16384, roomy.MaxWalSizeMb);
+        Assert.Equal(4096, tight.MaxWalSizeMb);
+
+        var conf = DarlingManagedPostgres.BuildWriteThroughputConfAppend()
+            + DarlingManagedPostgres.BuildWalSizingConfAppend(1024 * OneGb, 2048 * OneGb, 18);
+        Assert.Equal("16384MB", LastSettingValue(conf, "max_wal_size"));
+
+        /* The volume shrank: the block in force was derived to a rung this box no longer affords. */
+        var tightStamp = DarlingManagedPostgres.BuildWalSizingStamp(tight, 18);
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(conf, tightStamp));
+
+        var healed = conf + DarlingManagedPostgres.BuildWalSizingConfAppend(32 * OneGb, 120 * OneGb, 18);
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(healed, tightStamp));
+        Assert.Equal("4096MB", LastSettingValue(healed, "max_wal_size"));
+        Assert.Equal("1024MB", LastSettingValue(healed, "min_wal_size"));
+        Assert.Equal(2, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV12));
+
+        /* The older block is preserved, not edited — the heal path only ever appends. */
+        Assert.Contains("max_wal_size = 16384MB", healed, StringComparison.Ordinal);
+
+        /* Resize back: the 16 GB stamp IS in the file, so a Contains test would skip. It is not LAST, so the
+           box re-derives, and the appended block makes it current again. */
+        var roomyStamp = DarlingManagedPostgres.BuildWalSizingStamp(roomy, 18);
+        Assert.Contains(roomyStamp, healed, StringComparison.Ordinal);
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(healed, roomyStamp));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(
+            healed + DarlingManagedPostgres.BuildWalSizingConfAppend(1024 * OneGb, 2048 * OneGb, 18), roomyStamp));
+    }
+
+    /// <summary>
+    /// v12 SUPERSEDES v4's fixed <c>max_wal_size = 4GB</c> by last-occurrence-wins, in BOTH directions
+    /// (#3802) — up to the cap on a roomy volume, and DOWN below v4's constant on a tight one, which is
+    /// deliberate: v4 sized for a bootstrap burst on a box it never measured. Pinned against a conf carrying
+    /// initdb's commented default as a decoy, so the count is of live assignments and not of substrings.
+    /// v4 keeps its <c>max_connections</c>; v12 does not restate it.
+    /// </summary>
+    [Fact]
+    public void WalSizingConfAppend_SupersedesV4sFixedCeiling_ByLastOccurrence_UpAndDown()
+    {
+        const string StockPreamble = "#max_wal_size = 1GB\n#min_wal_size = 80MB\n#checkpoint_completion_target = 0.9\n";
+        var v4 = StockPreamble + DarlingManagedPostgres.BuildWriteThroughputConfAppend();
+        Assert.Equal("4GB", LastSettingValue(v4, "max_wal_size"));
+        Assert.Null(LastSettingValue(v4, "min_wal_size"));
+
+        var roomy = v4 + DarlingManagedPostgres.BuildWalSizingConfAppend(1024 * OneGb, 2048 * OneGb, 18);
+        Assert.Equal("16384MB", LastSettingValue(roomy, "max_wal_size"));
+        Assert.Equal("4096MB", LastSettingValue(roomy, "min_wal_size"));
+
+        var tight = v4 + DarlingManagedPostgres.BuildWalSizingConfAppend(2 * OneGb, 40 * OneGb, 18);
+        Assert.Equal("1024MB", LastSettingValue(tight, "max_wal_size"));   /* below v4's 4GB: the box cannot afford it */
+        Assert.Equal("256MB", LastSettingValue(tight, "min_wal_size"));
+
+        /* Two live assignments of max_wal_size (v4's and v12's), one of max_connections (v4's alone). */
+        Assert.Equal(2, CountAssignments(tight, "max_wal_size"));
+        Assert.Equal(1, CountAssignments(tight, "max_connections"));
+        Assert.Equal(1, CountOccurrences(tight, DarlingManagedPostgres.ConfMarkerV4));
+    }
+
+    /// <summary>
+    /// The two every-start heals cannot read each other's line (#3802). v8 keys on the LAST line carrying
+    /// <see cref="DarlingManagedPostgres.ConfHardwareFingerprintPrefix"/> in the conf as read at the top of
+    /// <c>EnsureConfAppended</c>; v12 is appended after it and carries its own stamp under
+    /// <see cref="DarlingManagedPostgres.ConfWalSizingStampPrefix"/>. If either prefix were a substring of
+    /// the other, one heal's <c>LastIndexOf</c> would land on the other's line on the next start and compare
+    /// against a line it can never match — an append per start, forever. Asserted both ways, and then
+    /// end-to-end: a v8 block followed by a v12 block still reports v8 current, and vice versa.
+    /// </summary>
+    [Fact]
+    public void WalSizingStamp_AndHardwareFingerprint_DoNotReadEachOther()
+    {
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, DarlingManagedPostgres.ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, DarlingManagedPostgres.ConfWalSizingStampPrefix, StringComparison.Ordinal);
+
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        var v8 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, 40);
+        var v12 = DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, 18);
+        var v8Fingerprint = DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, 40);
+        var v12Stamp = DarlingManagedPostgres.BuildWalSizingStamp(DarlingManagedPostgres.DeriveWalSettings(64 * OneGb), 18);
+
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(v8 + v12, v8Fingerprint));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(v8 + v12, v12Stamp));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(v12 + v8, v8Fingerprint));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(v12 + v8, v12Stamp));
+
+        /* And neither block writes the other's line at all. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, v8, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, v12, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The pure half of the ALTER SYSTEM check (#3802): the WAL keys <c>postgresql.auto.conf</c> assigns, as
+    /// written. The fixture is the file's real shape — the two-line "Do not edit" header ALTER SYSTEM writes,
+    /// quoted values, and a setting this block does not own sitting between the ones it does. The header lines
+    /// are comments and must not register; <c>shared_buffers</c> is not a WAL key and must not register;
+    /// duplicate keys resolve to the LAST one, which is what PostgreSQL honours. No file, or an empty one,
+    /// yields nothing.
+    /// </summary>
+    [Fact]
+    public void FindWalSizingAutoConfOverrides_FindsTheWalKeys_IgnoresHeaderAndOtherSettings()
+    {
+        const string AutoConf =
+            "# Do not edit this file manually!\n" +
+            "# It will be overwritten by the ALTER SYSTEM command.\n" +
+            "max_wal_size = '2GB'\n" +
+            "shared_buffers = '512MB'\n" +
+            "checkpoint_completion_target = '0.7'\n" +
+            "max_wal_size = '16GB'\n";
+
+        var overrides = DarlingManagedPostgres.FindWalSizingAutoConfOverrides(AutoConf);
+
+        Assert.Equal(2, overrides.Count);
+        Assert.Contains(("max_wal_size", "'16GB'"), overrides);              /* the LAST assignment, not the first */
+        Assert.Contains(("checkpoint_completion_target", "'0.7'"), overrides);
+        Assert.DoesNotContain(overrides, o => o.Name == "shared_buffers");
+        Assert.DoesNotContain(overrides, o => o.Name == "min_wal_size");
+
+        Assert.Empty(DarlingManagedPostgres.FindWalSizingAutoConfOverrides(null));
+        Assert.Empty(DarlingManagedPostgres.FindWalSizingAutoConfOverrides(string.Empty));
+        Assert.Empty(DarlingManagedPostgres.FindWalSizingAutoConfOverrides("# Do not edit this file manually!\n"));
+
+        /* The three names the scan looks for are exactly the three the block can write. */
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, postgresMajor: 13);
+        Assert.Equal(
+            DarlingManagedPostgres.WalSizingSettingNames.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            SettingNames(block).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// THE ALTER SYSTEM PIN the issue asked for (#3802): a fake <c>postgresql.auto.conf</c> carrying
+    /// <c>max_wal_size = '2GB'</c> yields ONE warning naming the key, the value as written, the figure the
+    /// product derived instead, and the precedence that makes the file's value win — and the block is
+    /// unchanged, because the builder is pure and the override feeds only the log. Nothing is edited: the
+    /// auto.conf's bytes are the same after the check. A data directory with no auto.conf logs nothing.
+    /// </summary>
+    [Fact]
+    public void AlterSystemOverride_IsLogged_AndTheBlockIsUnchanged()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var config = new PostgresConfig { Managed = true, Port = 5994, DataDirectory = dataDirectory };
+            var derived = DarlingManagedPostgres.DeriveWalSettings(64 * OneGb);
+
+            /* No auto.conf: nothing to say. */
+            var quiet = new CapturingTestLogger();
+            new DarlingManagedPostgres(config, quiet).LogWalSizingAutoConfOverrides(dataDirectory, derived);
+            Assert.Equal("(no log lines captured)", quiet.Joined);
+
+            const string AutoConf = "# Do not edit this file manually!\n# It will be overwritten by the ALTER SYSTEM command.\nmax_wal_size = '2GB'\n";
+            var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+            File.WriteAllText(autoConfPath, AutoConf);
+
+            var before = DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, 18);
+            var logger = new CapturingTestLogger();
+            new DarlingManagedPostgres(config, logger).LogWalSizingAutoConfOverrides(dataDirectory, derived);
+
+            var line = Assert.Single(logger.Joined.Split(" | "));
+            Assert.StartsWith("Warning: ", line, StringComparison.Ordinal);
+            Assert.Contains("postgresql.auto.conf sets max_wal_size = '2GB'", line, StringComparison.Ordinal);
+            Assert.Contains("AFTER postgresql.conf", line, StringComparison.Ordinal);
+            Assert.Contains("derived 8192MB", line, StringComparison.Ordinal);
+            Assert.Contains("ALTER SYSTEM RESET max_wal_size", line, StringComparison.Ordinal);
+
+            /* Unchanged block, untouched file. */
+            Assert.Equal(before, DarlingManagedPostgres.BuildWalSizingConfAppend(64 * OneGb, 120 * OneGb, 18));
+            Assert.Equal(AutoConf, File.ReadAllText(autoConfPath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     [Fact]

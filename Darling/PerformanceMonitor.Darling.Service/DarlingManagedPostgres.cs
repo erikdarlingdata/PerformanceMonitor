@@ -343,6 +343,109 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV11 = "# Managed by PerformanceMonitor Darling (v11 job execution logging) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v12 WAL-sizing block (#3802): derive <c>max_wal_size</c> (and <c>min_wal_size</c> beside
+    /// it) from the headroom on the volume that holds the data directory, and re-derive it on every
+    /// service-owned start. A TWELFTH independently versioned block, and after v8 the second one keyed on
+    /// something other than its own marker's absence — see <see cref="ConfWalSizingStampPrefix"/>.
+    ///
+    /// <para><b>What was in force before this, stated precisely, because the issue's own title gets it
+    /// wrong.</b> #3802 says every managed store "runs PostgreSQL's default 1 GB". It does not: the v4 block
+    /// (<see cref="BuildWriteThroughputConfAppend"/>) has written <c>max_wal_size = 4GB</c> as a fixed
+    /// constant since the 24-server bootstrap incident, so a healed managed store sat at 4 GB, not 1 GB. The
+    /// defect is real all the same — 4 GB is a constant chosen for a bootstrap burst and sized to no property
+    /// of the box it runs on — and the mechanism the issue measured is exactly the one a constant cannot
+    /// answer. This block SUPERSEDES v4's line by last-occurrence-wins, the way v5 supersedes v3's
+    /// <c>shared_buffers</c>; v4 is not edited and keeps its <c>max_connections</c>.</para>
+    ///
+    /// <para><b>The measured mechanism (a production store, 2026-09-20 15:20–15:40Z, the #3745 exhibit).</b>
+    /// One continuous-aggregate refresh wrote 8.3 M rows in a single transaction, ran through
+    /// <c>max_wal_size</c> mid-checkpoint, forced a second WAL-triggered checkpoint (199 s), and for four
+    /// minutes every heavy read on the store starved behind it — the fleet overview cancelled twice, four
+    /// alert reads cancelled, a parallel worker failed to spawn (<c>could not reserve shared memory
+    /// region</c>). The maintainer set <c>max_wal_size = 16GB</c> out of band on all three production stores
+    /// (reload-only, verified) and ruled that the product should author it — <i>"as long as the box can
+    /// afford it. so dynamic i guess."</i> — which is the whole brief: a derivation, not a constant.</para>
+    ///
+    /// <para><b>The formula.</b> <c>max_wal_size = clamp(free / 8, 1 GB, 16 GB)</c>, floored to the
+    /// power-of-two ladder 1, 2, 4, 8, 16 GB, where <c>free</c> is the space available on the data volume at
+    /// ensure time; <c>min_wal_size = max(80 MB, max_wal_size / 4)</c>. Both written in whole megabytes in
+    /// PostgreSQL's unit grammar. The pieces:
+    /// <list type="bullet">
+    /// <item><b>/ 8</b> — the WAL directory must never be the thing that fills the data volume.
+    ///   <c>max_wal_size</c> is a SOFT limit (PostgreSQL's documentation: <i>"WAL size can exceed max_wal_size
+    ///   under special circumstances, such as heavy load"</i>), and the load that makes it matter here — a
+    ///   compression-heavy TimescaleDB store whose materializations write millions of rows per transaction —
+    ///   is precisely the heavy load that overshoots it. Checkpoints on that store are the write amplifier,
+    ///   and the WAL ceiling is what spaces them. An eighth of what is free leaves seven eighths for the
+    ///   overshoot, for the store's own growth between retention sweeps, and for the disk-pressure self-alert
+    ///   to fire before anything is actually full.</item>
+    /// <item><b>16 GB ceiling</b> — the maintainer's chosen ceiling from #3802, not a measured optimum: it is
+    ///   the figure applied out of band to the store that exhibited the mechanism, and the point past which
+    ///   checkpoint spacing was judged to stop buying anything for this write shape. A larger
+    ///   <c>max_wal_size</c> also lengthens crash recovery on the bundled store — more WAL to replay — which
+    ///   is the price of fewer forced checkpoints, so the ceiling is also where that price stops being worth
+    ///   paying.</item>
+    /// <item><b>1 GB floor</b> — PostgreSQL's own default. A volume with under 16 GB free cannot afford more
+    ///   WAL than the server would have used anyway, and the log line says so rather than landing there
+    ///   silently. On a volume with under 32 GB free the floor and the 2 GB rung land BELOW v4's fixed 4 GB;
+    ///   that is deliberate. v4 sized for a burst on a box it never measured, and the block that does measure
+    ///   the box heals it down.</item>
+    /// <item><b>min_wal_size at a quarter</b> — the size below which PostgreSQL recycles old segments rather
+    ///   than removing them, so recycling keeps pace with a raised ceiling instead of paying segment creation
+    ///   on every burst. Floored at PostgreSQL's 80 MB default; on the ladder that floor is never the binding
+    ///   term (the smallest rung yields 256 MB), and it is coded anyway so the formula is true of itself and
+    ///   not merely of the ladder.</item>
+    /// </list></para>
+    ///
+    /// <para><b>Why a power-of-two ladder and not the raw quotient.</b> This block heals on a change in the
+    /// box, like v8, and v8's lesson applies with more force: a check that runs on every start and compares
+    /// an exact figure turns every wobble in that figure into a fresh block appended to the file, forever.
+    /// Free disk is not a wobble — it moves by gigabytes between any two starts on a store that compresses
+    /// and drops chunks — so the raw quotient would re-author on essentially every start, and whole-GB steps
+    /// would still flip on an 8 GB swing. The ladder makes a re-author need the free space to HALVE or
+    /// DOUBLE, which is the scale at which the checkpoint spacing it governs actually changes; within a rung
+    /// nothing is written, and the start's log line says so. The stamp line under the marker records the
+    /// derived rung and the PostgreSQL major, and <see cref="ConfHasCurrentWalSizingStamp"/> compares the
+    /// LAST stamp in the file — the v8 rule, for the v8 reason: postgresql.conf takes the last occurrence, so
+    /// the question has to be asked of the block that is actually in force.</para>
+    ///
+    /// <para><b><c>checkpoint_completion_target</c> is pinned at 0.9 only where the default is not already
+    /// 0.9.</b> The PostgreSQL 14 release notes (E.25.3.1.9): <i>"Change checkpoint_completion_target default
+    /// to 0.9 (Stephen Frost). The previous default was 0.5."</i> On 14 and later the line is omitted —
+    /// re-stating a default buys nothing and would read as a decision this block did not make; on 13 and
+    /// earlier it is emitted, because a checkpoint that finishes in half its interval is the write spike this
+    /// block exists to spread. The bundled runtime is PostgreSQL 18, so in the shipped product the line can
+    /// only ever appear on a data directory this build's initdb did not create. An unreadable
+    /// <c>PG_VERSION</c> is treated as pre-14: the pin is a no-op where the default is already 0.9 and the
+    /// fix where it is not, so emitting it is the answer that cannot be wrong.</para>
+    ///
+    /// <para><b>What it does not reach.</b> <c>postgresql.auto.conf</c> is read after <c>postgresql.conf</c>,
+    /// so an <c>ALTER SYSTEM SET max_wal_size</c> still wins — the precedence the v10 <c>lc_messages</c> and
+    /// v11 job-logging notes document (v11 measured it), and the one the maintainer's own out-of-band 16 GB
+    /// may be sitting under. This block does not fight it: <see cref="LogWalSizingAutoConfOverrides"/> reads
+    /// the auto.conf, logs one WARNING per WAL key it assigns — naming the key, its value and the precedence —
+    /// and the block is authored regardless, so the file records what the product derived even while an
+    /// operator's override is what runs. Nothing here edits or deletes <c>postgresql.auto.conf</c>;
+    /// <c>ALTER SYSTEM RESET</c> is the operator's move. And it reaches MANAGED stores only — a
+    /// bring-your-own store's WAL is its owner's to size, consistent with the BYO posture everywhere else in
+    /// this class.</para>
+    ///
+    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable
+    /// <c>DriveInfo</c> is not evidence the headroom is unchanged, it is the absence of evidence either way,
+    /// and re-deriving the WAL ceiling from a figure this service could not read is worse than leaving the
+    /// last good block (or v4's 4 GB, on a store that has never healed) in force. The skip is logged as a
+    /// warning naming what stays in force.</para>
+    ///
+    /// <para><b>Reload semantics.</b> All three settings are SIGHUP-context (the documentation's <i>"can only
+    /// be set in the postgresql.conf file or on the server command line"</i>), and this append runs before
+    /// <c>pg_ctl start</c>, so on a service-owned start the block is live on the very start that writes it —
+    /// the v9 through v11 story. The adopted-listener path in <see cref="EnsureRunningAsync"/> is the same
+    /// exception it is for them: a postmaster this service did not start is neither stopped nor signalled, so
+    /// there the heal waits for the next service-owned start.</para>
+    /// </summary>
+    public const string ConfMarkerV12 = "# Managed by PerformanceMonitor Darling (v12 wal sizing) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -351,6 +454,22 @@ public sealed class DarlingManagedPostgres
     /// host's block still winning by last-occurrence-wins.
     /// </summary>
     public const string ConfHardwareFingerprintPrefix = "# darling-hardware-fingerprint: ";
+
+    /// <summary>
+    /// Prefix of the v12 stamp line (#3802) — the record of what the WAL sizing beneath it was derived TO: the
+    /// <c>max_wal_size</c> rung, the <c>min_wal_size</c> that follows from it, and the PostgreSQL major that
+    /// decided whether <c>checkpoint_completion_target</c> was pinned. The same mechanism as
+    /// <see cref="ConfHardwareFingerprintPrefix"/>, compared the same way against the LAST occurrence
+    /// (<see cref="ConfHasCurrentWalSizingStamp"/>), under a DIFFERENT prefix on purpose: the v8 check keys on
+    /// the last line carrying its own prefix in the text read at the top of <see cref="EnsureConfAppended"/>,
+    /// and a v12 line that shared that prefix would be the line v8 read on the next start. Neither prefix is a
+    /// substring of the other, and a pin holds it so.
+    ///
+    /// <para>Records OUTPUTS where v8 records inputs, for the reason the v12 marker's doc gives: the raw
+    /// free-disk figure moves on every start and the rung does not. Recording the input would make every
+    /// start a change; recording the rung makes only a real change one.</para>
+    /// </summary>
+    public const string ConfWalSizingStampPrefix = "# darling-wal-sizing: ";
 
     /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
@@ -813,8 +932,17 @@ public sealed class DarlingManagedPostgres
     /// own semantics, and is what lets this converge instead of latching.</para>
     /// </summary>
     internal static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+        => LastLineWithPrefixEquals(conf, ConfHardwareFingerprintPrefix, expectedFingerprint);
+
+    /// <summary>
+    /// Whether the LAST line in <paramref name="conf"/> that starts with <paramref name="prefix"/> is exactly
+    /// <paramref name="expectedLine"/> — the one comparison both every-start heals share (v8's fingerprint,
+    /// v12's stamp; #3802 extracted it so the two cannot drift in what "current" means). Last, not any: see
+    /// <see cref="ConfHasCurrentHardwareFingerprint"/> for why a Contains test latches on a stale block.
+    /// </summary>
+    private static bool LastLineWithPrefixEquals(string conf, string prefix, string expectedLine)
     {
-        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        var lastIndex = conf.LastIndexOf(prefix, StringComparison.Ordinal);
         if (lastIndex < 0)
         {
             return false;
@@ -822,7 +950,7 @@ public sealed class DarlingManagedPostgres
 
         var lineEnd = conf.IndexOf('\n', lastIndex);
         var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
-        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
+        return string.Equals(line.TrimEnd('\r'), expectedLine, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -955,6 +1083,219 @@ public sealed class DarlingManagedPostgres
         builder.Append(StoreSelfMetrics.JobExecutionLoggingSetting).Append(" = on\n");
         return builder.ToString();
     }
+
+    /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
+
+    /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
+    /// a volume that cannot afford more WAL than the server would have used anyway gets exactly that, and the
+    /// start's log line says so (see <see cref="ConfMarkerV12"/>).</summary>
+    internal const long WalSizingFloorBytes = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>16 GB — the maintainer's chosen ceiling from #3802 (the figure applied out of band to the store
+    /// that exhibited the mechanism), NOT a measured optimum. Also where the crash-recovery price of a larger
+    /// WAL stops being worth paying for this write shape; see <see cref="ConfMarkerV12"/>.</summary>
+    internal const long WalSizingCeilingBytes = 16L * 1024 * 1024 * 1024;
+
+    /// <summary>80 MB — PostgreSQL's <c>min_wal_size</c> default, the floor under the quarter rule. Never the
+    /// binding term on the power-of-two ladder (the 1 GB rung yields 256 MB), coded so the formula is true of
+    /// itself rather than of the ladder.</summary>
+    internal const long MinWalSizeFloorBytes = 80L * 1024 * 1024;
+
+    /// <summary>The share of the data volume's free space the WAL ceiling may claim: one eighth, leaving seven
+    /// for the soft limit's overshoot, the store's own growth, and the disk-pressure self-alert.</summary>
+    internal const int WalSizingFreeDiskDivisor = 8;
+
+    /// <summary>
+    /// The PostgreSQL major whose release notes moved <c>checkpoint_completion_target</c>'s default from 0.5 to
+    /// 0.9 (PostgreSQL 14, E.25.3.1.9: <i>"Change checkpoint_completion_target default to 0.9 (Stephen Frost).
+    /// The previous default was 0.5."</i>). The v12 block pins 0.9 only on majors BELOW this one.
+    /// </summary>
+    internal const int CheckpointCompletionTargetDefaultChangedMajor = 14;
+
+    /// <summary>The value the v12 block pins on pre-14 majors — the default every later major ships with.</summary>
+    internal const string CheckpointCompletionTargetPin = "0.9";
+
+    /// <summary>
+    /// The three settings the v12 block may author, and therefore the keys
+    /// <see cref="FindWalSizingAutoConfOverrides"/> looks for in <c>postgresql.auto.conf</c>: an
+    /// <c>ALTER SYSTEM</c> on any of them outranks the block by PostgreSQL's precedence, and the start says so.
+    /// </summary>
+    internal static readonly string[] WalSizingSettingNames = { "max_wal_size", "min_wal_size", "checkpoint_completion_target" };
+
+    /// <summary>The two WAL sizes the v12 block derives from data-volume headroom, in whole MB.</summary>
+    internal readonly record struct WalSettings(int MaxWalSizeMb, int MinWalSizeMb);
+
+    /// <summary>
+    /// Derives the WAL sizing from the free space on the data volume — PURE and testable via an injected byte
+    /// count, the way <see cref="DeriveMemorySettings"/> derives from RAM (#3802).
+    ///
+    /// <para><c>max_wal_size</c> = <c>free / 8</c>, clamped to [1 GB, 16 GB], then FLOORED to the power-of-two
+    /// ladder 1, 2, 4, 8, 16 GB. The clamp is the formula; the ladder is what makes a check that runs on every
+    /// start converge instead of appending — a re-author needs the free space to halve or double, not to move
+    /// (see <see cref="ConfMarkerV12"/>). The rungs therefore sit at 16, 32, 64 and 128 GB free.
+    /// <c>min_wal_size</c> = <c>max(80 MB, max_wal_size / 4)</c>.</para>
+    ///
+    /// <para>A non-positive reading derives as ZERO free — the floor, PostgreSQL's own default — rather than
+    /// as some fallback volume, because "cannot afford it" is the only honest answer to "could not measure it".
+    /// The caller never passes one: <see cref="EnsureConfAppended"/> skips the whole v12 check without an
+    /// authoritative disk reading, exactly as v8 does without an authoritative RAM reading.</para>
+    /// </summary>
+    internal static WalSettings DeriveWalSettings(long freeDiskBytesOnDataVolume)
+    {
+        const long oneMb = 1024L * 1024L;
+
+        var free = Math.Max(0L, freeDiskBytesOnDataVolume);
+        var target = Math.Clamp(free / WalSizingFreeDiskDivisor, WalSizingFloorBytes, WalSizingCeilingBytes);
+
+        /* Floor to the ladder: the largest power-of-two multiple of the floor that does not exceed the clamped
+           target. Bounded by the ceiling, so this is at most four doublings. */
+        var maxWal = WalSizingFloorBytes;
+        while (maxWal * 2 <= target)
+        {
+            maxWal *= 2;
+        }
+
+        var minWal = Math.Max(MinWalSizeFloorBytes, maxWal / 4);
+
+        return new WalSettings((int)(maxWal / oneMb), (int)(minWal / oneMb));
+    }
+
+    /// <summary>
+    /// Whether the v12 block emits <c>checkpoint_completion_target = 0.9</c> for a store on this PostgreSQL
+    /// major: only BELOW 14, where the default was 0.5 (see
+    /// <see cref="CheckpointCompletionTargetDefaultChangedMajor"/>). An unknown major (0, from an unreadable
+    /// <c>PG_VERSION</c>) pins it — the pin is a no-op where the default is already 0.9 and the fix where it is
+    /// not, so emitting is the answer that cannot be wrong.
+    /// </summary>
+    internal static bool PinsCheckpointCompletionTarget(int postgresMajor)
+        => postgresMajor < CheckpointCompletionTargetDefaultChangedMajor;
+
+    /// <summary>
+    /// The <c>checkpoint_completion_target</c> clause of the v12 start line — what the block did about it and
+    /// why, for the major it saw. Three shapes: pinned on a known pre-14 major (naming the major and its old
+    /// 0.5 default), pinned on an unreadable major (saying so, and that the pin is harmless on 14+), or left at
+    /// the named major's own 0.9 default. Pure so the wording is pinned alongside the decision it reports.
+    /// </summary>
+    internal static string DescribeCheckpointCompletionTarget(int postgresMajor)
+    {
+        if (!PinsCheckpointCompletionTarget(postgresMajor))
+        {
+            return FormattableString.Invariant($"left at PostgreSQL {postgresMajor}'s default {CheckpointCompletionTargetPin}");
+        }
+
+        return postgresMajor > 0
+            ? FormattableString.Invariant($"pinned at {CheckpointCompletionTargetPin} (PostgreSQL {postgresMajor} defaulted to 0.5; 14 raised the default)")
+            : FormattableString.Invariant($"pinned at {CheckpointCompletionTargetPin} (PG_VERSION unreadable, so the pre-14 pin is emitted: a no-op on 14+, the fix before it)");
+    }
+
+    /// <summary>
+    /// The v12 stamp line for a derived sizing on a given major (#3802) — the outputs the block beneath it
+    /// carries, formatted invariantly so the comparison is a plain ordinal match on a machine with any locale.
+    /// Every input the block's CONTENT depends on is in here (both sizes and the major that decides the
+    /// checkpoint pin), so "the last stamp equals this one" means "the block in force is the block we would
+    /// write". The raw free-disk figure is deliberately NOT in it; see <see cref="ConfWalSizingStampPrefix"/>.
+    /// </summary>
+    internal static string BuildWalSizingStamp(WalSettings settings, int postgresMajor)
+        => FormattableString.Invariant(
+            $"{ConfWalSizingStampPrefix}max_wal_size_mb={settings.MaxWalSizeMb} min_wal_size_mb={settings.MinWalSizeMb} pg_major={postgresMajor}");
+
+    /// <summary>
+    /// True when the MOST RECENT v12 stamp in the conf equals <paramref name="expectedStamp"/> — the test that
+    /// decides whether <see cref="BuildWalSizingConfAppend"/> needs to run (#3802). Last, not any, for the v8
+    /// reason (<see cref="ConfHasCurrentHardwareFingerprint"/>): postgresql.conf takes the last occurrence, so a
+    /// volume that shrank and grew back would otherwise find its old stamp still present, skip, and leave the
+    /// shrunken block in force.
+    /// </summary>
+    internal static bool ConfHasCurrentWalSizingStamp(string conf, string expectedStamp)
+        => LastLineWithPrefixEquals(conf, ConfWalSizingStampPrefix, expectedStamp);
+
+    /// <summary>
+    /// The v12 block (#3802): the marker, the stamp, one comment line recording the headroom it was derived
+    /// from (so an operator reading postgresql.conf later can see WHY 8192MB without the service log), then
+    /// <c>max_wal_size</c> and <c>min_wal_size</c> in whole MB, and <c>checkpoint_completion_target = 0.9</c>
+    /// only on a pre-14 major. Pure: the same inputs write the same bytes, which is what lets the stamp stand
+    /// for the block. Takes the total-disk figure for the comment only — nothing is derived from it.
+    ///
+    /// <para>Carries no <see cref="ConfHardwareFingerprintPrefix"/> line, so the v8 staleness check's invariant
+    /// about what it reads is untouched; its own stamp sits under a different prefix for exactly that reason.
+    /// Supersedes v4's fixed <c>max_wal_size = 4GB</c> by last-occurrence-wins and restates nothing else — the
+    /// blocks compose, they do not compete.</para>
+    /// </summary>
+    internal static string BuildWalSizingConfAppend(long freeDiskBytesOnDataVolume, long totalDiskBytesOnDataVolume, int postgresMajor)
+    {
+        var settings = DeriveWalSettings(freeDiskBytesOnDataVolume);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV12).Append('\n');
+        builder.Append(BuildWalSizingStamp(settings, postgresMajor)).Append('\n');
+        builder.Append("# derived from ").Append(FormatGb(freeDiskBytesOnDataVolume)).Append(" GB free of ")
+            .Append(FormatGb(totalDiskBytesOnDataVolume)).Append(" GB on the data volume: free / ")
+            .Append(WalSizingFreeDiskDivisor).Append(", floored to a power of two, clamped to ")
+            .Append(WalSizingFloorBytes / (1024L * 1024L)).Append("MB..").Append(WalSizingCeilingBytes / (1024L * 1024L)).Append("MB\n");
+        builder.Append("max_wal_size = ").Append(settings.MaxWalSizeMb).Append("MB\n");
+        builder.Append("min_wal_size = ").Append(settings.MinWalSizeMb).Append("MB\n");
+        if (PinsCheckpointCompletionTarget(postgresMajor))
+        {
+            builder.Append("checkpoint_completion_target = ").Append(CheckpointCompletionTargetPin).Append('\n');
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The WAL keys <c>postgresql.auto.conf</c> assigns, with the value each carries — the pure half of the
+    /// ALTER SYSTEM check (#3802). <c>ALTER SYSTEM</c> writes one <c>name = 'value'</c> line per setting and
+    /// rewrites the file on every change, so there is normally one assignment per key; the LAST one is taken
+    /// regardless, because that is what PostgreSQL honours. Comment lines (the file's own "Do not edit this
+    /// file manually!" header) and lines naming other settings are ignored. Null or empty text (no file, or an
+    /// empty one) yields no overrides. Values are returned as written, quotes included, so the log line shows
+    /// the operator exactly what the file says.
+    /// </summary>
+    internal static IReadOnlyList<(string Name, string Value)> FindWalSizingAutoConfOverrides(string? autoConfText)
+    {
+        var overrides = new List<(string Name, string Value)>();
+        if (string.IsNullOrWhiteSpace(autoConfText))
+        {
+            return overrides;
+        }
+
+        foreach (var raw in autoConfText.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var name = line[..separator].Trim();
+            var matched = Array.Find(WalSizingSettingNames, n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+            if (matched is null)
+            {
+                continue;
+            }
+
+            var assignment = line[(separator + 1)..];
+            var comment = assignment.IndexOf('#', StringComparison.Ordinal);
+            var value = (comment >= 0 ? assignment[..comment] : assignment).Trim();
+
+            /* Last assignment wins, so replace an earlier one for the same key rather than adding a second. */
+            overrides.RemoveAll(o => string.Equals(o.Name, matched, StringComparison.Ordinal));
+            overrides.Add((matched, value));
+        }
+
+        return overrides;
+    }
+
+    /// <summary>Bytes as whole-and-tenth gigabytes, invariant — the figure the v12 block's comment line and
+    /// the start's log line both carry, so they cannot disagree about what the block was derived from.</summary>
+    internal static string FormatGb(long bytes)
+        => (Math.Max(0L, bytes) / (1024d * 1024d * 1024d)).ToString("F1", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// The derived managed-mode connection string: <c>127.0.0.1</c> + port + darling/darling + the
@@ -1397,7 +1738,13 @@ public sealed class DarlingManagedPostgres
     /// must apply the SAME blocks to the freshly-initdb'd cluster BEFORE pg_upgrade runs: pg_upgrade
     /// starts the new cluster internally to restore the dump, and restoring TimescaleDB into a server
     /// that has not preloaded its library fails outright. Healing it afterwards would be too late.</para>
+    ///
+    /// <para>Windows-attributed as of #3802 because the v12 heal reads the data directory's major through
+    /// <see cref="DarlingStoreUpgrade.TryReadDataDirectoryMajor"/>, whose class is Windows-only. Nothing about
+    /// the attribute is new in substance: the constructor already carries it, so every instance method here
+    /// has only ever been reachable on Windows.</para>
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void EnsureConfAppended(string dataDirectory)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
@@ -1497,7 +1844,10 @@ public sealed class DarlingManagedPostgres
            may have appended. That is safe only because none of them emits a line carrying
            ConfHardwareFingerprintPrefix, so nothing appended above can change this answer. A future version
            block that DID write a fingerprint line would be silently invisible here and the staleness check
-           would quietly stop checking — re-read the file at that point rather than adding the block above. */
+           would quietly stop checking — re-read the file at that point rather than adding the block above.
+           v12 (#3802) is the second every-start heal and carries its OWN stamp under ConfWalSizingStampPrefix,
+           which is not a substring of this prefix (pinned), so it neither disturbs this read nor is disturbed
+           by it; it runs below and reads the same once-read `conf` under the same reasoning. */
         var hypertableCount = TimescaleSupport.HypertableCount;
         var v8Authoritative = TryGetAuthoritativePhysicalMemoryBytes(out var v8RamBytes);
         var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
@@ -1568,6 +1918,146 @@ public sealed class DarlingManagedPostgres
                 "Appended v11 job execution logging to postgresql.conf ({Setting} = on): timescaledb_information.job_history records one row per background-job run, and without this it stays EMPTY — a maximum over it returns no rows, which reads as 'no run exceeded the line' rather than 'this instrument is off'. Logging starts from this start onward if the service owns it, otherwise from the next start it owns; runs before that point wrote nothing and CANNOT be recovered. job_stats remains the unconditional surface for a store that has not yet healed.",
                 StoreSelfMetrics.JobExecutionLoggingSetting);
         }
+
+        /* v12 (#3802): the second every-start heal, keyed like v8 on a stamp rather than on its marker's
+           absence, because what it derives from — the free space on the data volume — is a property of the box
+           that changes under a running store. It re-states max_wal_size (superseding v4's fixed 4GB by
+           last-occurrence-wins) and min_wal_size from that headroom, on a power-of-two ladder so ordinary
+           free-disk drift is not a change; and it pins checkpoint_completion_target only on a pre-14 major,
+           where the default was 0.5. Placed LAST, after v9-v11, for the reason those are placed after v8: it
+           carries a stamp line, and every block between v8 and here must not. Its stamp sits under its own
+           prefix, so the v8 read above is untouched (pinned: neither prefix is a substring of the other).
+
+           Two inputs, both read from the data directory handed in rather than from the field, so the store
+           upgrade's callback (#1706) sizes the freshly-initdb'd cluster from ITS volume and ITS major.
+           The major comes from PG_VERSION — readable without executing anything, the DarlingStoreUpgrade rule
+           — and an unreadable one derives as 0, which pins the checkpoint target (a no-op on 14+, the fix
+           on anything older). The disk figure is the gate: without an authoritative DriveInfo reading this does NOTHING,
+           exactly as v8 does without an authoritative RAM reading, because re-deriving a production WAL ceiling
+           from a figure we could not read is worse than leaving the block in force. All three settings are
+           SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
+        var v12Major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
+        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes))
+        {
+            _logger.LogWarning(
+                "Skipped the v12 WAL-sizing check: the free space on the volume holding {DataDirectory} could not be read, so a change in headroom cannot be distinguished from a failed reading. The WAL settings currently in force (the last v12 block if one exists, otherwise v4's max_wal_size = 4GB) stay in force.",
+                dataDirectory);
+        }
+        else
+        {
+            var v12Settings = DeriveWalSettings(v12FreeBytes);
+            var v12Stamp = BuildWalSizingStamp(v12Settings, v12Major);
+            var v12CheckpointNote = DescribeCheckpointCompletionTarget(v12Major);
+
+            /* The ALTER SYSTEM check runs whether or not the block is re-authored: the override outranks the
+               block on every start, not only on the start that writes it, and an operator reading the log
+               for "why is the effective value not what the product derived" needs the answer on the start
+               they are looking at. */
+            LogWalSizingAutoConfOverrides(dataDirectory, v12Settings);
+
+            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp))
+            {
+                File.AppendAllText(confPath, BuildWalSizingConfAppend(v12FreeBytes, v12TotalBytes, v12Major));
+                _logger.LogInformation(
+                    "Appended v12 WAL sizing to postgresql.conf: max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume (free / {Divisor} on the 1 GB..16 GB power-of-two ladder; supersedes v4's fixed 4GB by last-occurrence-wins); checkpoint_completion_target {CheckpointNote}. SIGHUP-context, so effective on this start when the service owns it.",
+                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), WalSizingFreeDiskDivisor, v12CheckpointNote);
+            }
+            else
+            {
+                /* The self-proving shape (#3802): a re-derivation that changes nothing still says what it
+                   derived and from what, so a start with no append is distinguishable from a start that never
+                   checked. */
+                _logger.LogInformation(
+                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force was derived to the same rung; checkpoint_completion_target {CheckpointNote}.",
+                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The v12 ALTER SYSTEM check (#3802): reads <c>postgresql.auto.conf</c> in the data directory and logs ONE
+    /// warning per WAL key it assigns, naming the key, the value as written, the figure the product derived
+    /// instead, and the precedence that makes the file's value the one that runs. It changes nothing — the
+    /// block is authored regardless and the auto.conf is never edited or deleted; the v10 <c>lc_messages</c>
+    /// note is the precedent for stating the precedence rather than fighting it, and <c>ALTER SYSTEM RESET</c>
+    /// is the operator's move. Split from <see cref="EnsureConfAppended"/> so the log line can be pinned with a
+    /// fake auto.conf and a capturing logger, without a data directory that can start.
+    ///
+    /// <para>Never throws: an unreadable auto.conf is logged at Debug and treated as "no overrides" — the block
+    /// is still authored, and this is a diagnostic, not a gate. WARNING rather than INFORMATION because the
+    /// block is INERT for that key while the override stands, and an operator reading the log for "why is the
+    /// effective value not what the product derived" needs the answer to stand out from the v12 line above
+    /// it that reports the derivation as if it applied.</para>
+    /// </summary>
+    internal void LogWalSizingAutoConfOverrides(string dataDirectory, WalSettings derived)
+    {
+        var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+        string? autoConf;
+        try
+        {
+            autoConf = File.Exists(autoConfPath) ? File.ReadAllText(autoConfPath) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogDebug("v12 WAL sizing: could not read {AutoConf} to check for ALTER SYSTEM overrides ({Message}); the block is authored regardless.", autoConfPath, ex.Message);
+            return;
+        }
+
+        foreach (var (name, value) in FindWalSizingAutoConfOverrides(autoConf))
+        {
+            var derivedText = name switch
+            {
+                "max_wal_size" => FormattableString.Invariant($"{derived.MaxWalSizeMb}MB"),
+                "min_wal_size" => FormattableString.Invariant($"{derived.MinWalSizeMb}MB"),
+                _ => CheckpointCompletionTargetPin + " (or PostgreSQL's default on 14+)",
+            };
+            _logger.LogWarning(
+                "postgresql.auto.conf sets {Setting} = {Value} (an ALTER SYSTEM override). PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so that value wins over the v12 WAL-sizing block's derived {Derived} and the block is inert for this setting until the override is removed (ALTER SYSTEM RESET {Setting}, then reload). This service does not edit postgresql.auto.conf; the block is authored regardless so the file records what the product derived.",
+                name, value, derivedText, name);
+        }
+    }
+
+    /// <summary>
+    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802): the
+    /// same <c>DriveInfo</c>-on-the-path-root idiom the store upgrade's headroom check and the disk-pressure
+    /// self-alert already use, so three readers of one volume cannot disagree about which volume.
+    /// <c>AvailableFreeSpace</c> rather than <c>TotalFreeSpace</c>: it honours a quota on the service account,
+    /// and the WAL is written by the postmaster running AS that account, so it is the figure that bounds what
+    /// the server can actually write — the upgrade's headroom decision makes the same choice.
+    ///
+    /// <para>False, with both figures zero, when the root cannot be resolved, the drive is not ready, or the
+    /// read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged at
+    /// Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.</para>
+    /// </summary>
+    private bool TryReadDataVolumeSpace(string dataDirectory, out long freeBytes, out long totalBytes)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(dataDirectory));
+            if (!string.IsNullOrEmpty(root))
+            {
+                var drive = new DriveInfo(root);
+                if (drive.IsReady)
+                {
+                    freeBytes = drive.AvailableFreeSpace;
+                    totalBytes = drive.TotalSize;
+                    if (freeBytes >= 0 && totalBytes > 0)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (root {Root} not ready or reported no size).", dataDirectory, root ?? "(unresolved)");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} ({Message}).", dataDirectory, ex.Message);
+        }
+
+        freeBytes = 0;
+        totalBytes = 0;
+        return false;
     }
 
     /// <summary>
