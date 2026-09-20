@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace PerformanceMonitor.Analysis;
@@ -27,9 +29,178 @@ namespace PerformanceMonitor.Analysis;
 /// is left to the operator; the cost of overshooting (double-caching against the OS page cache, longer
 /// checkpoints, less room for <c>work_mem</c> × connections) is in the same sentence as the recommendation.
 /// <c>effective_cache_size</c> is never used as a memory figure here (design §6 D). No DDL (D8).</para>
+///
+/// <para><b>The composition sentence is a second composer (lane 29 of #3691).</b> <see cref="FactAdvice.PopulateStoryText"/>
+/// freezes the card from facts alone before any drill-down runs, so what the buffer cache HOLDS — read from the
+/// latest <c>pg_buffer_usage</c> capture by the Darling drill-down — is folded in afterwards through
+/// <see cref="WithBufferComposition"/>, lane 16's shape: the words stay here beside the rest of the buffer prose,
+/// the read stays with the other drill-downs, and the sentence in the payload's <c>note</c> and in the re-frozen
+/// card is one string. Value-stated from the capture (pool fill, the largest resident relation's share, the cold
+/// share), never presumed; the sizing sentence above already names <c>shared_buffers</c>' counter-objective, so
+/// the composition EXTENDS it (what a larger cache would hold) rather than repeating it.</para>
 /// </summary>
 public static partial class PgTargetAdvice
 {
+    /// <summary>The phrase every composition sentence starts with; <see cref="WithBufferComposition"/> keys its idempotence on it.</summary>
+    internal const string CompositionSentenceMarker = "Composition: ";
+
+    /// <summary>
+    /// The buffer-pressure card with the composition drill-down folded into its prose: the investigation gains
+    /// <see cref="BufferCompositionSentence"/>; the remediation, when a capture was read, gains what the
+    /// composition says about SIZING — a cold majority means a larger cache would hold pages nobody re-reads, a
+    /// single relation holding a large share names the statement or the bloat to look at before the knob, and on
+    /// Aurora the composition is the honest read where the hit ratio is not. A block already carrying the
+    /// sentence is returned unchanged, so a re-run over the same finding cannot stack it.
+    /// </summary>
+    public static AdviceBlock WithBufferComposition(AdviceBlock advice, PgTargetBufferCompositionSummary summary)
+    {
+        ArgumentNullException.ThrowIfNull(advice);
+        ArgumentNullException.ThrowIfNull(summary);
+
+        if (advice.Investigation.Contains(CompositionSentenceMarker, StringComparison.Ordinal))
+            return advice;
+
+        var investigation = string.Concat(advice.Investigation.TrimEnd(), " ", BufferCompositionSentence(summary));
+        var remediation = advice.Remediation;
+
+        if (summary.Status == PgTargetBufferCompositionStatus.Captured)
+        {
+            var sb = new StringBuilder(advice.Remediation.Length + 600);
+            sb.Append(advice.Remediation.TrimEnd()).Append(" What the capture says about sizing: ");
+
+            var top = summary.TopRelations.Count > 0 ? summary.TopRelations[0] : null;
+            if (top is not null && top.ShareOfPool >= BufferCompositionDominantRelationShare)
+            {
+                sb.Append(DescribeResident(top)).Append(" holds ").Append(KnobPct(top.ShareOfPool))
+                  .Append(" of the pool on its own — before the knob, look at what reads it (get_pg_top_queries — the shape whose shared_blks_read dwarfs its shared_blks_hit) and at its bloat: one sequential scanner or one bloated relation can churn a cache no size would satisfy, and fixing the statement or the bloat is the cheaper move. ");
+            }
+
+            if (summary.ColdShare is { } cold)
+            {
+                sb.Append(cold >= BufferCompositionColdMajority
+                    ? $"{KnobPct(cold)} of resident buffers sit in relations whose average usage count is at or below 1 — pages the clock sweep evicts first and nobody re-read — so a larger shared_buffers would mostly hold more of the same; raising it buys little here and still pays the counter-objective named above. "
+                    : $"Only {KnobPct(cold)} of resident buffers are cold (average usage count at or below 1), so what is in the cache is being re-read and a larger shared_buffers would hold pages that earn their place. ");
+            }
+
+            if (summary.PoolFill is { } fill && fill < BufferCompositionPoolFillFloor)
+                sb.Append("The pool is only ").Append(KnobPct(fill)).Append(" full: shared_buffers is not the constraint while it has room, and the pressure counters are better read as a scan pattern than a size. ");
+
+            if (summary.HitRatioSuppressed)
+                sb.Append("On Aurora the hit ratio is stated but not graded — a read outside shared_buffers may be a hit in the local storage tier — and this composition is the honest read there: what pg_buffercache says is resident is resident, whatever the community hit-ratio arithmetic says.");
+
+            remediation = sb.ToString().TrimEnd();
+        }
+
+        return advice with { Investigation = investigation, Remediation = remediation };
+    }
+
+    /// <summary>
+    /// One relation's share of the pool above which the remediation names it before the knob. Half is not a
+    /// bar in the scorer's sense — nothing is graded on it — it is the point at which "the cache is one
+    /// relation" is a fair sentence; below it the top-10 list in the payload speaks for itself. Chosen, not
+    /// measured (no fleet capture of <c>pg_buffer_usage</c> was in the 2026-09-19 calibration).
+    /// </summary>
+    internal const double BufferCompositionDominantRelationShare = 0.5;
+
+    /// <summary>The cold share at or above which the sentence says a larger cache would hold pages nobody re-reads: a majority. Chosen, not measured.</summary>
+    internal const double BufferCompositionColdMajority = 0.5;
+
+    /// <summary>Below this fill the pool has room and the size is not the constraint — 0.9, chosen, not measured; the sentence states the fill either way.</summary>
+    internal const double BufferCompositionPoolFillFloor = 0.9;
+
+    /// <summary>
+    /// The value-stated composition sentence, the same words in the drill-down payload's <c>note</c> and in the
+    /// re-frozen card. Four arms, one per <see cref="PgTargetBufferCompositionStatus"/>: a capture in the
+    /// window (pool fill, the largest resident relation, kind shares, dirty share, cold share, the capture's
+    /// stamp); no capture in the window with the extension present (the collector's hourly cadence, and how
+    /// long before the window the last capture was); <c>pg_buffercache</c> available but not installed; and
+    /// <c>pg_buffercache</c> absent from the server. Numbers are the summary's, never recomputed here.
+    /// </summary>
+    public static string BufferCompositionSentence(PgTargetBufferCompositionSummary summary)
+    {
+        ArgumentNullException.ThrowIfNull(summary);
+
+        switch (summary.Status)
+        {
+            case PgTargetBufferCompositionStatus.ExtensionAbsent:
+                return CompositionSentenceMarker +
+                       "what the cache holds cannot be shown — pg_buffercache is not offered by this server (pg_extension_availability reports it absent), so pg_buffer_usage has nothing to capture; " +
+                       "the pressure counters above stand on their own. On a managed service it is a parameter-group or a menu question, not a CREATE EXTENSION.";
+            case PgTargetBufferCompositionStatus.ExtensionAvailable:
+                return CompositionSentenceMarker +
+                       "what the cache holds cannot be shown yet — pg_buffercache is offered by this server but not installed (pg_extension_availability reports it available), " +
+                       "one CREATE EXTENSION pg_buffercache away; the next hourly pg_buffer_usage capture after that fills this drill-down.";
+            case PgTargetBufferCompositionStatus.NoCapture:
+            {
+                var sb = new StringBuilder(320);
+                sb.Append(CompositionSentenceMarker).Append("no buffer-cache capture in the window (pg_buffer_usage collects hourly; ");
+                sb.Append(summary.LastCaptureAt is null
+                    ? "this server has no capture at all"
+                    : summary.LastCaptureHoursBeforeWindow is { } before && before >= 0
+                        ? $"the last capture was {KnobHours(before)} before the window"
+                        : "the last capture is after the window");
+                sb.Append(").");
+                return sb.ToString();
+            }
+        }
+
+        var text = new StringBuilder(720);
+        text.Append(CompositionSentenceMarker);
+        text.Append("the pool is ");
+        text.Append(summary.PoolFill is { } poolFill ? KnobPct(poolFill) : "an unknown share");
+        text.Append(" full (").Append(KnobNum(summary.PoolBuffersUsed)).Append(" of ").Append(KnobNum(summary.PoolBuffersTotal))
+            .Append(" buffers, ").Append(KnobBytes(summary.PoolBytes)).Append(')');
+
+        var largest = summary.TopRelations.Count > 0 ? summary.TopRelations[0] : null;
+        if (largest is not null)
+            text.Append("; ").Append(DescribeResident(largest)).Append(" alone holds ").Append(KnobPct(largest.ShareOfPool));
+
+        if (summary.HeapShare is { } heap && summary.IndexShare is { } index && summary.ToastShare is { } toast && summary.OtherShare is { } other)
+        {
+            text.Append("; of the resident buffers, indexes hold ").Append(KnobPct(index))
+                .Append(", heaps ").Append(KnobPct(heap))
+                .Append(", TOAST ").Append(KnobPct(toast));
+            if (other > 0)
+                text.Append(", other databases and shared catalogs ").Append(KnobPct(other));
+        }
+
+        if (summary.DirtyShareOfPool is { } dirty)
+            text.Append("; ").Append(KnobPct(dirty)).Append(" of the pool is dirty");
+
+        if (summary.ColdShare is { } coldShare)
+            text.Append("; ").Append(KnobPct(coldShare)).Append(" of resident buffers sit in relations whose average usage count is at or below 1 — the clock sweep evicts those first");
+
+        text.Append('.');
+        if (summary.CapturedAt is { } at)
+            text.Append(" Captured at ").Append(at.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).Append(" UTC — a level, not the window's counters; pg_buffer_usage collects hourly.");
+        if (summary.RelationsInCapture > summary.TopRelations.Count)
+            text.Append(" The drill-down carries the top ").Append(KnobNum(summary.TopRelations.Count)).Append(" of ").Append(KnobNum(summary.RelationsInCapture)).Append(" resident relations; get_pg_buffer_usage lists the rest.");
+        return text.ToString();
+    }
+
+    /// <summary>"`orders_idx` (index, appdb)" — or, for a buffer the collector could not name, what that NULL means.</summary>
+    private static string DescribeResident(PgTargetBufferResident resident)
+    {
+        if (string.IsNullOrEmpty(resident.RelationName))
+            return string.IsNullOrEmpty(resident.DatabaseName)
+                ? "a shared catalog (no relation name from here)"
+                : $"a relation of database {resident.DatabaseName} (not nameable from the collector's database)";
+
+        var sb = new StringBuilder(96);
+        sb.Append('`').Append(resident.RelationName).Append(resident.RelationNameTruncated ? "…" : string.Empty).Append("` (").Append(resident.Kind);
+        if (!string.IsNullOrEmpty(resident.DatabaseName))
+            sb.Append(", ").Append(resident.DatabaseName);
+        sb.Append(')');
+        return sb.ToString();
+    }
+
+    private static string KnobHours(double hours) => hours switch
+    {
+        < 1 => $"{hours * 60:0} minutes",
+        < 48 => $"{hours:0.#} h",
+        _ => $"{hours / 24:0.#} days",
+    };
+
     private static partial AdviceBlock? ComposeBuffer(string key, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         return key switch
@@ -221,3 +392,80 @@ public static partial class PgTargetAdvice
         return sb.ToString();
     }
 }
+
+/// <summary>
+/// Which arm of the composition sentence applies (lane 29 of #3691). <see cref="Captured"/>: the window holds a
+/// <c>pg_buffer_usage</c> capture and the summary's numbers are that capture's. <see cref="NoCapture"/>: none in
+/// the window, and the extension is installed (or its state is not recorded) — a cadence statement, not a fact
+/// about the cache. <see cref="ExtensionAvailable"/> / <see cref="ExtensionAbsent"/>: <c>pg_extension_availability</c>'s
+/// latest word on <c>pg_buffercache</c>, which is why there is nothing to capture — "available" is one
+/// <c>CREATE EXTENSION</c> away, "absent" is not offered by the server at all.
+/// </summary>
+public enum PgTargetBufferCompositionStatus
+{
+    Captured,
+    NoCapture,
+    ExtensionAvailable,
+    ExtensionAbsent,
+}
+
+/// <summary>
+/// What the buffer-composition drill-down found (lane 29 of #3691), handed from the Darling read to the advice
+/// composer so the words and the numbers come from one object. Shares are fractions in [0, 1]:
+/// <paramref name="PoolFill"/> is <c>pool_buffers_used / pool_buffers_total</c>; <paramref name="DirtyShareOfPool"/>
+/// the listed dirty buffers over the WHOLE pool; the four kind shares and <paramref name="ColdShare"/> are over
+/// the LISTED buffers (the collector drops relations under 8 buffers, so "listed" is not "used" and the payload
+/// carries both) and sum to 1 when the capture has rows. <paramref name="ColdShare"/> counts buffers in relations
+/// whose AVERAGE usage count is at or below 1 — the row is per relation, so the figure is a relation-level
+/// reading of what the clock sweep would evict first, and is described that way. The pressure figures
+/// (<paramref name="MissShare"/>, <paramref name="HitRatioSuppressed"/>, <paramref name="EvictionsPerSec"/>,
+/// <paramref name="CacheTurnoversPerHour"/>, <paramref name="BuffersAllocPerSec"/>) are the ROOT FACT's metadata,
+/// reused, null when the finding carried none. <paramref name="LastCaptureAt"/> / <paramref name="LastCaptureHoursBeforeWindow"/>
+/// are for the no-capture arm: when the server was last captured, and how far before the window's start.
+/// </summary>
+public sealed record PgTargetBufferCompositionSummary(
+    PgTargetBufferCompositionStatus Status,
+    DateTime? CapturedAt,
+    DateTime? LastCaptureAt,
+    double? LastCaptureHoursBeforeWindow,
+    long PoolBuffersTotal,
+    long PoolBuffersUsed,
+    long PoolBytes,
+    double? PoolFill,
+    long BuffersListed,
+    long DirtyBuffersListed,
+    double? DirtyShareOfPool,
+    double? HeapShare,
+    double? IndexShare,
+    double? ToastShare,
+    double? OtherShare,
+    long ColdBuffers,
+    double? ColdShare,
+    int RelationsInCapture,
+    IReadOnlyList<PgTargetBufferResident> TopRelations,
+    double? MissShare,
+    bool HitRatioSuppressed,
+    double? EvictionsPerSec,
+    double? CacheTurnoversPerHour,
+    double? BuffersAllocPerSec);
+
+/// <summary>
+/// One resident relation in the latest capture, largest first. <paramref name="RelationName"/> is NULL for a
+/// buffer belonging to another database or to a shared catalog (the collector cannot name it from its own
+/// database — not a missing name), bounded in the read with <paramref name="RelationNameTruncated"/> saying
+/// whether the bound cut it; <paramref name="RelationKind"/> is <c>pg_class.relkind</c> as stored and
+/// <paramref name="Kind"/> the word for it (heap / index / toast / other). <paramref name="ShareOfPool"/> is
+/// over the whole pool, <paramref name="DirtyShare"/> over this relation's own buffers.
+/// </summary>
+public sealed record PgTargetBufferResident(
+    int Rank,
+    string? DatabaseName,
+    string? RelationName,
+    bool RelationNameTruncated,
+    string? RelationKind,
+    string Kind,
+    long Buffers,
+    double ShareOfPool,
+    long DirtyBuffers,
+    double DirtyShare,
+    double? AvgUsageCount);

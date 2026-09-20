@@ -884,9 +884,10 @@ public sealed class PgTargetKnobsTests
     /// One <c>pg_server_config</c> snapshot as the collector writes it: the two knobs at their shipped defaults
     /// (<c>shared_buffers 16384 × 8kB</c>, <c>max_wal_size 1024 MB</c>), the checkpoint rhythm at its default, and
     /// the three convention checks deliberately tuned so they root nothing — the e2e asserts EXACTLY two advisories.
-    /// A <c>source = 'session'</c> row for <c>work_mem</c> is planted too, to prove the exclusion filters it.
+    /// A <c>source = 'session'</c> row for <c>work_mem</c> is planted too, to prove the exclusion filters it. Internal:
+    /// lane 29's buffer-composition e2e plants the same snapshot so the memory chain roots there too.
     /// </summary>
-    private static async Task PlantConfigSnapshotAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime at, CancellationToken ct)
+    internal static async Task PlantConfigSnapshotAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime at, CancellationToken ct)
     {
         var rows = new (string Name, string Setting, string? Unit, string BootVal, string Source)[]
         {
