@@ -236,6 +236,7 @@ public sealed class PgTargetFactCollectorTests
             ("pg_column_stats", "lane 27 — top_value_frequency skew behind parameter sensitivity"),
             ("pg_predicate_stats", "lane 30 — predicate evaluation count and selectivity beside the Seq Scan"),
             ("pg_kernel_stats", "lane 28 — pg_stat_kcache user/system CPU time, the self-hosted CPU proxy"),
+            ("pg_extension_availability", "lane 28 — whether pg_stat_kcache is installed, READ before the kernel rows are (the first analysis read of the daily availability capture)"),
             ("pg_buffer_usage", "lane 29 — the buffer-composition drill-down on PG_BUFFER_CACHE_PRESSURE"),
             ("pg_cpu_utilization", "lane 32 — the V136 host-memory columns beside the capacity percent (lane 9 reads it too)"),
         })

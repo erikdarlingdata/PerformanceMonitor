@@ -77,6 +77,9 @@ public sealed class PgTargetV3PlumbingTests
     /// compose. Lane 27 filled the plan family's regression, sensitivity and anomaly arms: a BARE fact under those
     /// keys (no graded metadata) still scores 0 — the family self-gates on its own keys — and its advice, edges and
     /// baseline are pinned in <c>PgTargetPlanTests</c>; <c>PG_SEQ_SCAN_ADVISORY</c> stays lane 30's inert stub here.
+    /// Lane 28 filled the kernel family: its two keys, its anomaly and its metric left the inert loop too (their live
+    /// shapes are pinned in <c>PgTargetKernelTests</c>); the kernel proxy is base 0 by design and the split is 0.4, so the
+    /// filled-family check below asserts the filled shape, not inertness.
     /// </summary>
     [Fact]
     public void TheV3Families_AreInertThroughEverySharedEntryPoint_UntilTheirLanesLand()
@@ -101,8 +104,6 @@ public sealed class PgTargetV3PlumbingTests
         var facts = new[]
             {
                 (PgTargetSources.PlansSource, PgTargetFactKeys.SeqScanAdvisory),
-                (PgTargetSources.KernelSource, PgTargetFactKeys.CpuBurnCores),
-                (PgTargetSources.KernelSource, PgTargetFactKeys.CpuDecomposition),
                 (PgTargetSources.MemorySource, PgTargetFactKeys.ConfigMemoryOvercommit),
                 (PgTargetSources.MemorySource, PgTargetFactKeys.HostMemoryPressure),
             }
@@ -119,17 +120,14 @@ public sealed class PgTargetV3PlumbingTests
             Assert.Empty(graph.GetAllEdges(fact.Key));
             Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(fact.Key)!);
         }
-        foreach (var anomaly in new[] { PgTargetFactKeys.AnomalyCpuBurn })
-        {
-            Assert.Null(FactAdvice.GetForFactKey(anomaly));
-            Assert.Empty(graph.GetAllEdges(anomaly));
-            Assert.NotEmpty(PgTargetToolRecommendations.GetForKey(anomaly)!);
-        }
-        foreach (var metric in new[] { MetricNames.PgCpuBurnCores })
-        {
-            Assert.Null(PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric));
-            Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
-        }
+        /* Lane 28's kernel family is filled too: the anomaly composes its own block, the proxy's edges live on the
+           decomposition (not on the anomaly — no anomaly has an edge), and the metric is served by the PostgreSQL provider
+           only. No v3 anomaly or metric is a stub any longer. */
+        Assert.NotNull(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyCpuBurn));
+        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.AnomalyCpuBurn));
+        Assert.NotEmpty(graph.GetAllEdges(PgTargetFactKeys.CpuDecomposition));
+        Assert.NotNull(PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgCpuBurnCores));
+        Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgCpuBurnCores));
 
         /* The composition check is pg_memory-sourced and routed BY NAME ahead of the CONFIG_PG_ prefix arms, so its
            amplifiers and advice are the memory family's — the prefix arms would have handed it to the config family,

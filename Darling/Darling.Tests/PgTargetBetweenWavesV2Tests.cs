@@ -50,7 +50,9 @@ public sealed class PgTargetBetweenWavesV2Tests
         Assert.Contains("pg_wait_sampling", DarlingRetentionHorizons.BaselineServingRawCollectors);
         /* Lane 27's server-wide pg_statement_mean_ms arm reads pg_statement_stats directly: it joined (11 → 12). */
         Assert.Contains("pg_statement_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
-        Assert.Equal(12, DarlingRetentionHorizons.BaselineServingRawCollectors.Count);
+        /* Lane 28's pg_cpu_burn_cores arm reads pg_kernel_stats directly: it joined (12 → 13). */
+        Assert.Contains("pg_kernel_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
+        Assert.Equal(13, DarlingRetentionHorizons.BaselineServingRawCollectors.Count);
         /* The doc the floor falsified is gone from the provider's root: it no longer says the PostgreSQL tables lack one. */
         var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.cs");
         Assert.DoesNotContain("out of this lane's files", provider, StringComparison.Ordinal);
