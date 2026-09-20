@@ -1101,10 +1101,12 @@ SELECT
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to
            the rung below and showing a spurious upgrade banner on a store that is current.
 
-           The gate rests on that standing invariant alone: no viewer read names any of the eight columns yet —
-           the Query Store health grid's two columns, the Settings window's route toggle and the store-size
-           utilisation / checkpointer reads are each their own lane — so a viewer pointed below this rung
-           would not throw on any surface today. The column and its table are named only in the probe line, not this prose,
+           The gate is load-bearing here, not only the standing invariant: since #3796's code half the Query
+           Store health grid's read (ViewerDataService.Config.cs, QueryStoreHealthSql) names the two capture
+           modes, so a viewer pointed below this rung WOULD throw on that grid — the connect-time gate is what
+           keeps it from getting there. The other six columns — the Settings window's route toggle and the
+           store-size utilisation / checkpointer reads — are each their own lane and are named by no viewer
+           read yet. The column and its table are named only in the probe line, not this prose,
            per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a
            comment. */
         if (hasQsCaptureModeRouteKnobToast)

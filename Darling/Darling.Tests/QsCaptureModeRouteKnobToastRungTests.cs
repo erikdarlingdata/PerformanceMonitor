@@ -425,11 +425,17 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 
     /// <summary>
     /// The exit criterion's last clause, pinned so each consumer lane has to move this deliberately: no product
-    /// read names any of the eight columns. The consumers are named so the lane that lands one knows which arm
-    /// to retire: the Query Store clutter view / <c>get_query_store_health</c> / the Viewer grid for (a); the
-    /// route knob's code half — <c>DarlingAlertSettings</c>, <c>StoreConfigProvider</c>, the MCP pair, the Settings
-    /// window — for (b); <c>get_store_metrics</c> / <c>DarlingStoreMetricsReader</c> for (c) and (d). Block and line
-    /// comments are stripped before the scan; SQL string constants are code and stay in.
+    /// read names any of the SIX columns still waiting for a consumer. The consumers are named so the lane that
+    /// lands one knows which arm to retire: the route knob's code half — <c>DarlingAlertSettings</c>,
+    /// <c>StoreConfigProvider</c>, the MCP pair, the Settings window — for (b); <c>get_store_metrics</c> /
+    /// <c>DarlingStoreMetricsReader</c> for (c) and (d). Block and line comments are stripped before the scan; SQL
+    /// string constants are code and stay in.
+    ///
+    /// <para><b>Arm (a) is RETIRED, and inverted (#3796's code half).</b> The two capture modes are read: the
+    /// <c>get_query_store_health</c> reader and tool, the web catalogue row, and the Viewer's Query Store grid read
+    /// name both columns, and this pin now asserts that they DO — the positive form, so the consumer cannot quietly
+    /// disappear while the rung doc still says it exists. The Query Store clutter view (#3797) is the next consumer
+    /// and is not required here; when it lands it simply joins the population that names them.</para>
     ///
     /// <para>(d)'s three names are scanned on the store-metrics surface only, not repo-wide: <c>checkpoints_requested</c>
     /// is a <c>collect.pg_write_stats</c> column (V88, a PostgreSQL TARGET's checkpointer) read by the write-stats
@@ -438,9 +444,25 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
     /// alike; none of those files reads <c>store_metrics</c>.</para>
     /// </summary>
     [Fact]
-    public void NoReaderNamesAnyOfTheEightColumnsYet()
+    public void NoReaderNamesAnyOfTheSixUnconsumedColumnsYet_AndTheCaptureModeConsumersNameBoth()
     {
-        var names = CaptureModeColumns.Concat(new[] { RouteColumn }).Concat(ToastColumns).ToArray();
+        /* (a) retired and inverted: the #3796 consumers name both capture modes, in code, not comments. */
+        foreach (var consumer in new[]
+        {
+            new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingConfigHistoryReader.cs" },
+            new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpConfigHistoryTools.cs" },
+            new[] { "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Config.cs" },
+        })
+        {
+            var text = WithoutComments(RepoFile.ReadRepoFile(consumer));
+            foreach (var column in CaptureModeColumns)
+            {
+                Assert.True(text.Contains(column, StringComparison.Ordinal),
+                    $"{string.Join('/', consumer)} no longer names {column}: the #3796 consumer this pin's (a) arm was retired for is gone — either restore the read or re-arm (a) deliberately.");
+            }
+        }
+
+        var names = new[] { RouteColumn }.Concat(ToastColumns).ToArray();
 
         foreach (var project in new[]
         {
@@ -463,17 +485,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
                     continue;
                 }
 
-                if (name is "DarlingMcpQueryStoreClutterTools.cs" or "DarlingMcpInstructions.cs")
-                {
-                    /* POINTERS, not readers (the V136 shape's PgTargetToolRecommendations exclusion): #3797's clutter tool
-                       landed beside this rung publishing `query_capture_mode = (string?)null` with `capture_mode_known =
-                       false` and a note that says the column lands with V137 — the payload KEY, so a caller's shape is
-                       stable, never a value read from the store — and the MCP instructions name the key in the prose
-                       that tells an agent what the tool will say. The positive half below holds them to exactly that:
-                       the moment either SELECTs the column from the health table, it is the (a) reader and this arm is
-                       retired deliberately. */
-                    continue;
-                }
+                /* #3821 excluded DarlingMcpQueryStoreClutterTools.cs and DarlingMcpInstructions.cs here as POINTERS to
+                   the capture-mode key; with arm (a) retired the capture modes are no longer in `names`, so that
+                   exclusion would only have loosened the scan for (b) and (c) and it is gone. The clutter tool's
+                   pointer state is still held positively below. */
 
                 foreach (var column in names)
                 {
@@ -491,8 +506,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             }
         }
 
-        /* The clutter tool (#3797) is a POINTER until it reads the column: the key is published null with the flag
-           beside it, and no SQL of its selects either capture mode from the health table. */
+        /* The clutter tool (#3797) is still a POINTER: it publishes the key null with capture_mode_known false beside
+           it, and no SQL of its selects either capture mode from the health table. #3796's code half wired
+           get_query_store_health and the grids, NOT this tool (a separate lane owned it in the same wave); the
+           follow-up that flips capture_mode_known reads the column here and retires THIS block deliberately. */
         var clutterPath = System.IO.Path.Combine(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"), "Mcp", "DarlingMcpQueryStoreClutterTools.cs");
         if (System.IO.File.Exists(clutterPath))
         {

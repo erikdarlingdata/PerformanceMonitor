@@ -161,7 +161,7 @@ internal static class DarlingMcpInstructions
         | `get_database_config_changes` | sys.databases setting changes, diffed from config snapshots | `server_name`, `hours_back` (default 168), `as_of` |
         | `get_trace_flag_changes` | Trace flags enabled/disabled/modified, diffed from config snapshots | `server_name`, `hours_back` (default 168), `as_of` |
         | `get_database_scoped_config` | Latest database-scoped configuration (MAXDOP, legacy CE, ...) as of `captured_at` (captured on connect) | `server_name`, `database_name` |
-        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds | `server_name`, `database_name` |
+        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) | `server_name`, `database_name` |
         | `get_server_config` | CURRENT sys.configurations (latest snapshot) — what CTFP / MAXDOP / max memory are set to as of `captured_at` (captured on connect — can be days old) | `server_name` |
         | `get_database_config` | CURRENT per-database settings (latest snapshot) — recovery model, RCSI, Query Store, ... as of `captured_at` (captured on connect) | `server_name`, `database_name` |
         | `get_trace_flags` | CURRENT active trace flags (latest snapshot) — flag number, enabled, global/session, as of `captured_at` (captured on connect) | `server_name` |

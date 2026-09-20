@@ -2929,6 +2929,11 @@ const QS_HEALTH_COLUMNS = [
   { key: "pct_of_cap", label: "% of cap", format: "num1" },
   { key: "size_based_cleanup_mode", label: "Cleanup" },
   { key: "stale_query_threshold_days", label: "Stale (days)", format: "int" },
+  /* V137 (#3796): the payload's two trailing fields. Formatless on purpose: the renderer prints a null as the
+     page's "—", which is the right cell for a pre-rung row (or, for wait stats, a 2016 engine) — an absence,
+     never OFF. ALL is the plan-churn factory the tool's description names; the verdict is #3797's, not this tile's. */
+  { key: "query_capture_mode", label: "Capture mode" },
+  { key: "wait_stats_capture_mode", label: "Wait stats capture" },
 ];
 
 const TRACE_FLAG_COLUMNS = [

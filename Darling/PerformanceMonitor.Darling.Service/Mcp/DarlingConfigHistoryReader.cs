@@ -45,12 +45,18 @@ internal static class DarlingConfigHistoryReader
 
     /* ─────────────────────────── query store health snapshot row (not part of the change diff) ─────────────────────────── */
 
-    /* String fields coalesce DBNull to "" — the same defaults as both viewers' QueryStoreHealthRow —
-       so the two SKUs' MCP tools serialize identical JSON even in the never-observed null case. */
+    /* The original string fields coalesce DBNull to "" — the same defaults as both viewers' QueryStoreHealthRow —
+       so the two SKUs' MCP tools serialize identical JSON even in the never-observed null case. The two V137
+       capture modes (#3796) are the deliberate EXCEPTION and stay nullable: for them NULL is an observed,
+       meaningful state — the row predates the rung, or (wait_stats_capture_mode) the engine is 2016 and the
+       column does not exist there — and coalescing it to "" would let a reader confuse "never asked" with a
+       value the DMV never emits. The collector writes the DMV's *_desc spelling verbatim (ALL / AUTO / CUSTOM /
+       NONE; ON / OFF), so a non-null here is exactly what sys.database_query_store_options said. */
     public sealed record QueryStoreHealthReadRow(
         string DatabaseName, string ActualState, string DesiredState, int ReadonlyReason,
         long CurrentStorageMb, long MaxStorageMb, string SizeBasedCleanupMode,
-        long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes);
+        long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes,
+        string? QueryCaptureMode, string? WaitStatsCaptureMode);
 
     /* ─────────────────────────── server config snapshots ─────────────────────────── */
 
@@ -237,9 +243,15 @@ internal static class DarlingConfigHistoryReader
     /// <summary>The latest sys.database_query_store_options snapshot per database — the viewer's
     /// <c>QueryStoreHealthSql</c> minus its grid database filter (the tool filters in memory, like the
     /// scoped-config read above). Unlike the config-family reads this table is HOURLY, not on-connect,
-    /// so "latest" here is at most an hour old on a healthy schedule. $1 server_id.</summary>
+    /// so "latest" here is at most an hour old on a healthy schedule. $1 server_id.
+    ///
+    /// <para>Column order is the collector's payload order — the original nine, then the two V137 capture
+    /// modes (#3796) — with the snapshot stamp <c>capture_time</c> kept LAST, so the modes are ordinals 10 and
+    /// 11 and the stamp moves from 10 to 12. The view is <c>SELECT *</c> over the table and the rung appended
+    /// the columns at the tail, so a store at V137 answers both; the tool's payload publishes them as its own
+    /// two trailing fields, in this order.</para></summary>
     public const string QueryStoreHealthSql = """
-        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, capture_time
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
@@ -267,8 +279,11 @@ internal static class DarlingConfigHistoryReader
                 reader.IsDBNull(6) ? "" : reader.GetString(6),
                 reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0L : reader.GetInt64(9)));
-            capturedAt ??= reader.GetDateTime(10);
+                reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
+                /* V137 (#3796): NULL propagates — see the record's remarks; "" would erase the pre-rung / 2016 meaning. */
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
+            capturedAt ??= reader.GetDateTime(12);
         }
 
         return new LatestSnapshot<QueryStoreHealthReadRow>(capturedAt, rows);
