@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 63;
+    internal const int CurrentSchemaVersion = 64;
 
     private readonly string _archivePath;
 
@@ -1819,6 +1819,59 @@ public class DuckDbInitializer
                 catch (Exception ex)
                 {
                     _logger?.LogWarning("Migration to v63 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 64)
+        {
+            /* v64 (#3796, twinning Darling's V137): query_store_health gains the two Query Store CAPTURE modes,
+               query_capture_mode and wait_stats_capture_mode — the sys.database_query_store_options columns
+               the shared collector read around. The health row stored every option that says whether Query
+               Store WORKS (actual vs desired state, the cap, the cleanup thresholds) and none that says what it
+               CAPTURES, and QUERY_CAPTURE_MODE = ALL on an ad-hoc workload is the one setting that turns Query
+               Store into a plan-churn factory: measured on one production store class, ~755 k new distinct
+               plans a day from 42 servers, with the other three knobs uniform across the fleet. The row could
+               not say whether ALL was the cause because it never asked. Both are stored as the DMV's *_desc
+               spelling verbatim (ALL / AUTO / CUSTOM / NONE; ON / OFF).
+
+               ONE of the two is version-gated on the collector side, and this store must expect the NULL it
+               produces: query_capture_mode_desc shipped with the view in 2016 and is always selected, but
+               wait_stats_capture_mode_desc arrived in SQL Server 2017 (v14), and on a 2016 engine a body that
+               names it fails to compile for the whole database. QueryStoreHealthCollector.HasWaitStatsCaptureMode
+               (the DatabaseConfigCollector idiom) leaves the column out of the SELECT there and the row stores
+               NULL, which a reader publishes as "engine predates the option" — never as OFF. NULL on every
+               pre-v64 row means "never asked", for both columns.
+
+               Appended at the end of the PayloadColumns list, so the positional appender and old parquet are
+               unaffected (v_ views UNION ALL BY NAME the parquet with union_by_name, so an archived file
+               without the columns reads NULL through the view). Nothing to backfill and nothing that COULD
+               be: a row collected before the upgrade never asked the engine, and the store holds no way to
+               recover a capture mode from the other nine options.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the columns fails EndRow() on the first query_store_health batch
+               — the whole batch, not the column. Fresh installs get both from DuckDbSchemaGenerator; these
+               ALTERs are for an existing database and are idempotent. The v_ passthrough view needs no work
+               here: Lite rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this).
+               Non-fatal per statement, matching v59–v63. Nothing on this side reads either column yet; the
+               Query Store clutter view (#3797) is the consumer. */
+            _logger?.LogInformation("Running migration to v64: query_store_health stores each database's Query Store capture modes, so plan churn can be told apart from configuration");
+
+            foreach (var (table, column, type) in new[]
+            {
+                ("query_store_health", "query_capture_mode", "VARCHAR"),
+                ("query_store_health", "wait_stats_capture_mode", "VARCHAR"),
+            })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v64 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
                 }
             }
         }

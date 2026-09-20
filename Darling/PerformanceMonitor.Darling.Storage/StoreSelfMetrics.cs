@@ -30,10 +30,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// plain-PostgreSQL store this arm is skipped silently because the timescaledb_information views it reads
 /// do not exist there);</item>
 /// <item>one row per payload dimension table (<c>object_kind = 'dimension'</c>): total bytes
-/// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives) and the
-/// exact row count. The dims are the store's dominant payloads (measured: query_plan_dim alone was 101 GB
-/// of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they are deliberately
-/// PLAIN tables (see <see cref="PayloadDimensions.CreateDimTable"/>);</item>
+/// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives), the
+/// exact row count and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
+/// <c>toast_live_bytes</c> that is NULL until the maintainer picks the instrument — see
+/// <see cref="DimensionInsertSql"/>. The dims are the store's dominant payloads (measured: query_plan_dim
+/// alone was 101 GB of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they
+/// are deliberately PLAIN tables (see <see cref="PayloadDimensions.CreateDimTable"/>);</item>
 /// <item>one row per continuous aggregate (<c>object_kind = 'continuous_aggregate'</c>, #3582): the same
 /// three facts as a hypertable row, taken from the aggregate's MATERIALIZATION hypertable and reported
 /// under the aggregate's user-facing view name. TimescaleDB-only, like the hypertable arm. These rows
@@ -283,23 +285,54 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <c>pg_class.reltuples</c>: it is an hourly index-only scan over the digest PK, and the dim heap is
     /// small — the bytes live in TOAST, which <c>pg_total_relation_size</c> counts and a scan never
     /// touches. $1 metric_time.
+    ///
+    /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
+    /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing
+    /// about how FULL its TOAST file is, and on one production store class the plan dimension's TOAST file
+    /// sat at 154 GB for ~61 GB of live chunks — 40 % utilisation, ~93 GB of slack left by the V54 text→gz
+    /// conversion plus ~755 k rows a day cycling through row-capped deletes, which ordinary <c>VACUUM</c>
+    /// returns to the table and never to the OS. <c>toast_bytes</c> is <c>pg_relation_size(reltoastrelid)</c>:
+    /// the TOAST relation's main fork, the file whose slack that read measured, taken through
+    /// <c>NULLIF(reltoastrelid, 0)</c> so a table with no TOAST relation stores NULL rather than erroring
+    /// (both dims have one — every table with a TOAST-able column gets one at CREATE — but the read says
+    /// so rather than assuming it). Its index (<c>pg_toast_NNN_index</c>) is deliberately NOT included: the
+    /// utilisation question is about the heap file's pages, and the index is already inside
+    /// <c>total_bytes</c>.</para>
+    ///
+    /// <para><b><c>toast_live_bytes</c> is written <c>NULL</c> here, on purpose, because every extension-free
+    /// read of it was measured and found wanting</b> (rig: TimescaleDB 2.28.1 / PostgreSQL 18, 215 MB of
+    /// 9.6 KB TOASTed values, half deleted, ordinary <c>VACUUM</c>; <c>pgstattuple</c> as the oracle, 47.9 %
+    /// live). <c>n_live_tup / (n_live_tup + n_dead_tup) × file</c> reads 100 % after a vacuum — the #3783 shape
+    /// exactly — and is a lie. <c>n_live_tup(toast) × 1996</c> (chunk count × <c>TOAST_MAX_CHUNK_SIZE</c>) reads
+    /// 48.9 %, honest on 9.6 KB values but overstating by up to one partial chunk per value, so a dimension
+    /// whose values barely cross the TOAST threshold reads up to half again too high, and <c>n_live_tup</c>
+    /// is exact only just after a vacuum. <c>pg_freespacemap</c>'s <c>file − sum(avail)</c> reads 48.5 % — a
+    /// real byte measurement — but <c>CREATE EXTENSION pg_freespacemap</c> is a product dependency the
+    /// maintainer decides, not this sweep. The column exists so that decision needs no rung; until it is
+    /// made, a reader that finds NULL beside a non-NULL <c>toast_bytes</c> says "not measured" and computes
+    /// nothing from the total. The literal <c>NULL::bigint</c> is typed so the UNION's column list resolves
+    /// on every PostgreSQL major the store runs on.</para>
     /// </summary>
     public const string DimensionInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, total_bytes, row_count)
+    (metric_time, object_name, object_kind, total_bytes, row_count, toast_bytes, toast_live_bytes)
 SELECT
     $1,
     '{PayloadDimensions.QueryTextDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryTextDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable})
+    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable}),
+    pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass), 0)),
+    NULL::bigint
 UNION ALL
 SELECT
     $1,
     '{PayloadDimensions.QueryPlanDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryPlanDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable})";
+    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable}),
+    pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass), 0)),
+    NULL::bigint";
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>

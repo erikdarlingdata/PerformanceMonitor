@@ -22,7 +22,7 @@ namespace Lite.Tests;
 /// Pins the parity contract of the query_store_health definition (#2319) — database_scoped_config's
 /// shape applied to <c>sys.database_query_store_options</c>: on-prem database-list selection (the
 /// AG-primary filter), the [db].sys.sp_executesql per-database query with bracket escaping, the 2016+
-/// <c>AppliesTo</c> gate, the 10-column payload — including the ordinal-mapped
+/// <c>AppliesTo</c> gate, the 12-column payload — including the ordinal-mapped
 /// <see cref="QueryStoreHealthCollector.ReadItemAsync"/> and the
 /// <see cref="QueryStoreHealthCollector.WritePayload"/> order, the two paths most likely to silently
 /// drift on a future column reorder — and since #3764 the second execution shape: on Azure SQL DB the
@@ -30,6 +30,12 @@ namespace Lite.Tests;
 /// payload body bare, because the three-part reference the on-prem idiom nests is rejected there for every
 /// database that is not the connection's own. The two shapes are pinned to ONE body so they cannot drift
 /// apart.
+///
+/// <para>Since V137 / Lite v64 (#3796) the body carries the two Query Store capture modes, and ONE of them is
+/// version-gated: <c>wait_stats_capture_mode_desc</c> is 2017+, so on a 2016 target the SELECT does not name
+/// it (a missing column fails the whole database's batch at compile) and the reader does not read the
+/// ordinal. The gate tests below pin both halves against each other — the body a target is asked for and
+/// the ordinals its rows are read with come from the same <c>HasWaitStatsCaptureMode</c> decision.</para>
 /// </summary>
 public sealed class QueryStoreHealthCollectorDefinitionTests
 {
@@ -161,31 +167,141 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
 
         Assert.Contains("N'" + azureBody.Replace("'", "''", StringComparison.Ordinal) + "'", onPremText, StringComparison.Ordinal);
 
-        /* And the nine reader ordinals, in ReadRowsAsync's order, on both. */
-        var ordinals = new[]
-        {
-            "actual_state = qso.actual_state_desc",
-            "desired_state = qso.desired_state_desc",
-            "readonly_reason = qso.readonly_reason",
-            "current_storage_size_mb = qso.current_storage_size_mb",
-            "max_storage_size_mb = qso.max_storage_size_mb",
-            "size_based_cleanup_mode = qso.size_based_cleanup_mode_desc",
-            "stale_query_threshold_days = qso.stale_query_threshold_days",
-            "max_plans_per_query = qso.max_plans_per_query",
-            "interval_length_minutes = qso.interval_length_minutes",
-        };
-
+        /* And the eleven reader ordinals, in ReadRowsAsync's order, on both (the test contexts leave the
+           version unknown, which the gate reads as newest, so the 2017+ ordinal is present on both paths). */
         foreach (var text in new[] { azureBody, onPremText })
         {
-            var positions = ordinals.Select(o => text.IndexOf(o, StringComparison.Ordinal)).ToArray();
+            var positions = s_allOrdinals.Select(o => text.IndexOf(o, StringComparison.Ordinal)).ToArray();
 
             Assert.All(positions, p => Assert.True(p >= 0, "every reader ordinal must be selected on both paths"));
             Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)),
                 "the payload must select actual_state, desired_state, readonly_reason, current_storage_size_mb, "
                 + "max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, "
-                + "interval_length_minutes in that order — ReadRowsAsync reads ordinals 0 through 8");
+                + "interval_length_minutes, query_capture_mode, wait_stats_capture_mode in that order — ReadRowsAsync "
+                + "reads ordinals 0 through 10");
         }
     }
+
+    /// <summary>The eleven SELECT ordinals in ReadRowsAsync's order; the last is the 2017+ gated one.</summary>
+    private static readonly string[] s_allOrdinals =
+    {
+        "actual_state = qso.actual_state_desc",
+        "desired_state = qso.desired_state_desc",
+        "readonly_reason = qso.readonly_reason",
+        "current_storage_size_mb = qso.current_storage_size_mb",
+        "max_storage_size_mb = qso.max_storage_size_mb",
+        "size_based_cleanup_mode = qso.size_based_cleanup_mode_desc",
+        "stale_query_threshold_days = qso.stale_query_threshold_days",
+        "max_plans_per_query = qso.max_plans_per_query",
+        "interval_length_minutes = qso.interval_length_minutes",
+        "query_capture_mode = qso.query_capture_mode_desc",
+        "wait_stats_capture_mode = qso.wait_stats_capture_mode_desc",
+    };
+
+    /// <summary>
+    /// V137 / v64 (#3796): the ONE per-column version gate this collector has. <c>wait_stats_capture_mode_desc</c>
+    /// arrived in SQL Server 2017 (v14); <c>query_capture_mode_desc</c> shipped with the view in 2016 and is
+    /// never gated. 0 = version unknown = assume newest, the reading <c>AppliesTo</c> gives the version; both
+    /// Azure flavours always have the column.
+    /// </summary>
+    [Theory]
+    [InlineData(13, false, false, false)]
+    [InlineData(14, false, false, true)]
+    [InlineData(15, false, false, true)]
+    [InlineData(16, false, false, true)]
+    [InlineData(17, false, false, true)]
+    [InlineData(0, false, false, true)]
+    [InlineData(13, true, false, true)]
+    [InlineData(13, false, true, true)]
+    public void HasWaitStatsCaptureMode_Is2017Plus_AzureAlways_UnknownAssumesNewest(int majorVersion, bool isAzureSqlDb, bool isManagedInstance, bool expected)
+        => Assert.Equal(expected, QueryStoreHealthCollector.HasWaitStatsCaptureMode(
+            new CollectorTargetInfo { SqlMajorVersion = majorVersion, IsAzureSqlDb = isAzureSqlDb, IsAzureManagedInstance = isManagedInstance }));
+
+    /// <summary>
+    /// A 2016 target's body names ten columns and never the 2017+ one — on BOTH execution shapes, because
+    /// both are built from the one body for the one target. The reference itself is the compile error on
+    /// 2016, so "gated" has to mean "absent from the text", not "NULL in the result".
+    /// </summary>
+    [Fact]
+    public void On2016_TheBodyOmitsWaitStatsCaptureMode_OnBothShapes_AndKeepsQueryCaptureMode()
+    {
+        var onPrem2016 = Context(13, isAzureSqlDb: false);
+        var azure2016Registration = Context(13, isAzureSqlDb: true); /* Azure always has it — the gate ignores the number there. */
+
+        var onPremText = QueryStoreHealthCollector.Instance.BuildPerItemQuery("db1", onPrem2016).Text;
+        Assert.Contains("query_capture_mode = qso.query_capture_mode_desc", onPremText, StringComparison.Ordinal);
+        Assert.DoesNotContain("wait_stats_capture_mode", onPremText, StringComparison.Ordinal);
+        /* The tail follows the last ungated column directly — no dangling comma where the gated column was. */
+        Assert.Contains("query_capture_mode = qso.query_capture_mode_desc\nFROM sys.database_query_store_options AS qso", onPremText.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+
+        var azureText = QueryStoreHealthCollector.Instance.BuildQuery(azure2016Registration).Text;
+        Assert.Contains("wait_stats_capture_mode = qso.wait_stats_capture_mode_desc", azureText, StringComparison.Ordinal);
+
+        /* And a 2017 on-prem target gets the full eleven, comma-joined, in order. */
+        var onPrem2017 = QueryStoreHealthCollector.Instance.BuildPerItemQuery("db1", Context(14, isAzureSqlDb: false)).Text;
+        var positions = s_allOrdinals.Select(o => onPrem2017.IndexOf(o, StringComparison.Ordinal)).ToArray();
+        Assert.All(positions, p => Assert.True(p >= 0));
+        Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)));
+        Assert.Contains("interval_length_minutes = qso.interval_length_minutes,\n    query_capture_mode = qso.query_capture_mode_desc,\n    wait_stats_capture_mode = qso.wait_stats_capture_mode_desc\nFROM", onPrem2017.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The reader half of the gate: a 2016 target's rows have TEN columns and the loop must not reach for an
+    /// eleventh — the row's <c>WaitStatsCaptureMode</c> is NULL by construction, not by an out-of-range read
+    /// — while a 2017+ target's rows have eleven and both modes land. Same for the Azure per-database path.
+    /// </summary>
+    [Fact]
+    public async Task TheReaderReadsTheGatedOrdinal_OnlyWhereTheBodySelectedIt()
+    {
+        var rows = new List<QueryStoreHealthCollector.Row>();
+
+        /* 2016: ten values, the fake reader would throw on an eleventh. */
+        using (var reader = new FakeCollectorDataReader(new object[]
+               { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "ALL" }))
+        {
+            await QueryStoreHealthCollector.Instance.ReadItemAsync("db2016", reader, rows, Context(13, isAzureSqlDb: false), CancellationToken.None);
+        }
+
+        /* 2017+: eleven values, both modes. */
+        using (var reader = new FakeCollectorDataReader(new object[]
+               { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "AUTO", "ON" }))
+        {
+            await QueryStoreHealthCollector.Instance.ReadItemAsync("db2019", reader, rows, Context(15, isAzureSqlDb: false), CancellationToken.None);
+        }
+
+        /* 2017+ with the engine answering NULL for both — stays NULL, no coercion to a made-up mode. */
+        using (var reader = new FakeCollectorDataReader(new object[]
+               { "OFF", "OFF", 0, 0L, 100L, "AUTO", 30L, 200L, 60L, DBNull.Value, DBNull.Value }))
+        {
+            await QueryStoreHealthCollector.Instance.ReadItemAsync("db2022", reader, rows, Context(16, isAzureSqlDb: false), CancellationToken.None);
+        }
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal("ALL", rows[0].QueryCaptureMode);
+        Assert.Null(rows[0].WaitStatsCaptureMode);
+        Assert.Equal("AUTO", rows[1].QueryCaptureMode);
+        Assert.Equal("ON", rows[1].WaitStatsCaptureMode);
+        Assert.Null(rows[2].QueryCaptureMode);
+        Assert.Null(rows[2].WaitStatsCaptureMode);
+
+        /* The Azure per-database path reads the same ordinals with the same gate (Azure always has the column). */
+        var azure = Context(13, isAzureSqlDb: true);
+        azure.CurrentDatabaseName = "xedb1";
+        using var azureReader = new FakeCollectorDataReader(new object[]
+            { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "CUSTOM", "OFF" });
+        var azureRow = Assert.Single(await QueryStoreHealthCollector.Instance.ReadAsync(azureReader, azure, CancellationToken.None));
+        Assert.Equal("CUSTOM", azureRow.QueryCaptureMode);
+        Assert.Equal("OFF", azureRow.WaitStatsCaptureMode);
+    }
+
+    private static CollectorContext Context(int majorVersion, bool isAzureSqlDb) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc),
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { SqlMajorVersion = majorVersion, IsAzureSqlDb = isAzureSqlDb },
+    };
 
     /// <summary>Query Store shipped in 2016 (v13); without the gate a pre-2016 target errors once per
     /// database per hour. Same condition as QueryStoreCollector, so both SKUs skip identically.</summary>
@@ -204,9 +320,10 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         var rows = new List<QueryStoreHealthCollector.Row>();
         var context = CollectorTestContext.Make(s_deltas);
 
-        /* A healthy READ_WRITE database with a cap. */
+        /* A healthy READ_WRITE database with a cap (eleven ordinals since V137 / v64: the two capture modes
+           ride last; the test context's unknown version reads as newest, so the 2017+ ordinal is present). */
         using (var reader = new FakeCollectorDataReader(new object[]
-               { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L }))
+               { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "AUTO", "ON" }))
         {
             await QueryStoreHealthCollector.Instance.ReadItemAsync("db1", reader, rows, context, CancellationToken.None);
         }
@@ -214,7 +331,7 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         /* The cap-hit shape this collector exists for: desired READ_WRITE, actual READ_ONLY, reason
            65536 — plus DBNulls exercising every coalesce arm. */
         using (var reader = new FakeCollectorDataReader(new object[]
-               { "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value }))
+               { "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value }))
         {
             await QueryStoreHealthCollector.Instance.ReadItemAsync("db2", reader, rows, context, CancellationToken.None);
         }
@@ -231,6 +348,8 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         Assert.Equal(30L, rows[0].StaleQueryThresholdDays);
         Assert.Equal(200L, rows[0].MaxPlansPerQuery);
         Assert.Equal(60L, rows[0].IntervalLengthMinutes);
+        Assert.Equal("AUTO", rows[0].QueryCaptureMode);
+        Assert.Equal("ON", rows[0].WaitStatsCaptureMode);
 
         Assert.Equal("db2", rows[1].DbName);
         Assert.Equal("READ_ONLY", rows[1].ActualState);
@@ -240,6 +359,9 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         Assert.Equal(0L, rows[1].StaleQueryThresholdDays);
         Assert.Equal(0L, rows[1].MaxPlansPerQuery);
         Assert.Equal(0L, rows[1].IntervalLengthMinutes);
+        /* The two modes are strings and stay NULL as null — no coalesce to a made-up mode. */
+        Assert.Null(rows[1].QueryCaptureMode);
+        Assert.Null(rows[1].WaitStatsCaptureMode);
     }
 
     [Fact]
@@ -254,7 +376,7 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
 
         List<QueryStoreHealthCollector.Row> rows;
         using (var reader = new FakeCollectorDataReader(new object[]
-               { "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, DBNull.Value, 30L, 200L, 60L }))
+               { "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, DBNull.Value, 30L, 200L, 60L, "ALL", "ON" }))
         {
             rows = await QueryStoreHealthCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         }
@@ -270,6 +392,8 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
         Assert.Equal(30L, row.StaleQueryThresholdDays);
         Assert.Equal(200L, row.MaxPlansPerQuery);
         Assert.Equal(60L, row.IntervalLengthMinutes);
+        Assert.Equal("ALL", row.QueryCaptureMode);
+        Assert.Equal("ON", row.WaitStatsCaptureMode);
 
         /* A host that forgot to set the name gets one loud failure, not rows filed under a blank
            database — the query_store rule, for the same reason: the latest-snapshot readers group and
@@ -277,7 +401,7 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
            READ_ONLY transition on one database could not be told from a healthy row on another. */
         var untagged = CollectorTestContext.Make(s_deltas, isAzureSqlDb: true);
         using var untaggedReader = new FakeCollectorDataReader(new object[]
-            { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L });
+            { "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "AUTO", "ON" });
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await QueryStoreHealthCollector.Instance.ReadAsync(untaggedReader, untagged, CancellationToken.None));
         Assert.Contains("CurrentDatabaseName", ex.Message, StringComparison.Ordinal);
@@ -286,14 +410,18 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
     [Fact]
     public void PayloadColumns_MatchSchema_AndWriteOrder()
     {
+        /* Twelve since V137 / v64 (#3796): the two capture modes appended LAST, in this order, Varchar (text on
+           Darling, VARCHAR on Lite), both nullable. */
         Assert.Equal(
             new[]
             {
                 "database_name", "actual_state", "desired_state", "readonly_reason",
                 "current_storage_size_mb", "max_storage_size_mb", "size_based_cleanup_mode",
                 "stale_query_threshold_days", "max_plans_per_query", "interval_length_minutes",
+                "query_capture_mode", "wait_stats_capture_mode",
             },
             QueryStoreHealthCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
+        Assert.All(QueryStoreHealthCollector.Instance.PayloadColumns.TakeLast(2), c => Assert.Equal(CollectorColumnType.Varchar, c.Type));
 
         var writer = new RecordingCollectorRowWriter();
         QueryStoreHealthCollector.Instance.WritePayload(
@@ -309,11 +437,22 @@ public sealed class QueryStoreHealthCollectorDefinitionTests
                 StaleQueryThresholdDays = 30L,
                 MaxPlansPerQuery = 200L,
                 IntervalLengthMinutes = 60L,
+                QueryCaptureMode = "ALL",
+                WaitStatsCaptureMode = "ON",
             },
             writer, CollectorTestContext.Make(s_deltas));
 
         Assert.Equal(
-            new object?[] { "db1", "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L },
+            new object?[] { "db1", "READ_WRITE", "READ_WRITE", 0, 512L, 1000L, "AUTO", 30L, 200L, 60L, "ALL", "ON" },
             writer.Values);
+
+        /* A 2016 row writes NULL for the gated mode — one value per declared column, always. */
+        var writer2016 = new RecordingCollectorRowWriter();
+        QueryStoreHealthCollector.Instance.WritePayload(
+            new QueryStoreHealthCollector.Row { DbName = "db2016", QueryCaptureMode = "ALL", WaitStatsCaptureMode = null },
+            writer2016, CollectorTestContext.Make(s_deltas));
+        Assert.Equal(12, writer2016.Values.Count);
+        Assert.Equal("ALL", writer2016.Values[10]);
+        Assert.Null(writer2016.Values[11]);
     }
 }

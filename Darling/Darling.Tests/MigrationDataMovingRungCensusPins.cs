@@ -136,6 +136,18 @@ public sealed class MigrationDataMovingRungCensusPins
             + "most one row per DATABASE per server. The eight ADD COLUMNs in the same rung are not "
             + "findings and that is structural rather than measured - none of them carries a DEFAULT at "
             + "all, volatile or literal, so each is a catalog-only entry that rewrites no row"),
+        new(
+            137,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_alert_settings (created V17) validates every "
+            + "existing row, so it does touch pre-existing data - but config_alert_settings is the "
+            + "SINGLETON alert-settings row (id = 1, CHECK (id = 1)), so the scan it forces is over one row "
+            + "and spends none of the budget: V62's shape on the sibling control-plane singleton, for the "
+            + "same reason (an enumeration column whose only clamp is the constraint). The eight ADD COLUMNs "
+            + "in the same rung are not findings and that is structural rather than measured - none carries "
+            + "a DEFAULT, so each is a catalog-only entry that rewrites no row, on a compressed hypertable "
+            + "(query_store_health) and two plain tables alike; and the CREATE OR REPLACE VIEW is a catalog "
+            + "write over no rows"),
     ];
 
     /// <summary>
