@@ -7792,6 +7792,99 @@ LIMIT 1";
             + "cycle; the collector retries every cycle and starts collecting on the first one after the "
             + $"{noun} exists.";
     }
+
+    /// <summary>
+    /// The object a 42P01 / 42883 names, as its bare last segment (#3818): <c>relation
+    /// "public.pg_stat_statements_info" does not exist</c> yields <c>pg_stat_statements_info</c>;
+    /// <c>function aurora_stat_statements(boolean) does not exist</c> yields <c>aurora_stat_statements</c>.
+    /// Null when the message has neither shape - a non-English <c>lc_messages</c>, or a message this did not
+    /// anticipate - which keeps the caller on the arm it would have taken before this existed rather than
+    /// guessing. The relation and function fields Npgsql exposes are NOT consulted: PostgreSQL fills them for
+    /// constraint and datatype errors, not for a name it could not resolve.
+    /// </summary>
+    internal static string? MissingObjectNamedBy(PostgresException ex)
+    {
+        var text = ex.MessageText ?? string.Empty;
+
+        var relation = System.Text.RegularExpressions.Regex.Match(
+            text, "^relation \"(?<name>[^\"]+)\" does not exist", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        var function = System.Text.RegularExpressions.Regex.Match(
+            text, "^function (?<name>[^\\s(]+)\\(", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        var qualified = relation.Success ? relation.Groups["name"].Value
+            : function.Success ? function.Groups["name"].Value
+            : null;
+
+        if (qualified is null)
+        {
+            return null;
+        }
+
+        var lastDot = qualified.LastIndexOf('.');
+        return lastDot >= 0 ? qualified[(lastDot + 1)..] : qualified;
+    }
+
+    /// <summary>
+    /// The declared companion (<see cref="PgExtensionDependency.Companions"/>) a missing-object fault names,
+    /// with the extension it belongs to - or null when the fault names the extension's base object, an
+    /// undeclared object, or nothing this can read (#3818). Ordinal on the bare name, both sides lowercase
+    /// by declaration and by PostgreSQL's own folding.
+    /// </summary>
+    internal static (PgExtensionDependency Extension, PgExtensionCompanionObject Companion)? MissingCompanionOf(
+        PostgresException ex, IReadOnlyList<PgExtensionDependency> required)
+    {
+        var missing = MissingObjectNamedBy(ex);
+        if (missing is null)
+        {
+            return null;
+        }
+
+        foreach (var extension in required)
+        {
+            foreach (var companion in extension.Companions)
+            {
+                if (string.Equals(companion.ObjectName, missing, StringComparison.Ordinal))
+                {
+                    return (extension, companion);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The sentence a missing COMPANION object carries (#3818): the raw error, the object the server actually
+    /// named, the fact that the extension IS present (its base object resolved - see the ordering property on
+    /// <see cref="PgExtensionDependency.Companions"/>), the two states that produce this, and the remedy for
+    /// each. Neither of them is <c>CREATE EXTENSION</c>, which is why this is not
+    /// <see cref="ExtensionMissingExplanation"/>: on the fleet that motivated it the extension was installed,
+    /// preloaded and readable on every one of the 23 failing clusters, and the stored sentence said it was
+    /// not installed. <c>ALTER EXTENSION ... UPDATE</c> is a statement - no <c>shared_preload_libraries</c>
+    /// change, no restart, no parameter group - so the preload paragraph the base sentence carries is
+    /// deliberately absent here; sending someone to schedule a reboot for an update script is the same
+    /// wrong-remedy defect the base sentence exists to prevent.
+    /// </summary>
+    private static string CompanionMissingExplanation(
+        PostgresException ex, PgExtensionDependency extension, PgExtensionCompanionObject companion, string? connectedDatabase)
+    {
+        var where = string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the connected database"
+            : $"in database '{connectedDatabase}'";
+
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
+            + $"which is NOT the {extension.ExtensionName} extension's base object: that resolved, so the "
+            + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
+            + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
+            + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
+            + "upgraded in place or restored keeps the version the extension was created at until someone "
+            + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
+            + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
+            + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
+            + "schema it was created in; check pg_extension.extversion and extnamespace). This is "
+            + "NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather than an "
+            + "error so it does not fill the log every cycle; the collector retries every cycle.";
+    }
     /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>PERMISSIONS is the non-fatal-degradation bucket for the cases whose absent thing the code
@@ -7863,6 +7956,19 @@ LIMIT 1";
                error's shape. Undeclared sources keep the arm below: a version-gated relation, or an
                extension-owned object nothing declares, still presents as 42P01/42883, and for those the
                generic sentence is the honest one. */
+            /* #3818, the exception to #3240's inference, checked FIRST because it is the narrower claim: when the
+               object the server could not find is a COMPANION the collector declared beside its base object,
+               the extension is present - the base object resolved before the companion was looked up - and
+               "not installed" would be false. The remedy is ALTER EXTENSION ... UPDATE, not CREATE EXTENSION,
+               and the status is the general non-fatal-degradation bucket rather than EXTENSION_MISSING,
+               because that status word says the extension is missing and every health surface reads it as an
+               optional module left uninstalled - a legitimate resting state. A previously productive collector
+               dark on a version-gated companion is not resting. The text is where the truth goes, as it is on
+               the generic arm below. */
+            CollectorTargetFault.ObjectMissing when MissingCompanionOf(ex, RequiredExtensionsOf(collectorName)) is { } found =>
+                (CollectorRuntimePrecondition.DegradedStatus,
+                    CompanionMissingExplanation(ex, found.Extension, found.Companion, connectedDatabase)),
+
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
                     ExtensionMissingExplanation(ex, required, connectedDatabase)),
