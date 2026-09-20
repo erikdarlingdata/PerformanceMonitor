@@ -1251,6 +1251,7 @@ Fixed cadences, hardcoded on purpose:
 | Alert evaluation | Every 30 seconds per connected server (Lite's overview cadence) |
 | Scheduled analysis | Every 30 minutes per server, 120-second budget, analyzing the last 4 hours; findings persist to `analysis_findings` and high-severity ones notify through the configured channels |
 | Retention purge | First sweep after startup, then daily |
+| Store background-job health (compression-job self-heal, job cadence, Retention Held) and the retention coverage re-evaluation | First sweep after startup, then hourly at :30 past the minute; a held retention policy arms itself on the first hourly pass after its rollups cover raw, no restart needed (#3812) |
 | Reconnect attempts | Every 60 seconds while a server is unreachable |
 
 ---

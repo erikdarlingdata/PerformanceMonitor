@@ -168,7 +168,8 @@ public sealed class RollupBackfillLiveTests
                 after.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView)));
 
         /* ── 8. And the ARMING GATE now reports safe, which is the whole point: the held raw purge releases
-               itself on the next service start, with no manual step and nothing armed by the backfill. Run
+               itself on the next evaluation — the running service's hourly pass since #3812, or the next start
+               — with no manual step and nothing armed by the backfill. Run
                through EnsureRetentionPoliciesAsync — the real seam — rather than re-evaluating its predicate,
                because "the gate would say yes" and "the gate DID arm the policy" are different claims. ── */
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
@@ -329,10 +330,17 @@ AND   j.scheduled", ct);
                contract line has to promise what the gate actually checks or DONE keeps over-claiming. */
             Assert.Contains("DONE. Every rollup now covers its own source", runText, StringComparison.Ordinal);
 
-            /* The restart instruction is the operator's ONLY next step, and the trim race is the one thing that
-               can waste the run — both must be in the output, not just in a comment. */
-            Assert.Contains("restart the PerformanceMonitor Darling service", runText, StringComparison.Ordinal);
-            Assert.Contains("Do not delay the restart", runText, StringComparison.Ordinal);
+            /* The operator's next step is to WAIT for the hourly re-evaluation (#3812) — the restart is the
+               hurry-up option, not the remedy — and the trim race is the one thing that can waste the run. All
+               three must be in the output, not just in a comment: the pre-#3812 text made the restart
+               mandatory ("NEXT: restart", "Do not delay the restart"), which after #3812 sends an operator to
+               restart a service that would have released the hold on its own within the hour. */
+            Assert.Contains("hourly store-maintenance tick", runText, StringComparison.Ordinal);
+            Assert.Contains("'Retention re-evaluation: 0 policies held", runText, StringComparison.Ordinal);
+            Assert.Contains("To arm immediately instead, restart the", runText, StringComparison.Ordinal);
+            Assert.DoesNotContain("NEXT: restart", runText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Do not delay the restart", runText, StringComparison.Ordinal);
+            Assert.Contains("Do not let it wait a day", runText, StringComparison.Ordinal);
 
             /* ── The verb's success claim is CHECKED against the store, not taken at its word. ── */
             await using (var verify = new NpgsqlConnection(scratch.ConnectionString))

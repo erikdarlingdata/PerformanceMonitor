@@ -1454,7 +1454,9 @@ public sealed class PayloadDimensionTests
 
         /* And the sweep must still iterate the hoisted list rather than rebuilding one beside it — otherwise
            everything above could be true of a field nothing reads. */
-        var sweep = MethodBody(source, "public static async Task<int> EnsureRetentionPoliciesAsync");
+        /* The four-argument overload is the sweep proper; the three-argument one is a one-line forward to it
+           (#3812 replaced the bare int with TimescaleSupport.RetentionPolicySweepSummary and added the pass). */
+        var sweep = MethodBody(source, "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
         Assert.False(string.IsNullOrEmpty(sweep),
             "could not locate EnsureRetentionPoliciesAsync — the guard cannot silently pass on a parse miss");
         Assert.Contains(nameof(TimescaleSupport.RetentionPolicies), sweep, StringComparison.Ordinal);

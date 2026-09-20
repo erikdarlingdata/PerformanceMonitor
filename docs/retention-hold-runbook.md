@@ -35,27 +35,44 @@ cd C:\PerformanceMonitorDarling    # your install folder may differ
 # 2. Run it. Safe while the service is up, and resumable.
 .\PerformanceMonitor.Darling.Service.exe --backfill-rollups
 
-# 3. RESTART. This step is required - see below.
-Restart-Service -DisplayName "PerformanceMonitor Darling"
+# 3. Wait for the next hourly retention re-evaluation (up to an hour), OR restart now if you
+#    want the hold released immediately. Either one arms the policy; neither is required for
+#    the other - see below.
+Restart-Service -DisplayName "PerformanceMonitor Darling"    # optional
 
 # 4. Confirm. Every rollup should now report
 #    "nothing to do - coverage already reaches raw's oldest row".
 .\PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run
 ```
 
-## Why step 3 is not optional
+## Why step 3 is a wait and not a restart
 
-`TimescaleSupport.EnsureRetentionPoliciesAsync` is the only thing that arms a held policy, and it has a
-single call site: the service startup path. So a policy does not arm the moment coverage catches up — it
-arms on the **next service start**. Skip the restart and the backfill will have worked while the alert
-keeps firing, which reads like the backfill failed.
+`TimescaleSupport.EnsureRetentionPoliciesAsync` is the only thing that arms a held policy. Until #3812 it
+had a single call site, the service startup path, so a policy did not arm the moment coverage caught up —
+it armed on the **next service start**, and skipping the restart left a backfill that had worked under an
+alert that kept firing, which read like the backfill had failed. The running service now re-judges every
+held policy on its **hourly store-maintenance tick** as well (the same tick as the compression-job health
+check, at :30 past the minute), so the hold clears by itself within about an hour of the backfill
+completing. A restart still runs the same gate on the start path; it is the hurry-up option, not the
+remedy.
+
+Do not let it wait a day, though: the hourly rollups carry their own retention policy, already armed,
+which trims the coverage the backfill just built when it next fires (roughly daily). The hourly
+re-evaluation is well inside that; if the trim ever wins the race nothing is lost — raw is still held —
+and re-running the verb rebuilds it.
 
 ## How you know it worked
 
-Two independent confirmations:
+Three independent confirmations:
 
 - The second dry run reports nothing to do for every rollup.
-- The alert resolves itself: one `Retention Hold Cleared` delivery, and the repeating Critical stops.
+- The service log's next hourly line reads `Retention re-evaluation: 0 policies held, N armed this pass,
+  K unchanged` — `armed this pass` is the release itself, and one `Retention policy for <relation> ARMED`
+  line per policy names what was released. That line is written every hour whatever it found (`0 armed
+  this pass` on a quiet hour), so its presence proves the re-evaluation ran without a restart marker.
+- The alert resolves itself: one `Retention Hold Cleared` delivery, and the repeating Critical stops. This
+  lands one tick AFTER the arm, because the alert's read runs before the re-evaluation on the same hourly
+  tick — expect it on the hour following the `ARMED` line, not the same one.
 
 `query_store_*` is the family most likely to be the one behind. It carries by far the heaviest raw volume,
 so it falls behind first and its hold costs the most disk — check it first if this recurs.

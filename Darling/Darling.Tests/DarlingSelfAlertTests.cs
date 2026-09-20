@@ -4106,18 +4106,23 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     }
 
     /// <summary>
-    /// #3297: the detail names WHEN the policy arms. It said the policy "arms ITSELF once its consumer covers
-    /// everything raw holds" and stopped there, which is true and one step short:
-    /// <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c> is the only thing that arms a held policy and it
-    /// has exactly one call site, the service startup path. So arming happens on the next service START, not
-    /// when coverage catches up. An operator following the old wording runs the backfill, watches the hourly
-    /// Critical keep firing, and concludes the backfill failed — which is what happened on #3296, where the
-    /// reporter's own sequence included the restart and ours did not. Pinned here rather than only in
-    /// <c>docs/retention-hold-runbook.md</c> because the alert is what an operator sees first, and now that
-    /// every channel delivers the detail (#3297) it is what most of them will see at all.
+    /// #3297 made the detail name WHEN the policy arms; #3812 changed the answer, and this pin moved with it.
+    ///
+    /// <para>The #3297 wording was true and load-bearing: <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c>
+    /// had exactly one call site, the service start path, so a held policy armed on the next service START
+    /// and not when coverage caught up — an operator who ran the backfill and skipped the restart watched the
+    /// hourly Critical keep firing and concluded the backfill had failed (#3296). The pin therefore demanded
+    /// "RESTART" and "STARTUP" in the detail. #3812 put the same sweep on the running service's hourly
+    /// maintenance tick, which makes that sentence a LIE in the other direction: an operator told the restart
+    /// is "not optional" restarts a service that would have released the hold within the hour on its own.
+    /// So the detail now names the hourly re-evaluation as the mechanism, the restart as optional ("only if
+    /// you want it armed immediately"), and the hourly <c>Retention re-evaluation:</c> log line as the
+    /// confirmation — and this pin holds each of those, plus the ABSENCE of the two phrases that made the
+    /// restart mandatory, so the old sentence cannot come back by a merge. Pinned here rather than only in
+    /// <c>docs/retention-hold-runbook.md</c> for the #3297 reason: the alert is what an operator sees first.</para>
     /// </summary>
     [Fact]
-    public async Task RetentionHeld_TheDetail_NamesTheRestartAsPartOfTheRemedy()
+    public async Task RetentionHeld_TheDetail_NamesTheHourlyReEvaluation_AndMakesTheRestartOptional()
     {
         var h = new Harness();
         var e = h.Build();
@@ -4126,11 +4131,26 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
         var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
         Assert.Contains("--backfill-rollups", detail, StringComparison.Ordinal);
-        Assert.Contains("RESTART", detail, StringComparison.Ordinal);
-        /* The reason the restart is not optional, so a future edit cannot drop it to a bare instruction. */
-        Assert.Contains("STARTUP", detail, StringComparison.Ordinal);
-        /* And the do-not-arm warning it must never displace. */
+
+        /* The mechanism, by cadence and by issue, and the confirmation line an operator can grep for. */
+        Assert.Contains("hourly maintenance tick", detail, StringComparison.Ordinal);
+        Assert.Contains("#3812", detail, StringComparison.Ordinal);
+        Assert.Contains("'Retention re-evaluation:'", detail, StringComparison.Ordinal);
+
+        /* The restart is OPTIONAL now, and said to be. The two #3297 phrases that made it mandatory must be
+           gone: "then RESTART" was the instruction, "not optional" was its justification. */
+        Assert.Contains("only if you want it armed immediately", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("then RESTART", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("not optional", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("start path and nowhere else", detail, StringComparison.Ordinal);
+
+        /* The one-tick lag on the resolution edge is stated rather than left for the operator to discover: the
+           Retention Held read rides the compression check that runs BEFORE the re-evaluation on the same tick. */
+        Assert.Contains("resolves on the tick after the one that arms it", detail, StringComparison.Ordinal);
+
+        /* And the do-not-arm warning it must never displace — now with the hourly consequence attached. */
         Assert.Contains("Do NOT", detail, StringComparison.Ordinal);
+        Assert.Contains("re-holds a hand-armed policy", detail, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1618,8 +1618,9 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
             var retentionLog = new CapturingTestLogger();
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, retentionLog, ct);
 
-            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
-            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+            /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. InPlace is
+               the count this method returned as a bare int before #3812 replaced it with the whole tally. */
+            var applied = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct)).InPlace;
             Assert.True(applied == RetentionPolicyCount,
                 $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB; {retentionLog.Joined}");
 
@@ -1628,7 +1629,7 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
                Information summary even on success, so reusing retentionLog would bury this pass's own evidence
                under the first pass's already-explained noise (review finding on #2887). */
             var reapplyLog = new CapturingTestLogger();
-            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct);
+            var reapplied = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct)).InPlace;
             Assert.True(reapplied == RetentionPolicyCount,
                 $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {reapplyLog.Joined}");
 
@@ -1759,7 +1760,7 @@ VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), 
                pass actually fails under the earlier passes' expected noise (review finding on #2887). */
             var createLog = new CapturingTestLogger();
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
-            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct);
+            var created17 = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct)).InPlace;
             Assert.True(created17 == RetentionPolicyCount,
                 $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {createLog.Joined}");
 
@@ -1798,7 +1799,7 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             /* THE measured claim: the sweep converges both onto the constant, preserving everything else.
                Fresh logger — see the fixture-level #2818 comment above. */
             var convergeLog = new CapturingTestLogger();
-            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct);
+            var converged = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct)).InPlace;
             Assert.True(converged == RetentionPolicyCount,
                 $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
 
@@ -1828,7 +1829,7 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
                Fresh logger — see the fixture-level #2818 comment above. */
             var settledLog = new CapturingTestLogger();
-            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
+            var settled17 = (await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct)).InPlace;
             Assert.True(settled17 == RetentionPolicyCount,
                 $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
 
