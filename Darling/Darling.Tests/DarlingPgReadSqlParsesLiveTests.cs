@@ -96,6 +96,17 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            (CurrentLongRunningSessionsSql with it, CurrentLongRunningSessionsSqlBackupsIncluded without) ARE
            in the parse-checked population, so the fragment is verified where it is used. */
         "DarlingPgSessionStatesReader.BackupUtilitiesFilter",
+        /* #3743: the PostgreSQL Long-Running Query read's opt-out knob, applied through the SHARED
+           LongRunningQueryExclusions.BuildSqlPredicates builder. Two COLUMN EXPRESSIONS the host hands the
+           builder (s.application_name / s.username) and the builder's own spelling of an empty arm (FALSE),
+           spliced into CurrentLongRunningSessionsSqlTemplate at {1} / {2}. None is a statement; the two
+           field renderings of the template (both with the knob EMPTY, the only shape this assembly can
+           render without the builder) ARE in the parse-checked population, so the empty-arm fragment is
+           verified where it is spliced; the knob-SET shape is executed by PgLongRunningQueryExclusionTests'
+           live class against a planted capture. */
+        "DarlingPgSessionStatesReader.ExclusionProgramNameColumn",
+        "DarlingPgSessionStatesReader.ExclusionLoginNameColumn",
+        "DarlingPgSessionStatesReader.NoExclusionPredicate",
         "DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql",
         /* #3601: the severity CASE expression, spliced into EventsSql so the read and the tool's label-to-rank
            mapping share one spelling. A fragment, not a statement; the query it is spliced into IS in the
