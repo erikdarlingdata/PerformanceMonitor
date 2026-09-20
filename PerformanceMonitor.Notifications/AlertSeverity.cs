@@ -116,6 +116,14 @@ internal static class AlertSeverity
                once-a-day copy of findings that were kept OFF the paging channels must not itself render as a
                page; the declaration keeps the next fall-through sweep from promoting it. */
             "Analysis Singles Digest" => ("#2eaef1", "INFO", "\U0001F535"),
+            /* #3783: the store's two physical-health conditions are INFO by design, and the first CONDITIONS
+               (entered and left, with a resolution row) rather than reports to take the tier. A dimension's
+               TOAST file holding slack is disk the maintainer may reclaim in a maintenance window with a verb
+               that takes an ACCESS EXCLUSIVE lock; the checkpointer's sync phase running long is a WAL-sizing /
+               refresh-slicing decision (#3802, #3745). Neither is a page. Declared, for the digest's reason:
+               the next fall-through sweep must not promote them to WARNING. */
+            "Store TOAST Slack" => ("#2eaef1", "INFO", "\U0001F535"),
+            "Store Checkpointer Pressure" => ("#2eaef1", "INFO", "\U0001F535"),
             "Version Store (PVS)" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Failover" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Replica Disconnected" => ("#DC2626", "CRITICAL", "\U0001F534"),

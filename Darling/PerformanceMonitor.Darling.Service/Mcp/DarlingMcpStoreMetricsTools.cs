@@ -41,7 +41,7 @@ public sealed class DarlingMcpStoreMetricsTools
     public const int MaxDaysBack = StoreSelfMetrics.RetentionDays;
 
     [McpServerTool(Name = "get_store_metrics"), Description(
-        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; per-continuous-aggregate total size, pre/post-compression bytes and chunk count, sized through the aggregate's materialization hypertable and reported under the aggregate's view name (object_kind continuous_aggregate) — on one production store the twenty aggregates were 57% of the database and the previous inventory showed none of them, because timescaledb_information.hypertables never lists a materialization; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; the product's named plain tables (object_kind table: collect.query_store_text, which stores statement text inline by design, collect.query_store_plan_map, config.config_alert_log) with total size and the planner's row-count estimate; two catch-all rows — object_kind other, every relation in a user schema that no named row accounts for, and object_kind system, the PostgreSQL catalogs and TimescaleDB's own bookkeeping — each with its byte total and relation count; the whole store's size with the enabled-server count; and one row per TimescaleDB background job (CAGG refresh, compression, retention) with its last run duration, schedule interval, duration-vs-cadence percent, and run/failure totals — the jobs whose runtimes scale with fleet size. The inventory block RECONCILES the newest sweep against its own pg_database_size and states coverage in so many words: enumerated_percent is the share under named objects, attributed_percent the share any row accounts for, residual_bytes what no row explains, and reconciled is false when that residual exceeds the larger of 1% and 64 MiB — a gap that does not close is itself a finding, and the note says so. bytes_by_kind gives the per-kind subtotals (which is where 'what is driving growth' is answered in one glance), and largest_unenumerated names the biggest relations inside the other row, read live, so that figure is something to act on. Each continuous_aggregate object also carries, read LIVE from the catalog, compression_enabled and the job ids of its refresh, compression and retention policies (null where none exists) — the facts a growth investigation into the aggregates otherwise assembles by hand. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Each daily point is that day's LAST snapshot, never its maximum or its mean — the settled figure a growth question wants, but it means a MAXIMUM question (what was this job's longest run that day, did it enter its warning band) cannot be answered from this series: the day's peak is DROPPED rather than smoothed, so a day whose worst run crossed a threshold reads as a day that never approached it. The route that carries one row per run is TimescaleDB's own job history (timescaledb_information.job_history) — but it records a SUCCESSFUL run only while timescaledb.enable_job_execution_logging is on, and that setting defaults OFF (a FAILED run's row is written regardless of it), so on a store that has never had it turned on a maximum over that table covers zero rows of successful runs, which reads as 'no run exceeded the line' rather than 'this instrument is off'. The job_history block in every response reports that setting's EFFECTIVE value and its source (plus the file that set it, where the connection is privileged enough to see it), so this redirect is never issued blind: read it before treating an empty job_history as an answer, and note that logging covers runs only from the point it was switched on because nothing earlier was recorded to recover. The setting answers 'is it on'; whether YOU will see rows is a second question, because job_history is ownership-filtered — its rows are visible only to members of the job's owner role or of the database owner, while the jobs and job_stats views show every role every job — so a role that can list all the jobs can still read an empty history on a store that is recording perfectly. The same block therefore also reports which role it read as (reader_role), that role's standing under the view's own predicate (visibility: All, Partial or None, with the job counts behind it), the rows it actually observed over a fixed 24-hour window (rows_observed, newest_row_at) beside how many jobs job_stats says started a run in that window (jobs_run_in_window), and a contradiction flag that is true only when recording is on, a reader the view admits to every job's history saw no rows, and jobs ran — the finding to investigate. In managed mode this tool reads as the least-privilege mcp role, which the view filters out (visibility None), so its own rows_observed is zero by construction and the note names the role that can see. That role is the service's owner, and the service's hourly self-metrics sweep runs as it: the sweep persists the owner's own count over the same 24-hour window into the series, and the block reports it beside this connection's verdict as owner_evidence (Observed, Stale, Filtered or Absent), owner_role, owner_observed_at, owner_rows_observed, owner_newest_row_at and owner_jobs_run_in_window — so on a managed store 'recording' is a measurement after all, taken by the service's sweep rather than by this connection, the note says which, and the contradiction flag is computed from the owner's numbers when a fresh owner reading exists. The hourly snapshot behind the series has the same limit one grain down: it samples last_run_duration once an hour at a fixed offset, so a run longer than that offset is never recorded at all. Also reports, read LIVE from the catalog rather than from the recorded series, every retention policy the rollup-coverage gate is holding PAUSED, with the tier's actual data span and how many times its configured drop_after horizon it is really holding — a held policy records zero failures and a normal-looking last run, so it is invisible in the stored job telemetry and is a common cause of unexplained store growth. Use for capacity forecasting: what is driving store growth, how fast, what adding N servers would multiply, which background job is closest to outgrowing its own cadence, whether retention is actually running, and how much of the store the inventory can actually see.")]
+        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; per-continuous-aggregate total size, pre/post-compression bytes and chunk count, sized through the aggregate's materialization hypertable and reported under the aggregate's view name (object_kind continuous_aggregate) — on one production store the twenty aggregates were 57% of the database and the previous inventory showed none of them, because timescaledb_information.hypertables never lists a materialization; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; the product's named plain tables (object_kind table: collect.query_store_text, which stores statement text inline by design, collect.query_store_plan_map, config.config_alert_log) with total size and the planner's row-count estimate; two catch-all rows — object_kind other, every relation in a user schema that no named row accounts for, and object_kind system, the PostgreSQL catalogs and TimescaleDB's own bookkeeping — each with its byte total and relation count; the whole store's size with the enabled-server count; and one row per TimescaleDB background job (CAGG refresh, compression, retention) with its last run duration, schedule interval, duration-vs-cadence percent, and run/failure totals — the jobs whose runtimes scale with fleet size. The inventory block RECONCILES the newest sweep against its own pg_database_size and states coverage in so many words: enumerated_percent is the share under named objects, attributed_percent the share any row accounts for, residual_bytes what no row explains, and reconciled is false when that residual exceeds the larger of 1% and 64 MiB — a gap that does not close is itself a finding, and the note says so. bytes_by_kind gives the per-kind subtotals (which is where 'what is driving growth' is answered in one glance), and largest_unenumerated names the biggest relations inside the other row, read live, so that figure is something to act on. Each continuous_aggregate object also carries, read LIVE from the catalog, compression_enabled and the job ids of its refresh, compression and retention policies (null where none exists) — the facts a growth investigation into the aggregates otherwise assembles by hand. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Each daily point is that day's LAST snapshot, never its maximum or its mean — the settled figure a growth question wants, but it means a MAXIMUM question (what was this job's longest run that day, did it enter its warning band) cannot be answered from this series: the day's peak is DROPPED rather than smoothed, so a day whose worst run crossed a threshold reads as a day that never approached it. The route that carries one row per run is TimescaleDB's own job history (timescaledb_information.job_history) — but it records a SUCCESSFUL run only while timescaledb.enable_job_execution_logging is on, and that setting defaults OFF (a FAILED run's row is written regardless of it), so on a store that has never had it turned on a maximum over that table covers zero rows of successful runs, which reads as 'no run exceeded the line' rather than 'this instrument is off'. The job_history block in every response reports that setting's EFFECTIVE value and its source (plus the file that set it, where the connection is privileged enough to see it), so this redirect is never issued blind: read it before treating an empty job_history as an answer, and note that logging covers runs only from the point it was switched on because nothing earlier was recorded to recover. The setting answers 'is it on'; whether YOU will see rows is a second question, because job_history is ownership-filtered — its rows are visible only to members of the job's owner role or of the database owner, while the jobs and job_stats views show every role every job — so a role that can list all the jobs can still read an empty history on a store that is recording perfectly. The same block therefore also reports which role it read as (reader_role), that role's standing under the view's own predicate (visibility: All, Partial or None, with the job counts behind it), the rows it actually observed over a fixed 24-hour window (rows_observed, newest_row_at) beside how many jobs job_stats says started a run in that window (jobs_run_in_window), and a contradiction flag that is true only when recording is on, a reader the view admits to every job's history saw no rows, and jobs ran — the finding to investigate. In managed mode this tool reads as the least-privilege mcp role, which the view filters out (visibility None), so its own rows_observed is zero by construction and the note names the role that can see. That role is the service's owner, and the service's hourly self-metrics sweep runs as it: the sweep persists the owner's own count over the same 24-hour window into the series, and the block reports it beside this connection's verdict as owner_evidence (Observed, Stale, Filtered or Absent), owner_role, owner_observed_at, owner_rows_observed, owner_newest_row_at and owner_jobs_run_in_window — so on a managed store 'recording' is a measurement after all, taken by the service's sweep rather than by this connection, the note says which, and the contradiction flag is computed from the owner's numbers when a fresh owner reading exists. The hourly snapshot behind the series has the same limit one grain down: it samples last_run_duration once an hour at a fixed offset, so a run longer than that offset is never recorded at all. Also reports, read LIVE from the catalog rather than from the recorded series, every retention policy the rollup-coverage gate is holding PAUSED, with the tier's actual data span and how many times its configured drop_after horizon it is really holding — a held policy records zero failures and a normal-looking last run, so it is invisible in the stored job telemetry and is a common cause of unexplained store growth. Use for capacity forecasting: what is driving store growth, how fast, what adding N servers would multiply, which background job is closest to outgrowing its own cadence, whether retention is actually running, and how much of the store the inventory can actually see. TOAST UTILISATION (V137, #3783): each payload dimension object (object_kind dimension) also carries toast_bytes, toast_live_bytes, toast_utilisation_pct and toast_utilisation_note, because the plan XML and statement text do not live in the dimension's heap — they live in its TOAST file, and pg_total_relation_size says how big that file is and nothing about how FULL it is. A dimension that cycles rows (~755 k new distinct plans a day on one production store class, purged in row-capped slices) leaves free space inside the TOAST file that ordinary VACUUM returns to the table and never to the operating system, so the file sits at its high-water mark: the V54 text-to-gzip conversion plus that churn left one production store's query_plan_dim TOAST file at ~40 % utilisation (154 GB holding ~61 GB of live chunks) — ~93 GB of slack reported as store size. toast_utilisation_pct is toast_live_bytes / toast_bytes (one decimal) and is null when either is null or the file is empty; toast_live_bytes needs the pg_freespacemap extension, which the bundled store image ships and does not install, so on a store without it the note says 'not measured' in so many words and NOTHING is computed from total_bytes or a tuple share (after a VACUUM the dead tuples are gone and the file keeps its pages, so a tuple share reads 100 % on exactly the file in question). When the percentage IS measured and reads under 50 % on a file over 10 GiB, the note carries the reclaim path: --recompress-plan-dim --vacuum-full, at the MAINTAINER's word in a maintenance window, because VACUUM FULL takes an ACCESS EXCLUSIVE lock on the dimension for the rebuild and needs free disk for a full copy of the live data; the same condition fires the informational Store TOAST Slack self-alert once a day. This tool never reclaims anything by itself. Hypertable, aggregate, table and catch-all objects carry the four TOAST fields as null: they have no TOAST columns to measure. CHECKPOINTER (V137, #3783): the checkpointer block is the store's OWN checkpointer over the last self-metrics interval — write_ms and sync_ms (milliseconds the checkpointer spent in its write and sync/fsync phases inside the interval), requested (checkpoints in the interval forced by WAL volume reaching max_wal_size rather than by checkpoint_timeout), interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence), observed_at / previous_at, and the cumulative counters beside them. The sweep stores the server's cumulative counters and this block differences the two newest rows, so status says whether there IS an interval: Observed (judged), NoPrevious (one row so far), Reset (a counter went backwards — pg_stat_reset_shared or a restart between sweeps, so no delta is stated rather than a negative one), or Absent. It exists because three unattributed read kills on a production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s and nothing in the store recorded that; the informational Store Checkpointer Pressure self-alert fires when sync_ms exceeds 10,000 or requested exceeds 0 in an interval, naming WAL sizing (#3802) and refresh slicing (#3745) as the levers. The checkpointer row is not in objects[] or daily[]: it carries no bytes.")]
     public static async Task<string> GetStoreMetrics(
         NpgsqlDataSource postgres,
         [Description("Days of daily-series history. Default 30; max 400 (the series' own retention).")] int days_back = 30)
@@ -127,6 +127,12 @@ public sealed class DarlingMcpStoreMetricsTools
                reconcile against, in which case the block says coverage is unknown instead of computing a
                percentage of nothing. */
             var inventory = DarlingStoreMetricsReader.ComputeInventory(latest);
+
+            /* #3783: the store's own checkpointer, differenced from the two newest checkpointer rows. A third
+               read (the latest read takes one row per object and a difference needs two), not failure-isolated
+               inside the reader: this is a primary block, and a throw here is a tool error the outer catch
+               envelopes rather than a plausible 'Absent' dressed as a reading. */
+            var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres);
 
             /* #3582: two more LIVE catalog reads, both failure-isolated to null (never to an empty list,
                which would read as "no aggregates" / "nothing un-enumerated" and drop a section without a
@@ -275,12 +281,37 @@ public sealed class DarlingMcpStoreMetricsTools
                         || ownerEvidence.ContradictsRecording(jobLogging.Recording),
                     note = JobHistoryNote(jobLogging, jobEvidence, ownerEvidence),
                 },
+                /* #3783. Present on EVERY response, four states never a bool, for the reason every block
+                   above is: 'no row yet', 'one row', 'the counters reset' and 'here is the hour' are four
+                   different facts about an absent-or-present number, and the read kills this exists to
+                   explain were unattributed precisely because nothing said which. Deltas null unless
+                   Observed; the cumulative counters ride beside them for a reader who wants the lifetime
+                   figure and so nobody differences the stored columns by hand. */
+                checkpointer = new
+                {
+                    status = checkpointer.Status.ToString(),
+                    observed_at = checkpointer.ObservedAt?.ToString("o", CultureInfo.InvariantCulture),
+                    previous_at = checkpointer.PreviousAt?.ToString("o", CultureInfo.InvariantCulture),
+                    interval_seconds = checkpointer.IntervalSeconds,
+                    write_ms = checkpointer.WriteMs,
+                    sync_ms = checkpointer.SyncMs,
+                    requested = checkpointer.Requested,
+                    cumulative_write_ms = checkpointer.CumulativeWriteMs,
+                    cumulative_sync_ms = checkpointer.CumulativeSyncMs,
+                    cumulative_requested = checkpointer.CumulativeRequested,
+                    pressure = checkpointer.IsPressure,
+                    sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs,
+                    note = CheckpointerNote(checkpointer),
+                },
                 /* The job_history row is deliberately NOT in objects[] or daily[]: it carries no bytes, and
                    its columns are the overloaded ones the reader decodes into the block above — rendered
-                   raw here, last_run_duration_ms would read as a run's duration. */
+                   raw here, last_run_duration_ms would read as a run's duration. The checkpointer row
+                   (#3783) is excluded for the same reason: no bytes, and its columns are cumulative counters
+                   the block above differences — rendered raw they would read as an hour's figure. */
                 objects = latest
                     .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind
-                             && r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind)
+                             && r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind
+                             && r.ObjectKind != StoreSelfMetrics.CheckpointerObjectKind)
                     .OrderByDescending(r => r.TotalBytes ?? 0)
                     .Select(r => new
                     {
@@ -324,10 +355,19 @@ public sealed class DarlingMcpStoreMetricsTools
                             : (double?)null,
                         total_runs = r.TotalRuns,
                         total_failures = r.TotalFailures,
+                        /* #3783 dimension rows only (null on every other kind, which has no TOAST column to
+                           measure): the TOAST file's size, the live bytes inside it where pg_freespacemap is
+                           installed, their quotient, and the sentence that says what the numbers mean or
+                           why one of them is null. Trailing, so the existing shape is untouched. */
+                        toast_bytes = ToastFacts(r)?.ToastBytes,
+                        toast_live_bytes = ToastFacts(r)?.ToastLiveBytes,
+                        toast_utilisation_pct = ToastFacts(r)?.UtilisationPercent,
+                        toast_utilisation_note = ToastFacts(r)?.Note,
                     }),
                 daily = daily
                     .Where(p => p.ObjectKind != StoreSelfMetrics.StoreObjectKind
-                             && p.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind)
+                             && p.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind
+                             && p.ObjectKind != StoreSelfMetrics.CheckpointerObjectKind)
                     .GroupBy(p => (p.ObjectKind, p.ObjectName))
                     .OrderBy(g => g.Key.ObjectKind, StringComparer.Ordinal)
                     .ThenBy(g => g.Key.ObjectName, StringComparer.Ordinal)
@@ -347,6 +387,11 @@ public sealed class DarlingMcpStoreMetricsTools
                             schedule_interval_ms = p.ScheduleIntervalMs,
                             total_runs = p.TotalRuns,
                             total_failures = p.TotalFailures,
+                            /* #3783: the utilisation as a SERIES, dimension rows only — a file that is 64 %
+                               today and was 80 % a month ago is the trend the reclaim decision reads. */
+                            toast_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastBytes,
+                            toast_live_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastLiveBytes,
+                            toast_utilisation_pct = DarlingStoreMetricsReader.ToastFacts.For(p)?.UtilisationPercent,
                         }),
                     }),
             }, McpHelpers.JsonOptions);
@@ -364,6 +409,68 @@ public sealed class DarlingMcpStoreMetricsTools
            && byView.TryGetValue(row.ObjectName, out var state)
             ? state
             : null;
+
+    /// <summary>The #3783 TOAST facts for one latest row — null for every kind but <c>dimension</c>, so the
+    /// four trailing fields read null there. A thin alias so the projection reads as four fields of one fact.</summary>
+    private static DarlingStoreMetricsReader.ToastFacts? ToastFacts(DarlingStoreMetricsReader.StoreMetricRow row)
+        => DarlingStoreMetricsReader.ToastFacts.For(row);
+
+    /// <summary>
+    /// What the checkpointer block's numbers mean, or why there are none (#3783) — one sentence per status, and
+    /// the statuses deliberately do not share one: an absent row, a first row, a reset pair and a measured hour
+    /// call for four different readings of a null <c>sync_ms</c>. On an Observed interval the sentence states the
+    /// two figures, the bar each is judged against, and — when either is over its line — the two levers by
+    /// issue number, in the same words the self-alert uses, so a reader who saw the alert and a reader who saw
+    /// this block were told one thing.
+    /// </summary>
+    internal static string CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading reading)
+    {
+        const string source =
+            "The store's hourly self-metrics sweep records its own checkpointer's CUMULATIVE counters (pg_stat_checkpointer "
+            + "on PostgreSQL 17+, pg_stat_bgwriter before) as the object_kind = 'checkpointer' row; this block is the difference "
+            + "between the two newest rows, over the span their stamps measure.";
+
+        switch (reading.Status)
+        {
+            case DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent:
+                return source + " The series holds no checkpointer row yet (it lands within an hour of a service start on a "
+                    + "V137+ store), so there is no interval to state.";
+
+            case DarlingStoreMetricsReader.CheckpointerDeltaStatus.NoPrevious:
+                return source + $" One row so far, at {Stamp(reading.ObservedAt)}: the counters are real but there is nothing "
+                    + "earlier to subtract, so the first interval arrives with the next hourly sweep.";
+
+            case DarlingStoreMetricsReader.CheckpointerDeltaStatus.Reset:
+                return source + $" Between {Stamp(reading.PreviousAt)} and {Stamp(reading.ObservedAt)} at least one counter read "
+                    + "LOWER than before — pg_stat_reset_shared('checkpointer') or a server restart without statistics persistence "
+                    + "ran between the sweeps — so no delta is stated for this interval rather than a negative or a clamped zero; "
+                    + "the next sweep differences cleanly against the post-reset row.";
+        }
+
+        var syncMs = reading.SyncMs ?? 0;
+        var requested = reading.Requested ?? 0;
+        var minutes = ((reading.IntervalSeconds ?? 0) / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
+        var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer spent "
+            + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its sync (fsync) phase and "
+            + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase, and "
+            + $"{requested} checkpoint(s) were REQUESTED (WAL-forced by max_wal_size) rather than timed.";
+
+        if (!reading.IsPressure)
+        {
+            return source + measured + $" Both under the lines the self-alert judges (sync over "
+                + $"{(DarlingSelfAlertEvaluator.CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture)}s in an interval, or any requested checkpoint).";
+        }
+
+        return source + measured + " That is CHECKPOINTER PRESSURE: "
+            + (syncMs > DarlingSelfAlertEvaluator.CheckpointSyncBarMs
+                ? "a sync phase past the MCP host's own read deadline is an I/O stall every reader on the store shares — on one "
+                  + "production store, three otherwise-unexplained read kills in a day all sat inside 25.2 s and 14.0 s sync phases. "
+                : "a requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size allows, so the "
+                  + "checkpointer ran early and the next one is closer. ")
+            + "The levers are configuration: WAL sizing (#3802 — max_wal_size and checkpoint_completion_target; the managed "
+            + "store gained them as the v12 postgresql.conf block) and refresh slicing (#3745 — smaller continuous-aggregate "
+            + "refreshes write less WAL per tick). The informational Store Checkpointer Pressure self-alert says the same.";
+    }
 
     /// <summary>
     /// The coverage statement (#3582), in the issue's own words: "inventory covers N% of the database; X in

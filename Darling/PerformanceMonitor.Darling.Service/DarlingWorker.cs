@@ -2392,6 +2392,22 @@ public sealed class DarlingWorker : BackgroundService
                         _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
                     }
 
+                    /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
+                       the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
+                       evaluator says why) and the checkpointer's last interval, differenced from the newest
+                       two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
+                       the alert judges the hour the sweep measured rather than the one before it. Both
+                       master-gated inside and failure-isolated inside; the outer catch is the belt. */
+                    try
+                    {
+                        await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
+                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
+                    }
+
                     /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
                        engine deliberately does not have. Attempted on this same hourly tick because the
                        ceiling is enforced inside (one post per trailing day, and only on a day with

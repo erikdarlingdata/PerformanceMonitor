@@ -121,6 +121,10 @@ public static class AlertFamily
         ["Stale Mute Rules"] = SelfMonitor,
         ["Web TLS Certificate Expiring"] = SelfMonitor,
         ["Collector Cost Regression"] = SelfMonitor,
+        /* #3783: the store's own TOAST slack and checkpointer pressure — informational conditions about the
+           monitor's store, so self-monitor, not reports: they are entered and left and write a resolution. */
+        ["Store TOAST Slack"] = SelfMonitor,
+        ["Store Checkpointer Pressure"] = SelfMonitor,
 
         /* ---- reports: the three daily documents ---- */
         ["Collector Cost Digest"] = Reports,

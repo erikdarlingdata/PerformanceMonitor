@@ -31,8 +31,10 @@ namespace Darling.Tests;
 /// tri-state with a CHECK; (c) <c>toast_bytes</c> and <c>toast_live_bytes</c> on <c>collect.store_metrics</c>,
 /// the first written by the dimension-row sweep and the second written NULL until the maintainer picks the
 /// instrument; (d) <c>checkpoint_write_ms</c>, <c>checkpoint_sync_ms</c> and <c>checkpoints_requested</c> on
-/// <c>collect.store_metrics</c>, the checkpointer row's three deltas, written by nothing until #3783's code half
-/// lands the row. Eight nullable columns, no DEFAULT, no backfill, no new table, no new hypertable, one
+/// <c>collect.store_metrics</c>, the checkpointer row's three counters — written by nothing at the rung, and since
+/// #3783's code half written RAW (the server's cumulative figures) by <c>StoreSelfMetrics.CheckpointerInsertSql</c>
+/// and differenced by <c>DarlingStoreMetricsReader.CheckpointerReading</c>, the reasoning on the writer. Eight
+/// nullable columns, no DEFAULT, no backfill, no new table, no new hypertable, one
 /// passthrough refreshed. The shape is <see cref="PerfmonCounterTypeRungTests"/>'s (V132, a column on a shared
 /// collector's table plus its view) three times over, with <see cref="TimeHonestyRungTests"/>' (V134) mixed
 /// view / no-view arms.
@@ -288,9 +290,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
     /// <summary>
     /// (c)'s writer: the dimension rows — and ONLY the dimension rows — fill the two columns; <c>toast_bytes</c>
     /// is the TOAST relation's main fork through <c>NULLIF(reltoastrelid, 0)</c> (NULL, never an error, for a
-    /// table without one), and <c>toast_live_bytes</c> is the typed literal NULL until the maintainer picks the
-    /// instrument. Every other kind's INSERT leaves both columns alone, so they read NULL there by the table's
-    /// own per-kind convention.
+    /// table without one), and <c>toast_live_bytes</c> is the typed literal NULL in the INSERT itself — #3783's
+    /// code half fills it from a SEPARATE, extension-fenced UPDATE (<c>StoreSelfMetrics.ToastLiveBytesUpdateSql</c>),
+    /// so this INSERT still names no extension. Every other kind's INSERT leaves both columns alone, so they
+    /// read NULL there by the table's own per-kind convention; (d)'s writer touches only its own three.
     /// </summary>
     [Fact]
     public void TheDimensionSweepWritesToastBytes_AndNullLiveBytes_AndNoOtherKindTouchesEither()
@@ -327,17 +330,28 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             }
         }
 
-        /* (d) has NO writer in this rung: the checkpointer row is #3783's code half (a delta needs the previous
-           run's cumulative, which is state, not a line beside the TOAST read). The sweep names none of the three
-           and knows no 'checkpointer' kind yet; the lane that lands the row retires this arm deliberately. */
-        var sweep = WithoutComments(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs"));
-        foreach (var column in CheckpointerColumns)
+        /* (d)'s writer landed with #3783's code half and touches ONLY its three columns; the two TOAST columns
+           stay the dimension arm's alone. The "no writer yet" arm that stood here was retired deliberately
+           when the row landed, as the rung asked; StoreToastAndCheckpointerTests pins the writer's shape. */
+        foreach (var checkpointerSql in new[] { StoreSelfMetrics.CheckpointerInsertSql, StoreSelfMetrics.CheckpointerBgwriterInsertSql })
         {
-            Assert.DoesNotContain(column, sweep, StringComparison.Ordinal);
+            foreach (var column in ToastColumns)
+            {
+                Assert.DoesNotContain(column, checkpointerSql, StringComparison.Ordinal);
+            }
+
+            foreach (var column in CheckpointerColumns)
+            {
+                Assert.Contains(column, checkpointerSql, StringComparison.Ordinal);
+            }
         }
 
-        Assert.DoesNotContain("'checkpointer'", sweep, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_stat_checkpointer", sweep, StringComparison.Ordinal);
+        /* And the live-bytes UPDATE touches only toast_live_bytes, keyed on the dimension kind. */
+        Assert.Contains("SET    toast_live_bytes", StoreSelfMetrics.ToastLiveBytesUpdateSql, StringComparison.Ordinal);
+        foreach (var column in CheckpointerColumns)
+        {
+            Assert.DoesNotContain(column, StoreSelfMetrics.ToastLiveBytesUpdateSql, StringComparison.Ordinal);
+        }
 
         /* The sweep doc carries the measurement that decided NULL, in the words the next reader will look for. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
