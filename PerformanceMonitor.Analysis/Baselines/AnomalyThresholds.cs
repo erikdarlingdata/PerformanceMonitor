@@ -370,4 +370,24 @@ public static class AnomalyThresholds
     /// whose ordinary calls are waiting on something. unmeasured: chosen, not measured — the same unread series as the
     /// floor; calibrate against the upper tail of the per-collection mean before the next release.</summary>
     public const double PgStatementMeanMsFallback = 250.0;                // server-wide mean ms per statement call
+
+    // lane 28 (#3691, v3): the CPU-burn z-detector's floor and fallback (PgTargetAnomalyDetector.Kernel.cs).
+
+    /// <summary>Magnitude floor for the CPU-burn z-detector, in CORES BUSY per collection (Σ user + system + plan CPU
+    /// ms across every statement pg_stat_kcache tracks, over the collection's own gap): below half a core a deviation
+    /// is an idle server's ripple however many sigmas it reads — a routine of 0.05 cores busy at 3 am tripling to 0.15
+    /// is not a workload event. unmeasured: chosen, not measured — and NOT calibratable on the current fleet: every
+    /// PostgreSQL target the product monitors today is Aurora, and Aurora does not ship <c>pg_stat_kcache</c> (fifty
+    /// clusters in the 2026-09-19 calibration, no population for this family), so the detector never reaches this bar
+    /// there. Calibrate against the per-collection cores-busy distribution over <c>pg_kernel_stats</c> of a stock
+    /// population before the next release that monitors one; the detector stamps <c>threshold_lineage = 0</c> until
+    /// then. No core count is collected, so the unit is cores, never a percent.</summary>
+    public const double PgCpuBurnCoresFloor = 0.5;                        // cores busy in one collection
+
+    /// <summary>Absolute-fallback bar for CPU burn on an untrustworthy baseline: four cores busy, eight times the
+    /// floor — the smallest figure that is a whole small host's worth of CPU on any PostgreSQL, so a young store fires
+    /// only on a window that would saturate a four-core instance; a larger host's first storm is judged once its own
+    /// routine exists. unmeasured: chosen, not measured — the same un-calibratable population as the floor; calibrate
+    /// against a stock population's upper tail before the next release that monitors one.</summary>
+    public const double PgCpuBurnCoresFallback = 4.0;                     // cores busy in one collection
 }

@@ -429,9 +429,15 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(pgPlanAnomaly);
         Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyPlanRegression), pgPlanAnomaly);
         Assert.DoesNotContain("Anomalous spike", pgPlanAnomaly!.Headline, StringComparison.Ordinal);
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuBurnCores));            /* lane 28 */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuDecomposition));        /* lane 28 */
-        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyCpuBurn));       /* lane 28 — the arm exists, the composer is a stub */
+        /* v3 (#3691): lane 28 filled the kernel family — both keys compose their own block (the static shape when no fact
+           is in the lookup), and the anomaly's ComposeAnomaly arm delegates to the same file (never the SQL Server
+           "Anomalous spike" composer). Moved from Null, as the stub comment said it would be. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.CpuBurnCores));         /* lane 28 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.CpuDecomposition));     /* lane 28 */
+        var pgCpuBurnAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyCpuBurn);   /* lane 28: the anomaly too, lane 17's shape */
+        Assert.NotNull(pgCpuBurnAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyCpuBurn), pgCpuBurnAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgCpuBurnAnomaly!.Headline, StringComparison.Ordinal);
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 — routed by name to ComposeMemory, ahead of the config prefix arm */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
 
