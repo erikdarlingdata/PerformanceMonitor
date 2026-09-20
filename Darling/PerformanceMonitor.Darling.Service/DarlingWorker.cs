@@ -121,8 +121,27 @@ public sealed class DarlingWorker : BackgroundService
        schedule (#3035), and a check scheduled from the instant of its previous fire slips a few seconds
        every hour and eventually samples one of those :00 instants — which is where a production store's
        false page came from. TimescaleSupport.NextCompressionCheckUtc snaps each due time to :30 past its
-       minute, so this interval sets how OFTEN and that phase sets WHEN in the minute. */
+       minute, so this interval sets how OFTEN and that phase sets WHEN in the minute.
+
+       The retention re-evaluation (#3812) RIDES this tick rather than owning a second one: same store, same
+       domain (TimescaleDB background jobs), same cadence class — a held retention policy costs disk by the
+       day, so hourly is far tighter than the "next restart" it replaces and far looser than the 30 s alert
+       loop needs to be. It runs AFTER the compression read inside the tick, and that order is #3575's, not
+       taste: the compression read must sample at :30 past its minute, and twenty coverage probes ahead of it
+       on a large store would slide that sample toward the :00 instant the policies start on. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
+
+    /* The whole-pass budget for the hourly retention re-evaluation (#3812), the #2327 shape: this pass is
+       AWAITED on the serial sweep loop, so its worst case stalls per-server dispatch and every fleet-level
+       check behind it. Each statement inside TimescaleSupport.EnsureRetentionPoliciesAsync carries the 300 s
+       bulk-setup deadline that is right for a first conversion and wrong for a loop — twenty policies at up
+       to five statements each is a theoretical hundred-plus statements, and on a store that answers slowly
+       without failing that is hours of loop block behind one pass. One linked budget for the WHOLE pass bounds
+       it to the same ~5 minutes the store self-metrics sweep accepted for the same reason. On a healthy store
+       the pass is seconds: the coverage probe is a chunk-pruned min() per relation (685 ms cold on the largest
+       store, #2874) and everything else is a catalog row. A pass cut short leaves its unjudged policies exactly
+       as they were and says so; the next hour re-judges them. */
+    private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
        series exists to forecast weeks out, and the compression tier only changes state once a day per
@@ -487,7 +506,9 @@ public sealed class DarlingWorker : BackgroundService
        first sample is deliberately left unpinned — a restart is when an operator is reading the log and wants
        the store's job health now — and the confirm-read inside ReadStuckCompressionJobsAsync covers it like
        every other sample. Fleet-level (one shared store), so it is a single field, not per-server; only
-       consulted when _timescaleAvailable. */
+       consulted when _timescaleAvailable. Since #3812 the same due time also fires the hourly retention
+       re-evaluation (ReevaluateRetentionPoliciesAsync), AFTER the compression read so the :30 sample is not
+       pushed by the pass ahead of it — one stamp, two failure-isolated halves. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
@@ -1488,8 +1509,14 @@ public sealed class DarlingWorker : BackgroundService
                    per aggregate, and a no-op on every start after the first. */
                 await TimescaleSupport.EnsureAggregateCompressionAsync(timescaleConnection, _logger, stoppingToken);
 
-                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
-                // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).
+                /* AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
+                   history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958). The
+                   START-PATH pass: it creates what is missing, converges horizons and judges every policy's
+                   coverage gate, and writes one WARNING per held policy plus the "Retention evaluation at
+                   startup:" tally. KEPT as-is under #3812, which ADDED the hourly re-evaluation on the
+                   compression tick (ReevaluateRetentionPoliciesAsync) rather than moving this; a fresh store
+                   still gets its policies before the first collection lands, and a restart is still when an
+                   operator is reading the log. */
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
@@ -2274,6 +2301,34 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
                 await EvaluateCompressionJobHealthAsync(stoppingToken);
+
+                /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line the
+                   only thing that armed a held retention policy was the start-path ensure above, so "the gate
+                   releases the hold by itself once the backfill covers raw" was true only after a restart — a
+                   store on a stable build sat held indefinitely after a backfill that had worked, with the
+                   Retention Held alert still firing and reading like the backfill had failed. Same tick as the
+                   compression check (the constant's comment says why this cadence and why this order), each
+                   half failure-isolated inside its own method with its own catch, so a retention pass that
+                   throws or runs out its budget cannot skip the compression read and a compression fault
+                   cannot skip the retention pass. The Retention Held self-alert rides INSIDE the compression
+                   method and therefore reads the flags as they stood before this pass: a policy armed here
+                   shows as held on this tick's alert read and resolves on the next hour's, one tick of lag on
+                   the resolution edge that is stated rather than traded for #3575's phase. The first pass
+                   after startup fires within seconds of the start-path ensure (this stamp seeds at MinValue);
+                   that pass is deliberately not skipped — its "Retention re-evaluation:" line is the proof
+                   the hourly path is wired on this store, visible in the same log window an operator reads
+                   after a restart, and it costs twenty catalog rows and twenty chunk-pruned min() reads.
+
+                   THE HOURLY STORE-MAINTENANCE TICK, named. This guard is the home for every "we decided this
+                   at startup and never re-decided it" defect on the store side: #3812 is its first tenant, and
+                   #3815 (TimescaleDB availability probed only at startup), #3816 (job self-heal covers
+                   compression only) and #3817 (store-object convergence only at startup) are queued as further
+                   tenants — not built here. The contract a tenant signs: its own method, its own catch-all,
+                   awaited as its own statement in this block AFTER the compression read (the #3575 phase
+                   argument on s_compressionCheckInterval), in the order it appears; a new tenant is one more
+                   await line below this one. No delegate list yet, deliberately — two tenants do not justify
+                   the indirection, and a list would hide the order the phase argument depends on. */
+                await ReevaluateRetentionPoliciesAsync(stoppingToken);
             }
 
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
@@ -5883,6 +5938,70 @@ LIMIT 1";
             _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// The #3812 hourly retention re-evaluation (fleet-level, Timescale-only, on the compression tick): run
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
+    /// as the <see cref="TimescaleSupport.RetentionSweepPass.Periodic"/> pass on a connection from the worker's
+    /// pool. The start-path pass's <c>timescaleConnection</c> is scoped to the setup block and disposed after
+    /// it, which is why this cannot simply reuse it and why the method exists at all rather than a second line
+    /// beside the startup call.
+    ///
+    /// <para><b>What the pass does is the start path's, exactly.</b> Create what is missing (paused), converge
+    /// horizons, measure every policy's coverage, arm the Covered ones and hold the Short ones. Every step is
+    /// idempotent and was tested as such before it was scheduled (the method's own summary says how). What
+    /// differs is what it SAYS: a hold that was already a hold is Debug here, a policy ARMED this pass is
+    /// Information, a policy RE-HELD this pass is Warning, and the one line every pass writes whatever it found
+    /// is <c>Retention re-evaluation: N policies held, M armed this pass, K unchanged</c> — the #3756
+    /// discipline, so an operator can see the gate was re-judged without a restart marker.</para>
+    ///
+    /// <para><b>Failure-isolated at the worker level, with three distinct outcomes that read differently.</b>
+    /// The pass completed — its own tally line, inside the method. The pass would not open a connection or
+    /// threw outside its per-policy isolation — the WARNING below, naming the elapsed and the message. The pass
+    /// ran out its <see cref="s_retentionReevaluationBudget"/> — a different WARNING, because a store that
+    /// cannot answer twenty catalog reads and twenty chunk-pruned <c>min()</c> probes in five minutes is the
+    /// finding, not the retention. Shutdown cancellation is quiet: the next start's own pass re-judges every
+    /// policy, so a pass cut short by stopping the service has nothing to report. Not counted by #3013's
+    /// swallowed-read counter: this is a maintenance ACTION, not an alert read whose failure would leave a
+    /// condition unjudged — the Retention Held alert's own read is inside the compression method and counts
+    /// there.</para>
+    ///
+    /// <para>The budget is ONE linked token for the WHOLE pass (#2327's shape), not a per-statement deadline:
+    /// the sweep's statements carry <c>TimescaleSupport</c>'s 300 s bulk-setup bound each, which is right for
+    /// a first conversion and, multiplied by a hundred statements on a slow store, wrong for something awaited
+    /// on the serial sweep loop. A cancellation from that budget propagates out of the sweep's per-policy
+    /// isolation by design (<c>when (ex is not OperationCanceledException)</c>), so the policies it had not
+    /// reached keep their state and the WARNING here is the pass's line for the hour.</para>
+    /// </summary>
+    private async Task ReevaluateRetentionPoliciesAsync(CancellationToken cancellationToken)
+    {
+        var passClock = Stopwatch.StartNew();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_retentionReevaluationBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await TimescaleSupport.EnsureRetentionPoliciesAsync(
+                connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown — quiet and expected. The next start's own pass re-judges every policy. */
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - the policies it had not reached keep the state they were in and are re-judged next hour (and at the next start). A store that cannot answer twenty catalog reads and twenty chunk-pruned min() probes inside that budget is the finding here, not the retention.",
+                (long)s_retentionReevaluationBudget.TotalSeconds, passClock.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
+                passClock.ElapsedMilliseconds, ex.Message);
         }
     }
 

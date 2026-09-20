@@ -4493,15 +4493,17 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "The gate is working as designed - it will not let retention drop history a " +
                                   "rollup has never materialized - but the hold has lasted long enough to cost " +
                                   "real disk. ") +
-                            "The policy arms ITSELF once its consumer covers everything raw holds, but it " +
-                            "arms at STARTUP rather than the moment coverage catches up - EnsureRetentionPoliciesAsync " +
-                            "runs on the service start path and nowhere else. So the remedy is two steps, and the " +
-                            "second is not optional: run the --backfill-rollups operator action, then RESTART the " +
-                            "service. Skip the restart and the backfill will have worked while this alert keeps " +
-                            "firing, which reads like the backfill failed. Do NOT arm the policy by hand: the " +
-                            "history it holds exists nowhere else, so arming drops the only copy, which is " +
-                            "precisely what the gate prevents. Check the service log at startup for the " +
-                            "'HELD PAUSED' line naming which consumer is short.",
+                            "The policy arms ITSELF once its consumer covers everything raw holds: the coverage " +
+                            "gate is re-judged at startup and on the running service's hourly maintenance tick " +
+                            "(EnsureRetentionPoliciesAsync, #3812), so the remedy is one step - run the " +
+                            "--backfill-rollups operator action - and the hold clears by itself within about an " +
+                            "hour of the backfill completing. Restart the service only if you want it armed " +
+                            "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
+                            "the policy by hand: the history it holds exists nowhere else, so arming drops the only " +
+                            "copy, which is precisely what the gate prevents - and the hourly pass re-holds a " +
+                            "hand-armed policy whose coverage is still short. Check the service log for the " +
+                            "'HELD PAUSED' line at startup naming which consumer is short, and for the hourly " +
+                            "'Retention re-evaluation:' line, whose 'armed this pass' count is the confirmation.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),

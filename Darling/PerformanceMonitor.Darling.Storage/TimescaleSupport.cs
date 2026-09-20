@@ -5311,7 +5311,11 @@ AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
     /// The shared body of <see cref="ArmRetentionPolicySql"/> and <see cref="HoldRetentionPolicySql"/>: flip one
     /// relation's retention job. Filtering by proc_name AND the hypertable is what keeps it from arming — or
     /// stopping — some other policy, or every policy, by accident. Idempotent in both directions: setting a job
-    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict every start.
+    /// to the state it is already in is a no-op, which is what lets the sweep re-assert the verdict on every
+    /// evaluation — every start, and since #3812 every hour on the running service. Deliberately NOT made
+    /// conditional on the flag (<c>AND NOT j.scheduled</c>) when #3812 needed to count transitions: the prior
+    /// state is read separately (<see cref="RetentionPolicyScheduledSql"/>) so this stays the one plain state
+    /// set the pins hold it to be.
     /// </summary>
     private static string SetRetentionScheduleSql(string relation, bool scheduled)
         => $@"SELECT alter_job(j.job_id, scheduled => {(scheduled ? "true" : "false")})
@@ -5326,8 +5330,9 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
     ///
     /// <para>This is the check that makes arming provably non-destructive rather than a race the operator has to
-    /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first start AFTER a
-    /// backfill, with no manual step.</para>
+    /// win. It also self-heals: a store that is not yet covered stays paused and arms on the first evaluation
+    /// AFTER a backfill, with no manual step — within the hour on the running service (#3812), not only on the
+    /// next start.</para>
     ///
     /// <para><b>Plural since #1849, and the plurality is the point.</b> <c>query_store_stats</c> now feeds TWO
     /// rollup families — the original inflated pair and the corrected one — and a purge that satisfied only one
@@ -5608,7 +5613,10 @@ AND   j.hypertable_name = '{relation}'";
     /// 90d hourly vs the daily refresh's <see cref="DailyRefreshStartOffset"/>), so a drop never removes
     /// history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
-    /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
+    /// CAGGs the hourly policies target already exist. Returns the sweep's whole tally as a
+    /// <see cref="RetentionPolicySweepSummary"/> (until #3812 it returned one <c>int</c>: the policies IN PLACE,
+    /// which is <see cref="RetentionPolicySweepSummary.InPlace"/> now — the count that proves every policy's SQL
+    /// was valid on this TimescaleDB, and nothing about which of them the gate armed or held).
     ///
     /// COLD START ON AN EXISTING STORE (#1759): a store that already holds raw history older than its hourly
     /// CAGG has materialized does NOT lose it. <see cref="MeasureRetentionCoverageAsync"/> is fail-closed, so
@@ -5616,7 +5624,31 @@ AND   j.hypertable_name = '{relation}'";
     /// short. This used to be documented as a caveat prescribing a manual backfill "BEFORE this policy's
     /// first run" — a step no store ever received, and a defect rather than a caveat. The backfill is now a real
     /// operator verb (<c>--backfill-rollups</c>) with a disk preflight, and once it carries a rollup past the raw
-    /// horizon this gate arms the held policy by itself on the next start, with no manual step.
+    /// horizon this gate arms the held policy by itself on the next evaluation, with no manual step.
+    ///
+    /// <para><b>"The next evaluation" is hourly, not the next restart (#3812).</b> Until #3812 this method had
+    /// exactly one call site, the service start path, so "the gate releases the hold by itself" was true only
+    /// with an unstated clause: once someone restarted the service. A store on a stable build sat held
+    /// indefinitely after a backfill that had worked, with the Retention Held alert still firing — which reads
+    /// like the backfill failed. The running service now calls this on its hourly store-maintenance tick as
+    /// well (<see cref="RetentionSweepPass.Periodic"/>), and every step here was already safe to repeat:
+    /// <c>if_not_exists</c> returns -1 for an existing policy and changes nothing (a NOTICE, not a WARNING,
+    /// when the arguments match — measured on 2.28.1, so the hourly pass writes nothing to the store's server
+    /// log at its default <c>log_min_messages</c>); the horizon converge is named-config-only and a no-op once
+    /// converged; the verdict is a MEASUREMENT with <c>Unknown</c> touching nothing; and arm/hold are direct
+    /// state sets that are idempotent in both directions. Repeat invocation was a tested property before it
+    /// was a scheduled one.</para>
+    ///
+    /// <para><b>The counts are transitions where the operator needs transitions.</b> "Armed" used to count
+    /// every Covered verdict, which on a settled store is every armed policy on every pass — a number that
+    /// cannot distinguish the hour a hold released from the hour before it. It now counts policies that went
+    /// paused → scheduled THIS pass, read off the job's <c>scheduled</c> flag BEFORE the flip
+    /// (<see cref="RetentionPolicyScheduledSql"/>) rather than inferred from the verdict, and a policy already
+    /// in the state the verdict asks for is "unchanged". "Held" stays a STATE count (every policy the gate is
+    /// holding after this pass), because that is the number an operator waiting on a backfill watches go to
+    /// zero; the armed → held transition (#1877's re-hold) is carried separately as
+    /// <see cref="RetentionPolicySweepSummary.ReHeld"/> and gets its own WARNING every time, because coverage
+    /// REGRESSING under an armed policy is an event whatever the pass.</para>
     ///
     /// <para>A COVERAGE LIST THAT GROWS (#1877). Holding is not only for policies this sweep just created.
     /// <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a policy the store already has, so
@@ -5625,8 +5657,93 @@ AND   j.hypertable_name = '{relation}'";
     /// purging its source while the new consumer held nothing, capping how deep that consumer could ever be
     /// backfilled. It is now re-held, but ONLY on a positive measurement: see the three-valued
     /// <c>RetentionCoverage</c>, which is what keeps a probe failure from stopping retention fleet-wide.</para>
+    ///
+    /// <para>This overload is the START-PATH shape (<see cref="RetentionSweepPass.Startup"/>): every caller
+    /// that predates #3812 — the worker's setup block and the live tests — keeps its three arguments and its
+    /// per-start logging. The hourly tick names the pass explicitly through the four-argument overload.</para>
     /// </summary>
-    public static async Task<int> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => EnsureRetentionPoliciesAsync(connection, logger, RetentionSweepPass.Startup, cancellationToken);
+
+    /// <summary>
+    /// Which cadence a retention sweep is running on (#3812). The mechanism is identical on both; what differs
+    /// is what the sweep SAYS, because the same per-policy line is evidence once per start and noise once per
+    /// hour.
+    /// </summary>
+    public enum RetentionSweepPass
+    {
+        /// <summary>The service start path — the sweep's only caller until #3812. Keeps everything it logged
+        /// before: one WARNING per held policy naming the short consumer (the line the runbook and the
+        /// Retention Held alert send an operator to), the full horizon summary at Information, and now the
+        /// <c>Retention evaluation at startup:</c> tally line.</summary>
+        Startup,
+
+        /// <summary>The running service's hourly store-maintenance tick. A hold that was already a hold is a
+        /// Debug line here — the startup WARNING already named it, the Retention Held alert already judges its
+        /// cost, and 24 identical warnings a day per held policy would bury both; the full horizon summary
+        /// drops to Debug for the same reason. What stays loud is the TRANSITIONS: a policy armed this pass
+        /// (Information — the event an operator waiting on a backfill is waiting for, which before #3812 was
+        /// the one thing that never got a distinct line) and a policy re-held this pass (WARNING — coverage
+        /// regressed under an armed policy, #1877). And the one line every pass writes whatever it found:
+        /// <c>Retention re-evaluation: N policies held, M armed this pass, K unchanged</c>.</summary>
+        Periodic,
+    }
+
+    /// <summary>
+    /// What one retention sweep did — the tally behind the one unconditional line each pass writes (#3812, in
+    /// the #3756 discipline: a pass whose all-clear is indistinguishable from its non-execution has not
+    /// reported). Every policy in <see cref="RetentionPolicies"/> lands in EXACTLY ONE of
+    /// <see cref="Held"/>, <see cref="Armed"/>, <see cref="Unchanged"/> or <see cref="Failed"/>, so
+    /// <c>Held + Armed + Unchanged + Failed == RetentionPolicies.Count</c> on every pass.
+    ///
+    /// <para><see cref="InPlace"/> is what the method returned as a bare <c>int</c> before #3812: policies
+    /// whose create-or-already-exists step succeeded — <c>Count</c> on a healthy store, and the number the
+    /// live tests compare to prove every policy's SQL is valid on the TimescaleDB under test. It is NOT one of
+    /// the four buckets: a policy that got past its create and then failed in the converge or the gate counts
+    /// in both <see cref="InPlace"/> and <see cref="Failed"/>.</para>
+    ///
+    /// <para><see cref="Held"/> is a STATE: policies the gate is holding after this pass (verdict Short),
+    /// whether they were already paused or were re-held just now. <see cref="Armed"/> is a TRANSITION:
+    /// policies that went paused → scheduled on this pass; a Covered policy that was already armed is
+    /// <see cref="Unchanged"/>. <see cref="ReHeld"/> is the other transition, scheduled → paused (#1877), and
+    /// is a SUBSET of <see cref="Held"/>. <see cref="Unchanged"/> also carries every Unknown verdict — a probe
+    /// that could not conclude left the policy exactly as it was — and <see cref="Indeterminate"/> says how
+    /// many of them there were. <see cref="Converged"/> is horizons moved onto their constant (#1937),
+    /// independent of the four buckets.</para>
+    /// </summary>
+    public sealed record RetentionPolicySweepSummary(
+        int InPlace, int Held, int Armed, int Unchanged, int ReHeld, int Indeterminate, int Converged, int Failed)
+    {
+        /// <summary>The policies the gate reached a verdict on this pass — the three buckets that are not a
+        /// failure. <c>Evaluated + Failed == RetentionPolicies.Count</c>.</summary>
+        public int Evaluated => Held + Armed + Unchanged;
+    }
+
+    /// <summary>
+    /// One retention policy's <c>scheduled</c> flag, read BEFORE the sweep flips it (#3812) — the fact that
+    /// turns "armed" from a verdict count into a transition count. <c>alter_job</c> returns the job's NEW row
+    /// and nothing about its old one, and the arm/hold statements are deliberately unconditional so that they
+    /// stay the idempotent state sets <see cref="SetRetentionScheduleSql"/> describes (and the text
+    /// <c>RetentionHorizonConvergeCannotArmTests</c> pins); a prior read is the way to know whether the flip
+    /// changed anything without changing what the flip is. Same three filters as the flip, so the row it reads
+    /// is the row the flip writes; <c>hypertable_name</c> resolves to the user view for a continuous
+    /// aggregate's policy in this view, exactly as it does for the flip. Zero rows when the policy does not
+    /// exist, which the caller reads as "nothing to transition".
+    /// </summary>
+    public static string RetentionPolicyScheduledSql(string relation)
+        => $@"SELECT j.scheduled
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// The sweep proper — see the three-argument overload for the whole design. <paramref name="pass"/> decides
+    /// what is said, never what is done: both passes run the identical create / converge / measure / flip
+    /// sequence over <see cref="RetentionPolicies"/>, and both return the same tally.
+    /// </summary>
+    public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(
+        NpgsqlConnection connection, ILogger? logger, RetentionSweepPass pass, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -5636,8 +5753,11 @@ AND   j.hypertable_name = '{relation}'";
         var applied = 0;
         var armed = 0;
         var held = 0;
+        var unchanged = 0;
+        var reHeld = 0;
         var indeterminate = 0;
         var converged = 0;
+        var failed = 0;
 
         foreach (var (relation, dropAfter, timeColumn, coverage) in RetentionPolicies)
         {
@@ -5693,12 +5813,48 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
+                /* #3812: the job's scheduled flag BEFORE the gate's flip, so the tally below can tell a transition
+                   from a re-assertion. Read here, after the converge, because the converge names only config and
+                   cannot move it (RetentionHorizonConvergeCannotArmTests) — this is the freshest the flag can be
+                   before the one statement that may change it. Null when no job row answers, which the flip
+                   statements below would also match nothing on. */
+                bool? wasScheduled;
+                using (var scheduledRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
+                {
+                    var flag = await scheduledRead.ExecuteScalarAsync(cancellationToken);
+                    wasScheduled = flag is bool b ? b : null;
+                }
+
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
                     using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await arm.ExecuteNonQueryAsync(cancellationToken);
-                    armed++;
+
+                    if (wasScheduled == false)
+                    {
+                        /* THE transition an operator waiting on a backfill is waiting for, and before #3812 the
+                           one event in this sweep that never got a distinct line: the hold released. Said on both
+                           passes — on a fresh store's first start this is one line per policy, once in the
+                           store's life; on the hourly pass it is the line that proves the backfill worked without
+                           a restart. No phase-grid slot is named because there is none to name: a retention job
+                           is created with TimescaleDB's own defaults (schedule_interval 1 day, fixed_schedule
+                           false, no initial_start — measured on 2.28.1), so the grid (#3035/#3012) never phases
+                           it, and the arm statement names neither next_start nor config. A never-run policy
+                           starts on the scheduler's next pass (430 ms after the arm on the rig) and then runs a
+                           day after each finish; a policy that ran before it was re-held keeps the next_start it
+                           had. Arming moves no other job. */
+                        armed++;
+                        logger?.LogInformation(
+                            "Retention policy for {Relation} ARMED - {Coverage} now covers everything it holds, so the {DropAfter} purge the coverage gate was holding is released. The first drop runs on the scheduler's next pass and then daily; no other store job moves.",
+                            relation, string.Join(" + ", coverage), dropAfter);
+                    }
+                    else
+                    {
+                        /* Already armed (or no job row to flip): the statement above re-asserted a state the job
+                           was in, which is what "unchanged" means here. */
+                        unchanged++;
+                    }
                 }
                 else if (verdict == RetentionCoverage.Short)
                 {
@@ -5717,9 +5873,31 @@ AND   j.hypertable_name = '{relation}'";
                     using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await hold.ExecuteNonQueryAsync(cancellationToken);
                     held++;
-                    logger?.LogWarning(
-                        "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next start.",
-                        relation, shortConsumer, dropAfter);
+
+                    if (wasScheduled == true)
+                    {
+                        /* The #1877 event itself: this policy WAS purging and its coverage is now measurably
+                           short — a consumer was added under it by a build, or lost materialization. A WARNING
+                           on every pass, because coverage regressing under an armed policy is an event whatever
+                           cadence found it; and on the hourly pass (#3812) it also undoes a hand-arm within the
+                           hour, which is what the runbook's "do not arm by hand" already asks for. */
+                        reHeld++;
+                        logger?.LogWarning(
+                            "Retention policy for {Relation} RE-HELD - it was armed, and {ShortConsumer} no longer covers everything it holds, so the {DropAfter} purge is stopped before it drops history that consumer has never materialized. Backfill that consumer past the source's oldest row and the policy arms itself on the next evaluation (hourly on the running service, and at every start).",
+                            relation, shortConsumer, dropAfter);
+                    }
+                    else
+                    {
+                        /* A hold that was already a hold. At startup this WARNING is the line the runbook and the
+                           Retention Held alert send an operator to, once per start; on the hourly pass the same
+                           line 24 times a day per held policy is noise that buries the transitions above and
+                           below, so it drops to Debug there — the tally line at the end still counts it every
+                           hour, and the Retention Held self-alert judges its cost on the same tick. */
+                        logger?.Log(
+                            pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
+                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next evaluation - the running service re-judges every held policy hourly (#3812), and at every start.",
+                            relation, shortConsumer, dropAfter);
+                    }
                 }
                 else
                 {
@@ -5727,17 +5905,22 @@ AND   j.hypertable_name = '{relation}'";
                        policy in whatever state it is already in: a new one is paused (fail-closed, as always),
                        and one this store already armed keeps running. Disarming here instead would let a single
                        bad probe stop purging across every tier at once and grow disk without bound — the
-                       failure mode that kept #1877 unfixed rather than fixed badly. */
+                       failure mode that kept #1877 unfixed rather than fixed badly. Counted as UNCHANGED in the
+                       tally (it is), and as indeterminate beside it so the summary can say how many verdicts
+                       were never reached. Stays a WARNING on both passes: a probe that cannot answer is a store
+                       fault, not a steady state an operator has already been told about. */
                     indeterminate++;
+                    unchanged++;
                     logger?.LogWarning(
-                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this start, and an unreadable store is not evidence of anything. Re-judged on the next start.",
+                        "Retention policy for {Relation} left as-is - its coverage ({Coverage}) could not be established this pass, and an unreadable store is not evidence of anything. Re-judged on the next pass (hourly on the running service, and at every start).",
                         relation, string.Join(" + ", coverage));
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                failed++;
                 logger?.LogWarning(
-                    "Retention policy for {Relation} ({DropAfter}) failed - that tier keeps growing until the next restart retries: {Message}",
+                    "Retention policy for {Relation} ({DropAfter}) failed - that tier keeps growing until the next pass retries (hourly on the running service since #3812, and at every start): {Message}",
                     relation, dropAfter, ex.Message);
             }
         }
@@ -5751,12 +5934,43 @@ AND   j.hypertable_name = '{relation}'";
            line promising dailies are kept forever; and the seven baseline aggregates have a horizon of their own
            that went unmentioned. A field operator cross-checking found the first one immediately and had to
            work out whether they had hit a bug (#1958). A summary line is only worth printing if it survives
-           being checked. */
-        logger?.LogInformation(
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed, {Held} held paused pending backfill, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
-            applied, RetentionPolicies.Count, armed, held, indeterminate, converged,
+           being checked.
+
+           Since #3812 "armed" here is ARMED THIS PASS (a transition) and the line also carries the policies
+           that were already in the state the gate asked for, so the five counts still account for every
+           policy. Information at startup, where it is the store's retention posture in one line; Debug on the
+           hourly pass, where the posture has not changed since the last one and the tally line below is the
+           pass's one Information line. */
+        logger?.Log(
+            pass == RetentionSweepPass.Startup ? LogLevel.Information : LogLevel.Debug,
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
+            applied, RetentionPolicies.Count, armed, held, unchanged, indeterminate, converged,
             RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval);
-        return applied;
+
+        /* #3812, in the #3756 discipline: ONE Information line per evaluation, UNCONDITIONAL — written on the
+           all-unchanged pass exactly as on the pass that armed something, because a check whose negative outcome
+           is indistinguishable from its non-execution has not reported. Before this the only evidence a held
+           policy had been re-judged was a restart marker in the log; an operator (or the hourly monitoring
+           loop) can now verify the re-evaluation ran, and read "armed this pass" go 0 → 1 → 0, without one. Two
+           literal templates rather than one with a prefix placeholder, so each pass's line is a fixed string a
+           reader can grep for and a pin can hold. No slot detail follows the count: the coupling check on the
+           ARMED line above says why there is no phase-grid slot to name. */
+        if (pass == RetentionSweepPass.Startup)
+        {
+            logger?.LogInformation(
+                "Retention evaluation at startup: {Held} policies held, {Armed} armed this pass, {Unchanged} unchanged",
+                held, armed, unchanged);
+        }
+        else
+        {
+            logger?.LogInformation(
+                "Retention re-evaluation: {Held} policies held, {Armed} armed this pass, {Unchanged} unchanged",
+                held, armed, unchanged);
+        }
+
+        return new RetentionPolicySweepSummary(
+            InPlace: applied, Held: held, Armed: armed, Unchanged: unchanged, ReHeld: reHeld,
+            Indeterminate: indeterminate, Converged: converged, Failed: failed);
     }
 
     /* ─────────────── continuous-aggregate compression (#3581) ─────────────── */
