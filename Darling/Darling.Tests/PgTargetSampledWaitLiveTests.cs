@@ -35,7 +35,10 @@ namespace Darling.Tests;
 /// anomaly folds onto the dominant sampled wait's own card (<c>Lock:relation</c>) as one incident, with advice in the
 /// sampled grade's words. A second server that carries BOTH sources in the window shows the exact source winning:
 /// its facts are the Aurora deltas stamped <c>sampled_suppressed_by_exact = 1</c>, and no sampled anomaly is
-/// emitted for it.
+/// emitted for it. A third, YOUNG stock server (lane 35 of #3691: six hours of sampler history, so every baseline
+/// tier is under its three-distinct-day floor) carries ONE hot cycle in an otherwise quiet window: the detector
+/// fires <c>is_new</c> on the peak's bar alone (peak 1,700, mean about 362, under the 500 bar) — the first-occurrence
+/// gating the Aurora and SQL Server twins have (#3741), which lane 24's pair-gated arm withheld.
 ///
 /// <para>Gated on <c>DARLING_TEST_PG</c>; <c>[Collection("live-postgres")]</c>; cleanup through
 /// <see cref="LiveStoreCleanup"/> (the #1902 ratchet). The planting shape is <c>PgTargetAnomalyTests</c>' e2e
@@ -46,8 +49,10 @@ public sealed class PgTargetSampledWaitLiveTests
 {
     private const string StockName = "darling-pg-target-sampled-wait-stock-e2e";
     private const string BothName = "darling-pg-target-sampled-wait-both-e2e";
+    private const string YoungName = "darling-pg-target-sampled-wait-young-e2e";
     private static readonly int StockId = ServerIdHelper.GetDeterministicHashCode(StockName);
     private static readonly int BothId = ServerIdHelper.GetDeterministicHashCode(BothName);
+    private static readonly int YoungId = ServerIdHelper.GetDeterministicHashCode(YoungName);
 
     /* Per five-minute cycle, 30 s watched (sampled_ms = 30000), 1,000 ms period. Quiet: Lock:relation 3–5 samples
        (3–5 s of sampled waiting in 30 s watched → 0.10–0.17 of a backend; a deterministic ripple so the bucket has a
@@ -75,6 +80,7 @@ public sealed class PgTargetSampledWaitLiveTests
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, StockId, StockName, MonitoredEngineKind.Postgres, 17, ct);
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, BothId, BothName, MonitoredEngineKind.Postgres, 17, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, YoungId, YoungName, MonitoredEngineKind.Postgres, 17, ct);
 
             /* 31 days ending a minute ago, whole minutes; the heavy stretch is the last 250 minutes so the tool's own
                four-hour window (anchored at NOW) sits wholly inside it. */
@@ -119,6 +125,44 @@ FROM running
 CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 1003::bigint), ('CPU', 'Running', 0::bigint)) AS s(event_type, event, query_id)",
                     ct, CollectionIdGenerator.Next() + 3_000_000L, start, id, name, minutes, heavyFromMinute);
             }
+
+            /* The YOUNG server: the same sampler shape over only six hours (two hours of history before the window,
+               the window itself), quiet throughout but for ONE heavy cycle two hours into the window. Six hours
+               touch at most two calendar dates, so no tier of the sampled bucket reaches its three-distinct-day
+               floor and the detector takes its first-occurrence arm; the bucket still has samples (the arm's
+               SampleCount == 0 sit-out does not apply). The same six hours of pg_database_stats, because the
+               detector's root gate (HasBaselineDataSql) asks that table for ANY row in 30 days before it runs one
+               detector — a server with no database stats has no anomaly pass at all, first occurrence or not. */
+            const int youngMinutes = 6 * 60;
+            var youngStart = end.AddMinutes(-youngMinutes);
+            const int youngHotMinute = youngMinutes - 120;
+            await PlantAsync(connection, @"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL
+FROM generate_series(0, $5) AS n", ct, CollectionIdGenerator.Next() + 5_000_000L, youngStart, YoungId, YoungName, youngMinutes);
+            await PlantAsync(connection, @"
+WITH cycles AS (
+    SELECT n,
+           CASE WHEN n = $6 THEN " + HeavyRelation + " ELSE " + QuietRelationBase + @" + ((n / " + CycleMinutes + @") % 3) END AS relation_inc
+    FROM generate_series(0, $5, " + CycleMinutes + @") AS n
+),
+running AS (
+    SELECT n,
+           SUM(relation_inc) OVER (ORDER BY n) AS relation_total,
+           (n / " + CycleMinutes + @") * " + ReadPerCycle + @" AS read_total,
+           (n / " + CycleMinutes + @") * " + CpuPerCycle + @" AS cpu_total
+    FROM cycles
+)
+INSERT INTO pg_wait_sampling
+    (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, s.event_type, s.event, s.query_id,
+       CASE s.query_id WHEN 1001 THEN 100000 + relation_total WHEN 1003 THEN 200000 + read_total ELSE 900000 + cpu_total END,
+       " + PeriodMs + @", CASE s.query_id WHEN 1001 THEN 3 WHEN 1003 THEN 2 ELSE 8 END, " + SampledMs + @"
+FROM running
+CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 1003::bigint), ('CPU', 'Running', 0::bigint)) AS s(event_type, event, query_id)",
+                ct, CollectionIdGenerator.Next() + 4_000_000L, youngStart, YoungId, YoungName, youngMinutes, youngHotMinute);
 
             /* The BOTH server also carries the engine's exact deltas for the window: 241 one-minute pg_wait_stats
                collections with the stored interval 60 (Lock:Relation 12 s a minute = 0.20 of a backend). */
@@ -193,6 +237,41 @@ CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 10
 
             var bothAnomalies = await detector.DetectAnomaliesAsync(Context(BothId, BothName, windowStart, windowEnd));
             Assert.DoesNotContain(bothAnomalies, a => a.Key == PgTargetFactKeys.AnomalySampledWaitProfile);
+
+            /* ── Lane 35: the first-occurrence arm on the YOUNG server. The bucket is untrustworthy (≤ 2 distinct days)
+                 yet populated; the window's peak cycle is (45 + 6) s over 30 s = 1,700 ms/s, 3.4× the 500 bar; the
+                 window mean is 47 quiet cycles (300 / 333 / 367) and the one hot one — about 362, UNDER the bar. The
+                 twins fire this on the peak; lane 24's pair-gated arm held it. */
+            var youngBucket = await baselines.GetBaselineAsync(YoungId, MetricNames.PgSampledWaitMsPerSec, windowStart, ct);
+            Assert.True(youngBucket.SampleCount > 0, "the young server's bucket must have samples, or the detector sits out for another reason");
+            Assert.False(youngBucket.IsTrustworthy, $"six hours of history must not make a trustworthy bucket (distinct days {youngBucket.DistinctDays})");
+            var youngAnomalies = await detector.DetectAnomaliesAsync(Context(YoungId, YoungName, windowStart, windowEnd));
+            var first = Assert.Single(youngAnomalies, a => a.Key == PgTargetFactKeys.AnomalySampledWaitProfile);
+            Assert.Equal(1, first.Metadata["is_new"]);
+            Assert.Equal(1_700.0, first.Metadata["current_ms_per_sec"], precision: 6);
+            Assert.InRange(first.Metadata["mean_ms_per_sec"], 355.0, 370.0);
+            Assert.True(first.Metadata["mean_ms_per_sec"] < AnomalyThresholds.PgSampledWaitProfileFallbackMsPerSec, "the fixture's mean must sit under the bar, or the pin proves nothing");
+            Assert.Equal(3.4, first.Metadata["fallback_exceedance"], precision: 6);
+            Assert.Equal(0, first.Metadata["ratio"]);
+            Assert.Equal(0, first.Metadata["mean_ratio"]);
+            Assert.Equal(0, first.Metadata["fire_threshold"]);
+            Assert.Equal(48, first.Metadata["window_samples"]);
+            Assert.Equal(1, first.Metadata[PgTargetScorer.WaitIsSampledKey]);
+            Assert.Equal(1, first.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
+            Assert.Equal(0, first.Metadata["threshold_lineage"]);
+            /* Lock:relation over the 48 countable cycles (cycle indices 25..72, hot at 48): 47 quiet on the 3/4/5
+               ripple sum to 189, plus the one heavy 45 = 234 samples × the period. IO:DataFileRead is the steady 6 a
+               cycle — the LARGER contributor here: one hot cycle does not make Lock the window's leader, and the
+               fact says so honestly (the dominant-wait fold would land on IO:DataFileRead). */
+            Assert.Equal(234 * PeriodMs, first.Metadata["contrib_Lock:relation"], precision: 3);
+            Assert.Equal(48 * ReadPerCycle * PeriodMs, first.Metadata["contrib_IO:DataFileRead"], precision: 3);
+            Assert.False(first.Metadata.ContainsKey("contrib_CPU:Running"));
+            /* The first-occurrence advice: the absolute-level rendering, no sigma, the sampled grade's words. */
+            var firstAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalySampledWaitProfile, new[] { first }.ToFactLookup())!;
+            Assert.Contains("no baseline yet", firstAdvice.Headline, StringComparison.Ordinal);
+            Assert.Contains("fired on its absolute level", firstAdvice.Investigation, StringComparison.Ordinal);
+            Assert.Contains("estimated from sampling", firstAdvice.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("sigma", firstAdvice.Investigation, StringComparison.OrdinalIgnoreCase);
 
             /* ── THE EXIT CRITERION, through the real analyze_server on the stock server: Lock:relation (sampled, 1.5 on
                  the 0.15 → 1.0 ramp = 1.0) roots; the Lock rollup yields to it; the sampled profile anomaly folds onto
@@ -318,12 +397,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1000000, 1000000000000, $9, $10, 60)", c
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM pg_database_stats WHERE server_id IN ({StockId}, {BothId}); " +
-            $"DELETE FROM pg_wait_stats WHERE server_id IN ({StockId}, {BothId}); " +
-            $"DELETE FROM pg_wait_sampling WHERE server_id IN ({StockId}, {BothId}); " +
-            $"DELETE FROM analysis_findings WHERE server_id IN ({StockId}, {BothId}); " +
-            $"DELETE FROM analysis_muted WHERE server_id IN ({StockId}, {BothId}); " +
-            $"DELETE FROM servers WHERE server_id IN ({StockId}, {BothId});", connection);
+            $"DELETE FROM pg_database_stats WHERE server_id IN ({StockId}, {BothId}, {YoungId}); " +
+            $"DELETE FROM pg_wait_stats WHERE server_id IN ({StockId}, {BothId}, {YoungId}); " +
+            $"DELETE FROM pg_wait_sampling WHERE server_id IN ({StockId}, {BothId}, {YoungId}); " +
+            $"DELETE FROM analysis_findings WHERE server_id IN ({StockId}, {BothId}, {YoungId}); " +
+            $"DELETE FROM analysis_muted WHERE server_id IN ({StockId}, {BothId}, {YoungId}); " +
+            $"DELETE FROM servers WHERE server_id IN ({StockId}, {BothId}, {YoungId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
