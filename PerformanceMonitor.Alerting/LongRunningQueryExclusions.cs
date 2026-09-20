@@ -61,13 +61,21 @@ namespace PerformanceMonitor.Alerting;
 /// matches nothing: an unnamed program is not "any program". An empty entry is dropped on the way in (an empty
 /// prefix would match every program — the alert's enable switch in disguise).</para>
 ///
-/// <para><b>Applied IN THE READ, before the row cap, on both SKUs</b> — the shape that makes this different
-/// from <c>excludedDatabases</c>, which is dropped client-side after the read. The read is
+/// <para><b>Applied IN THE READ, before the row cap, on both SKUs</b> — and since #3742 so is
+/// <c>excludedDatabases</c>, on the two SQL Server reads. The read is
 /// <c>ORDER BY total_elapsed_time_ms DESC LIMIT maxResults</c> (default 5), and the sessions this knob exists
 /// for are the LONGEST-running on the server by construction, so a post-read filter would let five permanent
 /// background requests fill the cap on every sweep and the real long-running query behind them would never
-/// be seen at all — the alert made blind by the knob meant to make it accurate. <see cref="BuildSqlPredicates"/>
-/// is the shared translation to two <c>LIKE</c> predicates so Lite's DuckDB read and Darling's PostgreSQL read
+/// be seen at all — the alert made blind by the knob meant to make it accurate. When this knob shipped it
+/// named that shape as what set it apart from <c>excludedDatabases</c>, which both adapters still dropped
+/// client-side AFTER the cap; #3742 found that the contrast described the defect rather than a design (an
+/// operator who excludes a reporting database whose ETL holds the five longest sessions has switched the alert
+/// off for every other database without being told) and moved the database list into the same CTE as a third
+/// flag, through the five-argument <see cref="BuildSqlPredicates(string, string, string, IReadOnlyList{string}, int)"/>.
+/// The PostgreSQL-TARGET read (<c>DarlingPgSessionStatesReader</c>, the engine's third Long-Running Query read)
+/// still applies its list after its cap; that read is #3743's follow-through, and the helper's database arm is
+/// written so it can splice it the same way. <see cref="BuildSqlPredicates(string, string, int)"/>
+/// is the shared translation to <c>LIKE</c> predicates so Lite's DuckDB read and Darling's PostgreSQL read
 /// cannot drift in what an entry means; <see cref="Classify"/> is the same rule in C#, for the engine's fakes
 /// and for any host that filters rows it already holds.</para>
 ///
@@ -243,7 +251,59 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
     /// <param name="programNameColumn">The SQL expression for <c>program_name</c>, e.g. <c>r.program_name</c>.</param>
     /// <param name="loginNameColumn">The SQL expression for <c>login_name</c>.</param>
     /// <param name="firstParameterOrdinal">The <c>$n</c> the first operand binds as; operands are returned in binding order.</param>
-    public LongRunningQueryExclusionSql BuildSqlPredicates(string programNameColumn, string loginNameColumn, int firstParameterOrdinal)
+    public LongRunningQueryExclusionSql BuildSqlPredicates(string programNameColumn, string loginNameColumn, int firstParameterOrdinal) =>
+        BuildSqlPredicates(programNameColumn, loginNameColumn, databaseNameColumn: null, excludedDatabases: null, firstParameterOrdinal);
+
+    /// <summary>
+    /// The two knob arms AND the shared <c>excludedDatabases</c> list as three SQL boolean expressions (#3742):
+    /// everything <see cref="BuildSqlPredicates(string, string, int)"/> returns, plus
+    /// <see cref="LongRunningQueryExclusionSql.DatabasePredicate"/> — true for a row whose <c>database_name</c>
+    /// equals any excluded database, case-insensitively — with the database operands bound AFTER the login
+    /// operands, so an existing read that already binds the knob's operands from <paramref name="firstParameterOrdinal"/>
+    /// gains the database arm by appending, and no ordinal that was bound before this arm existed moves (the
+    /// #3736 trap, walked once).
+    ///
+    /// <para><b>Why the database list rides through the knob's builder rather than a helper of its own.</b>
+    /// Both are applied IN THE READ, ahead of the row cap, for the same reason (the type summary); both bind
+    /// positional operands into the same <c>candidates</c> CTE; and the Long-Running Query reads must agree
+    /// across two stores about what an entry means. One builder returning ONE operand list in ONE binding order
+    /// is what makes it impossible for a read to splice the three predicates and bind their operands in two
+    /// different orders. The database arm is the login arm's rule — EXACT, case-insensitive, one
+    /// <c>COALESCE(col, '') ILIKE $n ESCAPE '\'</c> term per entry, <see cref="ToExactLikeOperand"/> for the
+    /// operand — because <c>excludedDatabases</c> has always been an exact, case-insensitive name comparison
+    /// (<c>StringComparison.OrdinalIgnoreCase</c> in every C# filter that ever applied it), and because the
+    /// per-entry <c>ILIKE</c> is the text both stores already execute for the knob: no array parameter type on
+    /// either driver, no <c>= ANY</c>/<c>list_contains</c> dialect fork in a builder whose whole point is that
+    /// the two reads share one text.</para>
+    ///
+    /// <para><b>"A row with no database name is kept."</b> That has been the rule since the list existed — an
+    /// exclusion list names databases, and a session on none of them is not on an excluded one — and it falls
+    /// out of <c>COALESCE(col, '')</c> matching no non-empty operand. The list is passed through
+    /// <see cref="Normalize"/> here (trimmed, blanks dropped, case-insensitive dedupe) so that rule HOLDS: a
+    /// blank entry left in a settings box would otherwise bind as <c>''</c> and match exactly the no-database
+    /// rows the rule keeps.</para>
+    ///
+    /// <para><b>Counting once, three arms.</b> The knob's two counts are unchanged in meaning: program prefix
+    /// first, login <c>AND NOT</c> program. The database count a read takes is <c>excluded_by_database AND NOT
+    /// (program OR login)</c> — the database arm is the LAST arm, so a session the knob would have removed
+    /// anyway is the knob's, whichever database it ran in, and the three counts still sum to the sessions
+    /// removed. Last rather than first because the knob is the more specific instrument (it names programs and
+    /// principals and lists its entries on the card), while <c>excludedDatabases</c> is the blunt, shared list
+    /// the blocking and deadlock arms also honour; putting it first would make the knob's receipt depend on a
+    /// setting the knob's card does not show.</para>
+    /// </summary>
+    /// <param name="programNameColumn">The SQL expression for <c>program_name</c>, e.g. <c>r.program_name</c>.</param>
+    /// <param name="loginNameColumn">The SQL expression for <c>login_name</c>.</param>
+    /// <param name="databaseNameColumn">The SQL expression for <c>database_name</c>; null when the read has no
+    /// database arm (the three-argument overload), in which case <paramref name="excludedDatabases"/> is ignored.</param>
+    /// <param name="excludedDatabases">The shared <c>excludedDatabases</c> setting, raw; normalised here. Null or
+    /// empty spells the arm as the literal <c>FALSE</c>, so the read splices it unconditionally and a store with
+    /// no exclusions returns exactly the rows it did before the arm existed.</param>
+    /// <param name="firstParameterOrdinal">The <c>$n</c> the first operand binds as; operands are returned in
+    /// binding order — program prefixes, then logins, then databases.</param>
+    public LongRunningQueryExclusionSql BuildSqlPredicates(
+        string programNameColumn, string loginNameColumn, string? databaseNameColumn,
+        IReadOnlyList<string>? excludedDatabases, int firstParameterOrdinal)
     {
         var operands = new List<string>();
         var ordinal = firstParameterOrdinal;
@@ -262,9 +322,20 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
             operands.Add(ToExactLikeOperand(login));
         }
 
+        var databaseTerms = new List<string>();
+        if (databaseNameColumn is not null)
+        {
+            foreach (var database in Normalize(excludedDatabases))
+            {
+                databaseTerms.Add($"COALESCE({databaseNameColumn}, '') ILIKE ${ordinal++} ESCAPE '\\'");
+                operands.Add(ToExactLikeOperand(database));
+            }
+        }
+
         return new LongRunningQueryExclusionSql(
             programTerms.Count == 0 ? "FALSE" : "(" + string.Join(" OR ", programTerms) + ")",
             loginTerms.Count == 0 ? "FALSE" : "(" + string.Join(" OR ", loginTerms) + ")",
+            databaseTerms.Count == 0 ? "FALSE" : "(" + string.Join(" OR ", databaseTerms) + ")",
             operands);
     }
 }
@@ -284,14 +355,18 @@ public enum LongRunningQueryExclusionArm
 }
 
 /// <summary>
-/// The two arms of the knob as SQL, from <see cref="LongRunningQueryExclusions.BuildSqlPredicates"/>: each a
-/// boolean expression (the literal <c>FALSE</c> for an arm with no entries), plus every operand in binding
-/// order — program operands first, then logins.
+/// The two arms of the knob — and, since #3742, the shared <c>excludedDatabases</c> list as a third — as SQL,
+/// from <see cref="LongRunningQueryExclusions.BuildSqlPredicates(string, string, string, IReadOnlyList{string}, int)"/>:
+/// each a boolean expression (the literal <c>FALSE</c> for an arm with no entries, and always <c>FALSE</c> for
+/// the database arm through the three-argument overload), plus every operand in binding order — program
+/// operands first, then logins, then databases.
 /// </summary>
 /// <param name="ProgramPrefixPredicate">True for a row whose <c>program_name</c> starts with any configured prefix.</param>
 /// <param name="LoginPredicate">True for a row whose <c>login_name</c> equals any configured login.</param>
+/// <param name="DatabasePredicate">True for a row whose <c>database_name</c> equals any excluded database
+/// (exact, case-insensitive; a row with no database name never matches).</param>
 /// <param name="Operands">The <c>LIKE</c> operands, in <c>$n</c> order.</param>
-public sealed record LongRunningQueryExclusionSql(string ProgramPrefixPredicate, string LoginPredicate, IReadOnlyList<string> Operands);
+public sealed record LongRunningQueryExclusionSql(string ProgramPrefixPredicate, string LoginPredicate, string DatabasePredicate, IReadOnlyList<string> Operands);
 
 /// <summary>
 /// What the Long-Running Query read hands back since #3653 (A5, Q5): the sessions the alert evaluates, and how
@@ -300,17 +375,32 @@ public sealed record LongRunningQueryExclusionSql(string ProgramPrefixPredicate,
 /// WORKING — a setting whose effect is only ever the absence of a page is a setting nobody can verify — and
 /// which default did the work; they have to come from the read because the exclusion is applied there, ahead
 /// of the cap, where the engine cannot see the rows it removed.
+///
+/// <para><b>#3742 adds the shared <c>excludedDatabases</c> list's count.</b> The two SQL Server reads now
+/// apply that list in the same CTE, ahead of the same cap, for the same reason, and the same argument holds:
+/// a page that is short because six sessions in an excluded reporting database were removed ahead of it
+/// should be able to say so. <see cref="ExcludedByDatabase"/> is that count — sessions the database list
+/// removed that NEITHER knob arm had already removed, so the three counts sum to the sessions removed.
+/// <see cref="ExcludedCount"/> stays the knob's two-arm sum (the number the knob's card item has always
+/// reported); the database count is its own field with its own card item, because the two settings are
+/// different instruments with different owners, and an operator reading "Excluded Count: 3" under the knob's
+/// heading should not have to wonder whether a database is hiding in it.</para>
 /// </summary>
 /// <param name="Sessions">The evaluated sessions, longest elapsed first, capped at the configured maximum.</param>
 /// <param name="ExcludedByProgramPrefix">Distinct sessions over the threshold in the same snapshot whose
 /// <c>program_name</c> matched a configured prefix — including any that ALSO matched a login (counts once, here).</param>
 /// <param name="ExcludedByLogin">Distinct sessions over the threshold in the same snapshot whose <c>login_name</c>
 /// matched a configured login and whose program did NOT match a prefix.</param>
-public sealed record LongRunningQueryReadResult(List<LongRunningQueryInfo> Sessions, int ExcludedByProgramPrefix, int ExcludedByLogin)
+/// <param name="ExcludedByDatabase">Distinct sessions over the threshold in the same snapshot whose
+/// <c>database_name</c> is on <c>excludedDatabases</c> and that neither knob arm matched (#3742). Zero from a
+/// read that has no database arm — the PostgreSQL-target read until #3743 lands its own.</param>
+public sealed record LongRunningQueryReadResult(List<LongRunningQueryInfo> Sessions, int ExcludedByProgramPrefix, int ExcludedByLogin, int ExcludedByDatabase)
 {
-    /// <summary>Sessions removed by either arm — the two counts' sum, exact because a session is counted under one arm only.</summary>
+    /// <summary>Sessions removed by either KNOB arm — the two knob counts' sum, exact because a session is counted
+    /// under one arm only. Does NOT include <see cref="ExcludedByDatabase"/>: that is a different setting's
+    /// receipt (see the type summary).</summary>
     public int ExcludedCount => ExcludedByProgramPrefix + ExcludedByLogin;
 
     /// <summary>No sessions, nothing excluded — the shape every pre-knob empty read had.</summary>
-    public static LongRunningQueryReadResult Empty => new(new List<LongRunningQueryInfo>(), 0, 0);
+    public static LongRunningQueryReadResult Empty => new(new List<LongRunningQueryInfo>(), 0, 0, 0);
 }

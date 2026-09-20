@@ -129,7 +129,7 @@ public class LiteAlertForwardingTests : IDisposable
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
             IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new LongRunningQueryReadResult(new List<LongRunningQueryInfo>(LongRunning), 0, 0));
+            Task.FromResult(new LongRunningQueryReadResult(new List<LongRunningQueryInfo>(LongRunning), 0, 0, 0));
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));

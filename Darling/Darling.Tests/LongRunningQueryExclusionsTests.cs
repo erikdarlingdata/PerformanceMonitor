@@ -162,41 +162,99 @@ public sealed class LongRunningQueryExclusionsTests
         Assert.Equal("FALSE", loginsOnly.ProgramPrefixPredicate);
         Assert.Equal("(COALESCE(l, '') ILIKE $5 ESCAPE '\\')", loginsOnly.LoginPredicate);   /* the first operand is still $5 */
         Assert.Equal(new[] { "erik" }, loginsOnly.Operands);
+
+        /* #3742: the three-argument overload has no database arm — the literal FALSE, no operands of its own — so a
+           caller that never learned about the arm (the PostgreSQL-target read, until #3743) is byte-identical. */
+        Assert.Equal("FALSE", none.DatabasePredicate);
+        Assert.Equal("FALSE", loginsOnly.DatabasePredicate);
+    }
+
+    /// <summary>
+    /// #3742: the shared <c>excludedDatabases</c> list is the builder's THIRD arm — the login arm's rule (exact,
+    /// case-insensitive, one <c>ILIKE … ESCAPE</c> term per entry, no wildcard grammar) over <c>database_name</c>,
+    /// with its operands bound AFTER the logins so a read that already binds the knob's operands from $5 gains the
+    /// arm by appending and no ordinal it bound before this arm existed moves. The list is normalised on the way in:
+    /// a blank entry must NOT become an <c>ILIKE ''</c> term, because <c>COALESCE(col, '')</c> would then match
+    /// exactly the no-database rows the rule has always kept.
+    /// </summary>
+    [Fact]
+    public void BuildSqlPredicates_WithExcludedDatabases_IsAThirdExactArm_BoundAfterTheLogins()
+    {
+        var sql = LongRunningQueryExclusions.Defaults.BuildSqlPredicates(
+            "r.program_name", "r.login_name", "r.database_name", new[] { "ReportingDb", " Stack_Overflow ", "", "reportingdb" }, firstParameterOrdinal: 5);
+
+        /* The knob's two arms are exactly what the three-argument overload returns — $5, $6, $7 — unchanged. */
+        Assert.Equal("(COALESCE(r.program_name, '') ILIKE $5 ESCAPE '\\')", sql.ProgramPrefixPredicate);
+        Assert.Equal("(COALESCE(r.login_name, '') ILIKE $6 ESCAPE '\\' OR COALESCE(r.login_name, '') ILIKE $7 ESCAPE '\\')", sql.LoginPredicate);
+        /* The database arm follows at $8 onward: trimmed, the blank dropped, the case-duplicate dropped, `_` escaped
+           (a literal underscore in a database name is not LIKE's single-character wildcard), NO trailing % — exact. */
+        Assert.Equal("(COALESCE(r.database_name, '') ILIKE $8 ESCAPE '\\' OR COALESCE(r.database_name, '') ILIKE $9 ESCAPE '\\')", sql.DatabasePredicate);
+        Assert.Equal(new[] { "SQLAgent - TSQL JobStep%", @"NT AUTHORITY\\SYSTEM", @"NT AUTHORITY\\NETWORK SERVICE", "ReportingDb", "Stack\\_Overflow" }, sql.Operands);
+
+        /* An empty knob with a database list: the two knob arms FALSE, the database arm the FIRST operand at $5. */
+        var databasesOnly = LongRunningQueryExclusions.None.BuildSqlPredicates("p", "l", "d", new[] { "HammerDB" }, 5);
+        Assert.Equal("FALSE", databasesOnly.ProgramPrefixPredicate);
+        Assert.Equal("FALSE", databasesOnly.LoginPredicate);
+        Assert.Equal("(COALESCE(d, '') ILIKE $5 ESCAPE '\\')", databasesOnly.DatabasePredicate);
+        Assert.Equal(new[] { "HammerDB" }, databasesOnly.Operands);
+
+        /* Null, empty, and all-blank lists spell the arm FALSE with no operands — a store with no exclusions returns
+           exactly the rows it did before the arm existed. */
+        foreach (var empty in new[] { null, System.Array.Empty<string>(), new[] { "", "  " } })
+        {
+            var withoutDatabases = LongRunningQueryExclusions.Defaults.BuildSqlPredicates("p", "l", "d", empty, 5);
+            Assert.Equal("FALSE", withoutDatabases.DatabasePredicate);
+            Assert.Equal(3, withoutDatabases.Operands.Count);
+        }
+
+        /* A null column means "this read has no database arm": the list is ignored, not bound to nothing. */
+        var noColumn = LongRunningQueryExclusions.None.BuildSqlPredicates("p", "l", databaseNameColumn: null, new[] { "HammerDB" }, 5);
+        Assert.Equal("FALSE", noColumn.DatabasePredicate);
+        Assert.Empty(noColumn.Operands);
     }
 
     [Fact]
-    public void ReadResult_ExcludedCount_IsTheTwoArmsSum()
+    public void ReadResult_ExcludedCount_IsTheTwoKnobArmsSum_AndTheDatabaseCountIsItsOwn()
     {
-        var result = new LongRunningQueryReadResult(new System.Collections.Generic.List<LongRunningQueryInfo>(), 2, 3);
+        /* #3742: ExcludedCount stays the KNOB's receipt — the number its card item has always shown under a heading
+           that says "by the opt-out knob" — and the database list's count is a separate field with a separate item,
+           so neither heading lies about what its number contains. */
+        var result = new LongRunningQueryReadResult(new System.Collections.Generic.List<LongRunningQueryInfo>(), 2, 3, 6);
         Assert.Equal(5, result.ExcludedCount);
+        Assert.Equal(6, result.ExcludedByDatabase);
         Assert.Equal(0, LongRunningQueryReadResult.Empty.ExcludedCount);
+        Assert.Equal(0, LongRunningQueryReadResult.Empty.ExcludedByDatabase);
         Assert.Empty(LongRunningQueryReadResult.Empty.Sessions);
     }
 
     /// <summary>
-    /// The two SKUs' reads splice the two arms at the same place with the same operand ordinal, both project
-    /// <c>login_name</c> and both counts, and both count DISTINCT sessions with the login count taken AND NOT the
-    /// program flag — source-pinned because the DuckDB read is an interpolated string inside a WPF-hosted service
-    /// this Mac cannot load, and the parity is the point: one knob, one meaning, on both stores.
+    /// The two SKUs' reads splice the three arms at the same place with the same operand ordinal, both project
+    /// <c>login_name</c> and all three counts, and both count DISTINCT sessions with the login count taken AND NOT
+    /// the program flag and the database count AND NOT both — source-pinned because the DuckDB read is an
+    /// interpolated string inside a WPF-hosted service this Mac cannot load, and the parity is the point: one
+    /// knob, one list, one meaning, on both stores.
     /// </summary>
     [Fact]
-    public void BothReads_SpliceTheKnobAheadOfTheCap_AndProjectBothCountsInSessions()
+    public void BothReads_SpliceTheKnobAndTheDatabaseListAheadOfTheCap_AndProjectAllThreeCountsInSessions()
     {
         var lite = ReadRepoFile("Lite", "Services", "LocalDataService.WaitStats.cs");
         var darling = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs");
 
         foreach (var source in new[] { lite, darling })
         {
-            Assert.Contains("BuildSqlPredicates(\"r.program_name\", \"r.login_name\", firstParameterOrdinal: 5)", source, StringComparison.Ordinal);
+            Assert.Contains("BuildSqlPredicates(\"r.program_name\", \"r.login_name\", \"r.database_name\", excludedDatabases, firstParameterOrdinal: 5)", source, StringComparison.Ordinal);
             Assert.Contains("AS excluded_by_program_prefix,", source, StringComparison.Ordinal);
-            Assert.Contains("AS excluded_by_login", source, StringComparison.Ordinal);
-            Assert.Contains("WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)", source, StringComparison.Ordinal);
+            Assert.Contains("AS excluded_by_login,", source, StringComparison.Ordinal);
+            Assert.Contains("AS excluded_by_database", source, StringComparison.Ordinal);
+            Assert.Contains("WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)", source, StringComparison.Ordinal);
             Assert.Contains("(SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix)", source, StringComparison.Ordinal);
             Assert.Contains("(SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix)", source, StringComparison.Ordinal);
+            Assert.Contains("(SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login))", source, StringComparison.Ordinal);
             Assert.Contains("LIMIT $3", source, StringComparison.Ordinal);
             Assert.Contains("LoginName = reader.IsDBNull(11)", source, StringComparison.Ordinal);
             Assert.Contains("excludedByProgramPrefix = reader.IsDBNull(12)", source, StringComparison.Ordinal);
             Assert.Contains("excludedByLogin = reader.IsDBNull(13)", source, StringComparison.Ordinal);
+            Assert.Contains("excludedByDatabase = reader.IsDBNull(14)", source, StringComparison.Ordinal);
             /* No trace of the retired single-flag shape. */
             Assert.DoesNotContain("excluded_by_knob", source, StringComparison.Ordinal);
         }
@@ -205,7 +263,42 @@ public sealed class LongRunningQueryExclusionsTests
         var template = DarlingAlertReadAdapterTemplate(darling);
         Assert.True(template.IndexOf("{1} AS excluded_by_program_prefix", StringComparison.Ordinal) < template.IndexOf("LIMIT $3", StringComparison.Ordinal));
         Assert.True(template.IndexOf("{2} AS excluded_by_login", StringComparison.Ordinal) < template.IndexOf("LIMIT $3", StringComparison.Ordinal));
-        Assert.True(template.IndexOf("WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)", StringComparison.Ordinal) < template.IndexOf("LIMIT $3", StringComparison.Ordinal));
+        Assert.True(template.IndexOf("{3} AS excluded_by_database", StringComparison.Ordinal) < template.IndexOf("LIMIT $3", StringComparison.Ordinal));
+        Assert.True(template.IndexOf("WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)", StringComparison.Ordinal) < template.IndexOf("LIMIT $3", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #3742's negative half: NEITHER SQL Server-family adapter filters <c>excludedDatabases</c> on the C# side of
+    /// the read any more — the <c>.Where(q =&gt; string.IsNullOrEmpty(q.DatabaseName) || …)</c> block that consumed the
+    /// page is gone from both. Source-pinned with a POSITIVE control on the same text (the predicate must be
+    /// present in the read), so a matcher that quietly stopped matching cannot report a clean bill; and the
+    /// PostgreSQL-TARGET reader (<c>DarlingPgSessionStatesReader.FilterExcludedDatabases</c>) is deliberately NOT
+    /// asserted either way here — that read is #3743's.
+    /// </summary>
+    [Fact]
+    public void NeitherSqlServerAdapter_FiltersExcludedDatabasesAfterTheRead()
+    {
+        var liteAdapter = ReadRepoFile("Lite", "Services", "LiteAlertReadAdapter.cs");
+        var darlingAdapter = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs");
+
+        foreach (var source in new[] { liteAdapter, darlingAdapter })
+        {
+            /* The retired block, in the exact spelling both adapters carried. */
+            Assert.DoesNotContain(".Where(q => string.IsNullOrEmpty(q.DatabaseName)", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("excludedDatabases.Any(", source, StringComparison.Ordinal);
+            /* Positive control: the list still reaches the read — as an argument, not as a filter. */
+            Assert.Contains("excludedDatabases", source, StringComparison.Ordinal);
+        }
+
+        /* Lite's adapter forwards the list INTO the DuckDB read (the data service's new trailing parameter), and the
+           data service is where the predicate lives. */
+        Assert.Contains("excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);", liteAdapter, StringComparison.Ordinal);
+        var liteRead = ReadRepoFile("Lite", "Services", "LocalDataService.WaitStats.cs");
+        Assert.Contains("IReadOnlyList<string>? excludedDatabases = null)", liteRead, StringComparison.Ordinal);
+        Assert.Contains("{exclusionSql.DatabasePredicate} AS excluded_by_database", liteRead, StringComparison.Ordinal);
+
+        /* Darling's template carries the third placeholder and the adapter splices it. */
+        Assert.Contains(".Replace(\"{3}\", exclusionSql.DatabasePredicate)", darlingAdapter, StringComparison.Ordinal);
     }
 
     /// <summary>

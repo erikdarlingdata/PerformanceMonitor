@@ -102,16 +102,19 @@ public interface IAlertReadAdapter
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
     /// from the LATEST collection snapshot only (and only if that snapshot is under 10 minutes
     /// old — a stale store must not alert). Mirrors Lite's read exactly: user sessions only
-    /// (session_id &gt; 50), the five opt-out noise filters, capped at
-    /// <paramref name="maxResults"/> (clamped 1–1000), then rows in
-    /// <paramref name="excludedDatabases"/> dropped client-side (case-insensitive; rows with no
-    /// database name always pass) — the loop's post-fetch exclusion, moved behind the seam.
+    /// (session_id &gt; 50), the five opt-out noise filters, rows in <paramref name="excludedDatabases"/>
+    /// removed (exact, case-insensitive; rows with no database name always pass), capped at
+    /// <paramref name="maxResults"/> (clamped 1–1000) — in that order.
     /// <para>
     /// Since #3653 (A5, Q5) the <paramref name="exclusions"/> knob is applied IN THE READ, ahead of the row
-    /// cap — not client-side like the database list — because the sessions it removes are the longest-running
-    /// on the server by construction and would otherwise fill the cap on every sweep (see
-    /// <see cref="LongRunningQueryExclusions"/>). The result carries how many candidates the knob removed, so
-    /// the fire payload can show it. <see cref="LongRunningQueryExclusions.None"/> reads exactly as before.
+    /// cap, because the sessions it removes are the longest-running on the server by construction and would
+    /// otherwise fill the cap on every sweep (see <see cref="LongRunningQueryExclusions"/>). Since #3742 the
+    /// database list is applied the same way, in the same statement, for the same reason: it was dropped
+    /// client-side AFTER the cap on both SKUs, so an excluded database whose sessions were the five longest
+    /// consumed the page and the alert came back short or empty while matches existed. The result carries how
+    /// many candidates each removed — the knob's two arms and the database list as a third count — so the fire
+    /// payload can show what the page does not. <see cref="LongRunningQueryExclusions.None"/> with an empty
+    /// database list reads exactly as the pre-knob read did.
     /// </para>
     /// </summary>
     Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(

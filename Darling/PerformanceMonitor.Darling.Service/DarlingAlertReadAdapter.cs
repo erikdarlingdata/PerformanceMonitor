@@ -440,21 +440,32 @@ ORDER BY accumulated_wait_ms DESC";
     /// <c>now()</c> is timestamptz — wrong basis against naive-UTC timestamp columns), and the
     /// N'' literals in the opt-out filters (<c>{0}</c> placeholder) lose their N prefix.
     /// $1 server_id, $2 elapsed-ms threshold, $3 max results, $4 staleness floor; <c>{1}</c> and <c>{2}</c> are
-    /// the #3653 (A5, Q5) opt-out knob's two arm expressions — the shared
-    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicates"/> text (the literal <c>FALSE</c> for an arm with
-    /// no entries) whose operands bind as $5 onward, program prefixes first.
+    /// the #3653 (A5, Q5) opt-out knob's two arm expressions and <c>{3}</c> is the shared <c>excludedDatabases</c>
+    /// list's (#3742) — the shared
+    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicates(string, string, string, IReadOnlyList{string}, int)"/>
+    /// text (the literal <c>FALSE</c> for an arm with no entries) whose operands bind as $5 onward, program
+    /// prefixes first, then logins, then databases.
     ///
-    /// <para><b>Why a CTE and two flags rather than one more <c>AND NOT</c>.</b> The knob is applied ahead of
+    /// <para><b>Why a CTE and three flags rather than one more <c>AND NOT</c>.</b> The knob is applied ahead of
     /// <c>LIMIT</c> (the sessions it removes are the longest-running by construction and would otherwise fill
     /// the cap), and the fire payload wants to know how many it removed and WHICH ARM did it. Flagging every
     /// over-threshold row once per arm lets the outer query keep the unflagged ones under the cap AND count the
-    /// flagged ones as two uncorrelated scalars over the same CTE — one statement (Npgsql positional parameters
+    /// flagged ones as uncorrelated scalars over the same CTE — one statement (Npgsql positional parameters
     /// do not survive a batch), one snapshot, so the rows and the counts describe the same instant. The counts
     /// are DISTINCT <c>session_id</c>s, not rows: the read looks at one collection of one server, where the
     /// (server_id, session_id, tran_start_time) session identity collapses to <c>session_id</c>, and a MARS
     /// session with two request rows is one session. The login count is taken <c>AND NOT</c> the program flag so
     /// a session matching both arms counts once, under the program prefix. The outer alias is <c>r</c> like the
     /// inner's so the pins on this text keep reading.</para>
+    ///
+    /// <para><b>#3742: <c>excludedDatabases</c> is the third flag, for the same reason.</b> Until #3742 this
+    /// read applied the database list in C#, AFTER the cap — the very shape the knob's paragraph above refuses
+    /// — so an excluded database whose ETL held the five longest sessions consumed the page and the alert came
+    /// back short or empty while un-excluded long-running sessions existed. The list now rides the same CTE
+    /// as <c>excluded_by_database</c>, the outer <c>WHERE</c> drops it with the knob's two, and its count is
+    /// taken <c>AND NOT</c> both knob flags — the database arm is LAST, so a session the knob would have
+    /// removed anyway is the knob's whichever database it ran in, and the three counts sum to the sessions
+    /// removed (see the builder's doc for why last and not first).</para>
     /// </summary>
     public const string LongRunningQueriesSqlTemplate = @"
 WITH candidates AS (
@@ -473,7 +484,8 @@ WITH candidates AS (
         r.login_name,
         r.total_elapsed_time_ms,
         {1} AS excluded_by_program_prefix,
-        {2} AS excluded_by_login
+        {2} AS excluded_by_login,
+        {3} AS excluded_by_database
     FROM query_snapshots AS r
     WHERE r.server_id = $1
         AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM query_snapshots AS vqs WHERE vqs.server_id = $1)
@@ -496,9 +508,10 @@ SELECT
     r.program_name,
     r.login_name,
     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
-    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count
 FROM candidates AS r
-WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login)
+WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
 ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
@@ -542,16 +555,20 @@ LIMIT $3";
         }.Where(f => f.Length > 0));
 
         /* #3653 (A5, Q5): the opt-out knob's two arms, operands binding as $5 onward after the four fixed
-           parameters (program prefixes first, then logins — the builder's order is the binding order). */
-        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", firstParameterOrdinal: 5);
+           parameters (program prefixes first, then logins — the builder's order is the binding order); #3742:
+           the shared excludedDatabases list is the third arm, its operands appended after the logins, so it
+           is applied in this statement ahead of LIMIT and no ordinal the knob bound before it existed moves. */
+        var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", "r.database_name", excludedDatabases, firstParameterOrdinal: 5);
         var sql = LongRunningQueriesSqlTemplate
             .Replace("{0}", filters)
             .Replace("{1}", exclusionSql.ProgramPrefixPredicate)
-            .Replace("{2}", exclusionSql.LoginPredicate);
+            .Replace("{2}", exclusionSql.LoginPredicate)
+            .Replace("{3}", exclusionSql.DatabasePredicate);
 
         var items = new List<LongRunningQueryInfo>();
         int excludedByProgramPrefix = 0;
         int excludedByLogin = 0;
+        int excludedByDatabase = 0;
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
@@ -582,23 +599,18 @@ LIMIT $3";
                     ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
                     LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
                 });
-                /* The same two scalars on every row — read once is enough; a read with no rows has nothing to
+                /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                    fire and therefore nothing to render the counts beside. */
                 excludedByProgramPrefix = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
                 excludedByLogin = reader.IsDBNull(13) ? 0 : reader.GetInt32(13);
+                excludedByDatabase = reader.IsDBNull(14) ? 0 : reader.GetInt32(14);
             }
         }
 
-        if (excludedDatabases is { Count: > 0 })
-        {
-            items = items
-                .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
-                    !excludedDatabases.Any(e =>
-                        string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-        }
-
-        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin);
+        /* #3742: no post-read database filter here any more — the list is the CTE's third flag above, applied
+           ahead of LIMIT, so the page is a page of MATCHES and the rows it removed are counted, not silently
+           consumed. A `.Where` on items at this point would be the defect coming back. */
+        return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin, excludedByDatabase);
     }
 
     /* ---------------- database file growth (#2349) ---------------- */

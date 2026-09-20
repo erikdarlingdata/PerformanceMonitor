@@ -167,12 +167,20 @@ public sealed class AlertEngineTests
 
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
             LastLrqExclusions = exclusions;
-            var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
+            /* #3742: the database list is applied HERE, ahead of the cap, exactly as both SQL reads now apply it —
+               the rule the reads' third flag spells (exact, case-insensitive, normalised, a row with no database
+               name is kept) — so an engine-level pin can plant six excluded-database sessions ahead of one real
+               one and see the real one on a page of five. */
+            var excluded = LongRunningQueryExclusions.Normalize(excludedDatabases);
+            bool InExcludedDatabase(LongRunningQueryInfo q) => LongRunningQueryExclusions.MatchesExact(q.DatabaseName, excluded);
+            var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName) && !InExcludedDatabase(q)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
             /* Counts in SESSIONS (distinct session_id), split by arm through the shared Classify — a session matching
-               both arms lands under ProgramPrefix, exactly as the two SQL scalars count it. */
+               both arms lands under ProgramPrefix, exactly as the two SQL scalars count it; the database arm is LAST,
+               taken AND NOT either knob arm, as the third scalar counts it. */
             var byProgram = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.ProgramPrefix).Select(q => q.SessionId).Distinct().Count();
             var byLogin = LongRunning.Where(q => exclusions.Classify(q.ProgramName, q.LoginName) == LongRunningQueryExclusionArm.Login).Select(q => q.SessionId).Distinct().Count();
-            return Task.FromResult(new LongRunningQueryReadResult(kept, byProgram, byLogin));
+            var byDatabase = LongRunning.Where(q => InExcludedDatabase(q) && !exclusions.Excludes(q.ProgramName, q.LoginName)).Select(q => q.SessionId).Distinct().Count();
+            return Task.FromResult(new LongRunningQueryReadResult(kept, byProgram, byLogin, byDatabase));
         }
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
@@ -2586,6 +2594,153 @@ public sealed class AlertEngineTests
         Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
         Assert.Equal("0", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
         Assert.DoesNotContain(knobItem.Fields, f => f.Label == "Excluded Logins");
+    }
+
+    /* ---------------- long-running queries: excludedDatabases ahead of the cap (#3742) ---------------- */
+
+    /// <summary>A session in the reporting database an operator has excluded — the ETL that always runs long.</summary>
+    private static LongRunningQueryInfo ReportingEtlSession(int sessionId, long elapsedSeconds) => new()
+    {
+        SessionId = sessionId, DatabaseName = "ReportingDb", QueryText = "INSERT INTO dbo.FactSales SELECT …",
+        ProgramName = ".Net SqlClient Data Provider", LoginName = "svc_etl",
+        ElapsedSeconds = elapsedSeconds, QueryHash = "0x" + sessionId.ToString("X16")
+    };
+
+    [Fact]
+    public async Task LongRunningQuery_ExcludedDatabasesAreRemovedAheadOfTheCap_AndTheCardSaysHowMany()
+    {
+        /* THE #3742 LIE, as the engine sees it: an operator excludes a reporting database because its ETL always
+           runs long; on a server where that ETL holds the SIX longest sessions and the cap is five, the old
+           post-read filter returned an EMPTY page — five excluded rows read, five dropped — and the alert was off
+           for every other database without a word. With the list applied in the read, the human's query is on
+           the page, the fire says "1 query(s)", and the card's new item says six sessions were in excluded
+           databases — so a short page is a page an operator can read. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryMaxResults = 5;
+        h.Settings.ExcludedDatabasesList.Add("reportingdb");   /* the setting's spelling need not match the row's */
+
+        for (var i = 0; i < 6; i++)
+        {
+            h.Adapter.LongRunning.Add(ReportingEtlSession(90 + i, elapsedSeconds: 100_000 - i));
+        }
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+        Assert.StartsWith("Session #73 running 35m", fired.ShortMessage, StringComparison.Ordinal);
+        /* None of the six ETL sessions is on the card as a session — not their text, not their ids. */
+        Assert.DoesNotContain("FactSales", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #90", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Session #95", fired.DetailText, StringComparison.Ordinal);
+
+        /* The list's receipt: its own item, appended last; the knob is empty here so there is no knob item to sit
+           between the sessions and it. */
+        var databaseItem = fired.Context!.Details[^1];
+        Assert.Equal("6 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("6", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("reportingdb", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
+        Assert.Contains($"{AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel}: 6", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain(fired.Context.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedCountLabel));
+
+        /* The list still travels to the read as the argument it always was — that is where it is applied now. */
+        Assert.Equal(new[] { "reportingdb" }, h.Adapter.LastLrqArgs!.Value.Excluded);
+        /* And the excluded sessions were never fingerprinted: one incident, the human's. */
+        Assert.Single(fired.Context.Incidents!);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_TheKnobAndTheDatabaseListCompose_ASessionBothRemoveCountsOnceUnderTheKnob()
+    {
+        /* The three arms are three predicates on one candidate set, and the counts must still sum to the sessions
+           removed. The rule, pinned: a session the KNOB would have removed anyway is the knob's, whichever database
+           it ran in — the database arm is LAST (taken AND NOT either knob arm), because the knob is the more specific
+           instrument and lists its entries on the card, while the database list is the blunt shared one. So a job
+           step running in the excluded reporting database is "Excluded By Program Prefix: 1", not a database
+           exclusion; the two ETL sessions the knob does not name are the database list's. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.LongRunningQueryExcludedProgramNamePrefixesList.AddRange(LongRunningQueryExclusions.DefaultProgramNamePrefixes);
+        h.Settings.LongRunningQueryExcludedLoginsList.AddRange(LongRunningQueryExclusions.DefaultLogins);
+        h.Settings.ExcludedDatabasesList.Add("ReportingDb");
+
+        /* A job step IN the excluded database — both the prefix arm and the database arm match. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 61, DatabaseName = "ReportingDb", QueryText = "EXEC dbo.NightlyRebuild",
+            ProgramName = "SQLAgent - TSQL JobStep (Job 0x1D6B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 3)", LoginName = "app_admin",
+            ElapsedSeconds = 90_000, QueryHash = "0x6161616161616161"
+        });
+        /* The multi-day background under SYSTEM, in the excluded database too — login arm and database arm. */
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 62, DatabaseName = "reportingdb", QueryText = "sp_replcmds",
+            ProgramName = ".Net SqlClient Data Provider", LoginName = @"NT AUTHORITY\SYSTEM",
+            ElapsedSeconds = 80_000, QueryHash = "0x6262626262626262"
+        });
+        /* Two ETL sessions the knob does not name: the database list's alone. */
+        h.Adapter.LongRunning.Add(ReportingEtlSession(63, elapsedSeconds: 70_000));
+        h.Adapter.LongRunning.Add(ReportingEtlSession(64, elapsedSeconds: 60_000));
+        /* A job step in a database the operator cares about: the knob's, and not the database list's. */
+        h.Adapter.LongRunning.Add(PermanentSession(65, "SQLAgent - TSQL JobStep (Job 0x2A3B0D2E7FB2A24C9B4E9A5E0B53F5C1 : Step 1)", "app_admin", elapsedSeconds: 50_000));
+        /* And the human, whose page this is. */
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1 query(s), longest 35m", fired.CurrentValue);
+
+        /* Knob item first (61 and 65 by prefix; 62 by login), database item last (63 and 64) — 2 + 1 + 2 = 5, the
+           five sessions the page does not show, each counted exactly once. */
+        var knobItem = fired.Context!.Details[^2];
+        Assert.Equal("3 sessions over the threshold were excluded by the opt-out knob", knobItem.Heading);
+        Assert.Equal("2", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel).Value);
+        Assert.Equal("1", Assert.Single(knobItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByLoginLabel).Value);
+        var databaseItem = fired.Context.Details[^1];
+        Assert.Equal("2 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("2", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("ReportingDb", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_AnEmptyDatabaseList_LeavesTheCardWithoutTheDatabaseItem()
+    {
+        /* excludedDatabases is empty by default on both SKUs, so a fresh install's card must be byte-identical to
+           the pre-#3742 card: no item, no "Excluded By Database: 0" line about a list nobody set. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Adapter.LastLrqArgs!.Value.Excluded);
+        Assert.DoesNotContain(fired.Context!.Details, d => d.Fields.Any(f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel));
+        Assert.DoesNotContain("Excluded By Database", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LongRunningQuery_ADatabaseListThatRemovedNothing_StillSaysSo()
+    {
+        /* A set list that matched no over-threshold session this evaluation reports 0 — the same rule as the knob's
+           item: a setting whose only effect is an absence needs a line that says the absence was nothing, and "0" is
+           also how an operator learns a database name is misspelled. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("NotThisOne");
+        h.Adapter.LongRunning.Add(HumanSession());
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var databaseItem = fired.Context!.Details[^1];
+        Assert.Equal("0 sessions over the threshold were in excluded databases", databaseItem.Heading);
+        Assert.Equal("0", Assert.Single(databaseItem.Fields, f => f.Label == AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel).Value);
+        Assert.Equal("NotThisOne", Assert.Single(databaseItem.Fields, f => f.Label == "Excluded Databases").Value);
     }
 
     [Fact]
