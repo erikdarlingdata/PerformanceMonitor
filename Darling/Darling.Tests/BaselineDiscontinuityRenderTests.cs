@@ -104,8 +104,11 @@ public sealed class BaselineDiscontinuityRenderTests
 /// reaches the reason word, two carriers fold to one marker, and a trend tool's payload carries the block as
 /// its trailing key — empty on a continuous window. Planted the way the carriers write: one
 /// <c>collection_log</c> row per carrier run with the #3161 note, and the pair in <c>collector_state</c> under
-/// the carrier's name.
+/// the carrier's name. Serialized with every other class that reaches the shared <c>DARLING_TEST_PG</c> store
+/// (<c>LivePostgresCollectionHygieneTests</c>): its planted rows live in the shared <c>collection_log</c> and
+/// <c>collector_state</c> under a name-derived server_id, and the cleanup deletes them.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class BaselineDiscontinuityLivePostgresTests
 {
     private const string ServerName = "darling-discontinuity-e2e";

@@ -87,6 +87,11 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(queryDurationTask, procDurationTask, queryStoreDurationTask, executionCountTask);
 
+        /* The four are joined; the marker read below runs alone and must not be priced against a contention
+           count that is over — release the declared width here rather than at the closing brace, as the
+           Memory and PostgreSQL tabs do (ViewerCommandTimeoutTests.NoFanOutScope_OutlivesItsJoin pins it). */
+        readFanOut.Release();
+
         /* #3653 A5: one read for the four charts, after the fan-out (the fan-out is sized at four), and
            never fatal to the tab — a store that cannot answer this read still draws its series, unmarked,
            rather than drawing nothing. */
