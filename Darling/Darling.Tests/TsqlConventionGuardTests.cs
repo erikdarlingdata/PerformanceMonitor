@@ -1474,6 +1474,11 @@ public sealed class TsqlConventionGuardTests
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* #3691 lane 29 (#3795): the buffer-composition drill-down's nullable four-place rounder — the same
+           expression-shaped helper as the formatter lines above. What its range strands is `Math.Round(value.Value, 4)`
+           and nothing else: no T-SQL, no tempdb label, no SQL literal a census reads, so the member scan stopping
+           short of it loses no counted site. ARRIVED with #3795; named here so the scan's contract stays exact. */
+        "Darling/PerformanceMonitor.Darling.Analysis/PgTargetDrillDownCollector.Buffer.cs Round",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */
