@@ -349,4 +349,25 @@ public static class AnomalyThresholds
     /// unmeasured: chosen, not measured — same unread table as the floor; calibrate against pg_blocking_edges before
     /// the next release.</summary>
     public const double PgBlockedSessionsFallback = 10.0;                 // distinct blocked sessions in one capture
+
+    // lane 27 (#3691, v3): the server-wide per-call statement-mean z-detector's floor and fallback (PgTargetAnomalyDetector.Plans.cs).
+
+    /// <summary>Magnitude floor for the <c>pg_statement_mean_ms</c> z-detector — the SERVER-WIDE mean execution ms per
+    /// statement call per collection (Σ <c>delta_total_exec_time_ms</c> ÷ Σ <c>delta_calls</c> over every statement),
+    /// in ms. Under ten milliseconds per call a server is fast whatever the sigma says: an OLTP mix's mean sits at
+    /// single-digit ms, and a doubling of 2 ms is a warmer cache, not a regression anyone can feel. unmeasured:
+    /// chosen, not measured — the 2026-09-19 calibration read statement SHARES and busy fractions from
+    /// pg_statement_stats, never the per-collection mean-ms series; calibrate against
+    /// SUM(delta_total_exec_time_ms) / SUM(delta_calls) per collection_time over the dogfood PostgreSQL fleet before
+    /// the next release. The detector stamps <c>threshold_lineage = 0</c>. NOT the SQL Server
+    /// <see cref="QueryDurationFloorUs"/> reused by value: that floor is a per-query Query Store total in microseconds
+    /// on another engine.</summary>
+    public const double PgStatementMeanMsFloor = 10.0;                    // server-wide mean ms per statement call
+
+    /// <summary>Absolute-fallback bar for the server-wide per-call mean on an untrustworthy baseline (a young store, or
+    /// a server whose 30 days hold too few busy collections to trust): a quarter of a second per call, averaged over
+    /// EVERY statement the server ran in a collection, is slow on any PostgreSQL — a mix that averages 250 ms is a mix
+    /// whose ordinary calls are waiting on something. unmeasured: chosen, not measured — the same unread series as the
+    /// floor; calibrate against the upper tail of the per-collection mean before the next release.</summary>
+    public const double PgStatementMeanMsFallback = 250.0;                // server-wide mean ms per statement call
 }

@@ -420,10 +420,15 @@ public sealed class PgTargetSharedSwitchRoutingTests
            what PgTargetAdvice.Plans.cs / .Kernel.cs / .Memory.cs answer, and each anomaly's ComposeAnomaly arm delegates
            to the same family file (never the SQL Server "Anomalous spike" composer, which the equality would expose).
            Each content lane moves ITS lines to NotNull, as lanes 11–13 and 17 did. */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.PlanRegression));          /* lane 27 */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ParameterSensitivity));    /* lane 27 */
+        /* Lane 27 filled the plan family's regression and sensitivity arms and the anomaly composer — moved from Null, as
+           the stub comment said they would be; PG_SEQ_SCAN_ADVISORY stays lane 30's stub in the same partial. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.PlanRegression));       /* lane 27 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ParameterSensitivity)); /* lane 27 */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.SeqScanAdvisory));         /* lane 30 */
-        Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyPlanRegression)); /* lane 27 — the arm exists, the composer is a stub */
+        var pgPlanAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyPlanRegression);   /* lane 27: the anomaly too, lane 17's shape */
+        Assert.NotNull(pgPlanAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyPlanRegression), pgPlanAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgPlanAnomaly!.Headline, StringComparison.Ordinal);
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuBurnCores));            /* lane 28 */
         Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.CpuDecomposition));        /* lane 28 */
         Assert.Null(FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyCpuBurn));       /* lane 28 — the arm exists, the composer is a stub */
