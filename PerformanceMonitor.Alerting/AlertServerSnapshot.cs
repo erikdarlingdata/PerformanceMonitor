@@ -40,11 +40,23 @@ namespace PerformanceMonitor.Alerting;
 /// <c>SqlEngineEdition != 5</c> call-site gate.
 /// </param>
 /// <param name="CpuSampleTimeUtc">
-/// The <c>sample_time</c> of the CPU reading <paramref name="SqlCpuPercent"/>/<paramref name="TotalCpuPercent"/>
-/// came from, or null when the host has no sample instant for it. This is the CPU check's persistence-gate
+/// The instant of the CPU sample <paramref name="SqlCpuPercent"/>/<paramref name="TotalCpuPercent"/> came
+/// from, or null when the host has no sample instant for it. This is the CPU check's persistence-gate
 /// observation identity (#3282), not display data: the gate counts consecutive breaching SAMPLES, and the
 /// alert sweep is twice as fast as the samples arrive, so without it a re-read of one sample would count as
 /// a second observation of the condition.
+/// <para><b>Which clock (#3744).</b> The row's <c>sample_time_utc</c> twin where the store has one — every
+/// <c>cpu_utilization_stats</c> row written since Darling V134 / Lite v63 (#3730), so on any live store the
+/// name is true within one collector poll of the upgrade — and otherwise the row's <c>sample_time</c>, which
+/// on the ring-buffer arm is the MONITORED SERVER'S LOCAL wall clock (<c>CollectorTimestampFrameTests</c> pins
+/// that frame). Both hosts resolve it the same way, <c>sample_time_utc ?? sample_time</c>, at the read: Darling
+/// in <c>DarlingWorker.ReadLatestCpuAsync</c>, Lite in <c>MainWindow.AlertEngine</c> off the overview read's
+/// two columns. There is no frame field beside this one, deliberately: the gate compares identities for
+/// EQUALITY (<c>AlertEngine.ObservePersistenceAsync</c>), so which clock stamped the value is not an input
+/// to any decision the engine makes — the local→UTC switch at the upgrade reads as one new sample, once, and
+/// the fall-back's repeated hour as an hour of new samples, exactly as it should. A field nothing reads is a
+/// field that drifts. Before #3744 the name was a lie on every row (the value was always the local stamp);
+/// it is now true wherever the store can say the instant, and documented-local where it cannot.</para>
 /// <para>No default, so every host states it. A null degrades the gate to counting SWEEPS rather than
 /// samples — weaker persistence, but the alert still fires, which is the correct direction for a monitoring
 /// product where silence is indistinguishable from health. The opposite default (treat an unknown instant as

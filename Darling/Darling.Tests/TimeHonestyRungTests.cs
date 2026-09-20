@@ -31,8 +31,10 @@ namespace Darling.Tests;
 /// Two lies retired: a server-LOCAL sample stamp that every UTC-window reader had to de-skew by a derived
 /// offset (an hour wrong across a DST transition, silently), and an OFFSET that cannot say which side of a
 /// transition an instant fell on where a ZONE can. The rung, the one passthrough refresh, the viewer probe's top
-/// arm, the two windowed CPU readers that now prefer the stored UTC instant, the latest-row reads that
-/// deliberately do not, and the <c>get_server_properties</c> payload that publishes the clock pair.
+/// arm, the two windowed CPU readers that now prefer the stored UTC instant, the latest-row reads (three that
+/// order on the local stamp as a within-batch tiebreak and never name the twin; the CPU alert gate's, which since
+/// #3744 projects the twin as the gate's identity beside the local stamp it still orders on), and the
+/// <c>get_server_properties</c> payload that publishes the clock pair.
 ///
 /// <para>The "I am the top rung" claims this file carried when it landed (moved here off
 /// <c>PgNumbackendsAndSampledMsRungTests</c>, V133) moved on again to <c>LongRunningQueryExclusionKnobRungTests</c>
@@ -283,19 +285,22 @@ public sealed class TimeHonestyRungTests
     }
 
     /// <summary>
-    /// The latest-row reads keep the LOCAL <c>sample_time</c> and never name the twin: <c>DarlingWorker.LatestCpuSql</c>
-    /// projects it as the CPU alert gate's observation identity, compared only against itself by <c>&gt;</c>, and a
-    /// one-time frame change there would freeze the gate for one offset's worth of hours on every server east of
-    /// UTC (#3282's trap); the other three ORDER BY it as a within-batch tiebreak, which carries no frame. The
-    /// worker's doc says so in the words a reader will look for.
+    /// The latest-row reads all keep the LOCAL <c>sample_time</c> as their within-batch tiebreak, and the three
+    /// display/fleet reads never name the twin at all. The CPU alert gate's read is the exception since #3744: it
+    /// PROJECTS <c>sample_time_utc</c> beside the local stamp (the twin is the gate's observation identity where
+    /// the row has one, the local stamp where it does not) but still does not ORDER on it, because a
+    /// cross-batch order on the twin, or on a <c>COALESCE</c> of the two, would compare a pre-rung local stamp
+    /// against a post-rung UTC one and sort a stale row as newest east of UTC. #3730 pinned this read to the
+    /// local stamp because the gate compared identities by <c>&gt;</c> and a one-time frame change would have
+    /// frozen it for one offset's worth of hours; #3744 moved the gate to equality and this pin flipped with it.
+    /// The worker's doc says all of that in the words a reader will look for.
     /// </summary>
     [Fact]
-    public void TheLatestRowReads_KeepTheLocalStamp_AndTheWorkerSaysWhy()
+    public void TheLatestRowReads_KeepTheLocalTiebreak_TheGatesReadProjectsTheTwin_AndTheWorkerSaysWhy()
     {
         foreach (var sql in new[]
         {
-            DarlingWorker.LatestCpuSql, DarlingHealthReader.ServerSummaryCpuSql, DarlingFleetReader.FleetCpuSql,
-            ViewerDataService.ServerSummaryCpuSql,
+            DarlingHealthReader.ServerSummaryCpuSql, DarlingFleetReader.FleetCpuSql, ViewerDataService.ServerSummaryCpuSql,
         })
         {
             Assert.DoesNotContain("sample_time_utc", sql, StringComparison.Ordinal);
@@ -303,15 +308,38 @@ public sealed class TimeHonestyRungTests
             Assert.Contains("collection_time DESC, sample_time DESC", sql, StringComparison.Ordinal);
         }
 
-        Assert.Contains("SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time", DarlingWorker.LatestCpuSql, StringComparison.Ordinal);
+        /* The gate's read: both stamps projected, local first (ordinal 2) and the twin last (ordinal 3), so the
+           pre-#3744 ordinals still read what they always read; the twin named exactly once, in the SELECT list
+           and nowhere else — not in the ORDER BY, not in a predicate. */
+        var gate = DarlingWorker.LatestCpuSql;
+        Assert.Contains("SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, sample_time_utc", gate, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC, sample_time DESC", gate, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(gate, "sample_time_utc"));
+        Assert.DoesNotContain("COALESCE", gate, StringComparison.Ordinal);
 
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         var doc = worker[..worker.IndexOf("internal const string LatestCpuSql", StringComparison.Ordinal)];
         doc = doc[doc.LastIndexOf("/// <summary>", StringComparison.Ordinal)..];
-        foreach (var phrase in new[] { "Not <c>sample_time_utc</c>, deliberately", "OBSERVATION IDENTITY", "#3282", "EAST of UTC", "frozen", "TimeHonestyRungTests" })
+        foreach (var phrase in new[]
+        {
+            "the UTC twin is the identity where the row has one (#3744", "OBSERVATION IDENTITY", "#3282", "EAST of UTC",
+            "frozen", "fall-back", "EQUALITY", "The ORDER BY stays on the local stamp", "TimeHonestyRungTests",
+        })
         {
             Assert.Contains(phrase, doc, StringComparison.Ordinal);
         }
+
+        Assert.DoesNotContain("Not <c>sample_time_utc</c>, deliberately", doc, StringComparison.Ordinal);
+
+        /* And the reader folds the pair the documented way — twin first, local as the fallback — rather than
+           reading only one of them. Source pin because ReadLatestCpuAsync is private and needs a live store. */
+        var reader = CSharpSourceWalker.StripCommentsAndStrings(worker);
+        var head = reader.IndexOf("ReadLatestCpuAsync(int serverId", StringComparison.Ordinal);
+        Assert.True(head >= 0, "DarlingWorker has no ReadLatestCpuAsync");
+        var body = reader.Substring(head, Math.Min(2500, reader.Length - head));
+        Assert.Contains("reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)", body, StringComparison.Ordinal);
+        Assert.Contains("reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2)", body, StringComparison.Ordinal);
+        Assert.Contains("sampleTime = sampleTimeUtc ?? sampleTimeLocal;", body, StringComparison.Ordinal);
     }
 
     /// <summary>The properties read projects the clock pair after the pre-rung columns, the row type carries them
@@ -496,21 +524,28 @@ SELECT deskewed FROM (
                     Assert.Equal(newestUtc.AddHours(-1), (DateTime)(await deskewOnly.ExecuteScalarAsync(ct))!);
                 }
 
-                /* The worker's latest-row read keeps the LOCAL stamp: the gate's identity did not change frame.
-                   And it shows the pre-existing fall-back quirk this rung deliberately leaves alone: the tiebreak
-                   orders on the local stamp, so inside the one batch that straddles the fall-back the EDT-side
-                   sample (cpu 31, sixty seconds OLDER) sorts as the newest — a stale-by-a-minute reading once a
-                   year, and an identity that the next batch's EST stamps will not exceed for an hour (reported,
-                   not fixed here: switching the identity to the twin would trade that for a one-time freeze of one
-                   offset's worth of hours east of UTC at the upgrade, #3282's trap). */
+                /* The worker's latest-row read projects BOTH stamps (#3744): the local stamp at ordinal 2, where
+                   it always was, and the UTC twin at ordinal 3, which is what the gate now takes as this row's
+                   identity. It also still shows the one-batch fall-back quirk the tiebreak leaves: ordering on the
+                   local stamp, inside the single batch that straddles the fall-back the EDT-side sample (cpu 31,
+                   sixty seconds OLDER in UTC) sorts as the newest — a reading stale by one sample, once a year.
+                   Before #3744 that identity was also one the next batch's EST stamps would not EXCEED for an
+                   hour, and the gate compared by >, so it froze; the gate now compares for equality, and the next
+                   batch's twins simply differ from this one. The ORDER BY cannot move to the twin without
+                   comparing a pre-rung local stamp against a post-rung UTC one across batches — the worker's doc
+                   says why — so the one-sample staleness inside the straddling batch is the accepted residue. */
                 using (var latest = new NpgsqlCommand(DarlingWorker.LatestCpuSql, connection))
                 {
                     latest.Parameters.AddWithValue(ServerId);
                     using var reader = await latest.ExecuteReaderAsync(ct);
                     Assert.True(await reader.ReadAsync(ct));
+                    Assert.Equal(4, reader.FieldCount);
                     Assert.Equal(31, reader.GetInt32(0));
                     Assert.Equal(straddleUtc.AddHours(-4), reader.GetDateTime(2));
+                    Assert.Equal("sample_time_utc", reader.GetName(3));
+                    Assert.Equal(straddleUtc, reader.GetDateTime(3));
                 }
+
 
                 /* server_properties through ServerPropertiesCollector.WritePayload: a 2022+ row with the zone and
                    an older-engine row with NULL, the offset on both. */
@@ -547,6 +582,21 @@ SELECT deskewed FROM (
                 var samples = await viewer.GetCpuUtilizationAsync(ServerId, now.AddHours(-1), ct);
                 Assert.Equal(new[] { (pre1Utc, 21), (pre2Utc, 22), (straddleUtc, 31), (newestUtc, 32) },
                     samples.Select(s => (s.SampleTime, s.SqlServerCpu)).ToArray());
+            }
+
+            /* Last, because it removes the post-rung batch: a store whose NEWEST CPU row predates the rung —
+               fixture 5 of #3744, today's behaviour. The gate's read returns the pre-rung row with its local
+               stamp at ordinal 2 and a NULL twin at ordinal 3, which is the reader's cue to fall back to the
+               local stamp as the identity. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM cpu_utilization_stats WHERE server_id = $1 AND sample_time_utc IS NOT NULL", ServerId);
+            using (var latest = new NpgsqlCommand(DarlingWorker.LatestCpuSql, connection))
+            {
+                latest.Parameters.AddWithValue(ServerId);
+                using var reader = await latest.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(22, reader.GetInt32(0));
+                Assert.Equal(pre2Utc.AddHours(-4), reader.GetDateTime(2));
+                Assert.True(reader.IsDBNull(3), "a pre-rung row must read a NULL twin, or the fallback arm is never exercised");
             }
 
             bodySucceeded = true;

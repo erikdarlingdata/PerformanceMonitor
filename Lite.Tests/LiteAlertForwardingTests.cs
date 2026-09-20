@@ -416,6 +416,69 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.NotNull(persisted.Value.LastObservedSampleUtc);
     }
 
+    /* ---------------- CPU: the #3744 identity rule, on the Lite path ---------------- */
+
+    /// <summary>One sweep carrying one hand-picked sample instant (the #3744 fixtures run the stamp backwards,
+    /// which the increasing-instant drivers above cannot express).</summary>
+    private static Task ObserveCpuAsync(AlertEngine engine, DateTime sampleInstant, bool breaching) =>
+        engine.EvaluateServerAsync(Harness.Snapshot(
+            sqlCpu: breaching ? 70 : 20, totalCpu: breaching ? 95 : 30, cpuSampleTime: sampleInstant));
+
+    [Fact]
+    public async Task Cpu_AFallBack_RunsTheStampBackwards_AndTheStreakStillAdvances_OnLiteToo()
+    {
+        /* The Lite twin of AlertEngineTests' fall-back fixture (#3744). Lite feeds the shared gate
+           ServerSummaryItem.CpuSampleTimeUtc ?? CpuSampleTime off its overview read — the monitored server's
+           LOCAL wall clock on every pre-v63 row — and that clock repeats an hour every autumn. The gate now
+           decides "same sample" by EQUALITY of the instant rather than by order, so the sample stamped 01:00
+           after the fall-back is the new observation it is, and neither a building streak nor an open
+           incident waits an hour for the local clock to climb past 01:59 again. The arithmetic is the shared
+           engine's and is pinned in depth Darling-side; what this pins is that the Lite path reaches it
+           through its own settings, snapshot and store. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        var engine = h.Build();
+
+        var local = new DateTime(2026, 11, 1, 1, 58, 0);
+        await ObserveCpuAsync(engine, local, breaching: true);
+        await ObserveCpuAsync(engine, local.AddMinutes(1), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);
+        Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_IsFreshExactlyOnce_OnLiteToo()
+    {
+        /* The identity moved from the local stamp to the row's UTC twin (#3744), so a record Lite persisted
+           before that meets a UTC instant on the first post-upgrade sweep — earlier than the local stamp east
+           of UTC, later west of it. Either way it is ONE new identity: counted once, its re-read held, then the
+           genuinely new samples the bar always needed. A new engine over the same store is the restart. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);
+
+        var upgraded = h.Build();
+        var utc = local.AddHours(-3);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
     [Fact]
     public async Task Cpu_LiteSchemaCarriesThePersistenceTable()
     {

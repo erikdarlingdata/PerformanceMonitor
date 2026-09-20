@@ -623,6 +623,128 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /* ---------------- CPU: the #3744 identity rule — equality, not order ---------------- */
+
+    /// <summary>One sweep carrying one sample instant, breaching or not, with the same CPU pair the other CPU
+    /// fixtures use; the #3744 fixtures hand-pick each instant, so a shared driver would obscure the sequence.</summary>
+    private static Task ObserveCpuAsync(AlertEngine engine, DateTime sampleInstant, bool breaching) =>
+        engine.EvaluateServerAsync(Harness.Snapshot(
+            sqlCpu: breaching ? 70 : 20, totalCpu: breaching ? 95 : 30, cpuSampleTime: sampleInstant));
+
+    [Fact]
+    public async Task Cpu_AFallBack_RunsTheStampBackwards_AndTheStreakStillAdvances()
+    {
+        /* THE #3744 defect, first shape. cpu_utilization.sample_time is the monitored server's LOCAL wall
+           clock, and on a zone that observes DST that clock repeats an hour every autumn: 01:59 is followed
+           by 01:00. Under the pre-#3744 rule (fresh = strictly GREATER than the last counted instant) every
+           sample in the repeated hour read as stale, so a breach that began at 01:58 never reached the bar
+           and an open incident never cleared, for an hour, on every non-UTC server, once a year. The rule is
+           now equality — a different instant is a different sample whichever clock stamped it — and the two
+           samples one local hour apart across the fall-back are the DISTINCT identities they always were.
+
+           The instants are local-frame stamps on purpose: this is what the gate was fed before V134 and what
+           it is still fed off a pre-rung row, and the fix must hold there too, not only once the identity has
+           moved to the UTC twin. Under `>` the third observation below is "not fresh" and the fire never
+           comes; that is the assertion that reddens if the predicate goes back to order. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var local = new DateTime(2026, 11, 1, 1, 58, 0);              /* 01:58 EDT, Kind=Unspecified as stored */
+        await ObserveCpuAsync(engine, local, breaching: true);            /* 1 */
+        await ObserveCpuAsync(engine, local.AddMinutes(1), breaching: true); /* 01:59 EDT — 2 */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);          /* 01:00 EST: one real minute later, 59 local minutes EARLIER */
+        Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 — the bar */
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The same rule on the falling edge: an incident open across the fall-back clears in the repeated
+           hour rather than waiting for the local clock to climb past 01:59 again. */
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+        Assert.Empty(h.Resolutions);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Single(h.Resolutions);
+
+        /* And a repeat of the LAST counted instant is still the same sample: the streak holds and nothing is
+           written — equality lost none of #3282. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_EastOfUtc_IsFreshExactlyOnce_AndNeverFreezes()
+    {
+        /* THE #3744 defect, second shape — the one #3730 saw coming and worked around by leaving the gate's
+           identity on the local stamp. The identity is now the row's UTC twin where the store has one, so a
+           record persisted by a pre-#3744 build (a LOCAL instant) meets a UTC instant on the first post-upgrade
+           sweep. East of UTC the UTC instant reads EARLIER by the offset: at UTC+3, local 12:00 becomes UTC
+           09:00. Under `>` the gate would have seen no fresh sample until the UTC clock climbed past the last
+           local stamp — three hours of frozen CPU alerting on every server east of UTC, once, on upgrade day.
+           Under equality the switch is one new identity: counted ONCE, then the same UTC instant re-read is
+           the same sample, then `!=` within the UTC frame as the samples advance.
+
+           A new engine over the same store IS the restart the upgrade implies, so the seed path is the one
+           that hands the local record to the UTC-fed sweep. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        /* The pre-#3744 build: one breaching sample, identity = the local stamp. */
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);                                         /* 1 */
+        Assert.Equal(local, Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+
+        /* The upgraded build's first sweep: the SAME sample, now identified by its UTC twin — three hours
+           earlier as a value. Fresh exactly once (the accepted one-time re-anchor), never frozen. */
+        var upgraded = h.Build();
+        var utc = local.AddHours(-3);
+        Assert.True(utc < local, "east of UTC the twin must read earlier than the local stamp, or this is the west fixture");
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* 2 */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The re-read of that identity on the next sweep is the same sample: NOT counted, NOT written. If the
+           switch were treated as "fresh by frame" on every sweep rather than once, this is where the bar would
+           be reached early — the assertion that reddens if a re-anchor is not one-time. */
+        var writes = h.StateStore.SavedPersistence.Count;
+        await ObserveCpuAsync(upgraded, utc, breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
+
+        /* Within the UTC frame the samples advance and the bar is reached where it should be. */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(utc.AddMinutes(1), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_TheUpgradeFrameSwitch_WestOfUtc_CountsTheSameSampleOnceMoreAtMost()
+    {
+        /* The other direction of the same switch. West of UTC the twin reads LATER than the local stamp
+           (UTC−5: local 12:00 is UTC 17:00), so even under `>` the first post-upgrade sweep counted the
+           sample it had already counted — #3730 named that as the west-of-UTC cost of switching. Equality
+           has the same cost and the same bound, and this pins the bound: the same physical sample is counted
+           once more at the switch, the re-read of its UTC identity is held, and the streak then needs the
+           genuinely new samples it always needed. One extra count of one sample per server, once, is the
+           whole price of moving the identity to the honest clock. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var local = new DateTime(2026, 9, 21, 12, 0, 0);
+        await ObserveCpuAsync(h.Build(), local, breaching: true);                                         /* 1 */
+
+        var upgraded = h.Build();
+        var utc = local.AddHours(5);
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* 2 — the once-more */
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
+        await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
     [Fact]
     public async Task Cpu_TheMeasuredTwoMinuteExcursion_IsNotAnIncident()
     {
