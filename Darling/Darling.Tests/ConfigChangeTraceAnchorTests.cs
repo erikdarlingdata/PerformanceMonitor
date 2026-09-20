@@ -142,7 +142,7 @@ public sealed class ConfigChangeTraceAnchorTests
 
         var traced = ConfigChangeAttribution.BuildFact(1, evt, 0,
             ConfigChangeAttribution.WindowsFor(ConfigChangeAttribution.AnchorTime(evt, anchor), T0), compare: null, null, null, anchor);
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, traced.Metadata[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, traced.Metadata[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(new DateTimeOffset(changedAt).ToUnixTimeSeconds(), traced.Metadata[ConfigChangeAttribution.MetaChangeTimeUnix]);
         Assert.Equal(new DateTimeOffset(T0).ToUnixTimeSeconds(), traced.Metadata[ConfigChangeAttribution.MetaObservedAtUnix]);
         Assert.Equal(0, traced.Metadata[ConfigChangeAttribution.MetaObservationGapHours]);
@@ -150,7 +150,7 @@ public sealed class ConfigChangeTraceAnchorTests
         Assert.Equal(0, traced.Metadata[ConfigChangeAttribution.MetaAfterWindowClamped]);
 
         var observed = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(T0, T0), compare: null, null, null);
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, observed.Metadata[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, observed.Metadata[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(new DateTimeOffset(T0).ToUnixTimeSeconds(), observed.Metadata[ConfigChangeAttribution.MetaChangeTimeUnix]);
         Assert.Equal(30.0, observed.Metadata[ConfigChangeAttribution.MetaObservationGapHours], precision: 6);
         Assert.False(observed.Metadata.ContainsKey(ConfigChangeAttribution.MetaObservedLagHours));

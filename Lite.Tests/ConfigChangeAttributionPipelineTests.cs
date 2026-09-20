@@ -109,7 +109,7 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
 
         /* No trace line in the store: the observation anchor, and the fact says so (#3740). */
         Assert.NotNull(finding.RootFactMetadata);
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, finding.RootFactMetadata![ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, finding.RootFactMetadata![ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(finding.RootFactMetadata[ConfigChangeAttribution.MetaChangeTimeUnix], finding.RootFactMetadata[ConfigChangeAttribution.MetaObservedAtUnix]);
 
         /* The compare ran over observed halves: the verdict counts are on the row, and it is not "unavailable". */
@@ -222,7 +222,7 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.DoesNotContain("still filling in", advice.Investigation, StringComparison.Ordinal);
 
         var m = finding.RootFactMetadata!;
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(new DateTimeOffset(DateTime.SpecifyKind(changedAtUtc, DateTimeKind.Utc)).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaChangeTimeUnix], precision: 0);
         Assert.Equal(2.0, m[ConfigChangeAttribution.MetaObservedLagHours], precision: 1);
         Assert.Equal(0, m[ConfigChangeAttribution.MetaObservationGapHours]);
@@ -258,7 +258,7 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.DoesNotContain("default trace", advice.Investigation, StringComparison.Ordinal);
 
         var m = finding.RootFactMetadata!;
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.False(m.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
         Assert.Equal(27.0, m[ConfigChangeAttribution.MetaObservationGapHours], precision: 1);
         Assert.Equal(3.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);

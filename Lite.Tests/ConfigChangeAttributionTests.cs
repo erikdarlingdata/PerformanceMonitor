@@ -527,7 +527,7 @@ public sealed class ConfigChangeAttributionTests
 
         var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, windows, compare: null, null, null, anchor);
         var m = fact.Metadata;
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(new DateTimeOffset(changedAt).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaChangeTimeUnix]);
         Assert.Equal(new DateTimeOffset(T0).ToUnixTimeSeconds(), m[ConfigChangeAttribution.MetaObservedAtUnix]);
         Assert.Equal(0, m[ConfigChangeAttribution.MetaObservationGapHours]);
@@ -539,7 +539,7 @@ public sealed class ConfigChangeAttributionTests
         /* The observation-anchored twin of the same event, for contrast: the capture is the change time, the
            gap is the full span, the after half is clamped to the pass end, and there is no lag key at all. */
         var observed = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(T0, T0), compare: null, null, null);
-        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, observed.Metadata[ConfigChangeAttribution.MetaAnchorSource]);
+        Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, observed.Metadata[ConfigChangeAttribution.MetaAnchorClock]);
         Assert.Equal(observed.Metadata[ConfigChangeAttribution.MetaChangeTimeUnix], observed.Metadata[ConfigChangeAttribution.MetaObservedAtUnix]);
         Assert.Equal(30.0, observed.Metadata[ConfigChangeAttribution.MetaObservationGapHours], precision: 6);
         Assert.False(observed.Metadata.ContainsKey(ConfigChangeAttribution.MetaObservedLagHours));

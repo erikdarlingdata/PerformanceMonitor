@@ -585,7 +585,7 @@ public static class FactAdvice
     /// the new value was first SEEN; the prose says "first observed" and states the span since the previous
     /// snapshot, and when that span exceeds the before-window it says the before half may already hold the
     /// new value. When the fact is anchored on the default trace instead
-    /// (<see cref="ConfigChangeAttribution.MetaAnchorSource"/> = <see cref="ConfigChangeAttribution.AnchorSourceDefaultTrace"/>,
+    /// (<see cref="ConfigChangeAttribution.MetaAnchorClock"/> = <see cref="ConfigChangeAttribution.AnchorSourceDefaultTrace"/>,
     /// #3740), "changed at" is TRUE — the sp_configure line was stamped at the instant of the change — so the
     /// prose says it, names the source, states how much later the snapshot first saw it, and drops the span
     /// sentences, whose premise (the change landed somewhere in a span) no longer holds; a setting the trace
@@ -635,7 +635,7 @@ public static class FactAdvice
         // ── when, and how honest "when" is ──
         var changeUnix = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaChangeTimeUnix);
         var changeAt = changeUnix > 0 ? DateTimeOffset.FromUnixTimeSeconds((long)changeUnix).UtcDateTime : (DateTime?)null;
-        var traceAnchored = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAnchorSource) == ConfigChangeAttribution.AnchorSourceDefaultTrace;
+        var traceAnchored = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaAnchorClock) == ConfigChangeAttribution.AnchorSourceDefaultTrace;
         var gapHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaObservationGapHours);
         var beforeHours = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBeforeHours);
         if (beforeHours <= 0) beforeHours = ConfigChangeAttribution.CompareWindowHours;

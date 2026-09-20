@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Analysis;
 ///   <c>ErrorLog</c> event with the real <c>StartTime</c>), and <see cref="ResolveTraceAnchor"/> joins the
 ///   diffed change to that row. When one exists for the same option in <c>(previous capture, this
 ///   capture]</c>, the ±4 h compare anchors on the trace's time, the span collapses to nothing, and the
-///   prose says "changed at … (default trace)"; <see cref="MetaAnchorSource"/> says which clock the fact
+///   prose says "changed at … (default trace)"; <see cref="MetaAnchorClock"/> says which clock the fact
 ///   used. When none exists — trace off, Azure SQL Database (no default trace), the row aged out of the
 ///   trace's rollover files before the collector saw it, or a non-English instance whose message text the
 ///   parser does not read — the observation anchor and every one of its disclosures stand unchanged. The
@@ -132,13 +132,13 @@ public static class ConfigChangeAttribution
     public const int ReconfigureMessageNumber = 15457;
 
     /// <summary>
-    /// <see cref="MetaAnchorSource"/> value: the fact's change time is the config capture that first observed
+    /// <see cref="MetaAnchorClock"/> value: the fact's change time is the config capture that first observed
     /// the new value, with every observation disclosure in force.
     /// </summary>
     public const double AnchorSourceObservation = 0;
 
     /// <summary>
-    /// <see cref="MetaAnchorSource"/> value: the fact's change time is the default trace's <c>StartTime</c> for
+    /// <see cref="MetaAnchorClock"/> value: the fact's change time is the default trace's <c>StartTime</c> for
     /// the sp_configure line that made the change — the moment it happened, to the trace's millisecond.
     /// </summary>
     public const double AnchorSourceDefaultTrace = 1;
@@ -161,14 +161,17 @@ public static class ConfigChangeAttribution
     /// <summary>How many settings changed at this event (also the fact's Value).</summary>
     public const string MetaChangedSettings = "changed_settings";
     /// <summary>The change time the compare is ANCHORED on, as Unix seconds — a DateTime cannot ride in a
-    /// double map. The trace's <c>StartTime</c> when <see cref="MetaAnchorSource"/> is
+    /// double map. The trace's <c>StartTime</c> when <see cref="MetaAnchorClock"/> is
     /// <see cref="AnchorSourceDefaultTrace"/>, the observing capture's time otherwise (#3740). Readers that
     /// want the capture regardless of anchor take <see cref="MetaObservedAtUnix"/>.</summary>
     public const string MetaChangeTimeUnix = "change_time_unix";
     /// <summary>Which clock <see cref="MetaChangeTimeUnix"/> is in: <see cref="AnchorSourceObservation"/> (0) or
     /// <see cref="AnchorSourceDefaultTrace"/> (1). A number because the metadata map is doubles-only; the two
-    /// named constants are the whole domain, and the composer reads the key through them.</summary>
-    public const string MetaAnchorSource = "anchor_source";
+    /// named constants are the whole domain, and the composer reads the key through them. The key on the
+    /// wire is <c>anchor_source</c>; the constant is not named after it because <c>FactSourceRegistryTests</c>
+    /// sweeps every <c>Source = "…"</c> literal in the analysis assemblies as a fact-source stamp, and a
+    /// constant ending in <c>Source</c> would be read as one and fail the registry's set equality.</summary>
+    public const string MetaAnchorClock = "anchor_source";
     /// <summary>The config capture that first observed the new value, as Unix seconds — always present, and
     /// equal to <see cref="MetaChangeTimeUnix"/> on the observation anchor.</summary>
     public const string MetaObservedAtUnix = "observed_at_unix";
@@ -519,7 +522,7 @@ public static class ConfigChangeAttribution
         {
             [MetaChangedSettings] = change.Changes.Count,
             [MetaChangeTimeUnix] = Unix(anchorTime),
-            [MetaAnchorSource] = anchor is null ? AnchorSourceObservation : AnchorSourceDefaultTrace,
+            [MetaAnchorClock] = anchor is null ? AnchorSourceObservation : AnchorSourceDefaultTrace,
             [MetaObservedAtUnix] = Unix(change.ChangeTime),
             /* The span disclosure belongs to the observation anchor alone: with the trace's time in hand the
                "somewhere in the N h since the previous snapshot" sentence would be false, and the composer

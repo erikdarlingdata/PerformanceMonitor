@@ -98,7 +98,7 @@ public sealed class ConfigChangeTraceAnchorLivePostgresTests
             Assert.DoesNotContain("still filling in", advice.Investigation, StringComparison.Ordinal);
 
             var m = finding.RootFactMetadata!;
-            Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorSource]);
+            Assert.Equal(ConfigChangeAttribution.AnchorSourceDefaultTrace, m[ConfigChangeAttribution.MetaAnchorClock]);
             Assert.Equal(
                 new DateTimeOffset(DateTime.SpecifyKind(changedAtUtc, DateTimeKind.Utc)).ToUnixTimeSeconds(),
                 m[ConfigChangeAttribution.MetaChangeTimeUnix]);
@@ -156,7 +156,7 @@ public sealed class ConfigChangeTraceAnchorLivePostgresTests
             Assert.DoesNotContain("default trace", advice.Investigation, StringComparison.Ordinal);
 
             var m = finding.RootFactMetadata!;
-            Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorSource]);
+            Assert.Equal(ConfigChangeAttribution.AnchorSourceObservation, m[ConfigChangeAttribution.MetaAnchorClock]);
             Assert.False(m.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(Maxdop)));
             Assert.Equal(27.0, m[ConfigChangeAttribution.MetaObservationGapHours], precision: 3);
             Assert.Equal(3.0, m[ConfigChangeAttribution.MetaAfterHoursObserved], precision: 1);
