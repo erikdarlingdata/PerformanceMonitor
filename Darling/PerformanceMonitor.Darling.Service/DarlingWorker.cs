@@ -3909,7 +3909,9 @@ public sealed class DarlingWorker : BackgroundService
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
                 Suppressed: false,
                 /* #3282: the gate counts breaching SAMPLES, not sweeps — the sweep runs every 30 s and this
-                   sample advances about once a minute, so without the instant a re-read would count twice. */
+                   sample advances about once a minute, so without the instant a re-read would count twice.
+                   #3744: the row's UTC twin where the store has one, the local stamp before V134 — resolved
+                   in ReadLatestCpuAsync, compared for equality by the gate. */
                 CpuSampleTimeUtc: cpuSampleTime);
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
@@ -5460,20 +5462,34 @@ public sealed class DarlingWorker : BackgroundService
     /// invert east of UTC). An ORDER BY carries no clock frame at all. Internal so the shape and the
     /// same-row-across-offsets behaviour are both pinned by test.</para>
     ///
-    /// <para><b>Not <c>sample_time_utc</c>, deliberately (V134, #3653 item 13).</b> Since that rung every
-    /// row carries the same instant in UTC beside the local stamp, and the windowed CPU reads prefer it. This
-    /// read does not, because the value it projects is not display data and not a window bound: it is the
-    /// CPU alert gate's OBSERVATION IDENTITY (#3282), compared only against the value this same read stored
-    /// last sweep, by <c>&gt;</c>. A frame is irrelevant to that comparison as long as it never changes — and
-    /// switching the projection to the UTC column would change it exactly once, at the upgrade, so that on
-    /// every server EAST of UTC the first post-rung sample (UTC) reads OLDER than the last pre-rung one (local)
-    /// and the gate sees no fresh sample for one offset's worth of hours: CPU alerting frozen, silently, on
-    /// the half of the world where it is morning. West of UTC the same switch would count one stale sample as
-    /// fresh. The tiebreak in the ORDER BY carries no frame either way, and the local column is what every
-    /// row has. Pinned by <c>TimeHonestyRungTests</c>.</para>
+    /// <para><b>Both stamps, and the UTC twin is the identity where the row has one (#3744; V134, #3653
+    /// item 13).</b> Since that rung every row carries the same instant in UTC (<c>sample_time_utc</c>) beside
+    /// the local stamp, and the windowed CPU reads prefer it. This read projects both, and
+    /// <see cref="ReadLatestCpuAsync"/> hands the gate <c>sample_time_utc ?? sample_time</c> as the CPU alert
+    /// gate's OBSERVATION IDENTITY (#3282): the stored UTC instant on every row written since the rung, the
+    /// local stamp on a pre-rung row (the twin is NULL there; nothing was backfilled, for the reason V134
+    /// gives). #3730 left this read on the local stamp on purpose and wrote the trap down: the gate then
+    /// compared identities by <c>&gt;</c>, so a frame that changed once at the upgrade would have read every
+    /// first post-rung UTC instant as OLDER than the last local one on every server EAST of UTC and frozen
+    /// CPU alerting for one offset's worth of hours, and counted one stale sample as fresh west of it. The same
+    /// <c>&gt;</c> was also why the gate went blind for the repeated hour after every autumn fall-back on a
+    /// non-UTC server — the local clock runs backwards and every new sample read as stale. #3744 changed the
+    /// gate's test to EQUALITY (<c>AlertEngine.ObservePersistenceAsync</c> says why order was the wrong test):
+    /// a different instant is a different sample whichever clock stamped it, so the frame switch costs at most
+    /// one extra count of one sample per server, once, and the identity can be the honest UTC instant.</para>
+    ///
+    /// <para><b>The ORDER BY stays on the local stamp.</b> The tiebreak orders rows INSIDE one batch, where
+    /// every row shares a frame (a poll writes the twin on every row or on none), so it carries no frame
+    /// problem; ordering on the twin, or on a <c>COALESCE</c> of the two, would compare a pre-rung LOCAL stamp
+    /// against a post-rung UTC one across batches and, east of UTC, sort a stale pre-rung row as newest for one
+    /// offset's worth of hours after the upgrade. What the tiebreak does leave is the one-batch fall-back quirk
+    /// <c>TimeHonestyRungTests</c> shows: inside the single poll that straddles the transition the EDT-side
+    /// sample sorts as newest by local stamp, a reading stale by one sample, once a year — and with the gate on
+    /// equality that costs nothing downstream, because the next batch's identities differ from it. Pinned by
+    /// <c>TimeHonestyRungTests</c> and <c>LatestCpuReadShapeTests</c>.</para>
     /// </summary>
     internal const string LatestCpuSql = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, sample_time_utc
 FROM cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC, sample_time DESC
@@ -5501,13 +5517,18 @@ LIMIT 1";
         {
             sqlCpu = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0), CultureInfo.InvariantCulture);
             otherCpu = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
-            /* #3282: the sample's own instant, which is the persistence gate's observation identity. Left
-               Kind=Unspecified as it comes off the `timestamp` column (server-LOCAL on the ring-buffer arm,
-               UTC on Azure's — a frame this compare never needs; V134's UTC twin is deliberately not read
-               here, see LatestCpuSql) — it is only ever compared against the value this same read stored
-               last sweep, so coercing it to Kind=Utc would shift one side of that comparison by the host's
-               offset and, east of UTC, freeze the gate. */
-            sampleTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+            /* #3282: the sample's own instant, which is the persistence gate's observation identity. #3744:
+               the row's UTC twin (V134's sample_time_utc, ordinal 3) where the store has one, the local stamp
+               (ordinal 2) on a pre-rung row — the same `??` Lite's MainWindow.AlertEngine applies to its
+               overview read's two columns, so both SKUs hand the shared gate the same identity for the same
+               row. Left Kind=Unspecified as both come off `timestamp` columns (the twin is naive UTC by the
+               store-wide convention; the local stamp is the server's wall clock on the ring-buffer arm and UTC
+               on Azure's): the value is only ever compared for EQUALITY against the one this same read stored
+               last sweep, so coercing either to Kind=Utc would buy nothing and, through Npgsql's timestamptz
+               inference on the way back into the store, could shift the persisted copy by the host's offset. */
+            var sampleTimeUtc = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var sampleTimeLocal = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2);
+            sampleTime = sampleTimeUtc ?? sampleTimeLocal;
         }
 
         double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;

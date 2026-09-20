@@ -27,6 +27,7 @@ public partial class LocalDataService
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
         DateTime? cpuSampleTime = null;
+        DateTime? cpuSampleTimeUtc = null;
         DateTime? cpuCollectionTime = null;
         double? memoryMb = null;
         DateTime? memoryCollectionTime = null;
@@ -35,11 +36,19 @@ public partial class LocalDataService
         DateTime? lastCollection = null;
 
         /* Latest CPU — read both SQL Server CPU and other-process CPU so the UI can surface
-           total non-idle CPU alongside the SQL-only number. */
+           total non-idle CPU alongside the SQL-only number.
+
+           #3744: both stamps. sample_time is the monitored server's LOCAL wall clock (the chart's frame and
+           this ordering's key); sample_time_utc is the same instant in UTC on every row written since v63
+           (#3730) and NULL before. The alert gate's identity is the twin where the row has one, resolved at
+           the snapshot (MainWindow.AlertEngine) exactly as Darling resolves its own read. The ORDER BY stays
+           on the local stamp on purpose: every row has it, and ordering on the twin or a COALESCE of the two
+           would compare a pre-rung local stamp against a post-rung UTC one and, east of UTC, sort a stale
+           pre-rung row as newest for one offset's worth of hours after the upgrade. */
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY sample_time DESC
@@ -61,6 +70,10 @@ LIMIT 1";
                    gate's identity; collection_time is the instant the monitor stored it, comparable with every
                    other captured_at on the MCP surface. */
                 cpuCollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                /* #3744: the UTC twin, NULL on a pre-v63 row. Kept beside the local stamp rather than folded
+                   into it so the summary says which clock each value is in; the alert snapshot does the
+                   folding (twin ?? local) where the gate's identity is built. */
+                cpuSampleTimeUtc = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
             }
         }
 
@@ -132,6 +145,7 @@ WHERE server_id = $1";
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
             CpuSampleTime = cpuSampleTime,
+            CpuSampleTimeUtc = cpuSampleTimeUtc,
             CpuCollectionTime = cpuCollectionTime,
             MemoryMb = memoryMb,
             MemoryCollectionTime = memoryCollectionTime,
@@ -288,12 +302,23 @@ public class ServerSummaryItem
     public double? OtherProcessCpuPercent { get; set; }
 
     /// <summary>
-    /// The <c>sample_time</c> of the CPU reading <see cref="CpuPercent"/> came from (#3282) — the shared
-    /// engine's persistence-gate observation identity, NOT display data. Distinct from
+    /// The <c>sample_time</c> of the CPU reading <see cref="CpuPercent"/> came from (#3282) — the monitored
+    /// server's LOCAL wall clock, and the shared engine's persistence-gate observation identity on a row that
+    /// has no <see cref="CpuSampleTimeUtc"/> (#3744). NOT display data. Distinct from
     /// <see cref="LastCollectionTime"/>, which is the newest collection of anything and is what the
     /// freshness band is computed from.
     /// </summary>
     public DateTime? CpuSampleTime { get; set; }
+
+    /// <summary>
+    /// The same sample's instant in UTC — the row's <c>sample_time_utc</c> twin (Lite v63, #3730), null on a
+    /// row written before that rung. Where present it is the gate's observation identity in place of
+    /// <see cref="CpuSampleTime"/> (#3744); <c>MainWindow.AlertEngine</c> folds the pair as <c>twin ?? local</c>
+    /// when it builds the snapshot, the same rule Darling's <c>ReadLatestCpuAsync</c> applies, so both SKUs hand
+    /// the shared gate the same identity for the same row. Two properties rather than one pre-folded value so
+    /// this summary never holds a timestamp without saying which clock it is in.
+    /// </summary>
+    public DateTime? CpuSampleTimeUtc { get; set; }
 
     /// <summary>The store's <c>collection_time</c> for the CPU row <see cref="CpuPercent"/> came from (#3541
     /// A10) — the stamp get_server_summary publishes as <c>cpu_captured_at</c>. UTC, comparable with every other

@@ -114,6 +114,42 @@ public sealed class TimeHonestyRungTests
             Assert.Contains(phrase, darling, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// #3744, the Lite half of the CPU alert gate's identity: the overview read projects the UTC twin BESIDE the
+    /// local stamp (trailing, so the pre-#3744 ordinals read what they always read), still orders on the local
+    /// stamp (every row has it; a cross-row order on the twin or a COALESCE would compare a pre-rung local stamp
+    /// against a post-rung UTC one), carries both onto <c>ServerSummaryItem</c> under names that say which clock
+    /// each is, and <c>MainWindow.AlertEngine</c> folds them <c>twin ?? local</c> into the snapshot — the same rule
+    /// Darling's <c>ReadLatestCpuAsync</c> applies, pinned there by <c>Darling.Tests/TimeHonestyRungTests</c>. Source
+    /// pins because the snapshot construction sits inside a WPF window.
+    /// </summary>
+    [Fact]
+    public void TheOverviewRead_ProjectsTheTwinBesideTheLocalStamp_AndTheSnapshotFoldsThem()
+    {
+        var overview = Lite.Tests.ParitySource.ReadFile("Lite/Services/LocalDataService.Overview.cs");
+        Assert.Contains(
+            "SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc\nFROM v_cpu_utilization_stats",
+            overview.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("ORDER BY sample_time DESC\nLIMIT 1", overview.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY sample_time_utc", overview, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY COALESCE", overview, StringComparison.Ordinal);
+        Assert.Contains("cpuSampleTimeUtc = reader.IsDBNull(4) ? null : reader.GetDateTime(4);", overview, StringComparison.Ordinal);
+        Assert.Contains("CpuSampleTimeUtc = cpuSampleTimeUtc,", overview, StringComparison.Ordinal);
+        Assert.Contains("#3744", overview, StringComparison.Ordinal);
+
+        Assert.Equal(typeof(DateTime?), typeof(ServerSummaryItem).GetProperty("CpuSampleTime")!.PropertyType);
+        Assert.Equal(typeof(DateTime?), typeof(ServerSummaryItem).GetProperty("CpuSampleTimeUtc")!.PropertyType);
+
+        var window = Lite.Tests.ParitySource.ReadFile("Lite/MainWindow.AlertEngine.cs");
+        Assert.Contains("CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);", window, StringComparison.Ordinal);
+        Assert.Contains("#3744", window, StringComparison.Ordinal);
+
+        /* And the shared gate's side of the contract, in the words both hosts rely on: identity by EQUALITY. */
+        var engine = Lite.Tests.ParitySource.ReadFile("PerformanceMonitor.Alerting/AlertEngine.cs");
+        Assert.Contains("|| sampleUtc.Value != priorRecord.LastObservedSampleUtc.Value;", engine, StringComparison.Ordinal);
+        Assert.DoesNotContain("|| sampleUtc.Value > priorRecord.LastObservedSampleUtc.Value;", engine, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
@@ -237,6 +273,41 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         {
             ServerTimeHelper.UtcOffsetMinutes = savedOffset;
         }
+    }
+
+    /// <summary>
+    /// #3744: the overview read that feeds the CPU alert gate carries BOTH stamps of the newest row. A pre-rung row
+    /// (NULL twin) surfaces its local stamp and a null <c>CpuSampleTimeUtc</c> — the host then hands the gate the
+    /// local stamp, today's behaviour (fixture 5); a post-rung row surfaces both, and the twin is what the gate
+    /// gets. Newest by the LOCAL stamp, which every row has.
+    /// </summary>
+    [Fact]
+    public async Task TheOverviewRead_CarriesBothStampsOfTheNewestCpuRow()
+    {
+        var now = Truncate(DateTime.UtcNow);
+
+        /* Newest row pre-rung: local stamp only. */
+        var utcPre = now.AddMinutes(-2);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", utcPre.AddMinutes(CollectedOffset), null, 41);
+
+        var summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv");
+        Assert.NotNull(summary);
+        Assert.Equal(41, summary!.CpuPercent);
+        Assert.Equal(utcPre.AddMinutes(CollectedOffset), summary.CpuSampleTime);
+        Assert.Null(summary.CpuSampleTimeUtc);
+
+        /* A newer post-rung row: both stamps, and the twin is the honest instant. */
+        var utcPost = now.AddMinutes(-1);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", utcPost.AddMinutes(CollectedOffset), utcPost, 42);
+
+        summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv");
+        Assert.NotNull(summary);
+        Assert.Equal(42, summary!.CpuPercent);
+        Assert.Equal(utcPost.AddMinutes(CollectedOffset), summary.CpuSampleTime);
+        Assert.Equal(utcPost, summary.CpuSampleTimeUtc);
+
+        /* The fold the snapshot applies (MainWindow.AlertEngine, pinned as source above): twin where present. */
+        Assert.Equal(utcPost, summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);
     }
 
     /// <summary>The picker branch (server-local from/to) converts its bounds back to UTC for the twin exactly

@@ -85,8 +85,12 @@ public partial class MainWindow : Window
             Suppressed: suppressPopups,
             /* #3282: the gate counts breaching CPU SAMPLES rather than sweeps. Lite's sweep is the
                30-second overview timer and the ring-buffer sample behind CpuPercent advances about once a
-               minute, so without the instant one sample would fill the streak on its own. */
-            CpuSampleTimeUtc: summary.CpuSampleTime);
+               minute, so without the instant one sample would fill the streak on its own.
+               #3744: the row's UTC twin where the store has one (every row since v63), the local stamp on a
+               pre-rung row — the same `??` Darling's ReadLatestCpuAsync applies, so the shared gate gets one
+               identity per row on both SKUs. The gate compares it for equality, so the one-time local→UTC
+               switch at the upgrade reads as a single new sample rather than a freeze. */
+            CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);
 
         AlertSweepResult sweep;
         try

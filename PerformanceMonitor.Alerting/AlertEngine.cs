@@ -765,7 +765,9 @@ public sealed class AlertEngine
            be reached inside 90 seconds — shorter than every excursion #3282 measured, i.e. the defect intact
            behind a gate that looked like it fixed it. The fresh-sample rule, the null-instant fallback and
            the skip-a-write-when-nothing-moved rule live in ObservePersistenceAsync since #3653 (A5) put a
-           second arm behind the same gate. */
+           second arm behind the same gate. The instant is the row's UTC twin where the store has one and the
+           target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
+           it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
         var (outcome, incidentOpen) = await ObservePersistenceAsync(
             _cpuPersistence, CpuPersistenceMetric, key, snapshot.CpuSampleTimeUtc, breaching,
             CpuBreachSamples, CpuClearSamples);
@@ -894,10 +896,39 @@ public sealed class AlertEngine
     /// every five at the light tier). Without <paramref name="sampleUtc"/> the SAME row would advance the
     /// streak on consecutive sweeps and a K-sample bar would be reached inside K × 30 s of wall clock
     /// regardless of how many samples were actually taken — the measured flap intact behind a gate that
-    /// looked like it fixed it. A sample instant that has not moved past
+    /// looked like it fixed it. A sample instant EQUAL to
     /// <see cref="AlertPersistenceRecord.LastObservedSampleUtc"/> is therefore not an observation at all:
     /// the streak holds, nothing is written, and the caller still learns whether an incident is open so the
     /// standing-condition reminder can run on a sweep that brought no new sample.</para>
+    ///
+    /// <para><b>"Not counted yet" is decided by EQUALITY, not by order (#3744).</b> Until #3744 the rule was
+    /// <c>sampleUtc &gt; LastObservedSampleUtc</c>, and the difference between the two predicates is exactly
+    /// the set of observations whose instant reads OLDER than the one recorded. Every caller hands this method
+    /// the identity of the NEWEST stored row (each read is an <c>ORDER BY … DESC LIMIT 1</c> or a
+    /// <c>MAX(collection_time)</c> over a table its collector only ever appends to — at the store's clock, or
+    /// above its watermark), so between two sweeps that identity can stay equal
+    /// (the same row — not fresh) or change to a different row's; the only way it can change to an EARLIER
+    /// value is a clock running backwards behind the stamp, and both real cases of that are new samples that
+    /// MUST count. The first is the autumn fall-back: <c>cpu_utilization_stats.sample_time</c> is the monitored
+    /// server's LOCAL wall clock, which repeats an hour once a year, so under <c>&gt;</c> every sample in the
+    /// repeated hour read as stale and the CPU gate neither advanced a streak nor cleared an incident for that
+    /// hour on every non-UTC server — at the one instant nobody is watching. The second is the frame change at
+    /// the V134 upgrade (#3730): the CPU reads now prefer the row's UTC twin (<c>sample_time_utc</c>) as the
+    /// identity, so a record persisted by a pre-#3744 build holds a LOCAL instant and the first post-upgrade
+    /// sweep hands over a UTC one — east of UTC that reads older by the offset, and <c>&gt;</c> would have frozen
+    /// the gate for one offset's worth of hours on the half of the world where it is morning, which is why
+    /// #3730 left the identity on the local stamp and wrote the trap down. Equality is frame-blind: a
+    /// different instant is a different observation whichever clock stamped it, so the frame switch costs at
+    /// most ONE extra count of one sample per server, once (the same sample read as local 12:00 and then as
+    /// UTC 17:00 is two identities — the accepted one-time re-anchor), and a fall-back costs nothing at all.
+    /// No persisted frame tag was needed for that, which matters because
+    /// <c>config.alert_persistence_state</c> cannot grow a column without a rung. The residual failure was
+    /// weighed and is stated: should a NEWEST row ever be deleted from under the gate (nothing does that —
+    /// retention removes the oldest), the read would fall back to an older row, equality would count it once,
+    /// and the streak would run ONE sample ahead, where <c>&gt;</c> would have held it until a newer row landed.
+    /// One extra count in a path that does not exist against an hour of silence in one that runs every year is
+    /// not a close call. Pinned in both directions by <c>AlertEngineTests</c>' fall-back and upgrade fixtures
+    /// (fresh) and its repeated-instant fixture (not fresh).</para>
     ///
     /// <para><b>A null sample instant counts every sweep instead</b> (see
     /// <see cref="AlertServerSnapshot.CpuSampleTimeUtc"/> and <see cref="TempDbSpaceInfo.CollectionTimeUtc"/>
@@ -918,7 +949,11 @@ public sealed class AlertEngine
     /// </summary>
     /// <param name="records">The per-server record cache for this metric, seeded from the store at startup.</param>
     /// <param name="metricName">The <c>(server, metric)</c> key the record is persisted under.</param>
-    /// <param name="sampleUtc">The observation's sample instant, or null for a host that has none.</param>
+    /// <param name="sampleUtc">
+    /// The observation's sample instant — the NEWEST stored row's identity, compared for equality only — or
+    /// null for a host that has none. Naive UTC for every arm today, except the CPU arm on a row written before
+    /// V134 (the target's local clock; see <see cref="AlertServerSnapshot.CpuSampleTimeUtc"/>).
+    /// </param>
     /// <returns>The edge this observation produced, and whether the subject is firing after it.</returns>
     private async Task<(PersistenceOutcome Outcome, bool IncidentOpen)> ObservePersistenceAsync(
         ConcurrentDictionary<string, AlertPersistenceRecord> records, string metricName, string key,
@@ -926,9 +961,11 @@ public sealed class AlertEngine
     {
         var priorRecord = records.TryGetValue(key, out var cached) ? cached : AlertPersistenceRecord.Initial;
 
+        /* != and not > — a different instant is a different sample whichever clock stamped it; the summary
+           above says why order was the wrong test (#3744). */
         bool freshSample = !sampleUtc.HasValue
             || !priorRecord.LastObservedSampleUtc.HasValue
-            || sampleUtc.Value > priorRecord.LastObservedSampleUtc.Value;
+            || sampleUtc.Value != priorRecord.LastObservedSampleUtc.Value;
 
         if (!freshSample)
         {
