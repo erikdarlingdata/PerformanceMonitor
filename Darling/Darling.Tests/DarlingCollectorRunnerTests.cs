@@ -905,11 +905,20 @@ public class ServerWatermarkDispatchGateTests
     /// that performs the server-scoped watermark read, so deleting the gate — or adding a second, ungated
     /// read site — fails here. It cannot prove the branch polarity; that is what the behavioural pins above
     /// are for. The two together are the claim.</para>
+    ///
+    /// <para><b>Two readers since #3778.</b> <c>GetLastCollectedTimeWithFrameAsync</c> is the server-scoped read
+    /// for a definition that declares a <c>UtcWatermarkColumn</c> (the CPU collector's <c>sample_time_utc</c>
+    /// beside its local <c>sample_time</c>), and it is a server-scoped read like the other: the same #2797
+    /// argument applies to it — a fan-out cycle overwrites the value before any query is built — so every body
+    /// that calls EITHER reader must call the gate. Tracked as one family so a third reader added under the
+    /// same name prefix has to be enlisted here on purpose, and the pair read's own presence is asserted so the
+    /// widening cannot pass on the plain read alone.</para>
     /// </summary>
     [Fact]
     public void EveryServerScopedWatermarkReadSite_AlsoCallsTheDispatchGate()
     {
         const string Read = nameof(DarlingCollectorRunner.GetLastCollectedTimeAsync);
+        const string PairRead = nameof(DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync);
         const string Gate = nameof(DarlingCollectorRunner.ServerWatermarkIsDiscarded);
 
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
@@ -919,34 +928,46 @@ public class ServerWatermarkDispatchGateTests
            right the hard way are now properties of the scanner: MethodSpec resolution, without which the
            generic gate read as never called, and no cursor skip. Grouped by METHOD TOKEN rather than by name,
            so two overloads cannot be merged into one apparent body. */
-        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, Gate])
+        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, PairRead, Gate])
             .GroupBy(c => c.MethodToken);
 
         var readerBodies = 0;
+        var pairReaderBodies = 0;
         var gatedBodies = 0;
         var totalGateCalls = 0;
 
         foreach (var bodyCalls in byBody)
         {
             var callsRead = false;
+            var callsPairRead = false;
             var callsGate = false;
 
             foreach (var call in bodyCalls)
             {
-                if (call.CalleeName == Read)
-                {
-                    callsRead = true;
-                }
-                else
+                if (call.CalleeName == Gate)
                 {
                     callsGate = true;
                     totalGateCalls++;
+                }
+                else if (call.CalleeName == PairRead)
+                {
+                    callsRead = true;
+                    callsPairRead = true;
+                }
+                else
+                {
+                    callsRead = true;
                 }
             }
 
             if (callsRead)
             {
                 readerBodies++;
+                if (callsPairRead)
+                {
+                    pairReaderBodies++;
+                }
+
                 if (callsGate)
                 {
                     gatedBodies++;
@@ -957,6 +978,9 @@ public class ServerWatermarkDispatchGateTests
         Assert.True(readerBodies > 0,
             $"No method body in the service assembly calls {Read} — either the read moved or the IL walk "
             + "resolved nothing. Either way this test can say nothing about the gate.");
+        Assert.True(pairReaderBodies > 0,
+            $"No method body in the service assembly calls {PairRead} — the #3778 frame-aware read is declared "
+            + "and consulted by nothing, so the CPU collector's watermark is back on the local stamp alone.");
         Assert.True(totalGateCalls > 0,
             $"{Gate} is never called anywhere in the service assembly. The gate exists but nothing consults "
             + "it, so the server-scoped watermark read is unguarded and #2797 is not fixed.");

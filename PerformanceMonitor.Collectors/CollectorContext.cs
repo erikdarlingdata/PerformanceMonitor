@@ -60,6 +60,29 @@ public sealed class CollectorContext
     public DateTime? Watermark { get; set; }
 
     /// <summary>
+    /// Which of the definition's two watermark columns <see cref="Watermark"/> was read from (#3778): true
+    /// when the host resolved it from <c>UtcWatermarkColumn</c> (the store held at least one row with the UTC
+    /// twin, so the value is a UTC instant), false when it came from <c>WatermarkColumn</c> — which for the one
+    /// definition that declares both means a LOCAL wall-clock stamp off pre-rung rows, and for every other
+    /// definition means what it always meant, because they declare no UTC twin and the host never sets this.
+    /// False whenever <see cref="Watermark"/> is null.
+    ///
+    /// <para>The point of carrying the frame rather than the value alone: a definition that dedups client-side
+    /// compares each row's stamp against the watermark, and a comparison across frames is exactly the lie the
+    /// V134 rung retired. With the frame stated, <c>CpuUtilizationCollector.ReadAsync</c> compares the row's
+    /// UTC twin against a UTC watermark and its local stamp against a local one — so the first post-upgrade
+    /// run (no UTC value stored yet) dedups local-to-local exactly as it did before, and every later run dedups
+    /// UTC-to-UTC, which is the comparison that survives the autumn fall-back hour.</para>
+    ///
+    /// <para>Init-only, unlike <see cref="Watermark"/>, and that asymmetry is a stated boundary: the per-database
+    /// and per-item refreshes that mutate <see cref="Watermark"/> mid-cycle read the declared column alone and
+    /// would leave this flag stale if a definition ever declared a UTC twin together with a
+    /// <c>PerDatabaseWatermarkColumn</c>. None does, and <c>CpuUtilizationCollectorDefinitionTests</c> pins
+    /// that; the day one does, those refreshes have to carry the pair and this becomes settable with them.</para>
+    /// </summary>
+    public bool WatermarkFromUtcColumn { get; init; }
+
+    /// <summary>
     /// The database the host's Azure per-database loop is currently reading, set per iteration
     /// (null outside that loop — single-connection runs and non-Azure targets). The XE collectors
     /// use it as the authoritative <c>database_name</c> for rows read on this path: a

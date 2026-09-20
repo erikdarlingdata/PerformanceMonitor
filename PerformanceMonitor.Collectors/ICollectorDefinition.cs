@@ -54,6 +54,41 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     string? WatermarkColumn { get; }
 
     /// <summary>
+    /// A UTC column stored BESIDE <see cref="WatermarkColumn"/> that the host should PREFER as the watermark
+    /// where the store has it (#3778): the host reads <c>MAX(UtcWatermarkColumn)</c> and
+    /// <c>MAX(WatermarkColumn)</c> in one round trip, hands the definition the first when it is non-null and
+    /// the second otherwise, and says which it handed over through
+    /// <see cref="CollectorContext.WatermarkFromUtcColumn"/>, so the definition can compare each row's stamp IN
+    /// THE WATERMARK'S FRAME. Null when the collector has no such column (the common case — every collector
+    /// but <c>cpu_utilization</c>), which leaves the host's watermark read byte-identical to what it was.
+    ///
+    /// <para><b>Why a second column and a stated frame rather than simply re-pointing
+    /// <see cref="WatermarkColumn"/>.</b> <c>cpu_utilization_stats.sample_time</c> is the monitored server's
+    /// LOCAL wall clock and, until this member existed, the collector's watermark and dedup key. From the
+    /// autumn fall-back instant that clock repeats an hour, so every ring-buffer sample for the next hour
+    /// carried a stamp at or below the newest stored one and the client-side dedup dropped them all — no CPU
+    /// row landed for roughly an hour on every non-UTC server, once a year. <c>sample_time_utc</c> (Darling
+    /// V134 / Lite v63, #3730) is the same instant in UTC, projected on every row the collector reads today
+    /// and NULL on every row written before that rung. Re-pointing the watermark at it outright would make
+    /// <c>MAX(sample_time_utc)</c> NULL on a store with no post-rung rows, so the first post-upgrade run would
+    /// take the first-run fallback and re-collect ~60 samples the store already holds under their local
+    /// stamps: a one-time duplicate hour per server. Carrying BOTH reads and the frame closes that: the first
+    /// post-upgrade run finds no UTC value, falls to the local one and dedups local-to-local exactly as before
+    /// (nothing duplicated, nothing dropped beyond what the local rule always dropped); that run stores rows
+    /// with the twin, and every run after it dedups UTC-to-UTC forever, through every transition.</para>
+    ///
+    /// <para><b>Boundaries, stated.</b> Honoured on the SERVER-scoped watermark read only. The per-database
+    /// (Azure) and per-item (enumeration) refreshes read <see cref="WatermarkColumn"/> alone and never touch
+    /// the frame flag, so a definition must not declare this together with
+    /// <see cref="PerDatabaseWatermarkColumn"/> until those refreshes carry the pair too —
+    /// <c>CpuUtilizationCollectorDefinitionTests</c> pins that no definition does. It changes no query text:
+    /// a definition that filters server-side on the watermark (the CPU collector's Azure arm binds it as
+    /// <c>@last_sample_time</c> against <c>drs.end_time</c>, which is UTC and equal to both stored columns
+    /// there) sees the same value in either frame.</para>
+    /// </summary>
+    string? UtcWatermarkColumn { get; }
+
+    /// <summary>
     /// Numeric (bigint) column the host should read its latest already-collected value of (from the
     /// host's own store) before building the query — exposed to the definition as
     /// <see cref="CollectorContext.NumericWatermark"/> for server-side filters and client-side dedup

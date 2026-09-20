@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
@@ -37,7 +38,12 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The collector shapes (the UTC twin projected last on every arm off <c>SYSUTCDATETIME()</c>, the zone
 /// read in its own gated dynamic batch) are pinned in <c>CpuUtilizationCollectorDefinitionTests</c> and
 /// <c>ServerPropertiesCollectorDefinitionTests</c>; the Darling side in <c>Darling.Tests/TimeHonestyRungTests</c>.
-/// What is here is the DuckDB ladder, the generator, and the Lite reads end to end on a real DuckDB.</para>
+/// What is here is the DuckDB ladder, the generator, and the Lite reads end to end on a real DuckDB — and,
+/// since #3778, the collector's WATERMARK read on this side: the runner reads <c>MAX(sample_time_utc)</c> and
+/// <c>MAX(sample_time)</c> in one round trip for the one definition that declares a UTC twin, hands the
+/// collector the twin's value where the store has one and the local stamp otherwise, and says which, so the
+/// ring-buffer dedup compares in the watermark's frame and the autumn fall-back hour lands
+/// (<see cref="WatermarkFrameReadTests"/>; the dedup itself is pinned in <c>CpuUtilizationCollectorDefinitionTests</c>).</para>
 /// </summary>
 public sealed class TimeHonestyRungTests
 {
@@ -149,6 +155,146 @@ public sealed class TimeHonestyRungTests
         var engine = Lite.Tests.ParitySource.ReadFile("PerformanceMonitor.Alerting/AlertEngine.cs");
         Assert.Contains("|| sampleUtc.Value != priorRecord.LastObservedSampleUtc.Value;", engine, StringComparison.Ordinal);
         Assert.DoesNotContain("|| sampleUtc.Value > priorRecord.LastObservedSampleUtc.Value;", engine, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3778, the Lite runner's half: the watermark branch routes a definition with NO <c>UtcWatermarkColumn</c>
+    /// through the unchanged <c>GetLastCollectedTimeAsync</c> — whose SQL is the byte-identical string it was, so
+    /// every collector but <c>cpu_utilization</c> reads exactly what it read — and only a definition WITH one
+    /// through the pair read, whose SQL puts the twin's maximum first and the declared column's second, one
+    /// statement, one scan; and the frame the pair read returns rides onto the context as
+    /// <c>WatermarkFromUtcColumn</c>. Source pins because the runner's watermark read sits inside a method that
+    /// needs a live monitored server; the reads themselves run against a real DuckDB in
+    /// <see cref="WatermarkFrameReadTests"/>.
+    /// </summary>
+    [Fact]
+    public void TheRunner_ReadsTheWatermarkPair_OnlyForADefinitionWithAUtcTwin_AndBothReadsSpellTheirSql()
+    {
+        var runner = Lite.Tests.ParitySource.ReadFile("Lite/Services/RemoteCollectorService.DefinitionRunner.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains(
+            "        else if (definition.UtcWatermarkColumn is null)\n" +
+            "        {\n" +
+            "            watermark = await GetLastCollectedTimeAsync(serverId, definition.TargetTable, definition.WatermarkColumn, cancellationToken);\n" +
+            "        }",
+            runner, StringComparison.Ordinal);
+        Assert.Contains(
+            "            (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(\n" +
+            "                serverId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn, cancellationToken);",
+            runner, StringComparison.Ordinal);
+        Assert.Contains("            WatermarkFromUtcColumn = watermarkFromUtcColumn,", runner, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(runner, "GetLastCollectedTimeWithFrameAsync\\("));
+
+        var service = Lite.Tests.ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs");
+        Assert.Contains("cmd.CommandText = $\"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1\";", service, StringComparison.Ordinal);
+        Assert.Contains("cmd.CommandText = $\"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1\";", service, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #3778: Lite's watermark pair read against a real DuckDB through the real <c>RemoteCollectorService</c>
+/// method (exposed the way <c>CollectorStateStoreTests</c> exposes the state store), beside the unchanged plain
+/// read on the same table. What a store looks like on the morning of the upgrade (pre-rung rows only: the local
+/// maximum, frame LOCAL), after the first post-upgrade run (any twin: the twin's maximum, frame UTC), and in
+/// the shape that makes the frame matter — an upgrade INSIDE the repeated hour, where a pre-rung row's local
+/// stamp exceeds every post-rung row's local stamp, so the plain read's answer and the pair read's answer are
+/// different rows in different frames. Scoped per server, because the flag flips per server.
+/// </summary>
+public sealed class WatermarkFrameReadTests : IClassFixture<SharedDuckDbFixture>
+{
+    private const string Table = "cpu_utilization_stats";
+    private const string Local = "sample_time";
+    private const string Utc = "sample_time_utc";
+
+    private readonly DuckDbInitializer _duckDb;
+    private readonly WatermarkReads _reads;
+    private long _nextId = -3778;
+
+    public WatermarkFrameReadTests(SharedDuckDbFixture fixture)
+    {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+        _reads = new WatermarkReads(_duckDb);
+    }
+
+    /// <summary>Exposes the runner's two protected watermark reads; only <c>_duckDb</c> is exercised.</summary>
+    private sealed class WatermarkReads(DuckDbInitializer duckDb)
+        : RemoteCollectorService(duckDb, serverManager: null!, scheduleManager: null!)
+    {
+        public Task<DateTime?> PlainAsync(int serverId) =>
+            GetLastCollectedTimeAsync(serverId, Table, Local, CancellationToken.None);
+
+        public Task<(DateTime? Value, bool FromUtcColumn)> PairAsync(int serverId) =>
+            GetLastCollectedTimeWithFrameAsync(serverId, Table, Local, Utc, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AnEmptyStore_ReadsTheFirstRunPair_AndThePlainReadReadsNull()
+    {
+        Assert.Equal(((DateTime?)null, false), await _reads.PairAsync(1));
+        Assert.Null(await _reads.PlainAsync(1));
+    }
+
+    [Fact]
+    public async Task PreRungRowsOnly_ReadTheLocalMaximum_InTheLocalFrame_SameAsThePlainRead()
+    {
+        /* The morning of the upgrade at UTC-4: three pre-rung rows, twin NULL. */
+        var utc = new DateTime(2026, 7, 1, 16, 0, 0);
+        await SeedAsync(1, utc.AddMinutes(-2).AddHours(-4), null);
+        await SeedAsync(1, utc.AddMinutes(-1).AddHours(-4), null);
+        await SeedAsync(1, utc.AddHours(-4), null);
+
+        Assert.Equal(((DateTime?)utc.AddHours(-4), false), await _reads.PairAsync(1));
+        Assert.Equal(utc.AddHours(-4), await _reads.PlainAsync(1));
+    }
+
+    [Fact]
+    public async Task OnePostRungRow_FlipsTheFrameToUtc_EvenWhenAPreRungLocalStampIsLater_AndOnlyForItsServer()
+    {
+        /* America/New_York, upgraded INSIDE the repeated hour: the last pre-rung row is 01:59 EDT (05:59 UTC),
+           the first post-rung row is 01:05 EST (06:05 UTC). By local stamp the pre-rung row is the newer one;
+           by instant it is fifty-four minutes older. */
+        var transitionUtc = new DateTime(2026, 11, 1, 6, 0, 0);
+        var preRungLocal = transitionUtc.AddMinutes(-1).AddHours(-4);   /* 01:59 */
+        var postRungUtc = transitionUtc.AddMinutes(5);                  /* 06:05 */
+        var postRungLocal = postRungUtc.AddHours(-5);                   /* 01:05 */
+        Assert.True(preRungLocal > postRungLocal, "the fixture must put the pre-rung LOCAL stamp above the post-rung one, or the two reads agree by accident");
+
+        await SeedAsync(1, preRungLocal, null);
+        await SeedAsync(1, postRungLocal, postRungUtc);
+
+        /* A different server still on pre-rung rows: its frame does not flip because server 1's did. */
+        await SeedAsync(2, preRungLocal, null);
+
+        /* The pair read takes the twin and says so; the plain read, unchanged, still answers the local maximum —
+           the pre-rung row — which under the old rule was the watermark every EST-side sample sat below. */
+        Assert.Equal(((DateTime?)postRungUtc, true), await _reads.PairAsync(1));
+        Assert.Equal(preRungLocal, await _reads.PlainAsync(1));
+
+        Assert.Equal(((DateTime?)preRungLocal, false), await _reads.PairAsync(2));
+        Assert.Equal(preRungLocal, await _reads.PlainAsync(2));
+
+        /* A second post-rung row moves the UTC watermark forward; the pre-rung row's later local stamp never
+           enters the comparison. */
+        await SeedAsync(1, postRungLocal.AddMinutes(1), postRungUtc.AddMinutes(1));
+        Assert.Equal(((DateTime?)postRungUtc.AddMinutes(1), true), await _reads.PairAsync(1));
+    }
+
+    private async Task SeedAsync(int serverId, DateTime sampleTimeServerLocal, DateTime? sampleTimeUtc)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var conn = _duckDb.CreateConnection();
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO cpu_utilization_stats
+            (collection_id, collection_time, server_id, server_name, sample_time,
+             sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time_utc)
+            VALUES ($1, $2, $3, $4, $5, 50, 5, $6)";
+        foreach (var v in new object[] { _nextId--, DateTime.UtcNow, serverId, "WatermarkFrameSrv" + serverId, sampleTimeServerLocal, (object?)sampleTimeUtc ?? DBNull.Value })
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
     }
 }
 

@@ -44,6 +44,16 @@ namespace Darling.Tests;
 /// instant off <c>SYSUTCDATETIME()</c>, written beside it so the readers that window against UTC can stop
 /// deriving the offset. The pin below therefore no longer says "no UTC clock in this file" — it says which
 /// column each clock feeds, which is the only statement that is true of the file now.</para>
+///
+/// <para><b>And since #3778 the WATERMARK is the twin where the store has it.</b> The local column stayed the
+/// dedup key through V134 because a watermark that changed frame mid-series would re-ingest or skip one
+/// offset's worth of samples — but a LOCAL dedup key drops the autumn fall-back hour outright (every sample in
+/// the repeated hour sits at or below the pre-transition maximum), which #3730's live straddle test could not
+/// see because it planted through <c>WritePayload</c>, below the dedup. So the frame now changes ONCE, with the
+/// frame STATED: the host prefers <c>MAX(sample_time_utc)</c> and falls to <c>MAX(sample_time)</c> only while no
+/// row carries the twin, says which through <c>CollectorContext.WatermarkFromUtcColumn</c>, and the dedup
+/// compares each row on the same column. Neither clock function moved for it — the pins above hold — and
+/// <see cref="CpuUtilization_DedupsInTheWatermarksFrame_NotOnTheLocalStampAlone"/> holds the comparison.</para>
 /// </summary>
 public sealed class CollectorTimestampFrameTests
 {
@@ -127,6 +137,26 @@ public sealed class CollectorTimestampFrameTests
         Assert.Single(s_localClock.Matches(sql));
         Assert.Single(s_utcClock.Matches(sql));
         Assert.DoesNotContain("DATEDIFF", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3778: the ring-buffer dedup compares the row IN THE WATERMARK'S FRAME — the twin under a UTC watermark,
+    /// the local stamp under a local one — and the pre-#3778 shape, the local stamp compared unconditionally,
+    /// is gone. Read off the SOURCE with comments stripped (the collector's own essay names both shapes), the
+    /// way the clock pins above are. The behaviour — the fall-back hour landing, the upgrade day's zero
+    /// duplicates — runs through the real <c>ReadAsync</c> in <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>;
+    /// this is the frame-per-column statement of the same fact, beside the frame-per-column statements above.
+    /// </summary>
+    [Fact]
+    public void CpuUtilization_DedupsInTheWatermarksFrame_NotOnTheLocalStampAlone()
+    {
+        var code = QueryTextOf("CpuUtilizationCollector.cs");
+
+        Assert.Contains("var stampInWatermarkFrame = context.WatermarkFromUtcColumn ? sampleTimeUtc : sampleTime;", code, StringComparison.Ordinal);
+        Assert.Contains("&& stampInWatermarkFrame <= context.Watermark.Value)", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("sampleTime <= context.Watermark.Value", code, StringComparison.Ordinal);
+        Assert.Equal("sample_time_utc", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.UtcWatermarkColumn);
+        Assert.Equal("sample_time", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.WatermarkColumn);
     }
 
     /// <summary>

@@ -47,9 +47,10 @@ namespace PerformanceMonitor.Collectors;
 /// rung).</b> <c>sample_time</c> is, and stays, the MONITORED SERVER'S LOCAL wall clock: on the ring-buffer
 /// arm it is <c>SYSDATETIME()</c> minus the entry's age, and every reader that windows or plots it in the
 /// server's own frame (Lite's CPU chart, Lite's <c>GetTimeRangeServerLocal</c> window, the viewer's
-/// Server-time mode) wants exactly that value; it is also this collector's WATERMARK, and a watermark that
-/// changed frame mid-series would re-ingest or skip one UTC offset's worth of samples on the first poll
-/// after the upgrade. <c>sample_time_utc</c> is the SAME instant in UTC, written beside it by the same
+/// Server-time mode) wants exactly that value; it was also this collector's WATERMARK when the rung landed,
+/// and a watermark that changed frame mid-series without saying so would re-ingest or skip one UTC offset's
+/// worth of samples on the first poll after the upgrade (the next paragraph is how it changes frame once,
+/// saying so). <c>sample_time_utc</c> is the SAME instant in UTC, written beside it by the same
 /// arithmetic off <c>SYSUTCDATETIME()</c> (the two clock functions are runtime constants folded once per
 /// statement, so the pair differs by the server's offset to within the nanoseconds between two clock
 /// reads — not by a minute-quantised DATEDIFF that could straddle a boundary). Readers that compare the
@@ -61,6 +62,37 @@ namespace PerformanceMonitor.Collectors;
 /// plausible direction. A stored UTC instant needs no offset at all. Pre-rung rows carry NULL and keep
 /// the derivation; nothing is backfilled, because the offset a row's server HAD at its sample time is the
 /// very thing the store never recorded (<c>PgMigrations</c> V134 says why in full).</para>
+///
+/// <para><b>The watermark and the dedup key are the UTC twin where the store has it, else the local stamp —
+/// with the frame stated (#3778, the collector half of #3744's blind hour).</b> The ring-buffer arm cannot
+/// filter on its computed stamp in SQL, so <see cref="ReadAsync"/> dedups client-side: a row whose stamp is
+/// at or below the watermark is one the store already holds. While that stamp was the LOCAL clock, the autumn
+/// fall-back broke it: from the transition instant the local clock repeats an hour, every sample for the next
+/// hour carries a stamp at or below the newest one stored before the transition, and every one of them was
+/// dropped as already collected — no <c>cpu_utilization_stats</c> row for roughly an hour on every non-UTC
+/// server, once a year. #3744 / #3774 fixed the alert GATE's half (it compares identities for equality now);
+/// this is the collector's half, and it was invisible because #3730's live straddle test planted its batch
+/// through <see cref="WritePayload"/>, below the dedup. The fix: <see cref="UtcWatermarkColumn"/> names
+/// <c>sample_time_utc</c>, both hosts read <c>MAX(sample_time_utc)</c> and <c>MAX(sample_time)</c> in one round
+/// trip and hand over the first when it is non-null (a UTC instant) and the second otherwise (a local stamp
+/// off pre-rung rows), stating which through <see cref="CollectorContext.WatermarkFromUtcColumn"/>; the dedup
+/// then compares the row's <see cref="Row.SampleTimeUtc"/> against a UTC watermark and its
+/// <see cref="Row.SampleTime"/> against a local one. UTC never repeats an hour, so under a UTC watermark the
+/// repeated local hour lands sample by sample.</para>
+///
+/// <para><b>The upgrade day, bounded.</b> A store whose newest CPU row predates the rung has no UTC value to
+/// read, so the first post-upgrade run gets the local watermark and compares local-to-local: exactly the
+/// pre-#3778 rule, zero samples duplicated, zero dropped beyond what that rule always dropped. That run
+/// stores rows carrying the twin; from the next run on the read finds a UTC value and the comparison is
+/// UTC-to-UTC forever. This is why the watermark was not simply re-pointed at the twin: <c>MAX(sample_time_utc)</c>
+/// is NULL on a store with no post-rung rows, and a NULL watermark is the first-run fallback — the whole
+/// <c>TOP (60)</c> re-collected under stamps the store already holds, a duplicate hour per server, once. The
+/// alternatives (a <c>COALESCE</c> across the two columns inside one <c>MAX</c>, or converting the local
+/// watermark by the batch's own <c>sample_time - sample_time_utc</c> offset) each compare across frames on the
+/// upgrade run, and a cross-frame comparison is at best a bound of one offset's worth of samples; the stated
+/// frame's bound is zero. What nobody promised: a fall-back that happens to straddle the FIRST post-upgrade
+/// run itself is dropped exactly as it would have been the day before, because that run is still on the
+/// local rule. Once a year, one server class, one specific hour, and the run after it is on UTC.</para>
 ///
 /// <para>On the Azure SQL DB arm the two columns hold the same value, and that is a fact rather than a
 /// shortcut: <c>sys.dm_db_resource_stats.end_time</c> is documented UTC, and Azure SQL Database's server
@@ -78,10 +110,11 @@ public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtiliza
 
     /// <summary>
     /// One CPU sample. <paramref name="SampleTime"/> is the monitored server's LOCAL wall clock (the
-    /// watermark; unchanged since the collector was extracted). <paramref name="SampleTimeUtc"/> is the same
-    /// instant in UTC (#3653 item 13, Q7) — non-null on every row this collector reads today, nullable
-    /// because the STORED column is (pre-rung rows never recorded it) and because the writer's contract is
-    /// "one value per declared column", NULL included. No default, so every constructor site states it.
+    /// display frame Lite's chart plots, and the dedup key under a LOCAL watermark — the pre-rung rows' frame).
+    /// <paramref name="SampleTimeUtc"/> is the same instant in UTC (#3653 item 13, Q7), the dedup key under a
+    /// UTC watermark (#3778) — non-null on every row this collector reads today, nullable because the STORED
+    /// column is (pre-rung rows never recorded it) and because the writer's contract is "one value per declared
+    /// column", NULL included. No default, so every constructor site states it.
     /// </summary>
     public readonly record struct Row(DateTime SampleTime, int SqlServerCpuUtilization, int? OtherProcessCpuUtilization, DateTime? SampleTimeUtc);
 
@@ -179,8 +212,10 @@ SELECT TOP (60)
        the same) anchored on SYSUTCDATETIME() instead of SYSDATETIME(). Both clock functions are runtime
        constants, folded once per statement, so the two columns differ by exactly the server's UTC offset
        at the moment of the poll. sample_time itself is deliberately NOT changed to UTC: it is the
-       watermark and the server-local display value (see the class remarks); readers that want the UTC
-       frame take this column and fall back to their pre-rung derivation where it is NULL. */
+       server-local display value and the watermark a store with no post-rung rows still hands back (see
+       the class remarks; #3778 moved the watermark and the dedup onto THIS column wherever the store has
+       it); readers that want the UTC frame take this column and fall back to their pre-rung derivation
+       where it is NULL. */
     sample_time_utc = DATEADD(
         MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
         DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME()))
@@ -218,6 +253,14 @@ SELECT
     public override string TargetTable => "cpu_utilization_stats";
 
     public override string? WatermarkColumn => "sample_time";
+
+    /// <summary>
+    /// #3778: the host prefers <c>MAX(sample_time_utc)</c> as the watermark and falls to <c>MAX(sample_time)</c>
+    /// only while the store holds no row with the twin, stating which it chose through
+    /// <see cref="CollectorContext.WatermarkFromUtcColumn"/>; <see cref="ReadAsync"/> dedups in that frame.
+    /// The class remarks carry the fall-back mechanism and the upgrade-day bound.
+    /// </summary>
+    public override string? UtcWatermarkColumn => "sample_time_utc";
 
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
@@ -269,8 +312,23 @@ SELECT
         {
             var sampleTime = reader.GetDateTime(0);
 
-            /* Client-side dedup for the ring buffer (computed sample_time can't be filtered in SQL). */
-            if (!context.Target.IsAzureSqlDb && context.Watermark.HasValue && sampleTime <= context.Watermark.Value)
+            /* The UTC twin (#3653 item 13). Every arm projects it non-null; the guard is for the store's
+               nullable column and the writer's one-value-per-column contract, not for a case the queries
+               above produce. Read BEFORE the dedup since #3778, because the dedup may key on it. */
+            var sampleTimeUtc = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+
+            /* Client-side dedup for the ring buffer (computed sample_time can't be filtered in SQL), IN THE
+               WATERMARK'S FRAME (#3778): the host says which column it read the watermark from, and the row
+               is compared on the same column. Under a UTC watermark (every run after the first post-upgrade
+               one) that is the twin, which never repeats an hour, so the autumn fall-back's repeated local
+               hour lands; under a LOCAL watermark (pre-rung rows only, the first post-upgrade run) it is the
+               local stamp, the pre-#3778 rule exactly, so that run neither duplicates nor drops anything the
+               old rule would not have. A row with no twin under a UTC watermark cannot be placed in that
+               frame at all: C#'s lifted `<=` on a null left operand is false, so such a row is KEPT rather
+               than compared across frames or dropped on a guess. No arm produces one — the pins say so —
+               and if one ever did, a visible duplicate beats a silent hole. */
+            var stampInWatermarkFrame = context.WatermarkFromUtcColumn ? sampleTimeUtc : sampleTime;
+            if (!context.Target.IsAzureSqlDb && context.Watermark.HasValue && stampInWatermarkFrame <= context.Watermark.Value)
             {
                 continue;
             }
@@ -280,10 +338,7 @@ SELECT
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 /* NULL = host/other CPU not derivable (SystemIdle reported 0, Issue #1048) */
                 reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2),
-                /* The UTC twin (#3653 item 13). Every arm projects it non-null; the guard is for the
-                   store's nullable column and the writer's one-value-per-column contract, not for a case
-                   the queries above produce. */
-                reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)));
+                sampleTimeUtc));
         }
 
         /* #3653 A5: the batch's SECOND result set — the instance identity. Read off the payload and after
@@ -312,9 +367,9 @@ SELECT
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         writer
-            .Value(row.SampleTime)                  /* sample_time TIMESTAMP (server-local; the watermark) */
+            .Value(row.SampleTime)                  /* sample_time TIMESTAMP (server-local; the watermark only while the store has no twin, #3778) */
             .Value(row.SqlServerCpuUtilization)     /* sqlserver_cpu_utilization INTEGER */
             .Value(row.OtherProcessCpuUtilization)  /* other_process_cpu_utilization INTEGER (nullable) */
-            .Value(row.SampleTimeUtc);              /* sample_time_utc TIMESTAMP (nullable; the same instant in UTC, #3653 item 13) */
+            .Value(row.SampleTimeUtc);              /* sample_time_utc TIMESTAMP (nullable; the same instant in UTC, #3653 item 13; the watermark where present, #3778) */
     }
 }

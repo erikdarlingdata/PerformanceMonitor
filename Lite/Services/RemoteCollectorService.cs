@@ -1421,6 +1421,54 @@ WHERE server_id = $3";
     }
 
     /// <summary>
+    /// The watermark read for a definition that declares a UTC twin beside its watermark column (#3778):
+    /// <c>MAX(utcColumnName)</c> and <c>MAX(columnName)</c> in one round trip, returning the twin's value with
+    /// <c>FromUtcColumn = true</c> when the store holds at least one row carrying it, else the declared column's
+    /// value with <c>false</c>, else <c>(null, false)</c> — the first-run fallback, exactly as
+    /// <see cref="GetLastCollectedTimeAsync"/> signals it. The runner puts the pair on
+    /// <see cref="PerformanceMonitor.Collectors.CollectorContext.Watermark"/> and
+    /// <see cref="PerformanceMonitor.Collectors.CollectorContext.WatermarkFromUtcColumn"/>, and the definition's
+    /// dedup compares each row IN THAT FRAME — the CPU collector's UTC twin against a UTC watermark, its local
+    /// stamp against a local one — which is what lets the autumn fall-back's repeated local hour land instead
+    /// of being dropped as already collected. Only <c>cpu_utilization</c> declares a twin today; every other
+    /// definition still goes through <see cref="GetLastCollectedTimeAsync"/> and its unchanged SQL. The
+    /// Darling twin is <c>DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync</c>.
+    ///
+    /// <para>The twin wins whenever it exists, without comparing the two maxima: it is NULL on every row written
+    /// before Lite v63 and non-null on every row the collector has written since, so once any post-rung row
+    /// exists the newest instant is a post-rung one. Comparing the two maxima to decide would itself be the
+    /// cross-frame comparison this read exists to avoid. Both values come from ONE scan of the same rows, so
+    /// "the twin is NULL, use the local stamp" is a statement about the store and not about a race between
+    /// two reads.</para>
+    /// </summary>
+    protected async Task<(DateTime? Value, bool FromUtcColumn)> GetLastCollectedTimeWithFrameAsync(
+        int serverId, string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                    return (reader.GetDateTime(0), true);
+
+                if (!reader.IsDBNull(1))
+                    return (reader.GetDateTime(1), false);
+            }
+        }
+        catch
+        {
+            /* If DuckDB query fails, caller uses fallback window — the sibling's contract. */
+        }
+        return (null, false);
+    }
+
+    /// <summary>
     /// The database-scoped twin of <see cref="GetLastCollectedTimeAsync"/>, for definitions that
     /// declare a <see cref="PerformanceMonitor.Collectors.ICollectorDefinition{TRow}.PerDatabaseWatermarkColumn"/>
     /// (Azure SQL DB per-database XE capture): the newest already-collected value for ONE database,
