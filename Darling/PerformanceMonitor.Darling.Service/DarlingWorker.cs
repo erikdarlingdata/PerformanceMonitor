@@ -4845,8 +4845,11 @@ public sealed class DarlingWorker : BackgroundService
     ///
     /// <para><b>The noise opt-outs ride the SAME switches SQL Server's read takes</b> (#3539): the shared
     /// <c>longRunningQueryExcludeBackups</c> drops the dump/restore utilities' sessions, and the shared
-    /// <c>excludedDatabases</c> list is applied after the read exactly as <c>DarlingAlertReadAdapter</c>
-    /// applies it. The unconditional ones — non-client backends (autovacuum, walsender), the
+    /// <c>excludedDatabases</c> list rides INTO the read as the <c>candidates</c> CTE's third flag, ahead of
+    /// the row cap (#3742 — until then it was applied in C# after <c>LIMIT</c>, on this read and on both SQL
+    /// Server reads, so an excluded database's sessions consumed the page and the alert came back short or
+    /// empty while matches existed; #3772 fixed the SQL Server twins, this the PostgreSQL one). The
+    /// unconditional ones — non-client backends (autovacuum, walsender), the
     /// VACUUM/ANALYZE/REINDEX/CLUSTER statements, idle-in-transaction — live in the read's SQL; see
     /// <see cref="DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlTemplate"/> for each one's SQL
     /// Server sibling and for why the three remaining SQL Server switches have no honest reading here. What
@@ -4877,7 +4880,10 @@ public sealed class DarlingWorker : BackgroundService
     /// (<c>Excluded Count</c> / <c>Excluded By Program Prefix</c> / <c>Excluded By Login</c>), appended to
     /// <c>Details</c> only when the knob is SET, so an operator who cleared both lists does not read
     /// "Excluded: 0" on every card. Annotation, never suppression: the fire is decided on the rows the read
-    /// returned, and the item can only add a line.</para>
+    /// returned, and the item can only add a line. The database list's receipt (#3742) is the SQL Server
+    /// twin's second item, <see cref="AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem"/>,
+    /// appended after the knob's under the same rule — only when the list is SET, rendered even at 0 then —
+    /// so a page that is short because the list removed the longest sessions says so.</para>
     ///
     /// <para>Fires at <see cref="PgLongRunningQueryFireSeverity"/> — an explicit Warning, and only Warning
     /// (#3653); that constant's doc says why no Critical tier exists here.</para>
@@ -4908,23 +4914,28 @@ public sealed class DarlingWorker : BackgroundService
 
             /* #3743: the opt-out knob, normalised from the same two settings lists AlertEngine's SQL Server
                arm normalises (trim, blanks dropped, case-insensitive dedupe) and translated ONCE by the shared
-               builder over this engine's two columns; the reader takes the rendered text and its operands,
-               numbered from the reader's own first free ordinal. An empty knob renders as two FALSE arms and
-               the read's rows are exactly the pre-#3743 rows. */
+               builder over this engine's columns; the reader takes the rendered text and its operands,
+               numbered from the reader's own first free ordinal. #3742: the shared excludedDatabases list goes
+               through the SAME builder call (its five-argument overload, over database_name, operands after the
+               login operands) so all three arms are one text in one binding order — the SQL Server twin's call
+               in DarlingAlertReadAdapter, over this reader's column constants. An empty knob and an empty list
+               render as three FALSE arms and the read's rows are exactly the pre-#3743 rows. */
             var exclusions = LongRunningQueryExclusions.From(
                 alertSettings.LongRunningQueryExcludedProgramNamePrefixes, alertSettings.LongRunningQueryExcludedLogins);
             var exclusionSql = exclusions.BuildSqlPredicates(
                 DarlingPgSessionStatesReader.ExclusionProgramNameColumn,
                 DarlingPgSessionStatesReader.ExclusionLoginNameColumn,
+                DarlingPgSessionStatesReader.ExclusionDatabaseNameColumn,
+                alertSettings.ExcludedDatabases,
                 DarlingPgSessionStatesReader.ExclusionFirstParameterOrdinal);
 
             var read = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
                 PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults,
                 excludeBackups: alertSettings.LongRunningQueryExcludeBackups,
-                excludedDatabases: alertSettings.ExcludedDatabases,
                 programPrefixPredicate: exclusionSql.ProgramPrefixPredicate,
                 loginPredicate: exclusionSql.LoginPredicate,
+                databasePredicate: exclusionSql.DatabasePredicate,
                 exclusionOperands: exclusionSql.Operands,
                 cancellationToken);
             var rows = read.Sessions;
@@ -4969,8 +4980,11 @@ public sealed class DarlingWorker : BackgroundService
                             Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
                             /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
                                labels) and under the same rule — only when the knob is SET; a cleared knob has no
-                               footnote. See the method summary. */
-                            Details = BuildPgLongRunningQueryExclusionDetails(exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin),
+                               footnote. #3742: the database list's receipt beside it, the twin's second item, only
+                               when the list is SET. See the method summary. */
+                            Details = BuildPgLongRunningQueryExclusionDetails(
+                                exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin,
+                                alertSettings.ExcludedDatabases, read.ExcludedByDatabase),
                         },
                         DetailText: null,
                         NumericCurrentValue: elapsedMinutes,
@@ -5017,21 +5031,33 @@ public sealed class DarlingWorker : BackgroundService
             Database: row.DatabaseName);
 
     /// <summary>
-    /// The PostgreSQL Long-Running Query card's knob receipt (#3743), pulled out of
+    /// The PostgreSQL Long-Running Query card's exclusion receipts (#3743, #3742), pulled out of
     /// <see cref="EvaluatePgLongRunningQueryAsync"/> for testability like the incident mapping above: the
     /// SQL Server twin's <see cref="AlertContextBuilders.BuildLongRunningQueryExclusionItem"/> as the card's
-    /// one detail item when the knob is set, and NO item when both lists are empty — <c>AlertEngine</c>'s
+    /// first detail item when the knob is set, and NO item when both lists are empty — <c>AlertEngine</c>'s
     /// rule, for its reason (an operator who said "evaluate everything" does not want "Excluded: 0" on
-    /// every card). The counts are the read's, taken ahead of the cap over the same capture as the rows.
+    /// every card); then the twin's <see cref="AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem"/>
+    /// when the shared <c>excludedDatabases</c> list is set, rendered even at 0 then, and absent when it is
+    /// empty (the default), so a fresh install's card is unchanged. Two items rather than one because the two
+    /// settings are different instruments with different owners (the builder's doc says why the knob's count
+    /// stays the knob's). The counts are the read's, taken ahead of the cap over the same capture as the rows,
+    /// and the two items' numbers sum to the sessions the page does not show.
     /// </summary>
     internal static List<AlertDetailItem> BuildPgLongRunningQueryExclusionDetails(
-        LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin)
+        LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin,
+        IReadOnlyList<string> excludedDatabases, int excludedByDatabase)
     {
         ArgumentNullException.ThrowIfNull(exclusions);
+        ArgumentNullException.ThrowIfNull(excludedDatabases);
         var details = new List<AlertDetailItem>();
         if (!exclusions.IsEmpty)
         {
             details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, excludedByProgramPrefix, excludedByLogin));
+        }
+
+        if (excludedDatabases.Count > 0)
+        {
+            details.Add(AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(excludedDatabases, excludedByDatabase));
         }
 
         return details;

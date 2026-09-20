@@ -184,9 +184,13 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
     /// <summary>
     /// The window's Aurora all-types wait rate per collection (CPU excluded; the three-state interval of the wait
     /// partial and the <c>pg_wait_ms_per_sec</c> baseline arm — stored <c>NULLIF</c>, NULL <c>LAG</c>, a restart
-    /// collection is not a sample), then PEAK, total and the count of rated collections. Zero rows means this
-    /// flavour does not write the table and the detector sits out; stock's sampled estimate is its own detector
-    /// (<c>SampledWaitRateWindowSql</c>, lane 24).
+    /// collection is not a sample), then PEAK, MEAN, total and the count of rated collections. The MEAN is the
+    /// #3691 parity line ("Aurora wait-profile detector lacks the peak-AND-mean gate"): the same arm and the same
+    /// guard as the peak, so a NULL-interval collection contributes NULL to both aggregates and both ignore it —
+    /// peak and mean describe the same sample set and the gate compares like with like. The column order is the
+    /// reader's ordinal contract (0 peak, 1 mean, 2 total, 3 sample count, 4 collection count), pinned. Zero rows
+    /// means this flavour does not write the table and the detector sits out; stock's sampled estimate is its own
+    /// detector (<c>SampledWaitRateWindowSql</c>, lane 24).
     /// </summary>
     public const string WaitRateWindowSql = @"
 WITH per_collection AS (
@@ -201,6 +205,7 @@ WITH per_collection AS (
     GROUP BY collection_time
 )
 SELECT MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec,
+       AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec,
        SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE interval_sec > 0)                    AS total_wait_ms,
        COUNT(*) FILTER (WHERE interval_sec > 0)                                          AS sample_count,
        COUNT(*)                                                                          AS collection_count
@@ -548,6 +553,35 @@ LIMIT 6";
     /// sentinel. Top contributors ride as <c>contrib_Type:event</c>. The stock sampled estimate is never read here
     /// and the fact therefore never carries <c>is_sampled</c>; the sampled arm is its own metric, key and bar
     /// (<c>DetectSampledWaitProfileAnomalies</c>, lane 24) and sits out whenever this table has rows.
+    ///
+    /// <para><b>The peak-AND-mean gate (#3691 parity line; #3773's shape).</b> Lane 9 shipped this arm gating on the
+    /// window PEAK alone — the #3538 A8 shape #3724 removed from every other baseline detector and #3773 then
+    /// removed from the SQL Server wait profile: one hot five-minute delta in an otherwise quiet window fired the
+    /// profile anomaly, and a longer window bought more of them. The trusted robust arm is now the shared
+    /// <see cref="AnomalyGate"/> PAIR call, exactly as <see cref="PgAnomalyDetector"/> takes it: the window peak
+    /// AND the window mean must BOTH clear the 5.0 modified-z cutoff against the bucket's median and
+    /// <c>EffectiveRobustSigma</c> (the arithmetic of <c>BaselineMath.ModifiedZScore</c>, which still stamps the
+    /// uncapped <c>modified_z</c> the scorer grades), with the magnitude bar on the peak only — the gate's rule: the
+    /// floor is the "trivial value" ceiling for the value the finding reports, sized for a peak. The
+    /// <c>EffectiveRobustSigma &gt; 0</c> guard on this arm makes the gate's classical frame unreachable here, so
+    /// the same 5.0 is passed as both cutoffs and the family's one bar as both floor and bar. The ratio arm asks
+    /// the same of both ratios (peak/mean AND window-mean/mean over <c>PgRatioAnomalyThreshold</c>); the no-baseline
+    /// arm stays on the peak's absolute bar alone — there is no z to trust on either statistic there, and #3741's
+    /// ruling keeps that bar where it was (the sampled twin asks its bar of both; that divergence is stated, not
+    /// hidden). No bar value changes and no lineage moves: the same constants, asked of one more statistic.
+    /// The honest caveat #3773 wrote is this arm's too: the mean's z is judged against the SAME per-collection
+    /// median/MAD as the peak's (one centre, one dispersion, one <c>Decide</c> body), which for a heavy-tailed
+    /// family is a little LESS strict than a symmetric reading suggests — a bias toward firing, never toward
+    /// silence, and bounded, because the mean clause can only admit a window the peak already admitted.</para>
+    ///
+    /// <para><b>Metadata.</b> <c>current_ms_per_sec</c> stays the PEAK (the value the story leads with and the ratio
+    /// is taken on); <c>mean_ms_per_sec</c>, <c>mean_ratio</c> and <c>mean_modified_z</c> ride beside it in the
+    /// same uncapped frame — the SAMPLED twin's keys (<c>DetectSampledWaitProfileAnomalies</c>), not
+    /// <c>PgAnomalyDetector</c>'s <c>avg_ms_per_sec</c>, because the two PostgreSQL-target profiles share one
+    /// vocabulary through <see cref="PgTargetFactKeys.IsWaitProfileAnomaly"/> and their advice composers read the
+    /// same names. Stamped on every arm: 0 modified z on a robust-less bucket, exactly as <c>modified_z</c> is.
+    /// <see cref="PgTargetScorer.IsExtremeWaitProfileAnomaly"/> and the scorer read <c>modified_z</c> / <c>ratio</c>
+    /// unchanged — the peak's — so the extremity escape and the grade are what they were.</para>
     /// </summary>
     private async Task DetectWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
@@ -558,16 +592,17 @@ LIMIT 6";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            double peakRate, totalWaitMs;
+            double peakRate, meanRate, totalWaitMs;
             long sampleCount, collectionCount;
             using (var rateCmd = WindowCommand(WaitRateWindowSql, connection, context))
             {
                 using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
                 if (!await rateReader.ReadAsync(context.CancellationToken)) return;
                 peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
-                totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
-                sampleCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
-                collectionCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
+                meanRate = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
+                totalWaitMs = rateReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rateReader.GetValue(2));
+                sampleCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
+                collectionCount = rateReader.IsDBNull(4) ? 0L : Convert.ToInt64(rateReader.GetValue(4));
             }
 
             /* No rows: this flavour does not write pg_wait_stats (stock) — sit out. Rows but no rated collection:
@@ -576,39 +611,54 @@ LIMIT 6";
             if (baseline.SampleCount == 0) return;
 
             bool isNew;
-            double ratio, fallbackExceedance;
+            double ratio, meanRatio, fallbackExceedance;
             var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
+            var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
                 ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
+                meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
                 fallbackExceedance = 0;
-                if (modifiedZ < HeavyTailModifiedZThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
+                /* The shared PAIR gate (#3773's call, verbatim but for this family's bar): peak AND mean at the
+                   heavy-tail cutoff by reference, the (measured) magnitude bar on the peak alone. See the summary
+                   for why the same cutoff is passed twice and the same bar as floor and fallback. */
+                var decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakRate, meanRate,
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap);
+                if (!decision.Fire) return;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
                 isNew = false;
                 ratio = peakRate / baseline.Mean;
+                meanRatio = meanRate / baseline.Mean;
                 fallbackExceedance = 0;
-                if (ratio < PgRatioAnomalyThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
+                /* unmeasured: PgRatioAnomalyThreshold on both statistics, PgWaitProfileFallbackMsPerSec on the peak. */
+                if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
             }
             else
             {
                 isNew = true;
                 ratio = 0;
+                meanRatio = 0;
                 fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;
+                /* The peak's bar alone, by #3741's ruling (summary): no z to trust on either statistic here. */
                 if (fallbackExceedance < 1.0) return;
             }
 
             var metadata = new Dictionary<string, double>
             {
                 ["current_ms_per_sec"] = peakRate,
+                ["mean_ms_per_sec"] = meanRate,
                 ["baseline_mean"] = baseline.Mean,
                 ["baseline_samples"] = baseline.SampleCount,
                 ["total_wait_ms"] = totalWaitMs,
                 ["window_samples"] = sampleCount,
                 ["ratio"] = ratio,
+                ["mean_ratio"] = meanRatio,
                 ["modified_z"] = modifiedZ,
+                ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = isNew ? 0 : (baseline.EffectiveRobustSigma > 0 ? HeavyTailModifiedZThreshold : PgRatioAnomalyThreshold),
