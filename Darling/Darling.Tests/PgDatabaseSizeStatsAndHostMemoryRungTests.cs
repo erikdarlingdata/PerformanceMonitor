@@ -306,11 +306,12 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
                 var text = WithoutComments(System.IO.File.ReadAllText(file));
                 var name = System.IO.Path.GetFileName(file);
                 if (name is "PgMigrations.cs" or "ViewerDataService.cs" or "DarlingWorker.cs" or "RdsCpuIngestor.cs"
-                    or "PgTargetToolRecommendations.cs")
+                    or "PgTargetToolRecommendations.cs" or "ViewerPostgresTabs.cs")
                 {
                     /* The rung, its probe line, the worker's dispatch and the WRITER name them by construction; the
                        tool-recommendation registry names the column in the prose that tells an agent where the
-                       figure WILL live (the v3 plumbing's memory family), which is a pointer, not a read. */
+                       figure WILL live (the v3 plumbing's memory family), and the viewer tab registry PLACES the
+                       table on the Storage tab with a note that it is not yet drawn — pointers, not reads. */
                     continue;
                 }
 

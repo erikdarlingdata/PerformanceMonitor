@@ -537,9 +537,10 @@ public sealed class PgLogEventMetricsRungTests
         Assert.Contains("#3602", doc, StringComparison.Ordinal);
         Assert.Contains("#3603", doc, StringComparison.Ordinal);
 
-        /* No table, no collector, no tool: the censuses did not move. */
-        Assert.Equal(71, TimescaleSupport.HypertableCount);
-        Assert.Equal(28, CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql));
+        /* No table, no collector, no tool: THIS rung moved no census. Restated as the current figures (72 / 29
+           since V136's pg_database_size_stats, #3691) rather than as "unchanged", which is the claim made. */
+        Assert.Equal(72, TimescaleSupport.HypertableCount);
+        Assert.Equal(29, CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql));
         Assert.Equal(30, CollectorScheduleDefaults.All["pg_log_events"].RetentionDays);
         Assert.Contains("thirty-five are the PostgreSQL reads", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs"), StringComparison.Ordinal);
     }

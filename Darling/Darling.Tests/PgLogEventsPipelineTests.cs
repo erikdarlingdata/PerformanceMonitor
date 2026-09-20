@@ -859,8 +859,9 @@ public sealed class PgLogEventsRungTests
     {
         var workers = TimescaleSupport.HypertableCount + 2;
         var processes = 3 + workers + 8;
-        Assert.Equal(73, workers);
-        Assert.Equal(84, processes);
+        /* 74 / 85 since V136 (#3691) added pg_database_size_stats; this rung's own move was 72 → 73 / 83 → 84. */
+        Assert.Equal(74, workers);
+        Assert.Equal(85, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
         Assert.Contains($"today the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);

@@ -402,9 +402,17 @@ public sealed class ViewerPostgresTabsTests
             "PostgreSQL panel note(s) are declared in the XAML and never filled, so those panels can be " +
             "blank with no explanation: " + string.Join(", ", unfilled));
 
+        /* The ONE stated exemption: pg_database_size_stats (V136, #3691) is written by its collector and read by
+           nothing yet — the analysis consumer (lane 32) and its Viewer panel are follow-on lanes on #3691. It is
+           PLACED on the Storage tab (the placement census above has no exemption path, deliberately) and the
+           tab's note tells the operator it is collected and not yet drawn; PgRegistryPanelPlacementTests and
+           ViewerCollectorCoverageTests carry the matching entries. All three come off in the panel's PR. */
+        var placedNotDrawn = new HashSet<string>(StringComparer.Ordinal) { "pg_database_size_stats" };
+
         var unasked = ViewerPostgresTabs.All
             .SelectMany(t => t.Collectors)
             .Distinct(StringComparer.Ordinal)
+            .Where(c => !placedNotDrawn.Contains(c))
             .Where(c => !loaders.Contains($"\"{c}\"", StringComparison.Ordinal))
             .OrderBy(c => c, StringComparer.Ordinal)
             .ToList();
