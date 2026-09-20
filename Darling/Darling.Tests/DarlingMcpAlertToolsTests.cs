@@ -330,70 +330,157 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// #3712: <c>analysis.uncorroborated_route</c> is FILE-LEVEL — darling.json's <c>analysis.uncorroboratedRoute</c>,
-    /// no <c>config_alert_settings</c> column (no rung window) — so the read reports the value the running host
-    /// PUBLISHED (null in a harness, never a constant dressed as a reading) beside a note saying where it lives,
-    /// and the writer treats it three ways: our own null coming home claims no column and no warning; a value
-    /// that MATCHES the published file value is accepted with a warning (a whole-payload round-trip must not
-    /// fail on a field the caller did not choose to change); a value that would CHANGE it is refused by name
-    /// with the file key, because accepting it silently would present as the setting not sticking.
+    /// #3712 (V137): <c>analysis.uncorroborated_route</c> has TWO homes since the rung — the settings row's
+    /// <c>analysis_uncorroborated_route</c> column and darling.json's <c>analysis.uncorroboratedRoute</c> — and the
+    /// read reports the EFFECTIVE route (never null) beside <c>uncorroborated_route_source</c> saying which home
+    /// decided, resolved store-over-file by the SAME function the engine seam uses. The store half comes off the
+    /// row; the file half off the ambient publish, as before. The pre-rung pin ("reported from the publish, the
+    /// writer refuses to change it") lived here; what replaces it is the four resolutions and the writer's three
+    /// arms: a route writes the column in its canonical spelling, an explicit null clears it (the third state,
+    /// reachable no other way once a route is stored), anything else is refused by name with the accepted
+    /// spellings. The note no longer says FILE-LEVEL — that sentence became a lie the moment the column landed.
     ///
     /// <para>The ambient publish is reset at both ends WITHOUT a <c>finally</c>: this class carries the
     /// live-collection attribute, and the #1902 ratchet reads every <c>finally</c> in such a file as a store
-    /// teardown. A leaked value is harmless to the siblings here — a published <c>digest</c> round-trips with a
-    /// warning and an unparseable value publishes nothing — so the discipline costs nothing on a failure.</para>
+    /// teardown. A leaked value is harmless to the siblings here — the store half on the sample row wins over
+    /// any published file value — so the discipline costs nothing on a failure.</para>
     /// </summary>
     [Fact]
-    public void UncorroboratedRoute_IsReportedFromThePublish_WithItsNote_AndTheWriterRefusesToChangeIt()
+    public void UncorroboratedRoute_IsTheEffectiveRoute_WithItsSource_AndTheWriterTakesDigestPageOrNull()
     {
         DarlingFileLevelAlertSettings.ResetForTests();
 
-        /* Unpublished: the read says null and the note; the null coming home claims nothing. */
+        /* The sample row's store half is 'page' (deliberately not the shipped digest), so with nothing published
+           the store decides: effective 'page', source 'store'. */
         var payload = SerializedSettingsPayload(SampleSettingsRow());
-        Assert.Null(payload["analysis"]!["uncorroborated_route"]);
+        Assert.Equal("page", payload["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        Assert.Equal(DarlingAlertSettings.RouteSourceStore, payload["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
         Assert.Equal(DarlingMcpAlertTools.UncorroboratedRouteNote, payload["analysis"]!["uncorroborated_route_note"]!.GetValue<string>());
-        Assert.StartsWith("FILE-LEVEL (#3712)", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.StartsWith("#3712: the EFFECTIVE route, resolved store-over-file", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILE-LEVEL", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
 
-        var (unpublishedTargets, unpublishedError, unpublishedWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-            "{\"analysis\":{\"uncorroborated_route\":null,\"uncorroborated_route_note\":\"anything\"}}")!);
-        Assert.Null(unpublishedError);
-        Assert.Empty(unpublishedTargets);
-        Assert.Empty(unpublishedWarnings);
+        /* A NULL store half with nothing published: neither home holds a route, so the shipped digest applies and
+           the source SAYS default — a true statement in a harness, where 'file' would claim a value nothing loaded
+           and the pre-rung null claimed only that nothing had been published. */
+        var unset = SerializedSettingsPayload(SampleSettingsRow() with { AnalysisUncorroboratedRoute = null });
+        Assert.Equal("digest", unset["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        Assert.Equal(DarlingAlertSettings.RouteSourceDefault, unset["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
 
-        /* A value sent while nothing is published cannot be honored — refused with the file key. */
-        var (_, changeError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-            "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
-        Assert.NotNull(changeError);
-        Assert.Contains("analysis.uncorroboratedRoute", changeError, StringComparison.Ordinal);
-        Assert.Contains("darling.json", changeError, StringComparison.Ordinal);
+        /* Published 'page' in the file, NULL in the store: the file decides. Published 'page' beside a stored
+           'digest': the store decides, and the file's page is what the operator overrode. */
+        DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "Page" });
+        var fileDecides = SerializedSettingsPayload(SampleSettingsRow() with { AnalysisUncorroboratedRoute = null });
+        Assert.Equal("page", fileDecides["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        Assert.Equal(DarlingAlertSettings.RouteSourceFile, fileDecides["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
+        var storeDecides = SerializedSettingsPayload(SampleSettingsRow() with { AnalysisUncorroboratedRoute = "digest" });
+        Assert.Equal("digest", storeDecides["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        Assert.Equal(DarlingAlertSettings.RouteSourceStore, storeDecides["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
 
-        /* Published: the read reports the file's value in its wire spelling. */
-        DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "Digest" });
-        Assert.Equal("digest", SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        /* A store value the CHECK would have refused (a hand-dropped constraint) is ignored, not obeyed: the
+           file's page governs and the source says so — the same fall-through LoadViewAsync applies and logs. */
+        var garbage = SerializedSettingsPayload(SampleSettingsRow() with { AnalysisUncorroboratedRoute = "pgae" });
+        Assert.Equal("page", garbage["analysis"]!["uncorroborated_route"]!.GetValue<string>());
+        Assert.Equal(DarlingAlertSettings.RouteSourceFile, garbage["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
 
-        /* The published value coming home, in either case: accepted, no column, one warning. */
-        var (matchTargets, matchError, matchWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-            "{\"analysis\":{\"uncorroborated_route\":\"DIGEST\"}}")!);
-        Assert.Null(matchError);
-        Assert.Empty(matchTargets);
-        Assert.Single(matchWarnings);
-        Assert.Contains("file-level", matchWarnings[0], StringComparison.Ordinal);
+        /* The writer: a route writes the column in the canonical lower-case spelling the CHECK admits. */
+        var (pageTargets, pageError, pageWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"PAGE\"}}")!);
+        Assert.Null(pageError);
+        Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, "analysis_uncorroborated_route") }, pageTargets.ToArray());
+        Assert.Empty(pageWarnings);
+        Assert.Equal("page", Assert.IsType<NpgsqlParameter<string>>(SingleParameterOf("{\"analysis\":{\"uncorroborated_route\":\"PAGE\"}}")).TypedValue);
 
-        /* A DIFFERENT value: refused. */
-        var (_, flipError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
-            "{\"analysis\":{\"uncorroborated_route\":\"page\"}}")!);
-        Assert.NotNull(flipError);
+        /* An explicit null CLEARS the column — a typed text NULL, and a target, because null is a value here. */
+        var (nullTargets, nullError, nullWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":null}}")!);
+        Assert.Null(nullError);
+        Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, "analysis_uncorroborated_route") }, nullTargets.ToArray());
+        Assert.Empty(nullWarnings);
+        var nullParameter = SingleParameterOf("{\"analysis\":{\"uncorroborated_route\":null}}");
+        Assert.Equal(DBNull.Value, nullParameter.Value);
+        Assert.Equal(NpgsqlTypes.NpgsqlDbType.Text, nullParameter.NpgsqlDbType);
 
-        /* A file value that parses to neither spelling publishes nothing, so the read stays honest. */
-        DarlingFileLevelAlertSettings.Publish(new AnalysisConfig { UncorroboratedRoute = "sometimes" });
-        Assert.Null(SerializedSettingsPayload(SampleSettingsRow())["analysis"]!["uncorroborated_route"]);
+        /* Anything else is refused by name with the three accepted spellings, and nothing is written. */
+        foreach (var refused in new[] { "\"pgae\"", "\"\"", "true", "1", "[\"page\"]" })
+        {
+            var (refusedTargets, refusedError, _) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+                "{\"analysis\":{\"uncorroborated_route\":" + refused + "}}")!);
+            Assert.NotNull(refusedError);
+            Assert.Contains("analysis.uncorroborated_route", refusedError, StringComparison.Ordinal);
+            Assert.Contains("'digest', 'page', or null", refusedError, StringComparison.Ordinal);
+            Assert.Empty(refusedTargets);
+        }
 
-        /* Both descriptions say it, where an agent reads before calling. */
-        Assert.Contains("analysis.uncorroborated_route", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
-        Assert.Contains("FILE-LEVEL", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route is FILE-LEVEL (#3712)", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+        /* The read-only companions coming home claim no column and, alone, are not a write. */
+        var (companionTargets, companionError, companionWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route_source\":\"store\",\"uncorroborated_route_note\":\"anything\"}}")!);
+        Assert.Null(companionError);
+        Assert.Empty(companionTargets);
+        Assert.Empty(companionWarnings);
+
+        /* The provenance warning: a whole-payload round-trip whose own echo said the FILE had been deciding
+           writes the effective route into the store (the write is exactly what was sent) and SAYS the decision
+           moved — in either key order. An echo of 'store' is a round-trip of a store value and warns nothing; a
+           partial update naming the route alone is a deliberate write and warns nothing. */
+        foreach (var echoed in new[] { DarlingAlertSettings.RouteSourceFile, DarlingAlertSettings.RouteSourceDefault })
+        {
+            foreach (var body in new[]
+            {
+                "{\"analysis\":{\"uncorroborated_route\":\"digest\",\"uncorroborated_route_source\":\"" + echoed + "\"}}",
+                "{\"analysis\":{\"uncorroborated_route_source\":\"" + echoed + "\",\"uncorroborated_route\":\"digest\"}}",
+            })
+            {
+                var (movedTargets, movedError, movedWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(body)!);
+                Assert.Null(movedError);
+                Assert.Single(movedTargets);
+                var moved = Assert.Single(movedWarnings);
+                Assert.Contains("now governs", moved, StringComparison.Ordinal);
+                Assert.Contains("'" + echoed + "'", moved, StringComparison.Ordinal);
+                Assert.Contains("analysis.uncorroborated_route: null", moved, StringComparison.Ordinal);
+            }
+        }
+
+        var (_, storeEchoError, storeEchoWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"page\",\"uncorroborated_route_source\":\"store\"}}")!);
+        Assert.Null(storeEchoError);
+        Assert.Empty(storeEchoWarnings);
+
+        /* And a refused route with a file echo beside it is refused, not warned about. */
+        var (_, refusedWithEchoError, refusedWithEchoWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"analysis\":{\"uncorroborated_route\":\"pgae\",\"uncorroborated_route_source\":\"file\"}}")!);
+        Assert.NotNull(refusedWithEchoError);
+        Assert.Empty(refusedWithEchoWarnings);
+
+        /* Both descriptions say it, where an agent reads before calling: the precedence, the source key, the
+           null-clears arm, and no trace of the retired FILE-LEVEL sentence. */
+        var read = ToolDescription("get_alert_settings");
+        var write = ToolDescription("update_alert_settings");
+        Assert.Contains("analysis.uncorroborated_route (#3712)", read, StringComparison.Ordinal);
+        Assert.Contains("the STORE winning", read, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route_source", read, StringComparison.Ordinal);
+        Assert.Contains("'store', 'file' or 'default'", read, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route (#3712) is WRITABLE since V137", write, StringComparison.Ordinal);
+        Assert.Contains("null CLEARS the column", write, StringComparison.Ordinal);
+        Assert.Contains("uncorroborated_route_source", write, StringComparison.Ordinal);
+        foreach (var description in new[] { read, write })
+        {
+            Assert.DoesNotContain("FILE-LEVEL", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("restart to change", description, StringComparison.Ordinal);
+        }
 
         DarlingFileLevelAlertSettings.ResetForTests();
+    }
+
+    /// <summary>The one bound parameter a single-field body produces — for the pins that need its TYPE and
+    /// VALUE, which the (table, column) projection <see cref="ParseAsPartialUpdate"/> returns cannot see.</summary>
+    private static NpgsqlParameter SingleParameterOf(string body)
+    {
+        var build = typeof(DarlingMcpAlertTools).GetMethod(
+            "BuildAlertSettingsUpdate", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var result = build.Invoke(null, new object[] { (JsonObject)JsonNode.Parse(body)! })!;
+        var updates = ((System.Collections.IEnumerable)result.GetType().GetField("Item1")!.GetValue(result)!).Cast<object>().ToList();
+        var target = Assert.Single(updates);
+        return (NpgsqlParameter)target.GetType().GetProperty("Param")!.GetValue(target)!;
     }
 
     /// <summary>
@@ -1034,7 +1121,12 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
            let a payload that dropped the column and fell back to the default still match, and an un-normalised
            sample would let the writer's normaliser change what the round-trip compares. */
         LongRunningQueryExcludedProgramNamePrefixes: new[] { "HammerDB", "QueueWorker" },
-        LongRunningQueryExcludedLogins: new[] { "svc_replication" });
+        LongRunningQueryExcludedLogins: new[] { "svc_replication" },
+        /* #3712 (V137): the route knob's store half, deliberately 'page' — NOT the shipped digest and NOT NULL
+           (the upgrade-day state) — so a payload that dropped the column and fell through to the file or the
+           default would read 'digest' / not-'store' and fail rather than match; and a value the writer hands
+           back to the same column, which is what the round-trip equality needs to see. */
+        AnalysisUncorroboratedRoute: "page");
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -2242,6 +2334,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
            run on a reused database. */
         var originalFireCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cooldown_minutes FROM config_alert_settings WHERE id = 1"));
         var originalDeliveryCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1"));
+        /* #3712 (V137): the route knob's store half is a singleton tri-state the whole store shares too, and the
+           only one of these whose ORIGINAL is expected to be NULL (the upgrade-day state) — captured as the raw
+           object so the restore can put NULL back as NULL rather than as a default. */
+        var originalRoute = await ScalarAsync(connection, ct, "SELECT analysis_uncorroborated_route FROM config_alert_settings WHERE id = 1");
         var versionBefore = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
         var newThreshold = originalThreshold == 91 ? 71 : 91;                 // a distinct, in-range value
         var muteTag = "mcp_alert_write_e2e_" + Guid.NewGuid().ToString("N");  // own-scoped cleanup tag
@@ -2307,6 +2403,38 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             /* An unknown field writes NOTHING (validated before the UPDATE). */
             Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"cpu\":{\"bogus\":1}}")));
 
+            /* #3712 (V137): the route knob round-trips THROUGH THE STORE in all three states. 'Page' lands as the
+               canonical 'page' the CHECK admits and the read-back says the STORE decided; null CLEARS the column
+               to SQL NULL and the read-back falls to the file half — 'default' here, because this harness has
+               published no file value, which is the honest word for it; a misspelling is refused before the
+               UPDATE (the tool's invalid arm, not the CHECK's 23514) and the column is untouched. */
+            DarlingFileLevelAlertSettings.ResetForTests();
+            var routed = await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"analysis\":{\"uncorroborated_route\":\"Page\"}}");
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(routed));
+            using (var doc = JsonDocument.Parse(routed))
+            {
+                var analysis = doc.RootElement.GetProperty("settings").GetProperty("analysis");
+                Assert.Equal("page", analysis.GetProperty("uncorroborated_route").GetString());
+                Assert.Equal(DarlingAlertSettings.RouteSourceStore, analysis.GetProperty("uncorroborated_route_source").GetString());
+                Assert.Contains("analysis_uncorroborated_route", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
+                Assert.Equal(0, doc.RootElement.GetProperty("warnings").GetArrayLength());
+            }
+            Assert.Equal("page", (string)(await ScalarAsync(connection, ct, "SELECT analysis_uncorroborated_route FROM config_alert_settings WHERE id = 1"))!);
+
+            Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"analysis\":{\"uncorroborated_route\":\"pgae\"}}")));
+            Assert.Equal("page", (string)(await ScalarAsync(connection, ct, "SELECT analysis_uncorroborated_route FROM config_alert_settings WHERE id = 1"))!);
+
+            var cleared = await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"analysis\":{\"uncorroborated_route\":null}}");
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(cleared));
+            using (var doc = JsonDocument.Parse(cleared))
+            {
+                var analysis = doc.RootElement.GetProperty("settings").GetProperty("analysis");
+                Assert.Equal("digest", analysis.GetProperty("uncorroborated_route").GetString());
+                Assert.Equal(DarlingAlertSettings.RouteSourceDefault, analysis.GetProperty("uncorroborated_route_source").GetString());
+                Assert.Contains("analysis_uncorroborated_route", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
+            }
+            Assert.Equal(DBNull.Value, await ScalarAsync(connection, ct, "SELECT analysis_uncorroborated_route FROM config_alert_settings WHERE id = 1"));
+
             /* create_mute_rule → get_mute_rules → delete_mute_rule round-trip (own-scoped by the GUID reason tag). */
             var created = await DarlingMcpAlertTools.CreateMuteRule(postgres, server_name: "e2e-write-server", metric_name: "High CPU", reason: muteTag);
             Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
@@ -2337,6 +2465,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1, cooldown_minutes = $2 WHERE id = 1", originalThreshold, originalFireCooldown);
+                /* #3712: NULL back as NULL — ExecAsync binds a null argument as DBNull, and a store that read NULL
+                   before this test must read NULL after it, or every later test sees a route this test chose. */
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET analysis_uncorroborated_route = $1 WHERE id = 1", originalRoute is DBNull ? null : originalRoute);
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_notification SET email_cooldown_minutes = $1 WHERE id = 1", originalDeliveryCooldown);
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
             });

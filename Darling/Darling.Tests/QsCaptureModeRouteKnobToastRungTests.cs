@@ -425,17 +425,22 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 
     /// <summary>
     /// The exit criterion's last clause, pinned so each consumer lane has to move this deliberately: no product
-    /// read names any of the SIX columns still waiting for a consumer. The consumers are named so the lane that
-    /// lands one knows which arm to retire: the route knob's code half — <c>DarlingAlertSettings</c>,
-    /// <c>StoreConfigProvider</c>, the MCP pair, the Settings window — for (b); <c>get_store_metrics</c> /
-    /// <c>DarlingStoreMetricsReader</c> for (c) and (d). Block and line comments are stripped before the scan; SQL
-    /// string constants are code and stay in.
+    /// read names any of the FIVE columns still waiting for a consumer. The consumers are named so the lane that
+    /// lands one knows which arm to retire: <c>get_store_metrics</c> / <c>DarlingStoreMetricsReader</c> for (c) and
+    /// (d). Block and line comments are stripped before the scan; SQL string constants are code and stay in.
     ///
     /// <para><b>Arm (a) is RETIRED, and inverted (#3796's code half).</b> The two capture modes are read: the
     /// <c>get_query_store_health</c> reader and tool, the web catalogue row, and the Viewer's Query Store grid read
     /// name both columns, and this pin now asserts that they DO — the positive form, so the consumer cannot quietly
     /// disappear while the rung doc still says it exists. The Query Store clutter view (#3797) is the next consumer
     /// and is not required here; when it lands it simply joins the population that names them.</para>
+    ///
+    /// <para><b>Arm (b) is RETIRED too (#3712's code half).</b> The route knob's store column is read by exactly the
+    /// readers the rung doc promised — <c>DarlingAlertSettings.ResolveUncorroboratedRoute</c>,
+    /// <c>StoreConfigProvider</c>'s read at ordinal 69, the MCP pair, the Viewer's select/upsert and Settings combo —
+    /// and <c>UncorroboratedRouteStoreKnobTests</c> pins every one of them at its ordinal, which is the positive form
+    /// for (b); the rung doc's "written by nothing and read by nothing" clause is now a statement about the window
+    /// between the rung and that lane.</para>
     ///
     /// <para>(d)'s three names are scanned on the store-metrics surface only, not repo-wide: <c>checkpoints_requested</c>
     /// is a <c>collect.pg_write_stats</c> column (V88, a PostgreSQL TARGET's checkpointer) read by the write-stats
@@ -444,7 +449,7 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
     /// alike; none of those files reads <c>store_metrics</c>.</para>
     /// </summary>
     [Fact]
-    public void NoReaderNamesAnyOfTheSixUnconsumedColumnsYet_AndTheCaptureModeConsumersNameBoth()
+    public void NoReaderNamesAnyOfTheFiveUnconsumedColumnsYet_AndTheCaptureModeConsumersNameBoth()
     {
         /* (a) retired and inverted: the #3796 consumers name both capture modes, in code, not comments. */
         foreach (var consumer in new[]
@@ -462,7 +467,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             }
         }
 
-        var names = new[] { RouteColumn }.Concat(ToastColumns).ToArray();
+        /* (b) is not in this list either — see the summary; UncorroboratedRouteStoreKnobTests holds its positive form.
+           Five columns remain unread: the (c) pair here, and the (d) three scanned on the store-metrics surface below
+           rather than here, as before. */
+        var names = ToastColumns;
 
         foreach (var project in new[]
         {
@@ -501,7 +509,7 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
                     }
 
                     Assert.False(text.Contains(column, StringComparison.Ordinal),
-                        $"{file} names {column}: a consumer landed — retire this pin's arm for that column deliberately (and, for (b), the rung doc's 'written by nothing and read by nothing' clause).");
+                        $"{file} names {column}: a consumer landed — retire this pin's arm for that column deliberately, the way #3712's code half retired (b)'s.");
                 }
             }
         }

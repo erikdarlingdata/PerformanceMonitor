@@ -314,10 +314,13 @@ public sealed class LongRunningQueryExclusionKnobRungTests
             .Max();
         Assert.Equal(command.Parameters.Count, highestPlaceholder);
 
-        /* The two new columns ride at the END — appended, the rule every knob rung on this table follows — in
-           the column list's order: programs, then logins. */
-        Assert.Equal(new[] { "QueueWorker", "SQLAgent - TSQL JobStep" }, Assert.IsType<string[]>(command.Parameters[^2].Value));
-        Assert.Equal(new[] { "svc_replication", "*" }, Assert.IsType<string[]>(command.Parameters[^1].Value));
+        /* The two V135 columns ride at their APPENDED positions — the rule every knob rung on this table follows,
+           so every earlier ordinal keeps its column — in the column list's order: programs, then logins. They
+           were the END until #3712's code half appended the route knob's store column after them
+           (UncorroboratedRouteStoreKnobTests pins that one at the end now); 67 and 68 are the V135 slots, and
+           the equality is what would catch a rung inserted anywhere but after them. */
+        Assert.Equal(new[] { "QueueWorker", "SQLAgent - TSQL JobStep" }, Assert.IsType<string[]>(command.Parameters[67].Value));
+        Assert.Equal(new[] { "svc_replication", "*" }, Assert.IsType<string[]>(command.Parameters[68].Value));
 
         /* And the column list, the select and the upsert agree on the two names at the same two positions. */
         var columns = ViewerDataService.AlertSettingsSelectSql
@@ -326,8 +329,8 @@ public sealed class LongRunningQueryExclusionKnobRungTests
             .Split(',')
             .Select(c => c.Trim())
             .ToList();
-        Assert.Equal(ProgramsColumn, columns[^2]);
-        Assert.Equal(LoginsColumn, columns[^1]);
+        Assert.Equal(ProgramsColumn, columns[67]);
+        Assert.Equal(LoginsColumn, columns[68]);
         Assert.Equal(highestPlaceholder, columns.Count);
     }
 
@@ -347,18 +350,22 @@ public sealed class LongRunningQueryExclusionKnobRungTests
             .ToList();
         Assert.Equal(ProgramsColumn, columns[67]);
         Assert.Equal(LoginsColumn, columns[68]);
-        Assert.Equal(69, columns.Count);
+        /* At least the V135 pair and whatever appended after it (the #3712 route column is 69) — a count pinned
+           to 69 asserted this rung's pair was the end of the SELECT, which stopped being true when that code half
+           landed; the top-of-list claim moved with it. */
+        Assert.True(columns.Count >= 69);
 
         var reader = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAlertReader.cs");
         Assert.Contains("reader.GetFieldValue<string[]>(67)", reader, StringComparison.Ordinal);
         Assert.Contains("reader.GetFieldValue<string[]>(68)", reader, StringComparison.Ordinal);
 
-        /* The record's last two positional members are the two lists, in column order. */
+        /* The record's positional members at 67 and 68 are the two lists, in column order — no longer its last
+           two, for the reason one paragraph up. */
         var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
-        Assert.Equal("LongRunningQueryExcludedProgramNamePrefixes", parameters[^2].Name);
-        Assert.Equal("LongRunningQueryExcludedLogins", parameters[^1].Name);
-        Assert.Equal(69, parameters.Length);
+        Assert.Equal("LongRunningQueryExcludedProgramNamePrefixes", parameters[67].Name);
+        Assert.Equal("LongRunningQueryExcludedLogins", parameters[68].Name);
+        Assert.Equal(columns.Count, parameters.Length);
     }
 
     /* ---- the seam reaches the engine -------------------------------------------------------------------- */

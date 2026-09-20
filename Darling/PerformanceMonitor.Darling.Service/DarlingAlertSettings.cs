@@ -353,15 +353,87 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        Lite always passed a configured one through — the Darling parity gap gotqn called out. */
     public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
 
-    /// <summary>#3712: where an uncorroborated finding goes — <c>analysis.uncorroboratedRoute</c> in darling.json,
-    /// file-level (see <see cref="AnalysisConfig.UncorroboratedRoute"/> for why, and how it survives the store
-    /// reload). Read live through the by-reference seam like every sibling. A value that is neither
-    /// <c>digest</c> nor <c>page</c> is "no opinion" and takes the shipped default, which is the interface's.</summary>
+    /// <summary>
+    /// #3712: where an uncorroborated finding goes — resolved from the knob's TWO homes with <b>store non-NULL
+    /// wins over file</b>: <c>config_alert_settings.analysis_uncorroborated_route</c> (V137, read into
+    /// <see cref="AnalysisConfig.StoreUncorroboratedRoute"/>) when it holds a route, else darling.json's
+    /// <c>analysis.uncorroboratedRoute</c> (<see cref="AnalysisConfig.UncorroboratedRoute"/>, carried across the
+    /// store swap), else the shipped <c>digest</c>, which is the interface's default. Read live through the
+    /// by-reference seam like every sibling, so the store's hot-reload (<c>ApplyToConfig</c> swaps
+    /// <c>config.Analysis</c>) reaches the gate without reconstruction.
+    ///
+    /// <para><b>Why the store wins.</b> An operator who flips the Viewer's Settings toggle or calls
+    /// <c>update_alert_settings</c> expects the change to take effect — without a restart, without a file edit
+    /// on the service box, and without knowing which of two places holds the losing value. The file is the
+    /// INSTALL-TIME default: it is read once at start, is not hot-reloaded, and on a container install may be
+    /// nobody's to edit. The store is the surface the product already hot-reloads for every other alert knob
+    /// (V17's statement-level <c>trg_bump_alert_settings</c> bumps <c>config_version</c> on any write to the
+    /// row), so a value written there is live within one 15 s beacon tick and is consulted by
+    /// <c>AnalysisNotificationService</c> on the next scheduled-analysis delivery. NULL in the store is the
+    /// third state — "the file governs" — which is what every existing store reads after the V137 upgrade, so
+    /// nothing moved on upgrade day; <c>get_alert_settings</c> says which home decided under
+    /// <c>analysis.uncorroborated_route_source</c>. The resolver is <see cref="ResolveUncorroboratedRoute"/>,
+    /// shared with that tool so the two never disagree about one row.</para>
+    /// </summary>
     public FindingRoute UncorroboratedFindingRoute =>
-        FindingRouting.TryParseRoute(_config.Analysis.UncorroboratedRoute) ?? FindingRoute.Digest;
+        ResolveUncorroboratedRoute(_config.Analysis.StoreUncorroboratedRoute, _config.Analysis.UncorroboratedRoute).Route;
+
+    /// <summary>The <c>analysis.uncorroborated_route_source</c> wire word for a route the STORE column decided
+    /// (#3712, V137): the column held <c>digest</c> or <c>page</c>.</summary>
+    public const string RouteSourceStore = "store";
+
+    /// <summary>The wire word for a route darling.json's <c>analysis.uncorroboratedRoute</c> decided: the store
+    /// column was NULL (or, on a store whose CHECK was dropped, unparseable) and the file held a route.</summary>
+    public const string RouteSourceFile = "file";
+
+    /// <summary>The wire word for the shipped <c>digest</c> deciding: neither home held a parseable route — the
+    /// store column NULL and the file's value missing or misspelled (an MCP host that has not published its file
+    /// value reads here too, deliberately: "default" is a true statement there where "file" would not be).</summary>
+    public const string RouteSourceDefault = "default";
+
+    /// <summary>
+    /// The one resolver for the #3712 route knob's two homes, pure so both the engine seam above and
+    /// <c>get_alert_settings</c> / <c>update_alert_settings</c> read one row the same way. Precedence: a store
+    /// value that parses (<see cref="FindingRouting.TryParseRoute"/>, case-insensitive) wins; else a file value
+    /// that parses; else <see cref="FindingRoute.Digest"/>. <c>StoreValueIgnored</c> is true when the store
+    /// held something that is neither route — impossible under the V137 CHECK, possible on a store whose CHECK
+    /// was dropped by hand — so the caller that has a logger (<c>StoreConfigProvider.LoadViewAsync</c>) can say
+    /// so rather than let a misspelling silently turn an operator's PAGE back into the digest, which is the one
+    /// failure the knob exists to make impossible and the reason the rung carries a CHECK at all.
+    /// </summary>
+    public static UncorroboratedRouteResolution ResolveUncorroboratedRoute(string? storeValue, string? fileValue)
+    {
+        if (FindingRouting.TryParseRoute(storeValue) is { } fromStore)
+        {
+            return new UncorroboratedRouteResolution(fromStore, RouteSourceStore, StoreValueIgnored: false);
+        }
+
+        var storeValueIgnored = !string.IsNullOrWhiteSpace(storeValue);
+        if (FindingRouting.TryParseRoute(fileValue) is { } fromFile)
+        {
+            return new UncorroboratedRouteResolution(fromFile, RouteSourceFile, storeValueIgnored);
+        }
+
+        return new UncorroboratedRouteResolution(FindingRoute.Digest, RouteSourceDefault, storeValueIgnored);
+    }
 
     /// <summary>#2710: the triage-link base — <c>web.publicBaseUrl</c>, read live through the by-reference
     /// config seam like every sibling. File-authoritative on purpose (see the WebConfig doc comment): a store
     /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.</summary>
     public string TriageBaseUrl => _config.Web.PublicBaseUrl ?? "";
+}
+
+/// <summary>
+/// The outcome of <see cref="DarlingAlertSettings.ResolveUncorroboratedRoute"/> (#3712): the route the gate
+/// applies, the wire word for WHICH home decided it (<see cref="DarlingAlertSettings.RouteSourceStore"/> /
+/// <see cref="DarlingAlertSettings.RouteSourceFile"/> / <see cref="DarlingAlertSettings.RouteSourceDefault"/>),
+/// and whether the store held a value the resolver had to ignore. <c>Source</c> is what
+/// <c>get_alert_settings</c> publishes as <c>analysis.uncorroborated_route_source</c>; <c>Route</c> is what it
+/// publishes as <c>analysis.uncorroborated_route</c> and what <c>AnalysisNotificationService</c> reads.
+/// </summary>
+public readonly record struct UncorroboratedRouteResolution(FindingRoute Route, string Source, bool StoreValueIgnored)
+{
+    /// <summary>The effective route's wire spelling (<c>digest</c> / <c>page</c>) — never null, unlike the
+    /// pre-V137 publish, because a resolution always ends somewhere.</summary>
+    public string RouteText => FindingRouting.RouteText(Route);
 }

@@ -202,7 +202,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers (#3638), a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED (#3593): since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route (#3712) is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores pre-#3712 paging of every notify-worthy finding; a corroborated finding pages under either. It is FILE-LEVEL (darling.json analysis.uncorroboratedRoute, restart to change) and analysis.uncorroborated_route_note says so beside it; null means the running host has not published its file value. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob (#3653): a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres)
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers (#3638), a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED (#3593): since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route (#3712) is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores pre-#3712 paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob (#3653): a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres)
     {
         try
         {
@@ -233,14 +233,19 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712): the knob is file-level, so the reader
-    /// is told where it lives and where the EFFECTIVE decision is visible per finding.</summary>
+    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712): the knob has TWO homes since V137, so
+    /// the reader is told the precedence, how to move the decision between them, and where the EFFECTIVE
+    /// decision is visible per finding. Restates <see cref="DarlingAlertSettings.ResolveUncorroboratedRoute"/>
+    /// in prose; the machine-readable half is <c>uncorroborated_route_source</c> beside it.</summary>
     internal const string UncorroboratedRouteNote =
-        "FILE-LEVEL (#3712): set analysis.uncorroboratedRoute in darling.json ('digest' by default, 'page' restores "
-        + "pre-#3712 paging of every notify-worthy finding) and restart the service; it is not a store column, so "
-        + "update_alert_settings cannot write it and a store reload does not change it. A corroborated finding pages "
-        + "under either value. The decision the running service made for each finding is on its get_alert_history row "
-        + "as routing / routing_reason.";
+        "#3712: the EFFECTIVE route, resolved store-over-file. config_alert_settings.analysis_uncorroborated_route (V137; "
+        + "set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis), live in the running service within one "
+        + "collection sweep, no restart) wins when it holds 'digest' or 'page'; NULL there defers to darling.json's "
+        + "analysis.uncorroboratedRoute, read once at service start; a file value that is neither spelling defers to the "
+        + "shipped 'digest'. uncorroborated_route_source names the home that decided: 'store', 'file' or 'default'. Send "
+        + "uncorroborated_route: null through update_alert_settings to clear the store column and let the file govern again. "
+        + "A corroborated finding pages under either value. The decision the running service made for each finding is on "
+        + "its get_alert_history row as routing / routing_reason.";
 
     /// <summary>
     /// The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653): emitted beside the value by
@@ -252,6 +257,16 @@ public sealed class DarlingMcpAlertTools
     /// </summary>
     internal const string PoisonWaitThresholdMsNote =
         "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+
+    /// <summary>The #3712 route knob resolved for the read surface: the row's store half (raw, off
+    /// <see cref="DarlingAlertReader.AlertSettingsReadRow.AnalysisUncorroboratedRoute"/>) beside the file half
+    /// this process published (<see cref="DarlingFileLevelAlertSettings.UncorroboratedRoute"/>), through the ONE
+    /// resolver the engine seam uses, so <c>get_alert_settings</c> and <c>DarlingAlertSettings</c> cannot read one
+    /// row two ways. The publish is the file value's only route into a static tool over the store; where nothing
+    /// has published (a harness) the file half is null and the resolution says <c>default</c>, which is what
+    /// such a process would apply.</summary>
+    private static UncorroboratedRouteResolution UncorroboratedRoute(DarlingAlertReader.AlertSettingsReadRow s) =>
+        DarlingAlertSettings.ResolveUncorroboratedRoute(s.AnalysisUncorroboratedRoute, DarlingFileLevelAlertSettings.UncorroboratedRoute);
 
     /// <summary>The nested JSON shape get_alert_settings returns AND update_alert_settings echoes back — the same
     /// field names update_alert_settings accepts on the way in, so a read → modify → write round-trips.
@@ -438,12 +453,18 @@ public sealed class DarlingMcpAlertTools
             notify_severity = s.AnalysisNotifySeverity,
             /* #2107: was a hardcoded 360 in Darling while Lite passed a configured value through. */
             notify_cooldown_minutes = s.AnalysisNotifyCooldownMinutes,
-            /* #3712: where an UNCORROBORATED finding goes — 'digest' (shipped) or 'page'. FILE-LEVEL
-               (darling.json analysis.uncorroboratedRoute; no config_alert_settings column, no rung window),
-               so it is read off the ambient publish both config-loading hosts install rather than off the
-               row, and update_alert_settings refuses it by name with the file key. Null when nothing has
-               published (a harness) — never a constant dressed as a reading. */
-            uncorroborated_route = DarlingFileLevelAlertSettings.UncorroboratedRoute,
+            /* #3712: where an UNCORROBORATED finding goes — 'digest' (shipped) or 'page' — as the EFFECTIVE route
+               the service applies, resolved by the SAME function the engine seam uses
+               (DarlingAlertSettings.ResolveUncorroboratedRoute) over the knob's two homes: the row's
+               analysis_uncorroborated_route column (V137, read raw off the row above) wins when it holds a route;
+               NULL defers to darling.json's analysis.uncorroboratedRoute, read off the ambient publish both
+               config-loading hosts install (DarlingFileLevelAlertSettings — the file is not in the store, and
+               the alert tools are static methods over the store); neither defers to the shipped digest. Never
+               null: a resolution always ends somewhere, and _source says where — 'store', 'file', or 'default'.
+               An unpublished harness reads 'default' + 'digest', which is a true statement about what that
+               process would apply, where the pre-V137 null claimed only that nothing had been published. */
+            uncorroborated_route = UncorroboratedRoute(s).RouteText,
+            uncorroborated_route_source = UncorroboratedRoute(s).Source,
             uncorroborated_route_note = UncorroboratedRouteNote
         },
         /* #3466 (V124): the fleet sweep's own switch and cadence — the scheduled whole-fleet report,
@@ -729,9 +750,14 @@ public sealed class DarlingMcpAlertTools
         "poison_wait.threshold_ms is RETIRED (#3593): the Poison Wait alert grades accumulated wait over a ten-minute window, " +
         "so this value is accepted and stored for round-trip compatibility but consulted by nothing — setting it returns " +
         "status updated with a warnings entry saying so, and does not change when the alert fires. poison_wait.enabled still governs the alert. " +
-        "analysis.uncorroborated_route is FILE-LEVEL (#3712): it lives in darling.json as analysis.uncorroboratedRoute, not in the settings row, " +
-        "so this tool cannot write it — sending it back unchanged from a get_alert_settings round-trip is accepted with a warning, and sending a " +
-        "different value is refused with the file key to edit. " +
+        "analysis.uncorroborated_route (#3712) is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
+        "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +
+        "from its next collection sweep and consults on the next scheduled-analysis delivery — no restart, no file edit; null CLEARS the column " +
+        "so the file governs again (get_alert_settings then reports uncorroborated_route_source 'file'); any other value is refused and nothing " +
+        "is written. Handing a whole get_alert_settings payload back writes the EFFECTIVE route it reported into the store, so a value the file " +
+        "had been supplying becomes the store's from then on — the response carries a warnings entry when the echoed uncorroborated_route_source " +
+        "was 'file' or 'default', and uncorroborated_route_source / uncorroborated_route_note themselves are read-only companions, accepted and " +
+        "ignored on the way in. A corroborated finding pages under either route. " +
         "long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins (#3653) are the two arrays of the " +
         "Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH a prefix in the first, or whose login_name " +
         "IS an entry of the second (both case-insensitive, no wildcard grammar — a * is a character), is NOT EVALUATED by that " +
@@ -742,7 +768,7 @@ public sealed class DarlingMcpAlertTools
         "logins; the application's admin login is deliberately not one, because it also runs real ad-hoc long-runners). The fired " +
         "card's Excluded Count item, split by arm, shows the knob working. " +
         "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
-        "empty unless a stored-but-unconsulted or file-level field was sent), or " +
+        "empty unless a stored-but-unconsulted field was sent, or a round-trip moved the route knob's source from the file to the store), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
         NpgsqlDataSource postgres,
@@ -1572,6 +1598,46 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* #3712 (V137): the route knob's TRI-STATE column, the one nullable text on this row. 'digest' / 'page'
+           (case-insensitive) is stored in the canonical lower-case wire spelling (FindingRouting.RouteText) --
+           the form the V137 CHECK admits and the form every reader compares against, so a 'Page' typed here
+           is not a value no reader wrote. An explicit JSON null is a VALUE, not an omission: it writes SQL
+           NULL, which is "hand the decision back to darling.json's analysis.uncorroboratedRoute" -- the third
+           state, and the only way to reach it once a route has been stored. Anything else is refused by the
+           tool's ordinary invalid arm (400-class on the web surface, #3739) with the three accepted spellings
+           named: a route has no clamp, so there is no "nearest valid value" to store instead, and the CHECK
+           would have refused it at the store anyway -- better to say so here than to surface a 23514. */
+        void AddNullableRoute(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text) && FindingRouting.TryParseRoute(text) is { } route)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = FindingRouting.RouteText(route) }));
+                return;
+            }
+
+            error = $"'{field}' must be '{FindingRouting.DigestText}', '{FindingRouting.PageText}', or null (null clears the store column so darling.json's analysis.uncorroboratedRoute governs again).";
+        }
+
+        /* #3712: the route knob's provenance echo. get_alert_settings emits the EFFECTIVE route under
+           analysis.uncorroborated_route and WHICH home decided it under analysis.uncorroborated_route_source, and
+           this tool's own description tells a caller to hand the whole read payload back -- so a round-trip
+           that changed some other knob also hands back a route the FILE had been supplying, and writing it
+           makes the store govern from then on. The value does not change; the provenance does, and a later
+           edit to darling.json would then do nothing. That is stated on the success envelope where the caller
+           is looking, ONLY when the echoed source says the file or the default had been deciding -- a partial
+           update naming the route alone is a deliberate write and gets no such note. The two locals are read
+           after the loop, because the echo may arrive before or after the route in document order. */
+        string? routeSourceEcho = null;
+        var routeWritten = false;
+
         /* Descends one nested group (e.g. "cpu": {...}); an unknown key inside it is rejected like an unknown
            top-level field, so the whole write is refused rather than silently ignoring a typo'd field. */
         void Group(JsonNode? node, string group, Action<string, JsonNode?> handleKey)
@@ -1925,29 +1991,20 @@ public sealed class DarlingMcpAlertTools
                             case "notify_severity": AddDouble("analysis_notify_severity", n, "analysis.notify_severity", 0.0, 2.0); break;
                             /* #2107: the clamp matches the shared engine's documented [30, 10080]. */
                             case "notify_cooldown_minutes": AddInt("analysis_notify_cooldown_minutes", n, "analysis.notify_cooldown_minutes", 30, 10080); break;
-                            /* #3712: reported by get_alert_settings but FILE-LEVEL, so a round-tripped payload that
-                               carries it unchanged is accepted with a warning (the poison_wait.threshold_ms shape),
-                               and one that tries to CHANGE it is refused by name with the file key — accepting it
-                               silently would present as the setting not sticking. */
+                            /* #3712 (V137): the route knob's store half -- 'digest' / 'page' write the column, null clears
+                               it back to "the file governs". Before the rung this arm refused a change by name with the
+                               file key; the store column is now the writable home and the file is what NULL defers to. */
                             case "uncorroborated_route":
-                            {
-                                /* The read emits null when nothing has published (a harness); that null coming home
-                                   is our own text and claims no column, like the note below. */
-                                var published = DarlingFileLevelAlertSettings.UncorroboratedRoute;
-                                var requested = n is JsonValue v && v.TryGetValue<string>(out var text) ? text : null;
-                                var normalized = FindingRouting.TryParseRoute(requested) is { } parsed ? FindingRouting.RouteText(parsed) : requested;
-                                if (requested is null && published is null)
-                                {
-                                    break;
-                                }
-                                if (string.Equals(normalized, published, StringComparison.Ordinal))
-                                {
-                                    warnings.Add("analysis.uncorroborated_route is file-level and was not written; the value sent matches darling.json's analysis.uncorroboratedRoute.");
-                                    break;
-                                }
-                                error = "analysis.uncorroborated_route is FILE-LEVEL: set analysis.uncorroboratedRoute in darling.json ('digest' or 'page') and restart the service. It is not a store column and this tool cannot write it.";
+                                AddNullableRoute("analysis_uncorroborated_route", n, "analysis.uncorroborated_route");
+                                routeWritten = error is null;
                                 break;
-                            }
+                            /* Read-only companions coming home from a get_alert_settings round-trip: the note is the
+                               tool's own text; the source is the reader's provenance label, remembered so the
+                               post-loop warning can say when a write moved the decision off the file. Neither claims
+                               a column and neither is validated -- our own text is not the caller's input. */
+                            case "uncorroborated_route_source":
+                                routeSourceEcho = n is JsonValue sv && sv.TryGetValue<string>(out var sourceText) ? sourceText : null;
+                                break;
                             case "uncorroborated_route_note": break;
                             default: error = $"Unknown field 'analysis.{k}'."; break;
                         }
@@ -1979,6 +2036,20 @@ public sealed class DarlingMcpAlertTools
                     error = $"Unknown field '{prop.Key}'. Send fields in the nested shape get_alert_settings returns.";
                     break;
             }
+        }
+
+        /* #3712: the provenance note described above the locals -- the route was written AND the payload's own
+           echo said the file (or the shipped default) had been deciding, so this write moved the decision into
+           the store. Not an error (the write is exactly what the caller sent) and not a refusal (the round-trip
+           this tool's description prescribes must not fail on a field the caller did not choose); a sentence
+           on the success envelope saying what moved and how to move it back. */
+        if (error == null && routeWritten
+            && (string.Equals(routeSourceEcho, DarlingAlertSettings.RouteSourceFile, StringComparison.Ordinal)
+                || string.Equals(routeSourceEcho, DarlingAlertSettings.RouteSourceDefault, StringComparison.Ordinal)))
+        {
+            warnings.Add("analysis.uncorroborated_route was written to the store, which now governs it; the payload's uncorroborated_route_source said '"
+                + routeSourceEcho + "' had been deciding, so darling.json's analysis.uncorroboratedRoute no longer applies until the column is cleared "
+                + "(send analysis.uncorroborated_route: null).");
         }
 
         /* Two accepted keys claiming ONE column. The only pair that can do this today is

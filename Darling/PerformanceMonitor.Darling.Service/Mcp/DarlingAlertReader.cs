@@ -258,7 +258,13 @@ AND   dismissed = TRUE";
            logins (text[], the excluded_databases shape; V135, DEFAULT the production read's seeds). APPENDED,
            same reason. */
         IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes,
-        IReadOnlyList<string> LongRunningQueryExcludedLogins);
+        IReadOnlyList<string> LongRunningQueryExcludedLogins,
+        /* #3712 (V137): the uncorroborated-finding route knob's STORE half — the raw column, nullable, where
+           NULL means "not set in the store; darling.json's analysis.uncorroboratedRoute governs". APPENDED,
+           same reason. Carried RAW rather than resolved so the payload builder can say which of the knob's two
+           homes decided (DarlingAlertSettings.ResolveUncorroboratedRoute takes this beside the published file
+           value) and so a store whose CHECK was dropped reports the same fall-through the service applied. */
+        string? AnalysisUncorroboratedRoute);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -291,7 +297,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
        self_disk_free_warn_gb,
-       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
+       analysis_uncorroborated_route
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -347,7 +354,10 @@ WHERE id = 1";
             reader.GetInt32(66),
             /* #3653 (A5, Q5): the Long-Running Query opt-out lists at 67–68. */
             reader.IsDBNull(67) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(67),
-            reader.IsDBNull(68) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(68));
+            reader.IsDBNull(68) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(68),
+            /* #3712 (V137): the route knob's store half at 69 — NULL is the expected reading on every store that
+               has not had a route written, not a mid-migration guard. */
+            reader.IsDBNull(69) ? null : reader.GetString(69));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

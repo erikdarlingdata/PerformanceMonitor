@@ -965,6 +965,16 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120), ..., then #3653's two
            Long-Running Query opt-out lists (text[], the excluded_databases shape).
 
+           ONE column the read selects is DELIBERATELY ABSENT here: analysis_uncorroborated_route (#3712, V137),
+           the store half of the uncorroborated-finding route knob. It is a nullable tri-state whose NULL means
+           "not set in the store; darling.json's analysis.uncorroboratedRoute governs", and the precedence the
+           resolver applies is store non-NULL wins over file. Seeding the file's value INTO it would make the
+           store win from the first start on every install, so the file could never govern again without an
+           operator clearing the column -- the third state would exist in the schema and be reachable on no
+           store. Omitted from the INSERT, the column takes its NULL, which is exactly what an upgraded store
+           reads too; the file keeps governing until someone writes a route through the Viewer or
+           update_alert_settings. The rung doc (PgMigrations V137) says the same from the DDL side.
+
            ANNOTATE HERE. THE COLUMN LIST CARRIES NO COMMENTS AT ALL, and that is a hard rule rather
            than a preference: ConfigSeedStatementArityTests parses this statement with one regex that
            captures the column list up to the first ')' and splits it on ','. A closing parenthesis in
@@ -1212,13 +1222,34 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
-            /* #3712: analysis.uncorroboratedRoute is FILE-LEVEL — config_alert_settings has no column for it
-               (no rung window) — and it lives inside the AnalysisConfig section that ApplyToConfig swaps
-               WHOLESALE, so the fresh store-built section would drop it on the first reload. Carried across
-               from the held config, which is darling.json's value on the first load and the previous carry
-               on every later one: the BuildServerFromRow shape (a file-only value backfilled from bootstrap
-               onto a store-built object). When the column exists this line becomes a reader.GetString. */
+            /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
+               (config_alert_settings.analysis_uncorroborated_route, V137) ReadAlertSettingsAsync has just read
+               into analysis.StoreUncorroboratedRoute. The file half lives inside the AnalysisConfig section that
+               ApplyToConfig swaps WHOLESALE, so the fresh store-built section would drop it on the first reload;
+               it is carried across from the held config, which is darling.json's value on the first load and
+               the previous carry on every later one -- the BuildServerFromRow shape (a file-only value
+               backfilled from bootstrap onto a store-built object). The carry SURVIVED the column on purpose:
+               the precedence is store non-NULL wins over file, and "over file" needs the file's value to still
+               exist when the store column is NULL -- including the moment an operator clears it back to NULL
+               to hand the decision back to the file. DarlingAlertSettings.ResolveUncorroboratedRoute reads the
+               pair. */
             analysis.UncorroboratedRoute = bootstrap.Analysis.UncorroboratedRoute;
+
+            /* The one reading the resolver cannot report itself: a store value that is neither 'digest' nor
+               'page'. The V137 CHECK makes that a write error at the store, so on a healthy store this never
+               fires; on a store whose CHECK was dropped by hand it is the difference between "the operator's
+               PAGE silently became the file's digest" and a warning naming the value. Logged here rather than
+               in the resolver because this is the one caller with a logger, and once per reload rather than
+               per evaluation because reloads happen only on a config_version bump. The value is left as read
+               (the resolver ignores it) so get_alert_settings, which reads the row directly, reports the same
+               fall-through this process applied. */
+            var resolved = DarlingAlertSettings.ResolveUncorroboratedRoute(analysis.StoreUncorroboratedRoute, analysis.UncorroboratedRoute);
+            if (resolved.StoreValueIgnored)
+            {
+                _logger?.LogWarning(
+                    "config_alert_settings.analysis_uncorroborated_route holds '{StoreValue}', which is neither 'digest' nor 'page' (the V137 CHECK should have refused it) — ignoring it; the {Source} route '{Route}' governs uncorroborated findings until the column is set to a valid route or cleared to NULL",
+                    analysis.StoreUncorroboratedRoute, resolved.Source, resolved.RouteText);
+            }
 
             /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
                username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
@@ -1393,7 +1424,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        pg_deadlock_count_threshold, pg_blocking_count_threshold,
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
        self_disk_free_warn_gb,
-       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins
+       long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
+       analysis_uncorroborated_route
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1541,6 +1573,19 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             IntervalMinutes = reader.GetInt32(24),
             NotificationsEnabled = reader.GetBoolean(25),
             NotifySeverity = reader.GetDouble(26),
+
+            /* #3712 (V137): the route knob's STORE half appended at ordinal 69 -- nullable text under a CHECK, no
+               DEFAULT, and NULL is a value ("not set in the store; darling.json's analysis.uncorroboratedRoute
+               governs"), so the DBNull arm is the EXPECTED reading on every store the morning after the upgrade
+               and on every fresh seed, not a mid-migration guard. Read into its own member, never folded into
+               UncorroboratedRoute (the file half, which LoadViewAsync carries across the swap): the resolver on
+               DarlingAlertSettings needs both to say which one decided, and an operator clearing the column
+               back to NULL needs the file's value still to be there. Same reachability rule as every appended
+               knob: ApplyToConfig replaces config.Analysis wholesale, so a column selected but not read here --
+               or read but not selected -- would silently reset the store half to NULL on every worker start,
+               and a route an operator set to PAGE in the Viewer would read as the file's digest while
+               get_alert_settings (which reads the row directly) still showed page. */
+            StoreUncorroboratedRoute = reader.IsDBNull(69) ? null : reader.GetString(69),
         };
         return (alerts, analysis);
     }

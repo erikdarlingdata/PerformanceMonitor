@@ -24,8 +24,11 @@ public sealed class McpAlertTools
     internal const string PoisonWaitThresholdMsNote =
         "retired by #3593 — the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
 
-    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712). Darling's twin says the knob is
-    /// file-level; Lite's says where it is edited, because here it is a live setting.</summary>
+    /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712). Darling's twin states the precedence
+    /// between the knob's TWO homes there (the settings-row column since V137, over darling.json) and publishes
+    /// which one decided under <c>uncorroborated_route_source</c>; Lite has ONE home, its settings file, so this
+    /// note says where it is edited and there is no source key to publish (<c>McpAlertSettingsKeyTests</c> holds
+    /// that omission as a decision).</summary>
     internal const string UncorroboratedRouteNote =
         "#3712: 'digest' (default) keeps a lone uncorroborated finding off email, the webhooks and the tray — it is still "
         + "recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of "
@@ -344,8 +347,9 @@ public sealed class McpAlertTools
                     notify_cooldown_minutes = App.AnalysisNotifyCooldownMinutes,
                     /* #3712: where a notify-worthy but UNCORROBORATED finding goes — Darling's key, Lite's own live
                        value (Settings → Alerts, or analysis_uncorroborated_route in the settings file). The note
-                       key rides for shape parity with Darling, whose knob is file-level; here it names the
-                       surface that edits it. */
+                       key rides for shape parity with Darling; here it names the surface that edits it. Darling's
+                       uncorroborated_route_source (which of its two homes decided) is deliberately NOT mirrored:
+                       Lite has one home, so the key could only ever read a constant. */
                     uncorroborated_route = FindingRouting.RouteText(App.AnalysisUncorroboratedRoute),
                     uncorroborated_route_note = UncorroboratedRouteNote
                 },
