@@ -109,13 +109,20 @@ LIMIT 6";
     /// window's stock SAMPLED all-types wait rate — per second the sampler was WATCHING, CPU/Running excluded —
     /// against the <c>pg_sampled_wait_ms_per_sec</c> bucket. Lane 9's Aurora wait-profile detector
     /// (<c>DetectWaitProfileAnomalies</c>) with the instrument swapped, and with the #3653 peak-AND-mean gate
-    /// (#3724) the ratio family did not yet have: every clause below is asked of the window PEAK and of the window
-    /// MEAN alike, so one hot five-minute collection is not a profile shift and a 24-hour anchored pass does not
+    /// (#3724) the ratio family did not yet have: every DEVIATION clause below is asked of the window PEAK and of the
+    /// window MEAN alike, so one hot five-minute collection is not a profile shift and a 24-hour anchored pass does not
     /// mechanically fire more often than the 4-hour one. Robust bucket: modified z at the heavy-tail cutoff
     /// (<see cref="AnomalyThresholds.HeavyTailModifiedZThreshold"/>, the SQL Server fleet's calibrated robust
     /// statistic used by reference) on both statistics AND the magnitude bar on the peak; classical bucket: the ratio
     /// at <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/> on both AND the bar on the peak; untrustworthy:
-    /// the bar alone on the peak AND the mean, <c>is_new</c>, no sentinel ratio. The bar is
+    /// the bar alone on the PEAK, <c>is_new</c>, no sentinel ratio — the one arm that is NOT pair-gated, by the
+    /// 2026-09-20 ruling (lane 35 of #3691): a first occurrence has no baseline to judge either statistic against,
+    /// so asking the mean to clear an absolute bar there is not the #3724 rule (a deviation must hold across the
+    /// window) but a second magnitude bar, and the Aurora twin (<c>DetectWaitProfileAnomalies</c>, #3780) and the
+    /// SQL Server wait profile (#3773) both gate <c>is_new</c> on the peak alone under #3741's ruling. Lane 24 had
+    /// pair-gated it; the divergence was stated, and is now closed the twins' way. Lineage of that choice:
+    /// unmeasured — population 0 on the dogfood fleet (no <c>pg_wait_sampling</c> cluster) as of 2026-09-20; gating
+    /// matched to the unsampled twin by ruling; revisit when a sampled cluster exists. The bar is
     /// <see cref="AnomalyThresholds.PgSampledWaitProfileFallbackMsPerSec"/> — lane 9 left it deliberately undeclared
     /// while nothing read it; it is the Aurora figure restated on its own (unmeasured) lineage and NOT an alias, so
     /// the two instruments calibrate apart. Every fact carries <c>threshold_lineage = 0</c>.
@@ -199,9 +206,11 @@ LIMIT 6";
                 ratio = 0;
                 meanRatio = 0;
                 fallbackExceedance = peakRate / PgSampledWaitProfileFallbackMsPerSec;
-                /* unmeasured: the bar alone, on the peak AND the mean (#3724's untrustworthy-path rule: the one
-                   absolute instrument this path has, asked of both statistics). */
-                if (fallbackExceedance < 1.0 || meanRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                /* unmeasured: the peak's bar alone, the Aurora twin's exact clause, by the 2026-09-20 ruling (summary):
+                   no z to trust on either statistic here, so the mean has nothing to be judged against; the pair gate
+                   stays on the two arms above, where #3724's rule applies. Gating matched to the unsampled twin;
+                   population 0 on the dogfood fleet — revisit when a pg_wait_sampling cluster exists. */
+                if (fallbackExceedance < 1.0) return;
             }
 
             var metadata = new Dictionary<string, double>

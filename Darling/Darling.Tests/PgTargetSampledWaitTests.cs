@@ -107,7 +107,9 @@ public sealed class PgTargetSampledWaitTests
         Assert.Contains("if (collectionCount == 0 || exactCollections > 0 || sampleCount == 0) return;", code, StringComparison.Ordinal);
         Assert.Contains("modifiedZ < HeavyTailModifiedZThreshold || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
         Assert.Contains("ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
-        Assert.Contains("fallbackExceedance < 1.0 || meanRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
+        /* The is_new arm is the one arm NOT pair-gated — lane 35's ruling; the parity pin below owns its shape. */
+        Assert.Contains("if (fallbackExceedance < 1.0) return;", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("meanRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
         Assert.Contains("Key = PgTargetFactKeys.AnomalySampledWaitProfile", code, StringComparison.Ordinal);
         Assert.DoesNotContain("PgWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);   /* its own bar, never the Aurora one */
         Assert.DoesNotContain("DateTime.UtcNow", code, StringComparison.Ordinal);
@@ -118,6 +120,96 @@ public sealed class PgTargetSampledWaitTests
         var blocking = root.IndexOf("await DetectBlockingAnomalies(context, anomalies);", StringComparison.Ordinal);
         var sampled = root.IndexOf("await DetectSampledWaitProfileAnomalies(context, anomalies);", StringComparison.Ordinal);
         Assert.True(blocking > 0 && sampled > blocking);
+    }
+
+    /// <summary>
+    /// The #3691 line "RULED 2026-09-20 → lane 35: the sampled twin matches the unsampled twin's <c>is_new</c>
+    /// gating": the sampled detector's first-occurrence arm gates on the PEAK's bar alone, textually the Aurora
+    /// twin's clause (<c>if (fallbackExceedance &lt; 1.0) return;</c>, no <c>meanRate &lt;</c> bar), while the robust
+    /// and ratio arms keep the #3724 pair gate. Lane 24 had pair-gated <c>is_new</c>; the Aurora twin (#3780) and the
+    /// SQL Server profile (#3773) never did, by #3741's ruling.
+    ///
+    /// <para>The arithmetic is EXECUTED here with the detector's constants and <see cref="BaselineMath.ModifiedZScore"/>
+    /// — the sampled arm's gates are inline predicates with no shared call to invoke, so the pin states each predicate
+    /// in the detector's own terms and the source pin above holds the text to it. Fixture: a young stock server
+    /// (untrustworthy bucket) whose window has ONE hot sampler cycle at 1,700 ms/sec watched over a flat 333 ms/sec:
+    /// the peak clears the 500 bar 3.4×, the window mean (362) does not — FIRES now (was: held by the mean clause),
+    /// and the same peak through the Aurora arm's clause fires identically. With a trustworthy bucket (lane 24's live
+    /// planting: median 333, MAD 33) the same one-cycle spike does NOT fire — the mean's modified z is under the
+    /// heavy-tail cutoff — and a sustained shift to 1,700 fires on both statistics; the classical arm holds the
+    /// spike on <c>meanRatio</c> and fires the shift. The pair gate is intact where a baseline exists.</para>
+    /// </summary>
+    [Fact]
+    public void TheFirstOccurrenceArm_GatesOnThePeakAloneLikeItsTwins_WhileTheBaselineArmsKeepThePairGate()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.WaitsSampled.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var start = code.IndexOf("private async partial Task DetectSampledWaitProfileAnomalies(", StringComparison.Ordinal);
+        Assert.True(start > 0, "the sampled wait-profile detector moved");
+        var body = code[start..];
+        /* Three arms, in order: robust (pair), classical (pair), first-occurrence (peak alone). */
+        var robust = body.IndexOf("modifiedZ < HeavyTailModifiedZThreshold || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", StringComparison.Ordinal);
+        var classical = body.IndexOf("ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", StringComparison.Ordinal);
+        var first = body.IndexOf("if (fallbackExceedance < 1.0) return;", StringComparison.Ordinal);
+        Assert.True(robust > 0 && classical > robust && first > classical, "the three arms are not in lane 24's order");
+        Assert.DoesNotContain("meanRate < PgSampledWaitProfileFallbackMsPerSec", body, StringComparison.Ordinal);
+        Assert.Contains("fallbackExceedance = peakRate / PgSampledWaitProfileFallbackMsPerSec;", body, StringComparison.Ordinal);
+        /* Twin parity, textually: the Aurora arm's first-occurrence clause is the same text. */
+        var aurora = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs"));
+        var auroraStart = aurora.IndexOf("private async Task DetectWaitProfileAnomalies(", StringComparison.Ordinal);
+        var auroraEnd = aurora.IndexOf("\n    internal const string AnomalySource", auroraStart, StringComparison.Ordinal);
+        Assert.True(auroraStart > 0 && auroraEnd > auroraStart);
+        var auroraBody = aurora[auroraStart..auroraEnd];
+        Assert.Contains("fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;", auroraBody, StringComparison.Ordinal);
+        Assert.Contains("if (fallbackExceedance < 1.0) return;", auroraBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("meanRate < PgWaitProfileFallbackMsPerSec", auroraBody, StringComparison.Ordinal);
+        /* The ruling's lineage note travels with the arm. */
+        Assert.Contains("population 0 on the dogfood fleet", source, StringComparison.Ordinal);
+        Assert.Contains("revisit when a", source, StringComparison.Ordinal);
+
+        /* ── The arithmetic, executed. Window: 48 countable cycles, 47 quiet at 333.3 ms/sec watched, one at 1,700. ── */
+        const double bar = AnomalyThresholds.PgSampledWaitProfileFallbackMsPerSec;
+        const double quiet = 10_000.0 / 30.0;   /* (4 + 6) s of sampled waiting over 30 s watched */
+        const double spike = 1_700.0;           /* (45 + 6) s over 30 s watched — lane 24's heavy cycle */
+        var spikeMean = (47 * quiet + spike) / 48;
+        Assert.InRange(spikeMean, 360.0, 365.0);
+
+        /* First occurrence (no trustworthy baseline): the peak's bar alone. */
+        var fallbackExceedance = spike / bar;
+        Assert.Equal(3.4, fallbackExceedance, precision: 9);
+        Assert.False(fallbackExceedance < 1.0, "the first-occurrence spike fires on the peak");
+        Assert.True(spikeMean < bar, "…and the retired mean clause would have held it — the red this pin turns green");
+        /* Twin parity, numerically: the same fixture through the Aurora arm's clause and bar. */
+        Assert.False(spike / AnomalyThresholds.PgWaitProfileFallbackMsPerSec < 1.0);
+        Assert.Equal(spike / AnomalyThresholds.PgWaitProfileFallbackMsPerSec, fallbackExceedance, precision: 9);
+        /* The fact the arm would stamp: is_new 1, ratio 0, fire_threshold 0 — the grade the scorer reads. */
+        var isNew = Anomaly(PgTargetFactKeys.AnomalySampledWaitProfile, ("is_new", 1), ("ratio", 0), ("fallback_exceedance", fallbackExceedance), ("current_ms_per_sec", spike), ("mean_ms_per_sec", spikeMean));
+        Assert.True(PgTargetScorer.ScoreRatioAnomaly(isNew) > 0);
+
+        /* A trustworthy robust bucket (lane 24's live planting): the same spike does NOT fire — the pair gate. */
+        var bucket = new BaselineBucket
+        {
+            Tier = BaselineTier.Full, HourOfDay = 12, DayOfWeek = 3,
+            Mean = quiet, StdDev = 27.2, Median = quiet, Mad = 1_000.0 / 30.0,
+            SampleCount = 250, DistinctDays = 5, AbsStdDevFloor = 0,
+        };
+        Assert.True(bucket.IsTrustworthy && bucket.EffectiveRobustSigma > 0);
+        var peakZ = BaselineMath.ModifiedZScore(bucket, spike);
+        var spikeMeanZ = BaselineMath.ModifiedZScore(bucket, spikeMean);
+        var shiftMeanZ = BaselineMath.ModifiedZScore(bucket, spike);   /* the whole window at 1,700: mean = peak */
+        Assert.True(peakZ >= AnomalyThresholds.HeavyTailModifiedZThreshold && spike >= bar, "the peak clears on both windows");
+        Assert.True(spikeMeanZ < AnomalyThresholds.HeavyTailModifiedZThreshold, "one hot cycle over a flat window: the mean's z holds it");
+        Assert.True(peakZ < AnomalyThresholds.HeavyTailModifiedZThreshold || spikeMeanZ < AnomalyThresholds.HeavyTailModifiedZThreshold || spike < bar, "the robust arm's exact predicate returns (holds) on the spike");
+        Assert.False(peakZ < AnomalyThresholds.HeavyTailModifiedZThreshold || shiftMeanZ < AnomalyThresholds.HeavyTailModifiedZThreshold || spike < bar, "…and fires on the sustained shift");
+
+        /* The classical arm (trustworthy, no MAD): the ratio on both; the spike's mean ratio is under 3×. */
+        var ratio = spike / bucket.Mean;
+        var spikeMeanRatio = spikeMean / bucket.Mean;
+        var shiftMeanRatio = spike / bucket.Mean;
+        Assert.True(ratio >= AnomalyThresholds.PgRatioAnomalyThreshold);
+        Assert.True(spikeMeanRatio < AnomalyThresholds.PgRatioAnomalyThreshold);
+        Assert.True(ratio < AnomalyThresholds.PgRatioAnomalyThreshold || spikeMeanRatio < AnomalyThresholds.PgRatioAnomalyThreshold || spike < bar, "the classical arm holds the spike on meanRatio");
+        Assert.False(ratio < AnomalyThresholds.PgRatioAnomalyThreshold || shiftMeanRatio < AnomalyThresholds.PgRatioAnomalyThreshold || spike < bar, "…and fires the shift");
     }
 
     /* ── the bar ── */
