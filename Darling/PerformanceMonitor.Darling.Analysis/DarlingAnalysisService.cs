@@ -921,13 +921,70 @@ AND   capture_time >= COALESCE(
 ORDER BY configuration_name, capture_time";
 
     /// <summary>
+    /// The default trace's sp_configure lines for the attribution's trace anchor (#3740): every stored
+    /// <c>ErrorLog</c> row carrying msg 15457 (<see cref="ConfigChangeAttribution.ReconfigureMessageNumber"/>)
+    /// whose event time falls in <c>($2, $3]</c> — the span between the config capture that saw the old value
+    /// and the one that saw the new, bound by the caller as naive UTC. Selected on <c>error_number</c>, not on
+    /// the text: the number is populated on the row and does not change with the instance's language, and
+    /// the attribution parses the text afterwards (<see cref="ConfigChangeAttribution.ParseReconfigureLine"/>).
+    /// Reads the base table like <c>DarlingDefaultTraceReader</c> does (it has no <c>v_*</c> view).
+    ///
+    /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
+    /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw so the collector's watermark compares like with
+    /// like — while the capture times this is bounded by are naive UTC, so the column is de-skewed by the
+    /// collected <c>server_properties.utc_offset_minutes</c> on BOTH the projection and both bounds, in the
+    /// exact spelling <c>DarlingDefaultTraceReader.EventsByWindowSql</c> and the viewer's System Events read
+    /// use (<c>ServerLocalReadFrameDisciplineTests</c> counts the three sites and forbids an un-de-skewed
+    /// read of the aliased column). Getting this wrong is not a cosmetic skew: at UTC−4 an un-de-skewed line would
+    /// sit four hours later than its capture and fall OUT of the span, so the anchor would silently never
+    /// resolve on the very fleet it was built for. A server with no collected offset yet falls back to 0
+    /// (local == UTC) through the single-row COALESCE CTE, which also keeps the cross join from dropping the
+    /// events; one offset covers the span, so a span straddling a DST transition is off by an hour on its
+    /// far side — the same single-snapshot approximation every reader of this column makes, stated here
+    /// rather than implied.</para>
+    ///
+    /// <para><b>Cost.</b> No <c>event_time</c> index exists (the table is indexed <c>(server_id,
+    /// collection_time)</c>), so this is a scan of the server's rows in a curated, low-volume table with a
+    /// 30-day retention; and it runs only when the snapshot diff found a change in the pass window, which
+    /// the connect cadence makes rare. Exposed const for the dialect pins.</para>
+    /// </summary>
+    public const string ReconfigureTraceLinesForAttributionSql = @"
+WITH svr AS (
+    SELECT COALESCE((
+        SELECT sp.utc_offset_minutes
+        FROM server_properties AS sp
+        WHERE sp.server_id = $1
+        AND   sp.utc_offset_minutes IS NOT NULL
+        ORDER BY sp.collection_time DESC
+        LIMIT 1), 0) AS offset_minutes
+)
+SELECT
+    dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
+    dte.text_data
+FROM default_trace_events AS dte, svr
+WHERE dte.server_id = $1
+AND   dte.error_number = 15457
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
+ORDER BY event_time_utc";
+
+    /// <summary>
     /// Step 2.5 of the pass (#3653 A10, Q2): if a <c>sys.configurations</c> value was first observed changed
-    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before that
-    /// observation and the (clamped) four hours after it, band the result with
+    /// inside the pass window, run <see cref="ComparePeriodsAsync"/> over the four hours before the change
+    /// and the (clamped) four hours after it, band the result with
     /// <see cref="ComparisonBanding.Compare"/> exactly as <c>compare_analysis</c> would, and append ONE
     /// <c>CONFIG_CHANGED</c> fact carrying the verdict. <see cref="ConfigChangeAttribution"/> holds the
-    /// design — why one fact, why Information, why "first observed" and never "changed at"; this method is
-    /// the store read, the engine gate and the wiring.
+    /// design — why one fact, why Information, which clock "the change" is on; this method is the store
+    /// reads, the engine gate and the wiring.
+    ///
+    /// <para><b>Two clocks, in order (#3740).</b> The snapshot diff says WHAT changed and when it was first
+    /// observed; the default trace's sp_configure line, when the store holds one for the same option in the
+    /// span between the two captures, says WHEN it changed. <see cref="ReconfigureTraceLinesForAttributionSql"/>
+    /// reads those lines and <see cref="ConfigChangeAttribution.ResolveServerConfigTraceAnchor"/> joins
+    /// them; the compare and the fact anchor on the trace's time when the join resolves and on the
+    /// observation otherwise, and the fact says which. The trace read has its own catch INSIDE the method's:
+    /// a fault there costs the pass the trace anchor, not the card — the observation anchor is exactly what
+    /// #3720 shipped and is still true.</para>
     ///
     /// <para><b>Engine gate by identity, not by token.</b> <c>ReferenceEquals(engine, _sqlServerEngine)</c>
     /// rather than re-reading <c>engine_kind</c>: the pass already resolved the set once, and an unstamped
@@ -983,7 +1040,9 @@ ORDER BY configuration_name, capture_time";
                 return;
 
             var latest = events[0];
-            var windows = ConfigChangeAttribution.WindowsFor(latest.ChangeTime, context.TimeRangeEnd);
+            var anchor = await ResolveTraceAnchorAsync(context, latest);
+            var anchorTime = ConfigChangeAttribution.AnchorTime(latest, anchor);
+            var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
             var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
@@ -998,11 +1057,13 @@ ORDER BY configuration_name, capture_time";
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
             facts.Add(ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage));
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Configuration change attributed for {Server}: {Settings} first observed at {ObservedAt:u}, compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better, {Stable} stable{Unavailable}",
-                context.ServerName, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)), latest.ChangeTime,
+                "[DarlingAnalysisService] Configuration change attributed for {Server}: {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better, {Stable} stable{Unavailable}",
+                context.ServerName, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)),
+                anchor is null ? "first observed at" : "changed at", anchorTime,
+                anchor is null ? "configuration snapshot" : "default trace, msg 15457",
                 ConfigChangeAttribution.CompareWindowHours, windows.AfterHoursObserved,
                 compare?.Worse ?? 0, compare?.Better ?? 0, compare?.Stable ?? 0,
                 compare is null ? " (compare unavailable this pass)" : string.Empty);
@@ -1012,6 +1073,49 @@ ORDER BY configuration_name, capture_time";
             _logger?.LogWarning(
                 "[DarlingAnalysisService] Configuration-change attribution failed for {Server}; the pass continues without the CONFIG_CHANGED card: {Message}",
                 context.ServerName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The trace half of step 2.5 (#3740): the stored sp_configure lines in the span between the two config
+    /// captures of <paramref name="change"/>, joined to its settings by
+    /// <see cref="ConfigChangeAttribution.ResolveServerConfigTraceAnchor"/>. Null — the observation anchor —
+    /// when no line matches (trace off, Azure SQL Database, the row aged out before collection, a
+    /// non-English message) AND when the read itself faults: the anchor is an improvement on a card that is
+    /// already true without it, so a store fault here is logged at Warning and costs only the anchor.
+    /// Shutdown residue still propagates to the caller's classified line (#2299). Bounds are bound as naive
+    /// timestamps like the snapshot read's, the column being <c>timestamp</c> without time zone.
+    /// </summary>
+    private async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
+        AnalysisContext context, ConfigChangeAttribution.ChangeEvent change)
+    {
+        try
+        {
+            var lines = new List<ConfigChangeAttribution.TraceLine>();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            using var cmd = new NpgsqlCommand(ReconfigureTraceLinesForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.PreviousCaptureTime, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified));
+
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                lines.Add(new ConfigChangeAttribution.TraceLine(
+                    reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
+            }
+
+            return ConfigChangeAttribution.ResolveServerConfigTraceAnchor(change, lines);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            _logger?.LogWarning(
+                "[DarlingAnalysisService] Default-trace anchor lookup failed for {Server}; the CONFIG_CHANGED card keeps its observation anchor: {Message}",
+                context.ServerName, ex.Message);
+            return null;
         }
     }
 
