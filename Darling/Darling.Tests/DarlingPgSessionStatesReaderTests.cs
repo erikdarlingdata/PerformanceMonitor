@@ -172,25 +172,44 @@ public class DarlingPgSessionStatesReaderTests
     }
 
     /// <summary>
-    /// <c>excludedDatabases</c> is applied after the read with the SQL Server adapter's exact rule: ordinal
-    /// ignore-case on the name, a row with no database name kept, null/empty list a no-op. Executed here,
-    /// not just pinned — the rule is pure.
+    /// <c>excludedDatabases</c> is applied IN the read, ahead of <c>LIMIT $4</c>, as the <c>candidates</c> CTE's
+    /// third flag (#3742) — the same shape on both engines, now the RIGHT one. Until #3742 this reader ran a C#
+    /// <c>FilterExcludedDatabases</c> after the cap (and this test executed its rule), so an excluded database's
+    /// sessions consumed the page and the alert came back short or empty while matches existed. Both
+    /// renderings carry the flag as the builder's empty-arm <c>FALSE</c>, the outer <c>WHERE</c> names all three
+    /// flags before the cap, the third count scalar is <c>AND NOT</c> both knob flags, and the reader has no
+    /// post-read filter left. The set shape (real operands, the exact/case-insensitive rule, a NULL-database
+    /// row kept) is <c>PgLongRunningQueryExclusionTests</c>' — through the shared builder, and live.
     /// </summary>
     [Fact]
-    public void ExcludedDatabases_AppliedAfterTheRead_CaseInsensitively_KeepingUnnamedRows()
+    public void ExcludedDatabases_IsTheThirdFlagAheadOfTheCap_NotAFilterAfterIt()
     {
-        var rows = new List<DarlingPgSessionStatesReader.LongRunningSessionRow>
+        foreach (var sql in new[]
         {
-            new(1, 101, "Orders", "app", "svc", "SELECT", 3_600_000),
-            new(2, 102, "billing", "app", "svc", "UPDATE", 2_400_000),
-            new(3, 103, null, "app", "svc", "(other)", 1_900_000),
-        };
+            DarlingPgSessionStatesReader.CurrentLongRunningSessionsSql,
+            DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlBackupsIncluded,
+        })
+        {
+            Assert.Contains("FALSE AS excluded_by_database", sql, StringComparison.Ordinal);
+            var filter = sql.IndexOf("WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login OR s.excluded_by_database)", StringComparison.Ordinal);
+            var limit = sql.IndexOf("LIMIT $4", StringComparison.Ordinal);
+            Assert.True(filter >= 0, "the three-flag filter is missing");
+            Assert.True(limit > filter, "the database list must be applied ahead of the row cap");
+            Assert.Contains(
+                "CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count",
+                sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("{3}", sql, StringComparison.Ordinal);
+        }
 
-        var filtered = DarlingPgSessionStatesReader.FilterExcludedDatabases(rows, new[] { "ORDERS" });
-        Assert.Equal(new long[] { 2, 3 }, filtered.Select(r => r.BackendId).ToArray());
+        Assert.Equal("s.database_name", DarlingPgSessionStatesReader.ExclusionDatabaseNameColumn);
 
-        Assert.Same(rows, DarlingPgSessionStatesReader.FilterExcludedDatabases(rows, null));
-        Assert.Same(rows, DarlingPgSessionStatesReader.FilterExcludedDatabases(rows, Array.Empty<string>()));
+        /* The retired helper is gone from the reader, not disabled — with a positive control on the same text so
+           a matcher that quietly stopped matching cannot report a clean bill. */
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgSessionStatesReader.cs");
+        Assert.Contains("excluded_by_database_count", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("public static List<LongRunningSessionRow> FilterExcludedDatabases(", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("excludedDatabases.Any(", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("IReadOnlyList<string>? excludedDatabases", reader, StringComparison.Ordinal);
     }
 
     // ── Scoping and parameterisation ─────────────────────────────────────────────────────────────

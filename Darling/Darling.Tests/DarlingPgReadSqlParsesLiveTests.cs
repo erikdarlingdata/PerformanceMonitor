@@ -106,6 +106,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            live class against a planted capture. */
         "DarlingPgSessionStatesReader.ExclusionProgramNameColumn",
         "DarlingPgSessionStatesReader.ExclusionLoginNameColumn",
+        /* #3742: the third column expression the same builder call takes (s.database_name), for the shared
+           excludedDatabases arm spliced at {3} — the same reasoning as the two above, and the list-SET shape is
+           executed by the same live class. */
+        "DarlingPgSessionStatesReader.ExclusionDatabaseNameColumn",
         "DarlingPgSessionStatesReader.NoExclusionPredicate",
         "DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql",
         /* #3601: the severity CASE expression, spliced into EventsSql so the read and the tool's label-to-rank

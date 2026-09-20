@@ -271,9 +271,11 @@ public sealed class LongRunningQueryExclusionsTests
     /// #3742's negative half: NEITHER SQL Server-family adapter filters <c>excludedDatabases</c> on the C# side of
     /// the read any more — the <c>.Where(q =&gt; string.IsNullOrEmpty(q.DatabaseName) || …)</c> block that consumed the
     /// page is gone from both. Source-pinned with a POSITIVE control on the same text (the predicate must be
-    /// present in the read), so a matcher that quietly stopped matching cannot report a clean bill; and the
-    /// PostgreSQL-TARGET reader (<c>DarlingPgSessionStatesReader.FilterExcludedDatabases</c>) is deliberately NOT
-    /// asserted either way here — that read is #3743's.
+    /// present in the read), so a matcher that quietly stopped matching cannot report a clean bill. The
+    /// PostgreSQL-TARGET reader (<c>DarlingPgSessionStatesReader</c>) is not asserted here: its retired helper's
+    /// absence and its three-flag shape are <c>DarlingPgSessionStatesReaderTests</c>' and
+    /// <c>PgLongRunningQueryExclusionTests</c>' pins, which took the same shape through the same five-argument
+    /// overload once #3772 had landed it.
     /// </summary>
     [Fact]
     public void NeitherSqlServerAdapter_FiltersExcludedDatabasesAfterTheRead()

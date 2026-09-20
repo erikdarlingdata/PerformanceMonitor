@@ -1095,6 +1095,230 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
         Assert.DoesNotMatch(new Regex(@"\bFROM\s+v_"), scanSql);
     }
 
+    /// <summary>
+    /// The #3691 parity line "Aurora wait-profile detector lacks the peak-AND-mean gate", closed in #3773's shape:
+    /// the window read carries the MEAN beside the PEAK in the reader's ordinal order (0 peak, 1 mean, 2 total,
+    /// 3 sample count, 4 collection count), the trusted robust arm is the shared <c>AnomalyGate</c> PAIR call with
+    /// this family's bar as both floor and fallback (the inline <c>modifiedZ &lt; HeavyTailModifiedZThreshold</c>
+    /// gate is gone), the ratio arm asks both ratios, the no-baseline arm stays on the peak alone (#3741's
+    /// ruling), and the fact stamps <c>mean_ms_per_sec</c> / <c>mean_ratio</c> / <c>mean_modified_z</c> — the
+    /// SAMPLED twin's keys — beside the peak's. No bar value moved.
+    ///
+    /// <para>The gate's arithmetic is EXECUTED here through the very call the detector makes, on #3773's fixture
+    /// (median 200, MAD 100 → robust σ 148.26): a single 3,200 ms/sec collection in a window whose mean sits at
+    /// the median (peak 20.2σ, mean 0.08σ) does NOT fire; a sustained shift to 1,500 with the same spike (mean
+    /// 8.8σ) fires; the retired peak-only call fires on both, which is the red this pin turns green. The
+    /// extremity escape still reads the peak's <c>modified_z</c> on a fact carrying both readings.</para>
+    /// </summary>
+    [Fact]
+    public void TheAuroraWaitProfile_GatesOnPeakAndMean_ThroughTheSharedPairGate_AndStampsBothReadings()
+    {
+        var sql = PgTargetAnomalyDetector.WaitRateWindowSql;
+        /* The OUTER select — the CTE has its own total_wait_ms alias. */
+        var projection = sql[sql.LastIndexOf("SELECT ", StringComparison.Ordinal)..];
+        var columns = new[] { "AS peak_ms_per_sec", "AS mean_ms_per_sec", "AS total_wait_ms", "AS sample_count", "AS collection_count" };
+        var positions = columns.Select(c => projection.IndexOf(c, StringComparison.Ordinal)).ToArray();
+        Assert.All(positions, p => Assert.True(p > 0));
+        Assert.Equal(positions.Order().ToArray(), positions);
+        /* The same guarded arm as the peak's — a NULL-interval collection is NULL to both aggregates. */
+        Assert.Contains("MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec", sql, StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var start = code.IndexOf("private async Task DetectWaitProfileAnomalies(", StringComparison.Ordinal);
+        var end = code.IndexOf("\n    internal const string AnomalySource", start, StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "the Aurora wait-profile detector moved");
+        var body = code[start..end];
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*meanRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*PgWaitProfileFallbackMsPerSec,\s*PgWaitProfileFallbackMsPerSec,\s*SigmaDisplayCap\)",
+            body);
+        Assert.Contains("if (!decision.Fire) return;", body, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"modifiedZ\s*<\s*HeavyTailModifiedZThreshold", body);
+        Assert.Contains("meanRatio < PgRatioAnomalyThreshold", body, StringComparison.Ordinal);
+        /* The no-baseline arm: the peak's bar alone, by ruling. */
+        Assert.Contains("if (fallbackExceedance < 1.0) return;", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("meanRate < PgWaitProfileFallbackMsPerSec", body, StringComparison.Ordinal);
+        var rawBody = source[source.IndexOf("private async Task DetectWaitProfileAnomalies(", StringComparison.Ordinal)..];
+        rawBody = rawBody[..rawBody.IndexOf("internal const string AnomalySource", StringComparison.Ordinal)];
+        Assert.Contains("[\"current_ms_per_sec\"] = peakRate,", rawBody, StringComparison.Ordinal);
+        Assert.Contains("[\"mean_ms_per_sec\"] = meanRate,", rawBody, StringComparison.Ordinal);
+        Assert.Contains("[\"mean_ratio\"] = meanRatio,", rawBody, StringComparison.Ordinal);
+        Assert.Contains("[\"mean_modified_z\"] = meanModifiedZ,", rawBody, StringComparison.Ordinal);
+
+        /* The arithmetic, executed: #3773's fixture through the detector's exact call. */
+        var bucket = new BaselineBucket
+        {
+            Tier = BaselineTier.Full, HourOfDay = 12, DayOfWeek = 3,
+            Mean = 200, StdDev = 81.65, Median = 200, Mad = 100,
+            SampleCount = 250, DistinctDays = 5, AbsStdDevFloor = 0,
+        };
+        Assert.True(bucket.IsTrustworthy && bucket.EffectiveRobustSigma > 0);
+        Assert.Equal(100 / 0.6745, bucket.EffectiveRobustSigma, precision: 6);
+        const double spike = 3_200.0;
+        var quietMean = (239 * 200.0 + spike) / 240;    /* one hot collection, the rest at the median */
+        var shiftedMean = (239 * 1_500.0 + spike) / 240; /* the profile running heavy across the window */
+        Assert.True(BaselineMath.ModifiedZScore(bucket, spike) >= AnomalyThresholds.HeavyTailModifiedZThreshold && spike >= AnomalyThresholds.PgWaitProfileFallbackMsPerSec, "the peak clears on both windows");
+        Assert.True(BaselineMath.ModifiedZScore(bucket, quietMean) < AnomalyThresholds.HeavyTailModifiedZThreshold, "the quiet window's mean is what keeps it quiet");
+        Assert.True(BaselineMath.ModifiedZScore(bucket, shiftedMean) >= AnomalyThresholds.HeavyTailModifiedZThreshold);
+
+        ZDecisionFor(bucket, spike, quietMean, out var quiet);
+        ZDecisionFor(bucket, spike, shiftedMean, out var shifted);
+        Assert.False(quiet.Fire, "a single-sample spike over a flat mean must not read as a profile shift");
+        Assert.True(shifted.Fire, "a sustained shift with the same peak fires");
+        Assert.True(quiet.MeanSigma < AnomalyThresholds.HeavyTailModifiedZThreshold && shifted.MeanSigma >= AnomalyThresholds.HeavyTailModifiedZThreshold);
+        /* Red-first, stated: the peak-only overload the arm used to be equivalent to fires on BOTH windows. */
+        var peakOnly = AnomalyGate.EvaluateZScore(
+            bucket, spike,
+            AnomalyThresholds.HeavyTailModifiedZThreshold, AnomalyThresholds.HeavyTailModifiedZThreshold,
+            AnomalyThresholds.PgWaitProfileFallbackMsPerSec, AnomalyThresholds.PgWaitProfileFallbackMsPerSec, AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(peakOnly.Fire);
+
+        /* The escape and the grade read the PEAK's statistics, unchanged, on a fact that now carries both readings. */
+        var paired = Anomaly(PgTargetFactKeys.AnomalyWaitProfile,
+            ("current_ms_per_sec", spike), ("mean_ms_per_sec", shiftedMean), ("modified_z", 20.2), ("mean_modified_z", 8.8), ("ratio", 16.0), ("mean_ratio", 7.5));
+        Assert.True(PgTargetScorer.IsExtremeWaitProfileAnomaly(paired, 3.0));
+        var modest = Anomaly(PgTargetFactKeys.AnomalyWaitProfile,
+            ("current_ms_per_sec", spike), ("mean_ms_per_sec", shiftedMean), ("modified_z", 14.9), ("mean_modified_z", 40.0), ("ratio", 16.0), ("mean_ratio", 60.0));
+        Assert.False(PgTargetScorer.IsExtremeWaitProfileAnomaly(modest, 3.0), "the escape is the peak's, never the mean's");
+
+        static void ZDecisionFor(BaselineBucket bucket, double peak, double windowMean, out AnomalyGate.ZDecision decision) =>
+            decision = AnomalyGate.EvaluateZScore(
+                bucket, peak, windowMean,
+                AnomalyThresholds.HeavyTailModifiedZThreshold, AnomalyThresholds.HeavyTailModifiedZThreshold,
+                AnomalyThresholds.PgWaitProfileFallbackMsPerSec, AnomalyThresholds.PgWaitProfileFallbackMsPerSec, AnomalyThresholds.SigmaDisplayCap);
+    }
+
+    /// <summary>
+    /// The gate against a real store: two Aurora servers with 31 days of one-minute <c>pg_wait_stats</c> whose
+    /// Lock:relation rate cycles 100 / 200 / 300 ms/sec (median 200, MAD 100), then the same four-hour window on
+    /// each — QUIET: every collection at the median but one at 3,200 ms/sec (peak 20σ, mean under 1σ) → no
+    /// <c>ANOMALY_PG_WAIT_PROFILE</c>; SHIFTED: every collection at 1,500 with the same one hot collection (mean
+    /// 8.8σ) → one fact, <c>current_ms_per_sec</c> the peak, <c>mean_ms_per_sec</c> the window mean, both modified
+    /// z stamped in the uncapped frame, <c>is_new</c> 0. Before this PR the QUIET window fired.
+    /// </summary>
+    [Fact]
+    public async Task TheAuroraWaitProfile_OneHotCollectionStaysQuiet_ASustainedShiftFires_AgainstDevPostgres()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the wait-profile gate e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteWaitGateRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var end = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            const int minutes = 31 * 24 * 60;
+            var start = end.AddMinutes(-minutes);
+            var windowStart = end.AddHours(-4);
+            const int windowFrom = minutes - 240;   /* the window holds minutes windowFrom..minutes: 241 collections */
+
+            foreach (var (id, name, windowMsPerSec) in new[] { (QuietWaitServerId, QuietWaitServerName, 200L), (ShiftedWaitServerId, ShiftedWaitServerName, 1_500L) })
+            {
+                await PgTargetFactCollectorTests.RegisterServerAsync(connection, id, name, MonitoredEngineKind.AuroraPostgres, 17, ct);
+
+                /* The baseline-data gate: one pg_database_stats row a minute, constant counters. */
+                await PlantWaitGateAsync(connection, @"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL
+FROM generate_series(0, $5) AS n", ct, CollectionIdGenerator.Next() + 4_000_000L, start, id, name, minutes);
+
+                /* One Lock:relation row per collection, stored interval 60 s, so ms/sec = delta_us / 60_000. History
+                   cycles 6 / 12 / 18 s a minute (100 / 200 / 300 ms/sec); the window is flat at $7 ms/sec with the
+                   LAST collection at 3,200. A CPU row rides beside it to prove the exclusion. */
+                await PlantWaitGateAsync(connection, @"
+WITH s AS (
+    SELECT n,
+           CASE WHEN n = $5 THEN 3200 * 60000::bigint
+                WHEN n >= $6 THEN $7 * 60000::bigint
+                ELSE (100 + 100 * (n % 3)) * 60000::bigint
+           END AS lock_us
+    FROM generate_series(0, $5) AS n
+)
+INSERT INTO pg_wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event,
+     waits, wait_time_us, delta_waits, delta_wait_time_us, sample_interval_seconds)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, w.type_id, w.event_id, w.wait_type, w.wait_event,
+       1000000, 1000000000000, 10, CASE WHEN w.type_id = 0 THEN 40000000::bigint ELSE s.lock_us END, 60
+FROM s
+CROSS JOIN (VALUES (3, 300001::bigint, 'Lock', 'relation'), (0, 1::bigint, 'CPU', 'CPU')) AS w(type_id, event_id, wait_type, wait_event)",
+                    ct, CollectionIdGenerator.Next() + 5_000_000L, start, id, name, minutes, windowFrom, windowMsPerSec);
+            }
+
+            var baselines = new PgTargetBaselineProvider(postgres);
+            var bucket = await baselines.GetBaselineAsync(QuietWaitServerId, MetricNames.PgWaitMsPerSec, windowStart, ct);
+            Assert.True(bucket.IsTrustworthy, "the 30-day wait bucket is not trustworthy");
+            Assert.InRange(bucket.Median, 199.0, 201.0);
+            Assert.InRange(bucket.EffectiveRobustSigma, 140.0, 160.0);
+
+            var detector = new PgTargetAnomalyDetector(postgres, baselines);
+            var quiet = await detector.DetectAnomaliesAsync(WaitGateContext(QuietWaitServerId, QuietWaitServerName, windowStart, end));
+            Assert.DoesNotContain(quiet, a => a.Key == PgTargetFactKeys.AnomalyWaitProfile);
+            /* Red-first, on the store's own numbers: the peak alone would have fired here. */
+            Assert.True(BaselineMath.ModifiedZScore(bucket, 3_200.0) >= AnomalyThresholds.HeavyTailModifiedZThreshold);
+
+            var shifted = await detector.DetectAnomaliesAsync(WaitGateContext(ShiftedWaitServerId, ShiftedWaitServerName, windowStart, end));
+            var fact = Assert.Single(shifted, a => a.Key == PgTargetFactKeys.AnomalyWaitProfile);
+            Assert.Equal(3_200.0, fact.Metadata["current_ms_per_sec"], precision: 3);
+            Assert.Equal((240 * 1_500.0 + 3_200.0) / 241, fact.Metadata["mean_ms_per_sec"], precision: 3);
+            Assert.Equal(0, fact.Metadata["is_new"]);
+            Assert.Equal(241, fact.Metadata["window_samples"]);
+            Assert.True(fact.Metadata["modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
+            Assert.True(fact.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
+            Assert.True(fact.Metadata["mean_modified_z"] < fact.Metadata["modified_z"]);
+            Assert.True(fact.Metadata["mean_ratio"] > 0 && fact.Metadata["mean_ratio"] < fact.Metadata["ratio"]);
+            Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+            Assert.True(fact.Metadata.ContainsKey("contrib_Lock:relation"));
+            Assert.False(fact.Metadata.ContainsKey("contrib_CPU:CPU"));
+            Assert.False(fact.Metadata.ContainsKey(PgTargetScorer.WaitIsSampledKey));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteWaitGateRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private const string QuietWaitServerName = "darling-pg-target-anomaly-wait-gate-quiet";
+    private static readonly int QuietWaitServerId = ServerIdHelper.GetDeterministicHashCode(QuietWaitServerName);
+    private const string ShiftedWaitServerName = "darling-pg-target-anomaly-wait-gate-shifted";
+    private static readonly int ShiftedWaitServerId = ServerIdHelper.GetDeterministicHashCode(ShiftedWaitServerName);
+
+    private static AnalysisContext WaitGateContext(int serverId, string serverName, DateTime start, DateTime end) => new()
+    {
+        ServerId = serverId, ServerName = serverName, TimeRangeStart = start, TimeRangeEnd = end, ServerUtcOffset = TimeSpan.Zero,
+        Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 241 },
+    };
+
+    /// <summary>One planting statement with its positional parameters, every one referenced by its statement.</summary>
+    private static async Task PlantWaitGateAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params object[] values)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        foreach (var value in values)
+            command.Parameters.AddWithValue(value);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteWaitGateRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM pg_database_stats WHERE server_id IN ({QuietWaitServerId}, {ShiftedWaitServerId}); " +
+            $"DELETE FROM pg_wait_stats WHERE server_id IN ({QuietWaitServerId}, {ShiftedWaitServerId}); " +
+            $"DELETE FROM analysis_findings WHERE server_id IN ({QuietWaitServerId}, {ShiftedWaitServerId}); " +
+            $"DELETE FROM servers WHERE server_id IN ({QuietWaitServerId}, {ShiftedWaitServerId});", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
     /// <summary>The CPU arm's live SQL with the column list's own name removed, so the "never cpu_percent" pin
     /// reads the READ and not the substring inside <c>acu_utilization_percent</c>'s neighbour.</summary>
     private static string CSharpSourceWalkerFreeSql(string sql) => sql.Replace("acu_utilization_percent", string.Empty, StringComparison.Ordinal);
