@@ -553,6 +553,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                    not derivable from the first (the costliest query is usually the one that always was).
                    A STORED read over the same query_store_stats the tools above read. */
                 .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
+                /* get_query_store_clutter (#3797) — the Query Store CLUTTER view: per-database read cost
+                   (the collection_log fan-out rollup), plan churn (raw query_store_stats plan identities) and
+                   configuration (query_store_health), plus ONE per-server overhead block (the non-sleep QDS_*
+                   wait deltas and MEMORYCLERK_QUERYDISKSTORE). Composed from rows the collectors already
+                   write — not a new query against the target. Darling-only for now: every input exists on
+                   Lite too, so the twin is a port, not a SKU boundary (CrossAppMcpToolInventoryPinTests). */
+                .WithGeminiCompatibleTools<DarlingMcpQueryStoreClutterTools>()
                 /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
                    desktop-only by design; the READ behind it is not, and a bucketed table is the same
                    answer. It is the only query read with a TIME axis: the rankings above cannot show that
