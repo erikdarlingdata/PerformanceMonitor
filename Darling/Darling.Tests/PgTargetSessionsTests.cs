@@ -69,6 +69,23 @@ namespace Darling.Tests;
 /// advice sentence states the multiple only on the stamp. Gated: two 31-day servers climbing to 90 of 97, one
 /// with throughput held (1.55, the sentence, the stamps through <c>get_analysis_facts</c>) and one with throughput
 /// climbing too (1.25, no sentence).</para>
+///
+/// <para><b>The numerator is <c>numbackends</c> (#3691 lane 25, V133).</b> Pinned: the numerator choice from the two
+/// coverage counts (no sampled instant → the capture peak; every instant sampled → the level; fewer than half → the
+/// capture peak with <c>numbackends_partial = 1</c>; exactly half → the level); the third read's SQL — <c>SUM(numbackends)</c>
+/// inside a <c>GROUP BY collection_time</c> CTE and the peak ordered over THOSE instants (a sum over the window is the
+/// wrong quantity and its text is asserted absent), <c>numbackends IS NOT NULL</c> as "sampled", <c>pg_database_stats</c>
+/// only, its place AFTER the ceiling lookup so a window without a ceiling costs no third query; both readings in the
+/// metadata whenever both exist (<c>peak_total_sessions</c> untouched for #3713's banding, <c>peak_numbackends</c> beside
+/// it) and <c>Value</c> from whichever decided; the scorer's bars unmoved by the source stamp; the advice naming the
+/// instrument in each arm (client backends from <c>pg_stat_database.numbackends</c> / the peak of the session captures,
+/// exception-driven, with the not-collected or mid-migration reason) while the capture's breakdown and idle share
+/// stay the capture's; and BYTE-IDENTITY for a pre-V133 fixture — a fact with no level stamps composes the same
+/// text as one stamped "capture peak, no samples". Gated: a fourth server whose <c>pg_database_stats</c> carries the
+/// level per database (two databases and the shared row's 0 every minute, summing to 30 and once to 93) beside
+/// captures peaking at 40 reads 93 / 97 CRITICAL from the level through the collector, the scorer and the real
+/// <c>analyze_server</c>; NULLing the column on the first 60 % of the window's instants drops it to the capture peak
+/// with the partial stamp and the unused level still shown; NULLing it everywhere reads 40 / 97 as v1 did.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgTargetSessionsTests
@@ -84,6 +101,9 @@ public sealed class PgTargetSessionsTests
     private static readonly int QueuedServerId = ServerIdHelper.GetDeterministicHashCode(QueuedServerName);
     private const string SurgeServerName = "darling-pg-target-sessions-surge";
     private static readonly int SurgeServerId = ServerIdHelper.GetDeterministicHashCode(SurgeServerName);
+    /* Lane 25's server: pg_database_stats carries numbackends per database, the captures peak lower than the level. */
+    private const string LevelServerName = "darling-pg-target-sessions-level";
+    private static readonly int LevelServerId = ServerIdHelper.GetDeterministicHashCode(LevelServerName);
 
     /// <summary>A saturation fact as the collector composes it: 100 / 3 → 97 usable; the breakdown and the
     /// window shape are the e2e's planted figures unless overridden.</summary>
@@ -137,6 +157,30 @@ public sealed class PgTargetSessionsTests
             ["peak_age_s"] = 600,
         },
     };
+
+    /// <summary>The level's stamps (#3691 lane 25) on a capture-composed fact, as the collector writes them: the
+    /// numerator choice from the two coverage counts through the collector's own pure function, <c>Value</c> and
+    /// <c>saturation_ratio</c> recomputed from the level when it decided, both readings kept, the level's own peak
+    /// age. <paramref name="numbackendsSamples"/> 0 is a pre-V133 window (no level, no peak).</summary>
+    private static Fact WithLevel(Fact fact, double peakNumbackends, double numbackendsSamples, double databaseStatsSamples = 241, double levelPeakAgeSeconds = 5_400)
+    {
+        var choice = PgTargetFactCollector.ChooseSaturationNumerator((long)databaseStatsSamples, (long)numbackendsSamples);
+        if (choice.UseNumbackends)
+        {
+            fact.Value = peakNumbackends / fact.Metadata["usable_connections"];
+            fact.Metadata["saturation_ratio"] = fact.Value;
+        }
+        fact.Metadata[PgTargetScorer.SaturationNumeratorSourceKey] = choice.UseNumbackends ? PgTargetScorer.SaturationNumeratorNumbackends : PgTargetScorer.SaturationNumeratorCapturePeak;
+        fact.Metadata[PgTargetScorer.NumbackendsPartialKey] = choice.Partial ? 1 : 0;
+        fact.Metadata[PgTargetScorer.NumbackendsSamplesKey] = numbackendsSamples;
+        fact.Metadata[PgTargetScorer.DatabaseStatsSamplesKey] = databaseStatsSamples;
+        if (numbackendsSamples > 0)
+        {
+            fact.Metadata[PgTargetScorer.PeakNumbackendsKey] = peakNumbackends;
+            fact.Metadata[PgTargetScorer.NumbackendsPeakAgeKey] = levelPeakAgeSeconds;
+        }
+        return fact;
+    }
 
     private static Dictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
 
@@ -408,7 +452,7 @@ public sealed class PgTargetSessionsTests
     /* ───────────────────────── the collector's shape, by source ───────────────────────── */
 
     [Fact]
-    public void TheSessionReads_AreTwoQueriesOverTheCollectorTable_PickTheDenormalisedTotals_AndNeverReadTheConfigSnapshot()
+    public void TheSessionReads_AreThreeQueriesOverCollectorTables_PickTheDenormalisedTotals_AndNeverReadTheConfigSnapshot()
     {
         var sql = PgTargetFactCollector.PgTargetSessionPeakSql;
         Assert.Contains(sql, PgTargetFactCollector.AllSql);
@@ -442,10 +486,11 @@ public sealed class PgTargetSessionsTests
         Assert.True(redactionGate > 0 && redactionGate < ceilingLookup, "the redaction gate must precede the ceiling lookup");
         Assert.Contains("Key = PgTargetFactKeys.MonitoringPermissions", code, StringComparison.Ordinal);
         Assert.Contains("Key = PgTargetFactKeys.ConnectionSaturation", code, StringComparison.Ordinal);
-        /* Two commands (lane 14 added the holders read — per-identity rows cannot join a one-row peak SELECT), two
-           consts, the shared deadline on both, the shared degrade. */
-        Assert.Equal(2, Count(code, "new NpgsqlCommand("));
-        Assert.Equal(2, Count(code, "CommandTimeout = FactCommandTimeoutSeconds"));
+        /* Three commands (lane 14 added the holders read — per-identity rows cannot join a one-row peak SELECT; lane
+           25 added the level read over pg_database_stats — a different table, read only once a ceiling exists), three
+           consts, the shared deadline on all, the shared degrade. */
+        Assert.Equal(3, Count(code, "new NpgsqlCommand("));
+        Assert.Equal(3, Count(code, "CommandTimeout = FactCommandTimeoutSeconds"));
         Assert.Contains("CommandTimeout = FactCommandTimeoutSeconds", code, StringComparison.Ordinal);
         Assert.Contains("ReportCollectionFailure(ex, context)", code, StringComparison.Ordinal);
         Assert.Contains("filled by lane 3", source, StringComparison.Ordinal);
@@ -483,6 +528,178 @@ public sealed class PgTargetSessionsTests
         var unobservable = code.IndexOf("PgTargetScorer.IdleInTransactionUnobservableKey] = 1", StringComparison.Ordinal);
         Assert.True(unobservable > redactionGate && unobservable < holdersRead, "the unobservable stamp belongs to the redaction branch");
         Assert.Contains("Key = PgTargetFactKeys.IdleInTransaction", code, StringComparison.Ordinal);
+
+        /* ── the level read (lane 25). */
+        var level = PgTargetFactCollector.PgTargetNumbackendsPeakSql;
+        Assert.Contains(level, PgTargetFactCollector.AllSql);
+        Assert.Contains("FROM pg_database_stats", level, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_session_states", level, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_server_config", level, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", level, StringComparison.Ordinal);
+        /* SUM over the DATABASES at one instant — the SUM sits inside the GROUP BY collection_time CTE — and the peak is
+           the largest such instant; the LAG / stats_reset machinery the counters need is absent (a level is never
+           differenced), and nothing sums the instants themselves. */
+        Assert.Contains("SUM(numbackends) AS numbackends", level, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", level, StringComparison.Ordinal);
+        Assert.True(level.IndexOf("SUM(numbackends)", StringComparison.Ordinal) < level.IndexOf("GROUP BY collection_time", StringComparison.Ordinal), "the sum is per instant");
+        Assert.Contains("ORDER BY numbackends DESC, collection_time DESC", level, StringComparison.Ordinal);
+        Assert.Equal(1, Count(level, "SUM("));
+        Assert.DoesNotContain("LAG(", level, StringComparison.Ordinal);
+        Assert.DoesNotContain("stats_reset", level, StringComparison.Ordinal);
+        /* "Sampled" is IS NOT NULL — NULL is "not sampled", never 0 (the V133 row contract); the coverage is instants,
+           not rows, so the always-NULL shared-relations row never counts against a minute. */
+        Assert.Contains("COUNT(*) FILTER (WHERE numbackends IS NOT NULL) AS numbackends_samples", level, StringComparison.Ordinal);
+        Assert.Contains("WHERE numbackends IS NOT NULL", level, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN peak AS p ON true", level, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", level, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", level, StringComparison.Ordinal);
+        /* Ordering: the level is read AFTER the ceiling lookup (no ceiling, no third query) and the choice is the
+           collector's own pure function; the capture peak keeps its v1 key beside the level's. */
+        var levelRead = code.IndexOf("ReadNumbackendsPeakAsync(connection", StringComparison.Ordinal);
+        Assert.True(ceilingLookup > 0 && ceilingLookup < levelRead, "the level is read only once a ceiling exists");
+        Assert.Contains("ChooseSaturationNumerator(level.DatabaseStatsSamples, level.NumbackendsSamples)", code, StringComparison.Ordinal);
+        Assert.Contains("PgTargetScorer.SaturationNumeratorSourceKey", code, StringComparison.Ordinal);
+        Assert.Contains("PgTargetScorer.PeakNumbackendsKey", code, StringComparison.Ordinal);
+        Assert.Contains("PgTargetScorer.NumbackendsPartialKey", code, StringComparison.Ordinal);
+        Assert.Contains("[\"peak_total_sessions\"] = peakTotal", source, StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── the numerator (lane 25) ───────────────────────── */
+
+    [Theory]
+    /* no pg_database_stats instant at all: the capture peak, and NOT partial — nothing the column could have covered */
+    [InlineData(0, 0, false, false)]
+    /* a pre-V133 window: instants, none sampled */
+    [InlineData(241, 0, false, false)]
+    /* every instant sampled */
+    [InlineData(241, 241, true, false)]
+    /* exactly half is the floor */
+    [InlineData(240, 120, true, false)]
+    /* one under half: the capture peak, flagged partial */
+    [InlineData(240, 119, false, true)]
+    /* the live fixture's mid-migration shape: the last 101 of 241 minutes carry it */
+    [InlineData(241, 101, false, true)]
+    public void ChooseSaturationNumerator_TakesTheLevelAtOrOverHalfCoverage_TheCapturePeakUnderIt_AndFlagsOnlyAPartWindow(long instants, long sampled, bool useNumbackends, bool partial)
+    {
+        var choice = PgTargetFactCollector.ChooseSaturationNumerator(instants, sampled);
+        Assert.Equal(useNumbackends, choice.UseNumbackends);
+        Assert.Equal(partial, choice.Partial);
+        /* The floor is the scorer's ONE constant, definitional like RedactedShareMajority. */
+        Assert.Equal(0.5, PgTargetScorer.NumbackendsCoverageFloor);
+    }
+
+    [Fact]
+    public void TheLevelStamps_PutBothReadingsOnTheFact_AndValueFollowsWhicheverDecided_WhileTheBarsDoNotMove()
+    {
+        /* All sampled: the level decides. 93 / 97 from numbackends; the capture peak (40) stays under its v1 key. */
+        var decided = WithLevel(Saturation(40, active: 15, idleInTransaction: 5), peakNumbackends: 93, numbackendsSamples: 241);
+        Assert.Equal(93 / 97.0, decided.Value, precision: 9);
+        Assert.Equal(decided.Value, decided.Metadata["saturation_ratio"]);
+        Assert.Equal(PgTargetScorer.SaturationNumeratorNumbackends, decided.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+        Assert.Equal(0, decided.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+        Assert.Equal(93, decided.Metadata[PgTargetScorer.PeakNumbackendsKey]);
+        Assert.Equal(40, decided.Metadata["peak_total_sessions"]);
+        /* The idle share is the CAPTURE's: 5 of ITS 40, not 5 of 93 — two instruments, two denominators. */
+        Assert.Equal(5 / 40.0, decided.Metadata["peak_idle_in_transaction_share"], precision: 9);
+        /* No bar change: 0.959 grades exactly as a capture-sourced 0.959 did — CRITICAL, lineage 1, no arm fires. */
+        Assert.Equal(1.0, PgTargetScorer.ScoreBase(decided), precision: 9);
+        Assert.Equal(1, decided.Metadata["threshold_lineage"]);
+        var scored = new List<Fact> { decided };
+        new FactScorer().ScoreAll(scored);
+        Assert.Equal(1.0, decided.Severity, precision: 9);
+        Assert.All(decided.AmplifierResults, r => Assert.False(r.Matched));
+
+        /* Partial: SOME instants carry it, under half — the capture peak decides (40 / 97 is context), the level it
+           did NOT use is still shown, and the partial stamp says why. */
+        var partial = WithLevel(Saturation(40, active: 15, idleInTransaction: 5), peakNumbackends: 93, numbackendsSamples: 101);
+        Assert.Equal(40 / 97.0, partial.Value, precision: 9);
+        Assert.Equal(PgTargetScorer.SaturationNumeratorCapturePeak, partial.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+        Assert.Equal(1, partial.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+        Assert.Equal(93, partial.Metadata[PgTargetScorer.PeakNumbackendsKey]);
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(partial));
+
+        /* None: a pre-V133 window — the capture peak, no level key at all, not partial. */
+        var none = WithLevel(Saturation(90), peakNumbackends: 0, numbackendsSamples: 0);
+        Assert.Equal(90 / 97.0, none.Value, precision: 9);
+        Assert.Equal(PgTargetScorer.SaturationNumeratorCapturePeak, none.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+        Assert.Equal(0, none.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+        Assert.False(none.Metadata.ContainsKey(PgTargetScorer.PeakNumbackendsKey));
+        Assert.False(none.Metadata.ContainsKey(PgTargetScorer.NumbackendsPeakAgeKey));
+        Assert.Equal(1.0, PgTargetScorer.ScoreBase(none), precision: 9);
+
+        /* The stamp keys are what the collector writes, by name — a reader of get_analysis_facts reads these strings. */
+        Assert.Equal("numerator_source", PgTargetScorer.SaturationNumeratorSourceKey);
+        Assert.Equal("peak_numbackends", PgTargetScorer.PeakNumbackendsKey);
+        Assert.Equal("numbackends_samples", PgTargetScorer.NumbackendsSamplesKey);
+        Assert.Equal("database_stats_samples", PgTargetScorer.DatabaseStatsSamplesKey);
+        Assert.Equal("numbackends_partial", PgTargetScorer.NumbackendsPartialKey);
+        Assert.Equal("numbackends_peak_age_s", PgTargetScorer.NumbackendsPeakAgeKey);
+    }
+
+    [Fact]
+    public void ComposeSessions_NamesTheLevelAsTheNumerator_AndTheCaptureAsTheBreakdownsSource_WhenNumbackendsDecided()
+    {
+        var fact = WithLevel(Saturation(40, active: 15, idleInTransaction: 5), peakNumbackends: 93, numbackendsSamples: 241);
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(fact))!;
+
+        /* THE EXIT SHAPE: N client backends of M usable at peak, from pg_stat_database.numbackends. */
+        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3 — that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
+        /* The capture is introduced as the breakdown's source, at ITS instant and ITS count; the split is unchanged. */
+        Assert.Contains("State breakdown at the peak session capture (40 sessions, 2 h before the window's end): 15 active, 5 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The numerator above is the level, not that capture", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the breakdown and the idle-in-transaction share are its own, over its own 40", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples", block.Investigation, StringComparison.Ordinal);
+        /* The measured note keeps its pinned clause and gains the second sentence: the read was of the capture peak. */
+        Assert.Contains("fleet maximum 10.3% of ceiling over 7 days; threshold_lineage = 1", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("That fleet read was of the capture peak; the level was read against the same ceilings on 2026-09-20 (numbackends/ceiling p99 median 1.8%, fleet maximum 10.0% over 20 h across the same 50 clusters) and agrees with the capture peak within 10%, so the bars stand.", block.Investigation, StringComparison.Ordinal);
+        /* The capture-only caveats are not claimed of the level. */
+        Assert.DoesNotContain("so the ratio reads a few points high", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("93 sessions were connected", block.Investigation, StringComparison.Ordinal);
+        /* 5 / 40 is under the parked bar: no PARKED claim; the capacity levers stand on the usable count. */
+        Assert.DoesNotContain("PARKED", block.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("Two capacity levers", block.Remediation, StringComparison.Ordinal);
+
+        /* Over the parked bar with the level deciding: the share is stated as the CAPTURE's, and the lever sentence
+           says whose 90 the 30 were. */
+        var parked = WithLevel(Saturation(90, active: 40, idleInTransaction: 30), peakNumbackends: 93, numbackendsSamples: 241);
+        block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(parked))!;
+        Assert.Contains("Idle-in-transaction sessions were 33% of the peak capture — the pool is being filled by PARKED connections, not work.", block.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("30 of the 90 peak capture sessions were idle in transaction", block.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ComposeSessions_StatesTheCapturePeakAsTheNumeratorWithItsReason_WhenTheLevelDidNotDecide_AndAPreV133FactIsByteIdentical()
+    {
+        /* Not collected: lane 3's text byte for byte, plus the one fallback sentence naming the instrument. */
+        var none = WithLevel(Saturation(90), peakNumbackends: 0, numbackendsSamples: 0);
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(none))!;
+        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3 — that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("State breakdown at the peak: 40 active, 30 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" The numerator is the peak of the session captures (exception-driven; numbackends not yet collected on this store).", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("client backends", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("mid-migration", block.Investigation, StringComparison.Ordinal);
+
+        /* BYTE-IDENTITY: a fact composed before this lane (no level key at all) is the same block as the stamped
+           "capture peak, nothing sampled" one — every pre-V133 fixture in this tree reads as it did. */
+        var preLane = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(Saturation(90)))!;
+        Assert.Equal(preLane, block);
+
+        /* Mid-migration: the capture peak decided, and the sentence says how much of the window carried the level and
+           what the level peaked at over the part that did. */
+        var partial = WithLevel(Saturation(90), peakNumbackends: 93, numbackendsSamples: 101);
+        block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(partial))!;
+        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.Contains(" The numerator is the peak of the session captures (exception-driven): pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples — a store mid-migration — so the level is not used until at least half of them carry it; over the samples that do, it peaked at 93.", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
+
+        /* The static block names both instruments and the rule between them, and still claims no figure. */
+        var statics = PgTargetAdvice.Static(PgTargetFactKeys.ConnectionSaturation)!;
+        Assert.Contains("The numerator is pg_stat_database.numbackends where the store carries it", statics.Investigation, StringComparison.Ordinal);
+        Assert.Contains("otherwise the peak session capture from pg_session_states", statics.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The state breakdown always comes from the peak capture.", statics.Investigation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1002,9 +1219,33 @@ public sealed class PgTargetSessionsTests
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, BusyServerId, BusyServerName, "postgres", 18, ct);
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, BlindServerId, BlindServerName, "postgres", 18, ct);
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, ParkedServerId, ParkedServerName, "postgres", 18, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, LevelServerId, LevelServerName, "postgres", 18, ct);
 
             var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
             var windowStart = windowEnd.AddHours(-4);
+
+            /* Level (lane 25): the same 25 h span witness, then every minute of the window as the V133 collector
+               writes it — one row per database carrying numbackends (appdb 20, reports 10 → 30) plus the shared row
+               PostgreSQL 18 reports as 0 — with ONE instant, 90 minutes before the window's end, at 60 + 33 = 93.
+               A sum over the window would be thousands; a sum over the databases at that minute is 93. */
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, LevelServerId, LevelServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+            {
+                var at = windowStart.AddMinutes(minute - 1);
+                var isLevelPeak = at == windowEnd.AddMinutes(-90);
+                await PlantLevelInstantAsync(connection, LevelServerId, LevelServerName, at,
+                    appdbBackends: isLevelPeak ? 60 : 20, reportsBackends: isLevelPeak ? 33 : 10, ct);
+            }
+            await PlantConfigSnapshotAsync(connection, LevelServerId, LevelServerName, windowEnd.AddMinutes(-30), ct);
+            /* Its captures peak LOWER than the level — 40 at capture 24 (15 active, 5 idle in transaction), 30
+               otherwise — so which numerator decided is visible in the fraction: 93 / 97 from the level, 40 / 97
+               from the captures. 5 / 40 is under the parked bar. */
+            for (var capture = 1; capture <= 48; capture++)
+            {
+                var isPeak = capture == 24;
+                await PlantSessionCaptureAsync(connection, LevelServerId, LevelServerName, windowStart.AddMinutes(capture * 5),
+                    total: isPeak ? 40 : 30, active: isPeak ? 15 : 10, idleInTransaction: isPeak ? 5 : 1, rows: 1, redactedRows: 0, ct);
+            }
 
             foreach (var (serverId, serverName) in new[] { (BusyServerId, BusyServerName), (BlindServerId, BlindServerName), (ParkedServerId, ParkedServerName) })
             {
@@ -1089,6 +1330,13 @@ public sealed class PgTargetSessionsTests
             Assert.Equal(1_800, saturation.Metadata["config_snapshot_age_s"]);
             Assert.Equal(48, saturation.Metadata["captures_with_rows"]);
             Assert.Equal(0, saturation.Metadata["rows_redacted_share"]);
+            /* Lane 25: this server's pg_database_stats rows carry NO numbackends (the shared planter is pre-V133 in
+               shape), so the numerator is the capture peak, stated as such, with the coverage it saw and no level. */
+            Assert.Equal(PgTargetScorer.SaturationNumeratorCapturePeak, saturation.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+            Assert.Equal(0, saturation.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+            Assert.Equal(0, saturation.Metadata[PgTargetScorer.NumbackendsSamplesKey]);
+            Assert.Equal(241, saturation.Metadata[PgTargetScorer.DatabaseStatsSamplesKey]);
+            Assert.False(saturation.Metadata.ContainsKey(PgTargetScorer.PeakNumbackendsKey));
 
             /* ── scored through the real scorer: 0.928 is past critical; the parked share amplifies it. */
             new FactScorer().ScoreAll(busyFacts);
@@ -1165,6 +1413,41 @@ public sealed class PgTargetSessionsTests
             Assert.Equal(1, parked.Metadata["threshold_lineage"]);
             Assert.Equal(1, parked.Metadata[PgTargetScorer.IdleInTransactionHorizonEscalatedKey]);
             Assert.Equal(0.0, quietPool.Severity);
+
+            /* ── THE LANE-25 EXIT CRITERION, collector half: the level decides. SUM over the databases at ONE instant —
+               93, not 30 × 241 — over 97; the capture peak (40) rides beside it under its v1 key; the idle share is the
+               capture's own 5 / 40. */
+            var levelContext = new AnalysisContext
+            {
+                ServerId = LevelServerId,
+                ServerName = LevelServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var levelFacts = await collector.CollectFactsAsync(levelContext);
+            var level = Assert.Single(levelFacts, f => f.Source == PgTargetSources.SessionsSource);
+            Assert.Equal(PgTargetFactKeys.ConnectionSaturation, level.Key);
+            Assert.Equal(93 / 97.0, level.Value, precision: 9);
+            Assert.Equal(level.Value, level.Metadata["saturation_ratio"]);
+            Assert.Equal(PgTargetScorer.SaturationNumeratorNumbackends, level.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+            Assert.Equal(0, level.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+            Assert.Equal(93, level.Metadata[PgTargetScorer.PeakNumbackendsKey]);
+            Assert.Equal(5_400, level.Metadata[PgTargetScorer.NumbackendsPeakAgeKey]);
+            /* 241 one-minute instants inside [start, end]; every one carried the column. */
+            Assert.Equal(241, level.Metadata[PgTargetScorer.DatabaseStatsSamplesKey]);
+            Assert.Equal(241, level.Metadata[PgTargetScorer.NumbackendsSamplesKey]);
+            Assert.Equal(40, level.Metadata["peak_total_sessions"]);
+            Assert.Equal(15, level.Metadata["peak_active_sessions"]);
+            Assert.Equal(5, level.Metadata["peak_idle_in_transaction_sessions"]);
+            Assert.Equal(20, level.Metadata["peak_other_sessions"]);
+            Assert.Equal(5 / 40.0, level.Metadata["peak_idle_in_transaction_share"], precision: 9);
+            Assert.Equal(7_200, level.Metadata["peak_age_s"]);
+            Assert.Equal(97, level.Metadata["usable_connections"]);
+            new FactScorer().ScoreAll(levelFacts);
+            Assert.Equal(1.0, level.BaseSeverity, precision: 9);
+            Assert.Equal(1.0, level.Severity, precision: 9);
+            Assert.Equal(1, level.Metadata["threshold_lineage"]);
 
             /* ── THE EXIT CRITERION: the real analyze_server tool, anchored at the planted window's end (as_of) so
                every number is arithmetic, not timing. */
@@ -1247,6 +1530,66 @@ public sealed class PgTargetSessionsTests
                 Assert.All(tools, t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));
                 Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
             }
+
+            /* ── THE LANE-25 EXIT CRITERION, through the real analyze_server: CRITICAL from the level, the headline in
+               client backends naming the instrument, the capture introduced as the breakdown's source. */
+            var levelJson = await DarlingMcpTools.AnalyzeServer(service, postgres, LevelServerName, 4, as_of: asOf);
+            using (var doc = JsonDocument.Parse(levelJson))
+            {
+                var root = doc.RootElement;
+                Assert.Equal("findings", root.GetProperty("status").GetString());
+                var findings = root.GetProperty("findings").EnumerateArray().ToList();
+                var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
+                Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
+                var advice = card.GetProperty("advice");
+                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
+                var investigation = advice.GetProperty("investigation").GetString()!;
+                Assert.Contains("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant", investigation, StringComparison.Ordinal);
+                Assert.Contains("93 / (100 − 3) = 96%", investigation, StringComparison.Ordinal);
+                Assert.Contains("State breakdown at the peak session capture (40 sessions, 2 h before the window's end): 15 active, 5 idle in transaction, 20 other", investigation, StringComparison.Ordinal);
+                Assert.Contains("numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("numbackends not yet collected", investigation, StringComparison.Ordinal);
+            }
+
+            var levelFactsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, LevelServerName, 4, PgTargetSources.SessionsSource, as_of: asOf);
+            using (var doc = JsonDocument.Parse(levelFactsJson))
+            {
+                var fact = Assert.Single(doc.RootElement.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConnectionSaturation);
+                var metadata = fact.GetProperty("metadata");
+                Assert.Equal(1, metadata.GetProperty(PgTargetScorer.SaturationNumeratorSourceKey).GetDouble());
+                Assert.Equal(93, metadata.GetProperty(PgTargetScorer.PeakNumbackendsKey).GetDouble());
+                Assert.Equal(40, metadata.GetProperty("peak_total_sessions").GetDouble());
+                Assert.Equal(1, metadata.GetProperty("threshold_lineage").GetDouble());
+            }
+
+            /* ── The same store MID-MIGRATION: NULL the level on every instant older than the last 100 minutes — 101 of 241
+               carry it (42 %, under the floor) — and the collector falls back to the capture peak, flags it partial,
+               and still shows the level it did not use (the 93 sits inside the sampled tail). */
+            await NullNumbackendsAsync(connection, LevelServerId, before: windowEnd.AddMinutes(-100), ct);
+            var partialFacts = await collector.CollectFactsAsync(levelContext);
+            var partial = Assert.Single(partialFacts, f => f.Source == PgTargetSources.SessionsSource);
+            Assert.Equal(40 / 97.0, partial.Value, precision: 9);
+            Assert.Equal(PgTargetScorer.SaturationNumeratorCapturePeak, partial.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+            Assert.Equal(1, partial.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+            Assert.Equal(101, partial.Metadata[PgTargetScorer.NumbackendsSamplesKey]);
+            Assert.Equal(241, partial.Metadata[PgTargetScorer.DatabaseStatsSamplesKey]);
+            Assert.Equal(93, partial.Metadata[PgTargetScorer.PeakNumbackendsKey]);
+            Assert.Equal(40, partial.Metadata["peak_total_sessions"]);
+            var partialAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, partialFacts.ToFactLookup())!;
+            Assert.Contains("pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples — a store mid-migration", partialAdvice.Investigation, StringComparison.Ordinal);
+            Assert.Contains("over the samples that do, it peaked at 93", partialAdvice.Investigation, StringComparison.Ordinal);
+
+            /* ── The same store with numbackends NULL everywhere: v1's reading, 40 / 97, stated as the capture peak. */
+            await NullNumbackendsAsync(connection, LevelServerId, before: null, ct);
+            var preRungFacts = await collector.CollectFactsAsync(levelContext);
+            var preRung = Assert.Single(preRungFacts, f => f.Source == PgTargetSources.SessionsSource);
+            Assert.Equal(40 / 97.0, preRung.Value, precision: 9);
+            Assert.Equal(PgTargetScorer.SaturationNumeratorCapturePeak, preRung.Metadata[PgTargetScorer.SaturationNumeratorSourceKey]);
+            Assert.Equal(0, preRung.Metadata[PgTargetScorer.NumbackendsPartialKey]);
+            Assert.Equal(0, preRung.Metadata[PgTargetScorer.NumbackendsSamplesKey]);
+            Assert.False(preRung.Metadata.ContainsKey(PgTargetScorer.PeakNumbackendsKey));
+            Assert.Contains("(exception-driven; numbackends not yet collected on this store)", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, preRungFacts.ToFactLookup())!.Investigation, StringComparison.Ordinal);
 
             var parkedFactsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ParkedServerName, 4, PgTargetSources.SessionsSource, as_of: asOf);
             using (var doc = JsonDocument.Parse(parkedFactsJson))
@@ -1395,9 +1738,48 @@ VALUES ($1, $2, $3, $4, $5, $6, 'appdb', $18, $19, NULL,
         }
     }
 
+    /// <summary>
+    /// One <c>pg_database_stats</c> instant as the V133 collector writes it on a two-database server: a row per
+    /// database carrying that database's <c>numbackends</c>, and the NULL-named shared-relations row carrying the
+    /// <c>0</c> PostgreSQL 18 reports for it (measured — not the NULL the rung doc expected; both sum the same). The
+    /// counters are flat so the database family's rates are zero and no sibling fact competes.
+    /// </summary>
+    private static async Task PlantLevelInstantAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime at, int appdbBackends, int reportsBackends, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset, numbackends)
+VALUES ($1, $2, $3, $4, 'appdb',   1000, 10, 100, 9000, 0, 0, 0, NULL, $5),
+       ($1, $2, $3, $4, 'reports', 1000, 10, 100, 9000, 0, 0, 0, NULL, $6),
+       ($1, $2, $3, $4, NULL,      0,    0,  0,   0,    0, 0, 0, NULL, 0)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(appdbBackends);
+        command.Parameters.AddWithValue(reportsBackends);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Takes the level away from one server's <c>pg_database_stats</c> rows — every row before
+    /// <paramref name="before"/>, or all of them when it is null — to stage the mid-migration and pre-V133 shapes on
+    /// the same planted window.</summary>
+    private static async Task NullNumbackendsAsync(NpgsqlConnection connection, int serverId, DateTime? before, CancellationToken ct)
+    {
+        using var command = before is { } cutoff
+            ? new NpgsqlCommand("UPDATE pg_database_stats SET numbackends = NULL WHERE server_id = $1 AND collection_time < $2", connection)
+            : new NpgsqlCommand("UPDATE pg_database_stats SET numbackends = NULL WHERE server_id = $1", connection);
+        command.CommandTimeout = 120;
+        command.Parameters.AddWithValue(serverId);
+        if (before is { } at)
+            command.Parameters.AddWithValue(at);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var ids = $"{BusyServerId}, {BlindServerId}, {ParkedServerId}, {QueuedServerId}, {SurgeServerId}";
+        var ids = $"{BusyServerId}, {BlindServerId}, {ParkedServerId}, {QueuedServerId}, {SurgeServerId}, {LevelServerId}";
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_session_states WHERE server_id IN ({ids}); " +
             $"DELETE FROM pg_server_config WHERE server_id IN ({ids}); " +
