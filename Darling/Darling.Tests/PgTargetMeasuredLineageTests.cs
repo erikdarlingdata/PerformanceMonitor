@@ -86,7 +86,9 @@ public sealed class PgTargetMeasuredLineageTests
         /* Lane 24 (#3691): the stock SAMPLED profile's bar — the calibration read Aurora's exact deltas, not pg_wait_sampling. */
         ("Baselines/AnomalyThresholds.cs", new[] { "PgSessionCountFloor", "PgSessionCountFallback", "PgSampledWaitProfileFallbackMsPerSec" }),
         /* Lane 27 (#3691 v3): the plan family — the calibration had no plan-hash or per-collection mean-ms distribution to read. */
-        ("PgTargetScorer.Plans.cs", new[] { "PlanRegressionRatioConcerning", "PlanRegressionMinDeltaMs", "PlanRegressionMinCallsPerSide", "PlanCoFireBoost", "ParameterSensitivityMinHashes", "ParameterSensitivitySkewFrequency", "ParameterSensitivityBase" }),
+        ("PgTargetScorer.Plans.cs", new[] { "PlanRegressionRatioConcerning", "PlanRegressionMinDeltaMs", "PlanRegressionMinCallsPerSide", "PlanCoFireBoost", "ParameterSensitivityMinHashes", "ParameterSensitivitySkewFrequency", "ParameterSensitivityBase",
+            /* lane 30 — the Seq-Scan advisory: no plan-node, predicate-selectivity or relation-size distribution was read. */
+            "SeqScanSelectiveFraction", "SeqScanLargeRelationBytes", "SeqScanMinCapturesPerHour", "SeqScanAdvisoryBase" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgStatementMeanMsFloor", "PgStatementMeanMsFallback" }),
         /* The ratio families' ramp spans: the 2026-09-20 read placed the firing multiple, not where a ramp should top out. */
         ("PgTargetScorer.Anomaly.cs", new[] { "RatioAnomalySaturation", "WaitProfileModifiedZSpan" }),

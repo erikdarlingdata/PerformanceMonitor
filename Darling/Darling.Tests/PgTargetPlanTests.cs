@@ -29,8 +29,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The plan family of the PostgreSQL-target analysis engine (#3691 lane 27, design §6): <c>PG_PLAN_REGRESSION</c>,
-/// <c>PG_PARAMETER_SENSITIVITY</c>, <c>ANOMALY_PG_PLAN_REGRESSION</c>. Lane 30's <c>PG_SEQ_SCAN_ADVISORY</c> stays a
-/// stub in the same partials and is pinned inert here.
+/// <c>PG_PARAMETER_SENSITIVITY</c>, <c>ANOMALY_PG_PLAN_REGRESSION</c>. Lane 30's <c>PG_SEQ_SCAN_ADVISORY</c> shares the
+/// partials and is pinned in <c>PgTargetSeqScanTests</c>; the shared-file counts here (lineage stamps, command sites,
+/// edges) include its arms.
 ///
 /// <para><b>Ungated:</b> every bar unmeasured by text and <c>threshold_lineage = 0</c> by stamp, and none a SQL Server
 /// constant by value; the regression ramp (2× → 0.5, 5× → 1.0, capped), the self-gates (under 2×, under the 50 ms
@@ -72,12 +73,13 @@ public sealed class PgTargetPlanTests
     public void EveryBar_IsUnmeasured_SaysSo_AndIsNoSqlServerConstantByValue()
     {
         /* Per constant, PgTargetMeasuredLineageTests.s_stillUnmeasured walks the block above each declaration; here the
-           file as a whole: seven declared bars, every marker the unmeasured shape, no bare "measured:" anywhere. */
+           file as a whole: eleven declared bars (seven of lane 27's, four of lane 30's), every marker the unmeasured
+           shape, no bare "measured:" anywhere; three graded arms, three stamps. */
         var scorer = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Plans.cs");
-        Assert.True(Regex.Matches(scorer, @"\bunmeasured:").Count >= 7);
+        Assert.True(Regex.Matches(scorer, @"\bunmeasured:").Count >= 11);
         Assert.DoesNotMatch(new Regex(@"(?<!un)measured:"), scorer);
         Assert.DoesNotContain("[\"threshold_lineage\"] = 1;", scorer, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(scorer, Regex.Escape("[\"threshold_lineage\"] = 0;")).Count);
+        Assert.Equal(3, Regex.Matches(scorer, Regex.Escape("[\"threshold_lineage\"] = 0;")).Count);
 
         Assert.Equal(2.0, PgTargetScorer.PlanRegressionRatioConcerning);
         Assert.Equal(5.0, PgTargetScorer.PlanRegressionRatioCritical);
@@ -148,11 +150,11 @@ public sealed class PgTargetPlanTests
         Assert.Equal(0, graded.Metadata["threshold_lineage"]);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(UnavailableSensitivity(qualstatsAbsent: true)));
 
-        /* Lane 30's key is inert under the source until its lane lands. */
+        /* Lane 30's key self-gates on its own pairs: a bare fact under it grades 0 (its shapes are PgTargetSeqScanTests'). */
         var seqScan = new Fact { Source = PgTargetSources.PlansSource, Key = PgTargetFactKeys.SeqScanAdvisory, Value = 42, ServerId = 1 };
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(seqScan));
         var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
-        Assert.Empty((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.SeqScanAdvisory])!);
+        Assert.Single((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.SeqScanAdvisory])!);
     }
 
     /* ───────────────────────── the collector's pure picks ───────────────────────── */
@@ -291,11 +293,11 @@ public sealed class PgTargetPlanTests
         Assert.Equal(PgTargetFactKeys.BadActorFamily, Assert.Single(graph.GetAllEdges(PgTargetFactKeys.PlanRegression)).Destination);
         Assert.Equal(PgTargetFactKeys.PlanRegression, Assert.Single(graph.GetAllEdges(PgTargetFactKeys.ParameterSensitivity)).Destination);
         Assert.Equal(PgTargetFactKeys.PlanRegression, Assert.Single(graph.GetAllEdges(PgTargetFactKeys.AnomalyPlanRegression)).Destination);
-        Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.SeqScanAdvisory));
+        Assert.Equal(2, graph.GetAllEdges(PgTargetFactKeys.SeqScanAdvisory).Count);   /* lane 30's two, pinned in PgTargetSeqScanTests */
         Assert.All(graph.GetAllEdges(PgTargetFactKeys.PlanRegression).Concat(graph.GetAllEdges(PgTargetFactKeys.ParameterSensitivity)).Concat(graph.GetAllEdges(PgTargetFactKeys.AnomalyPlanRegression)),
             e => Assert.Equal("plans", e.Category));
         var file = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Plans.cs"));
-        Assert.Equal(3, Regex.Matches(file, @"AddEdge\(").Count);
+        Assert.Equal(5, Regex.Matches(file, @"AddEdge\(").Count);
         Assert.DoesNotContain(".Severity", file, StringComparison.Ordinal);
 
         /* The regression and ITS bad actor, the only one: the alias resolves to it and the edge opens. */
@@ -524,8 +526,12 @@ public sealed class PgTargetPlanTests
         Assert.Contains("PgTargetScorer.PlanRegressionRatioConcerning", collector, StringComparison.Ordinal);
         Assert.Equal(50, PgTargetFactCollector.PlanFlipCandidateCount);
         Assert.Equal(2, PgTargetFactCollector.PlanStateLookbackDays);
-        Assert.Equal(3, Regex.Matches(collector, @"CommandTimeout = FactCommandTimeoutSeconds").Count);
-        Assert.DoesNotContain("ObservedDurationMs /", collector, StringComparison.Ordinal);
+        /* Five command sites: lane 27's three and lane 30's two (the captures walk, the one witness read). */
+        Assert.Equal(5, Regex.Matches(collector, @"CommandTimeout = FactCommandTimeoutSeconds").Count);
+        /* Lane 27's quantities take no rate; the ONLY division of observed time in the partial is lane 30's observed
+           hours (captures per hour is a rate over OBSERVED time, #3538 A7), and it is never the nominal window. */
+        Assert.Equal(2, Regex.Matches(collector, Regex.Escape("context.ObservedDurationMs / 3_600_000.0")).Count);
+        Assert.Equal(2, Regex.Matches(collector, @"ObservedDurationMs /").Count);
         Assert.DoesNotContain("PeriodDurationMs", collector, StringComparison.Ordinal);
         /* Lane 30's region is marked, at the end of the method, after both facts. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetFactCollector.Plans.cs");
@@ -773,11 +779,16 @@ public sealed class PgTargetPlanTests
             await PlantReadinessAsync(connection, windowStart.AddMinutes(-30), "library_loaded", false, ct, offId, ServerName + "-off");
             var offContext = new AnalysisContext { ServerId = offId, ServerName = ServerName + "-off", TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero };
             var offFacts = await collector.CollectFactsAsync(offContext);
-            var off = Assert.Single(offFacts, f => f.Source == PgTargetSources.PlansSource);
-            Assert.Equal(PgTargetFactKeys.PlanRegression, off.Key);
-            Assert.Equal(1, off.Metadata[PgTargetScorer.PlanUnavailableKey]);
-            Assert.Equal(1, off.Metadata[PgTargetScorer.PlanReasonAutoExplainOffKey]);
-            Assert.Equal(0, PgTargetScorer.ScoreBase(off));
+            /* Two keys, one missing instrument: the regression's unavailable fact and (lane 30) the Seq-Scan advisory's,
+               each with the same reason — two questions, two occurrence histories. */
+            var offFamily = offFacts.Where(f => f.Source == PgTargetSources.PlansSource).ToList();
+            Assert.Equal(new[] { PgTargetFactKeys.PlanRegression, PgTargetFactKeys.SeqScanAdvisory }, offFamily.Select(f => f.Key).ToArray());
+            foreach (var off in offFamily)
+            {
+                Assert.Equal(1, off.Metadata[PgTargetScorer.PlanUnavailableKey]);
+                Assert.Equal(1, off.Metadata[PgTargetScorer.PlanReasonAutoExplainOffKey]);
+                Assert.Equal(0, PgTargetScorer.ScoreBase(off));
+            }
 
             bodySucceeded = true;
         }

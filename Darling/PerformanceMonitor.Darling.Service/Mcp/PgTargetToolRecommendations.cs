@@ -228,9 +228,11 @@ internal static class PgTargetToolRecommendations
         ],
         [PgTargetFactKeys.SeqScanAdvisory] =
         [
-            new("get_pg_plans", "The captured plan with the Seq Scan node, its row estimate and actual rows"),
-            new("get_pg_predicate_stats", "How often the predicate was evaluated and how selective it was (pg_qualstats)"),
-            new("get_pg_column_stats", "The scanned columns' distribution — evidence, never a CREATE INDEX statement"),
+            new("get_pg_plans", "The captured plan with the Seq Scan node, its Filter (literals redacted), its row estimate and actual rows"),
+            new("get_pg_predicate_stats", "Which columns the predicate names, how often it was evaluated and how selective it was (pg_qualstats) — the only source an index column is named from"),
+            new("get_pg_top_queries", "The statement's text, calls and mean time — what the scan costs per hour"),
+            new("get_pg_table_bloat", "The relation's heap size and dead-tuple share — the size gate and the write side of the index's cost"),
+            new("get_pg_column_stats", "The scanned columns' distribution — whether the selective predicate is selective for every value or only the common one"),
         ],
         [PgTargetFactKeys.AnomalyPlanRegression] = PlanReads(),
         [PgTargetFactKeys.CpuBurnCores] = KernelReads(),

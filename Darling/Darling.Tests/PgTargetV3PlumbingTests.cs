@@ -76,7 +76,8 @@ public sealed class PgTargetV3PlumbingTests
     /// <c>analyze_server</c> on the gated e2e returns the SAME payload — follows: nothing here can emit, score or
     /// compose. Lane 27 filled the plan family's regression, sensitivity and anomaly arms: a BARE fact under those
     /// keys (no graded metadata) still scores 0 — the family self-gates on its own keys — and its advice, edges and
-    /// baseline are pinned in <c>PgTargetPlanTests</c>; <c>PG_SEQ_SCAN_ADVISORY</c> stays lane 30's inert stub here.
+    /// baseline are pinned in <c>PgTargetPlanTests</c>; lane 30 filled <c>PG_SEQ_SCAN_ADVISORY</c> in the same family
+    /// (pinned in <c>PgTargetSeqScanTests</c>), so it is in the filled loop too — a bare fact carries no pair and grades 0.
     /// Lane 28 filled the kernel family: its two keys, its anomaly and its metric left the inert loop too (their live
     /// shapes are pinned in <c>PgTargetKernelTests</c>); the kernel proxy is base 0 by design and the split is 0.4, so the
     /// filled-family check below asserts the filled shape, not inertness.
@@ -84,8 +85,8 @@ public sealed class PgTargetV3PlumbingTests
     [Fact]
     public void TheV3Families_AreInertThroughEverySharedEntryPoint_UntilTheirLanesLand()
     {
-        /* Lane 27's filled keys: a bare fact scores 0 (self-gated) and composes the family's static block, not null. */
-        var filled = new[] { PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity }
+        /* Lane 27's and lane 30's filled keys: a bare fact scores 0 (self-gated) and composes the family's static block, not null. */
+        var filled = new[] { PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.SeqScanAdvisory }
             .Select(k => new Fact { Source = PgTargetSources.PlansSource, Key = k, Value = 42, ServerId = 1 })
             .ToList();
         new FactScorer().ScoreAll(filled);
@@ -103,7 +104,6 @@ public sealed class PgTargetV3PlumbingTests
 
         var facts = new[]
             {
-                (PgTargetSources.PlansSource, PgTargetFactKeys.SeqScanAdvisory),
                 (PgTargetSources.MemorySource, PgTargetFactKeys.ConfigMemoryOvercommit),
                 (PgTargetSources.MemorySource, PgTargetFactKeys.HostMemoryPressure),
             }
@@ -169,9 +169,11 @@ public sealed class PgTargetV3PlumbingTests
             var text = RepoFile.ReadRepoFile(dir.Split('/').Append(file).ToArray());
             Assert.Contains($"/* filled by lane {lane}", text, StringComparison.Ordinal);
             Assert.DoesNotContain("aurora_stat_", text, StringComparison.Ordinal);
-            /* D8 is about what the OPERATOR reads: no string literal in a v3 family file may carry index DDL. The doc
-               comments name the prohibition; the literals must never satisfy it. */
-            Assert.All(CSharpSourceWalker.StringLiteralBodies(text), literal => Assert.DoesNotContain("CREATE INDEX", literal.Text, StringComparison.OrdinalIgnoreCase));
+            /* The "no CREATE INDEX literal anywhere in a v3 family file" census that stood here was withdrawn by the
+               maintainer on 2026-09-20 ("I never made that rule" — the engine recommends DDL elsewhere, RCSI being the
+               precedent). The Seq-Scan advisory (lane 30) names an index only where pg_qualstats named the columns and
+               every gate holds; PgTargetSeqScanTests pins THAT shape — evidence first, the cost beside it, no text when
+               the columns are unknown — which is the rule that does exist. */
         }
         /* Lane 30 shares the plan family's advice partial; its marker is there too. */
         Assert.Contains("lane 30", RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetAdvice.Plans.cs"), StringComparison.Ordinal);
