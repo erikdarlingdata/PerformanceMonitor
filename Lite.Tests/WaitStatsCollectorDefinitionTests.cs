@@ -178,7 +178,8 @@ internal static class CollectorTestContext
         IEnumerable<string>? ignored = null,
         bool isAzureSqlDb = false,
         DateTime? watermark = null,
-        bool capturePlanXml = false)
+        bool capturePlanXml = false,
+        bool watermarkFromUtcColumn = false)
         => new()
         {
             ServerId = 42,
@@ -187,6 +188,9 @@ internal static class CollectorTestContext
             Deltas = deltas,
             Target = new CollectorTargetInfo { IsAzureSqlDb = isAzureSqlDb },
             Watermark = watermark,
+            /* #3778: which column the host read the watermark from; false is every pre-#3778 caller's
+               frame and the default, so no existing pin moves. */
+            WatermarkFromUtcColumn = watermarkFromUtcColumn,
             IgnoredWaitTypes = new HashSet<string>(ignored ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase),
             CapturePlanXml = capturePlanXml,
         };

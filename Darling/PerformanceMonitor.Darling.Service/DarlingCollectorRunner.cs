@@ -990,11 +990,29 @@ public sealed class DarlingCollectorRunner
         var serverWatermarkWatch = Stopwatch.StartNew();
         long serverWatermarkMs;
         DateTime? watermark;
+        var watermarkFromUtcColumn = false;
         try
         {
-            watermark = definition.WatermarkColumn is null || serverWatermarkDiscarded
-                ? null
-                : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+            if (definition.WatermarkColumn is null || serverWatermarkDiscarded)
+            {
+                watermark = null;
+            }
+            else if (definition.UtcWatermarkColumn is null)
+            {
+                watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+            }
+            else
+            {
+                /* #3778: a definition with a UTC twin beside its watermark column (cpu_utilization's
+                   sample_time_utc beside the server-LOCAL sample_time) gets the pair read in one round trip
+                   and the FRAME of what came back, so its dedup compares like with like: the twin where the
+                   store has one, the local stamp until the first post-upgrade run has stored one. Its own
+                   method rather than a parameter on the read above, so every other definition's watermark
+                   SQL is the byte-identical string it was (TimeHonestyRungTests pins both strings). */
+                (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(
+                    server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,
+                    cancellationToken, serverReadFloor);
+            }
         }
         finally
         {
@@ -1102,6 +1120,7 @@ public sealed class DarlingCollectorRunner
             Deltas = _deltas,
             Target = server.Target,
             Watermark = watermark,
+            WatermarkFromUtcColumn = watermarkFromUtcColumn,
             NumericWatermark = numericWatermark,
             HasCollectedBefore = hasCollectedBefore,
             State = collectorState ?? CollectorContext.NoState,
@@ -3027,6 +3046,20 @@ public sealed class DarlingCollectorRunner
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
 
     /// <summary>
+    /// The server-scoped watermark SQL for a definition that declares a UTC twin beside its watermark column
+    /// (#3778): BOTH maxima in one statement, the twin first, so the caller can prefer the twin and fall to
+    /// the declared column without a second round trip — and so that the two values come from ONE scan of
+    /// the same rows, which is what makes "the twin is NULL, so use the local stamp" a statement about the
+    /// store rather than about a race between two reads. Same <c>server_id</c> predicate and the same
+    /// optional <c>collection_time</c> bound as <see cref="BuildServerWatermarkSql"/>; exposed for the same
+    /// reason, so a pin can assert the SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkPairSql(string tableName, string columnName, string utcColumnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
     /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so
     /// <see cref="GetLastCollectedTimeAsync"/>'s answer would be read by nothing and the round trip can be
     /// skipped (#2797).
@@ -3133,6 +3166,76 @@ public sealed class DarlingCollectorRunner
                 serverId, tableName, columnName, ex.Message);
         }
         return null;
+    }
+
+    /// <summary>
+    /// The watermark read for a definition that declares a UTC twin beside its watermark column (#3778):
+    /// <c>MAX(utcColumnName)</c> and <c>MAX(columnName)</c> in one round trip, returning the twin's value with
+    /// <c>FromUtcColumn = true</c> when the store holds at least one row carrying it, else the declared column's
+    /// value with <c>false</c>, else <c>(null, false)</c> — the first-run fallback, exactly as
+    /// <see cref="GetLastCollectedTimeAsync"/> signals it. The caller puts the pair on
+    /// <see cref="CollectorContext.Watermark"/> and <see cref="CollectorContext.WatermarkFromUtcColumn"/>, and
+    /// the definition's dedup compares each row IN THAT FRAME. Only <c>cpu_utilization</c> declares a twin
+    /// today; every other definition still goes through <see cref="GetLastCollectedTimeAsync"/> and its
+    /// unchanged SQL.
+    ///
+    /// <para><b>Why the twin wins whenever it exists, without comparing the two maxima.</b> The twin is NULL on
+    /// every row written before Darling V134 and non-null on every row the collector has written since, so
+    /// "the newest row with a twin" and "the newest row" are the same row once any post-rung row exists —
+    /// collection is append-only in time. Comparing <c>MAX(sample_time_utc)</c> against <c>MAX(sample_time)</c>
+    /// to decide would itself be the cross-frame comparison this read exists to avoid.</para>
+    ///
+    /// <para>Same bound, same deadline, same failure contract as the sibling: <paramref name="collectedSince"/>
+    /// predicates on the partitioning column (null for the CPU collector, whose watermark is never clamped;
+    /// <c>ServerWatermarkReadFloorTests</c> requires every reader in this family to accept it), the command
+    /// deadline is explicit rather than Npgsql's default, and a failed read logs and returns the first-run
+    /// pair rather than throwing — saying so, because a silent null here is a duplicate hour per server per
+    /// cycle for as long as it lasts, not merely a re-collected window.</para>
+    /// </summary>
+    public async Task<(DateTime? Value, bool FromUtcColumn)> GetLastCollectedTimeWithFrameAsync(
+        int serverId, string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken,
+        DateTime? collectedSince = null)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var sql = BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, collectedSince is not null);
+            using var command = new NpgsqlCommand(sql, connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            if (collectedSince is DateTime floor)
+            {
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+            }
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    return (reader.GetDateTime(0), true);
+                }
+
+                if (!reader.IsDBNull(1))
+                {
+                    return (reader.GetDateTime(1), false);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The sibling's contract, and the sibling's reason for logging rather than swallowing: a null here
+               reads as a first run, and for this collector a first run re-collects the ring buffer's whole
+               retained history under stamps the store already holds. */
+            _logger?.LogWarning(
+                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} — falling back to the "
+                + "collector's default window, which re-collects data already stored: {Message}",
+                serverId, tableName, columnName, utcColumnName, ex.Message);
+        }
+
+        return (null, false);
     }
 
     /// <summary>

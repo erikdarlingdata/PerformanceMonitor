@@ -38,6 +38,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual string? WatermarkColumn => null;
 
+    public virtual string? UtcWatermarkColumn => null;
+
     public virtual string? NumericWatermarkColumn => null;
 
     public virtual string? PerDatabaseWatermarkColumn => null;

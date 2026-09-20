@@ -69,9 +69,27 @@ public partial class RemoteCollectorService
 
         /* Watermark = the host store's latest already-collected value of the definition's time
            column (Darling reads Postgres here instead) — feeds server-side filters + client dedup. */
-        DateTime? watermark = definition.WatermarkColumn is null
-            ? null
-            : await GetLastCollectedTimeAsync(serverId, definition.TargetTable, definition.WatermarkColumn, cancellationToken);
+        DateTime? watermark;
+        var watermarkFromUtcColumn = false;
+        if (definition.WatermarkColumn is null)
+        {
+            watermark = null;
+        }
+        else if (definition.UtcWatermarkColumn is null)
+        {
+            watermark = await GetLastCollectedTimeAsync(serverId, definition.TargetTable, definition.WatermarkColumn, cancellationToken);
+        }
+        else
+        {
+            /* #3778: a definition with a UTC twin beside its watermark column (cpu_utilization's sample_time_utc
+               beside the server-LOCAL sample_time) gets the pair read in one round trip and the FRAME of what
+               came back, so its dedup compares like with like: the twin where the store has one, the local
+               stamp until the first post-upgrade run has stored one. Its own method rather than a parameter on
+               the read above, so every other definition's watermark SQL is the byte-identical string it was
+               (TimeHonestyRungTests pins the branch and both reads). Mirrors Darling's runner. */
+            (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(
+                serverId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn, cancellationToken);
+        }
 
         /* Numeric (bigint) watermark = the host store's latest already-collected value of the definition's
            monotonic identity column (job_history's instance_id) — the bigint twin of the timestamp watermark
@@ -164,6 +182,7 @@ public partial class RemoteCollectorService
             Deltas = _deltaCalculator,
             Target = target,
             Watermark = watermark,
+            WatermarkFromUtcColumn = watermarkFromUtcColumn,
             NumericWatermark = numericWatermark,
             HasCollectedBefore = hasCollectedBefore,
             State = collectorState ?? CollectorContext.NoState,

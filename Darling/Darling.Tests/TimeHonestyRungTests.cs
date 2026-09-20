@@ -47,6 +47,16 @@ namespace Darling.Tests;
 /// TRY/CATCH, NULL pre-2022) are pinned value-by-value in <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>
 /// and <c>Lite.Tests/ServerPropertiesCollectorDefinitionTests</c>, and the Lite ladder / reads in
 /// <c>Lite.Tests/TimeHonestyRungTests</c> — all of which run off Windows. What is here is the PostgreSQL side.</para>
+///
+/// <para><b>#3778 moved the collector's WATERMARK onto the twin where the store has it.</b> The runner reads
+/// <c>MAX(sample_time_utc)</c> and <c>MAX(sample_time)</c> in one statement for the one definition that declares a
+/// <c>UtcWatermarkColumn</c>, hands the collector the twin's value with the frame stated where any row carries
+/// one and the local maximum otherwise, and the ring-buffer dedup compares in that frame — so the autumn
+/// fall-back's repeated local hour lands instead of being dropped as already collected. The SQL shapes and the
+/// runner's branch are pinned in <see cref="TheRunner_ReadsTheWatermarkPair_OnlyForADefinitionWithAUtcTwin_AndBothSqlShapesArePinned"/>;
+/// the read itself runs inside the live round trip below at the three moments that matter (pre-rung rows only,
+/// after the writer has stored a twin, and after the post-rung rows are gone again); the dedup is pinned in
+/// <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>.</para>
 /// </summary>
 public sealed class TimeHonestyRungTests
 {
@@ -374,6 +384,68 @@ public sealed class TimeHonestyRungTests
         }
     }
 
+    /* ---- the watermark (#3778) ------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// The runner's watermark branch routes a definition with NO <c>UtcWatermarkColumn</c> through the unchanged
+    /// <c>GetLastCollectedTimeAsync</c>, whose SQL is the byte-identical string it was in both its bounded and
+    /// unbounded forms — so every collector but <c>cpu_utilization</c> reads exactly what it read — and only a
+    /// definition WITH one through <c>GetLastCollectedTimeWithFrameAsync</c>, whose SQL puts the twin's maximum
+    /// first and the declared column's second in ONE statement over ONE scan, with the same <c>server_id</c>
+    /// predicate and the same optional partitioning-column bound. The frame rides onto the context as
+    /// <c>WatermarkFromUtcColumn</c>. Both SQL builders are asserted as the SHIPPED strings (the #2796 discipline);
+    /// the branch is a source pin because it sits inside <c>RunAsync</c>, which needs a live monitored server.
+    /// The read runs against a real store in <see cref="TimeHonestyRungLivePostgresTests"/>.
+    /// </summary>
+    [Fact]
+    public void TheRunner_ReadsTheWatermarkPair_OnlyForADefinitionWithAUtcTwin_AndBothSqlShapesArePinned()
+    {
+        Assert.Equal("sample_time", CpuUtilizationCollector.Instance.WatermarkColumn);
+        Assert.Equal(CpuColumn, CpuUtilizationCollector.Instance.UtcWatermarkColumn);
+
+        /* The plain read, unchanged: what every other watermarked definition still runs. */
+        Assert.Equal(
+            $"SELECT MAX(sample_time) FROM {CpuTable} WHERE server_id = $1",
+            DarlingCollectorRunner.BuildServerWatermarkSql(CpuTable, "sample_time", bounded: false));
+        Assert.Equal(
+            $"SELECT MAX(sample_time) FROM {CpuTable} WHERE server_id = $1 AND collection_time > $2",
+            DarlingCollectorRunner.BuildServerWatermarkSql(CpuTable, "sample_time", bounded: true));
+
+        /* The pair read: twin first, declared column second, one statement. */
+        Assert.Equal(
+            $"SELECT MAX({CpuColumn}), MAX(sample_time) FROM {CpuTable} WHERE server_id = $1",
+            DarlingCollectorRunner.BuildServerWatermarkPairSql(CpuTable, "sample_time", CpuColumn, bounded: false));
+        Assert.Equal(
+            $"SELECT MAX({CpuColumn}), MAX(sample_time) FROM {CpuTable} WHERE server_id = $1 AND collection_time > $2",
+            DarlingCollectorRunner.BuildServerWatermarkPairSql(CpuTable, "sample_time", CpuColumn, bounded: true));
+
+        var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains(
+            "            else if (definition.UtcWatermarkColumn is null)\n" +
+            "            {\n" +
+            "                watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);\n" +
+            "            }",
+            runner, StringComparison.Ordinal);
+        Assert.Contains(
+            "                (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(\n" +
+            "                    server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,\n" +
+            "                    cancellationToken, serverReadFloor);",
+            runner, StringComparison.Ordinal);
+        Assert.Contains("            WatermarkFromUtcColumn = watermarkFromUtcColumn,", runner, StringComparison.Ordinal);
+
+        /* One call site for the pair read (the server-scoped read, behind the #2797 gate —
+           DarlingCollectorRunnerTests' IL pin holds the gate half), and the pair read is its own method rather
+           than a parameter on the plain one, so the plain one's body is untouched. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(runner);
+        Assert.Single(Regex.Matches(code, @"await GetLastCollectedTimeWithFrameAsync\("));
+        var plain = typeof(DarlingCollectorRunner).GetMethod(nameof(DarlingCollectorRunner.GetLastCollectedTimeAsync))!;
+        Assert.Equal(typeof(Task<DateTime?>), plain.ReturnType);
+        Assert.Equal(new[] { "serverId", "tableName", "columnName", "cancellationToken", "collectedSince" }, plain.GetParameters().Select(p => p.Name).ToArray());
+        var pair = typeof(DarlingCollectorRunner).GetMethod(nameof(DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync))!;
+        Assert.Equal(typeof(Task<(DateTime? Value, bool FromUtcColumn)>), pair.ReturnType);
+        Assert.Equal(new[] { "serverId", "tableName", "columnName", "utcColumnName", "cancellationToken", "collectedSince" }, pair.GetParameters().Select(p => p.Name).ToArray());
+    }
+
     /// <summary>Raw-string SQL constants dedent to their closing quotes' indentation; the pins above are spelled at
     /// the dedented text, so a four-space shift in either file's literal is normalised away here.</summary>
     private static string Dedent(string sql)
@@ -472,6 +544,14 @@ public sealed class TimeHonestyRungLivePostgresTests
             await PlantPreRungAsync(connection, ct, batch1, pre1Utc.AddHours(-4), 21);
             await PlantPreRungAsync(connection, ct, batch1, pre2Utc.AddHours(-4), 22);
 
+            /* #3778, moment one — the morning of the upgrade: no row carries a twin, so the runner's pair read hands
+               back the LOCAL maximum and says so, which is exactly what the plain read hands back; the first
+               post-upgrade run therefore dedups local-to-local, as it always did. */
+            await using var runnerSource = NpgsqlDataSource.Create(cs!);
+            var runner = new DarlingCollectorRunner(runnerSource, new CollectorDeltaCalculator());
+            Assert.Equal(((DateTime?)pre2Utc.AddHours(-4), false), await runner.GetLastCollectedTimeWithFrameAsync(ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
+            Assert.Equal(pre2Utc.AddHours(-4), await runner.GetLastCollectedTimeAsync(ServerId, "cpu_utilization_stats", "sample_time", ct));
+
             /* Batch 2 through CpuUtilizationCollector.WritePayload over the binary COPY. */
             var newestUtc = batch2.AddSeconds(-30);          /* on the EST side: local = utc - 5 h */
             var straddleUtc = batch2.AddSeconds(-90);        /* on the EDT side: local = utc - 4 h */
@@ -501,6 +581,15 @@ public sealed class TimeHonestyRungLivePostgresTests
                     (32, newestUtc.AddHours(-5), newestUtc),
                 }, rows);
             }
+
+            /* #3778, moment two — after the first post-upgrade run has stored rows with the twin: the pair read hands
+               back the newest INSTANT (cpu 32's twin) in the UTC frame. This batch is the fall-back shape, so the
+               plain read's answer is a DIFFERENT row: by local stamp the EDT-side sample (cpu 31) is fifty-nine
+               minutes "newer" than the EST-side one, and under the old rule that local maximum was the watermark
+               every EST-side sample for the next hour sat below. The frame is what tells the two apart. */
+            Assert.Equal(((DateTime?)newestUtc, true), await runner.GetLastCollectedTimeWithFrameAsync(ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
+            Assert.Equal(straddleUtc.AddHours(-4), await runner.GetLastCollectedTimeAsync(ServerId, "cpu_utilization_stats", "sample_time", ct));
+            Assert.True(straddleUtc.AddHours(-4) > newestUtc.AddHours(-5), "the fixture must put the older sample's LOCAL stamp above the newer one's, or the two reads agree by accident");
 
             /* The MCP read: pre-rung rows de-skewed (exactly, the batch was one offset), post-rung rows by their
                twin — including the EST-side sample, which the de-skew alone would have placed an hour early. */
@@ -598,6 +687,12 @@ SELECT deskewed FROM (
                 Assert.Equal(pre2Utc.AddHours(-4), reader.GetDateTime(2));
                 Assert.True(reader.IsDBNull(3), "a pre-rung row must read a NULL twin, or the fallback arm is never exercised");
             }
+
+            /* #3778, moment three — the twins gone again (retention on a store that upgraded and then aged every
+               post-rung row out would look like this only if it also kept older pre-rung rows, which retention
+               does not do; the point is the read's contract, not a fleet scenario): back to the local maximum,
+               frame LOCAL, never a UTC value invented from a local stamp. */
+            Assert.Equal(((DateTime?)pre2Utc.AddHours(-4), false), await runner.GetLastCollectedTimeWithFrameAsync(ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
 
             bodySucceeded = true;
         }
