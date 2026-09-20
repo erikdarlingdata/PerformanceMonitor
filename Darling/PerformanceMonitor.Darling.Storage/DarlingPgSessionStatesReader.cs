@@ -427,11 +427,42 @@ public static class DarlingPgSessionStatesReader
     /// replication workers — is already out through <c>backend_type</c>. <c>excludedDatabases</c> is applied
     /// after the read, exactly as the SQL Server adapter applies it.</para>
     ///
-    /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit; <c>{0}</c> is
-    /// the switchable filter block. A PROPERTY rather than a string field on purpose: the shipped-read
-    /// parse census (<c>DarlingPgReadSqlParsesLiveTests</c>) parse-checks every static string field on a
-    /// reader, and a template with a placeholder in it cannot parse. The two RENDERINGS below are the
-    /// fields, so both texts that can actually reach the store are the ones parse-checked.</para>
+    /// <para><b>The opt-out knob (#3653 A5, Q5; #3743 for this twin).</b> <c>{1}</c> and <c>{2}</c> are the
+    /// Long-Running Query knob's two arm expressions — the SHARED
+    /// <c>LongRunningQueryExclusions.BuildSqlPredicates</c> text (the literal <c>FALSE</c> for an arm with no
+    /// entries), built by the host over <see cref="ExclusionProgramNameColumn"/> and
+    /// <see cref="ExclusionLoginNameColumn"/> with operands binding from <see cref="ExclusionFirstParameterOrdinal"/>
+    /// onward, program prefixes first. <c>application_name</c> is the <c>program_name</c> twin and
+    /// <c>username</c> (<c>pg_stat_activity.usename</c>) the <c>login_name</c> twin, so an entry means the same
+    /// thing on both engines: prefix for programs, whole name for logins, case-insensitive, <c>%</c> / <c>_</c>
+    /// escaped, a NULL column matching nothing. The builder lives in the alerting assembly, which this storage
+    /// assembly does not (and should not) reference, so the host hands the rendered text and its operands
+    /// down rather than the knob itself — the translation is still spelled once, in the builder.</para>
+    ///
+    /// <para><b>Why a <c>candidates</c> CTE with two flags rather than one more <c>AND NOT</c></b> — the SQL
+    /// Server read's shape (<c>DarlingAlertReadAdapter.LongRunningQueriesSqlTemplate</c>), mirrored so the two
+    /// reads agree row-for-row in meaning. The knob is applied AHEAD of <c>LIMIT $4</c>: the sessions it names
+    /// are the longest-running on the server by construction (a permanent ETL or replication worker under a
+    /// service role), so a post-read filter would let them fill the cap on every sweep and blind the alert.
+    /// And the fire payload wants to know how many it removed and WHICH ARM did it — a setting whose only
+    /// effect is a page not arriving is one an operator cannot verify — so every over-threshold row is
+    /// flagged once per arm, the outer query keeps the unflagged rows under the cap, and the two counts are
+    /// uncorrelated scalars over the same CTE: one statement, one capture, rows and counts describing the same
+    /// instant. The login count is taken <c>AND NOT</c> the program flag so a session matching both arms counts
+    /// once, under the program prefix, and the two counts sum to the sessions removed. The counts are
+    /// <c>count(*)</c> rather than the SQL Server read's <c>COUNT(DISTINCT session_id)</c>: there a MARS session
+    /// can hold two request rows, here <c>pg_stat_activity</c> has exactly one row per backend and the capture
+    /// stores one row per backend, so the row IS the session — and <c>backend_id</c> / <c>pid</c> are nullable
+    /// on a redacted target, where a DISTINCT over them would drop the very rows the receipt is for. The outer
+    /// alias stays <c>s</c> like the inner's so the pins on this text keep reading.</para>
+    ///
+    /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit, $5… the knob's
+    /// operands; <c>{0}</c> is the switchable filter block. A PROPERTY rather than a string field on purpose:
+    /// the shipped-read parse census (<c>DarlingPgReadSqlParsesLiveTests</c>) parse-checks every static string
+    /// field on a reader, and a template with a placeholder in it cannot parse. The two RENDERINGS below are
+    /// the fields — both with the knob EMPTY (<c>FALSE</c> arms), the only shape this assembly can render
+    /// without the builder — so the texts that reach the store on an untouched knob are the ones parse-checked;
+    /// the knob-set shape is parse-checked and executed by the alert tests' live class instead.</para>
     /// </summary>
     public static string CurrentLongRunningSessionsSqlTemplate => """
         WITH recent AS (
@@ -439,6 +470,27 @@ public static class DarlingPgSessionStatesReader
             FROM pg_session_states
             WHERE server_id = $1
             AND   collection_time >= $3
+        ),
+        candidates AS (
+            SELECT
+                s.backend_id,
+                s.pid,
+                s.database_name,
+                s.username,
+                s.application_name,
+                s.command_tag,
+                s.query_duration_ms,
+                {1} AS excluded_by_program_prefix,
+                {2} AS excluded_by_login
+            FROM pg_session_states AS s
+            JOIN recent AS r
+              ON  s.collection_time = r.latest_capture
+            WHERE s.server_id = $1
+            AND   s.query_duration_ms >= $2
+            AND   s.is_idle_in_transaction = false
+            AND   coalesce(s.backend_type, 'client backend') = 'client backend'
+            AND   coalesce(s.command_tag, '') NOT IN ('VACUUM', 'ANALYZE', 'REINDEX', 'CLUSTER')
+            {0}
         )
         SELECT
             s.backend_id,
@@ -447,19 +499,33 @@ public static class DarlingPgSessionStatesReader
             s.username,
             s.application_name,
             s.command_tag,
-            s.query_duration_ms
-        FROM pg_session_states AS s
-        JOIN recent AS r
-          ON  s.collection_time = r.latest_capture
-        WHERE s.server_id = $1
-        AND   s.query_duration_ms >= $2
-        AND   s.is_idle_in_transaction = false
-        AND   coalesce(s.backend_type, 'client backend') = 'client backend'
-        AND   coalesce(s.command_tag, '') NOT IN ('VACUUM', 'ANALYZE', 'REINDEX', 'CLUSTER')
-        {0}
+            s.query_duration_ms,
+            CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
+            CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count
+        FROM candidates AS s
+        WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login)
         ORDER BY s.query_duration_ms DESC, s.pid
         LIMIT $4
         """;
+
+    /// <summary>The <c>program_name</c> twin the knob's prefix arm is built over — libpq's
+    /// <c>application_name</c>, the same column the backups opt-out filters on. Qualified with the
+    /// <c>candidates</c> CTE's inner alias because that is where the flags are computed.</summary>
+    public const string ExclusionProgramNameColumn = "s.application_name";
+
+    /// <summary>The <c>login_name</c> twin the knob's exact arm is built over — <c>pg_stat_activity.usename</c>,
+    /// stored as <c>username</c> by the collector.</summary>
+    public const string ExclusionLoginNameColumn = "s.username";
+
+    /// <summary>The <c>$n</c> the knob's first operand binds as: after the four fixed parameters
+    /// (<c>$1</c> server, <c>$2</c> threshold, <c>$3</c> recency floor, <c>$4</c> limit), program prefixes
+    /// first, then logins — the builder's order is the binding order.</summary>
+    public const int ExclusionFirstParameterOrdinal = 5;
+
+    /// <summary>The arm text an EMPTY knob arm renders as — the builder's own spelling of "no entries", spliced
+    /// here so the two field renderings below (which cannot call the builder) are the very text the host
+    /// sends on an untouched knob. Not a statement: a fragment, verified where it is spliced.</summary>
+    public const string NoExclusionPredicate = "FALSE";
 
     /// <summary>The switchable dump/restore opt-out — the PostgreSQL reading of
     /// <c>longRunningQueryExcludeBackups</c>. A constant rather than inline so a test can pin the list and
@@ -467,37 +533,83 @@ public static class DarlingPgSessionStatesReader
     public const string BackupUtilitiesFilter =
         "AND   coalesce(s.application_name, '') NOT IN ('pg_dump', 'pg_dumpall', 'pg_restore', 'pg_basebackup')";
 
-    /// <summary>The read as it runs with the backups opt-out ON — the shipped default, and what the
-    /// pre-#3539 constant name meant. Kept under the old name so pins on the shape keep pointing at the
-    /// text that actually executes on an untouched store. A <c>static readonly</c> field, not a property,
-    /// so the parse census sees it; <see cref="BackupUtilitiesFilter"/> is a <c>const</c>, so this
-    /// initializer cannot read it before it exists.</summary>
+    /// <summary>The read as it runs with the backups opt-out ON and the knob EMPTY — the shipped default
+    /// before #3743's knob, and what the pre-#3539 constant name meant. Kept under the old name so pins on
+    /// the shape keep pointing at the text that actually executes on an untouched store. A
+    /// <c>static readonly</c> field, not a property, so the parse census sees it;
+    /// <see cref="BackupUtilitiesFilter"/> is a <c>const</c>, so this initializer cannot read it before it
+    /// exists.</summary>
     public static readonly string CurrentLongRunningSessionsSql = BuildCurrentLongRunningSessionsSql(excludeBackups: true);
 
-    /// <summary>The read as it runs with the backups opt-out OFF — the other text that can reach the store,
-    /// held as a field for the same parse-census reason. The host does not read this; it calls
-    /// <see cref="BuildCurrentLongRunningSessionsSql"/> with the setting.</summary>
+    /// <summary>The read as it runs with the backups opt-out OFF and the knob EMPTY — the other text that can
+    /// reach the store without the knob, held as a field for the same parse-census reason. The host does not
+    /// read this; it calls <see cref="BuildCurrentLongRunningSessionsSql(bool, string, string)"/> with the
+    /// settings.</summary>
     public static readonly string CurrentLongRunningSessionsSqlBackupsIncluded = BuildCurrentLongRunningSessionsSql(excludeBackups: false);
 
     /// <summary>Renders <see cref="CurrentLongRunningSessionsSqlTemplate"/> for one setting of the shared
-    /// backups switch. Public so the host's call and a test's pin are the same text.</summary>
+    /// backups switch with the opt-out knob EMPTY (both arms <see cref="NoExclusionPredicate"/>) — the
+    /// pre-#3743 rows, byte-for-byte the text the host sends when both knob lists are empty.</summary>
     public static string BuildCurrentLongRunningSessionsSql(bool excludeBackups) =>
-        CurrentLongRunningSessionsSqlTemplate.Replace("{0}", excludeBackups ? BackupUtilitiesFilter : "");
+        BuildCurrentLongRunningSessionsSql(excludeBackups, NoExclusionPredicate, NoExclusionPredicate);
+
+    /// <summary>Renders <see cref="CurrentLongRunningSessionsSqlTemplate"/> for one setting of the shared
+    /// backups switch and the knob's two arm expressions (the shared builder's
+    /// <c>ProgramPrefixPredicate</c> / <c>LoginPredicate</c>, built over <see cref="ExclusionProgramNameColumn"/>
+    /// and <see cref="ExclusionLoginNameColumn"/> from <see cref="ExclusionFirstParameterOrdinal"/>). Public
+    /// so the host's call and a test's pin are the same text.</summary>
+    public static string BuildCurrentLongRunningSessionsSql(bool excludeBackups, string programPrefixPredicate, string loginPredicate)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(programPrefixPredicate);
+        ArgumentException.ThrowIfNullOrWhiteSpace(loginPredicate);
+        return CurrentLongRunningSessionsSqlTemplate
+            .Replace("{0}", excludeBackups ? BackupUtilitiesFilter : "")
+            .Replace("{1}", programPrefixPredicate)
+            .Replace("{2}", loginPredicate);
+    }
+
+    /// <summary>
+    /// What <see cref="GetCurrentLongRunningSessionsAsync"/> hands back since #3743: the sessions the alert
+    /// evaluates (longest first, capped, <c>excludedDatabases</c> applied) and how many over-threshold sessions
+    /// the opt-out knob removed from the same capture ahead of the cap, split by the arm that removed them —
+    /// the storage-side twin of the alerting assembly's <c>LongRunningQueryReadResult</c>, which this assembly
+    /// cannot reference. The two counts sum to the sessions removed: a session matching both arms is counted
+    /// under the program prefix only (see the SQL's doc comment).
+    /// </summary>
+    /// <param name="Sessions">The evaluated sessions.</param>
+    /// <param name="ExcludedByProgramPrefix">Over-threshold sessions in the capture whose <c>application_name</c>
+    /// matched a configured prefix — including any that ALSO matched a login (counted once, here).</param>
+    /// <param name="ExcludedByLogin">Over-threshold sessions whose <c>username</c> matched a configured login and
+    /// whose <c>application_name</c> did NOT match a prefix.</param>
+    public sealed record LongRunningSessionsReadResult(
+        List<LongRunningSessionRow> Sessions, int ExcludedByProgramPrefix, int ExcludedByLogin);
 
     /// <param name="excludeBackups">The shared <c>longRunningQueryExcludeBackups</c> switch — drops the
     /// dump/restore utilities' sessions (see the SQL's doc comment).</param>
     /// <param name="excludedDatabases">The shared <c>excludedDatabases</c> list, applied after the read
     /// case-insensitively exactly as the SQL Server adapter applies it; a row with no database name is
     /// kept. Null or empty excludes nothing.</param>
-    public static async Task<List<LongRunningSessionRow>> GetCurrentLongRunningSessionsAsync(
+    /// <param name="programPrefixPredicate">The knob's program arm as SQL — the shared builder's
+    /// <c>ProgramPrefixPredicate</c> over <see cref="ExclusionProgramNameColumn"/>, or
+    /// <see cref="NoExclusionPredicate"/> for an empty arm.</param>
+    /// <param name="loginPredicate">The knob's login arm as SQL — the builder's <c>LoginPredicate</c> over
+    /// <see cref="ExclusionLoginNameColumn"/>, or <see cref="NoExclusionPredicate"/>.</param>
+    /// <param name="exclusionOperands">The builder's operands in binding order (program prefixes first, then
+    /// logins), bound from <see cref="ExclusionFirstParameterOrdinal"/> onward. Empty for an empty knob.</param>
+    public static async Task<LongRunningSessionsReadResult> GetCurrentLongRunningSessionsAsync(
         NpgsqlDataSource postgres, int serverId, long thresholdMs, DateTime nowUtc, int recencyMinutes, int limit,
         bool excludeBackups, IReadOnlyList<string>? excludedDatabases,
+        string programPrefixPredicate, string loginPredicate, IReadOnlyList<string> exclusionOperands,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(exclusionOperands);
 
         var rows = new List<LongRunningSessionRow>();
-        await using var command = postgres.CreateCommand(BuildCurrentLongRunningSessionsSql(excludeBackups));
+        var excludedByProgramPrefix = 0;
+        var excludedByLogin = 0;
+        await using var command = postgres.CreateCommand(
+            BuildCurrentLongRunningSessionsSql(excludeBackups, programPrefixPredicate, loginPredicate));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
@@ -506,6 +618,13 @@ public static class DarlingPgSessionStatesReader
         command.Parameters.AddWithValue(
             DateTime.SpecifyKind(nowUtc.AddMinutes(-recencyMinutes), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
+        /* #3743: the knob's operands follow the four fixed parameters, in the builder's order — which is the
+           order the predicates number them from ExclusionFirstParameterOrdinal. */
+        foreach (var operand in exclusionOperands)
+        {
+            command.Parameters.AddWithValue(operand);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -517,9 +636,14 @@ public static class DarlingPgSessionStatesReader
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? -1 : reader.GetInt64(6)));
+            /* The same two scalars on every row — read once is enough; a read with no rows has nothing to
+               fire and therefore nothing to render the counts beside (the SQL Server read's rule). */
+            excludedByProgramPrefix = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);
+            excludedByLogin = reader.IsDBNull(8) ? 0 : reader.GetInt32(8);
         }
 
-        return FilterExcludedDatabases(rows, excludedDatabases);
+        return new LongRunningSessionsReadResult(
+            FilterExcludedDatabases(rows, excludedDatabases), excludedByProgramPrefix, excludedByLogin);
     }
 
     /// <summary>The <c>excludedDatabases</c> arm, pulled out so it is pinnable without a store: the SQL

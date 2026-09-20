@@ -4815,6 +4815,31 @@ public sealed class DarlingWorker : BackgroundService
     /// index build reads as what it is rather than being dropped on a guess — the annotate-never-suppress
     /// posture SQL Server's Agent-job name (#3497) takes on its card.</para>
     ///
+    /// <para><b>The opt-out knob rides INTO the read here too (#3743, closing #3653 A5 Q5's stated gap).</b>
+    /// <c>longRunningQueryExcludedProgramNamePrefixes</c> / <c>longRunningQueryExcludedLogins</c> — the SAME
+    /// settings row the SQL Server twin reads, since V135 — are normalised into a
+    /// <see cref="LongRunningQueryExclusions"/> on every sweep and translated by the shared
+    /// <see cref="LongRunningQueryExclusions.BuildSqlPredicates"/> over <c>application_name</c> (the
+    /// <c>program_name</c> twin) and <c>username</c> (<c>pg_stat_activity.usename</c>, the <c>login_name</c>
+    /// twin), so an entry means one thing on both engines: prefix for programs, whole name for logins,
+    /// case-insensitive, no wildcard grammar. Applied ahead of the row cap for the reason the knob's type
+    /// summary gives — a permanent ETL or replication worker under a service role is the longest-running
+    /// session by construction and would otherwise fill the five-row page every sweep. Before #3743 the
+    /// setting was visible, editable and read back on a PostgreSQL target and did nothing there. The knob is
+    /// passed as rendered text and operands rather than as the record because the storage assembly the reader
+    /// lives in does not reference the alerting assembly; the translation is still spelled once, in the
+    /// builder. The seeded defaults name SQL Server internals (<c>SQLAgent - TSQL JobStep</c>, the two
+    /// <c>NT AUTHORITY</c> logins) and match nothing on PostgreSQL by construction — correct, and the
+    /// <c>[]</c>-excludes-nothing rule holds; whether this engine wants seeds of its own is a production read
+    /// for the monitor seat, not a guess made here.</para>
+    ///
+    /// <para>The knob's receipt renders on the PostgreSQL incident's context exactly as the SQL Server twin
+    /// renders it — <see cref="AlertContextBuilders.BuildLongRunningQueryExclusionItem"/>, same labels
+    /// (<c>Excluded Count</c> / <c>Excluded By Program Prefix</c> / <c>Excluded By Login</c>), appended to
+    /// <c>Details</c> only when the knob is SET, so an operator who cleared both lists does not read
+    /// "Excluded: 0" on every card. Annotation, never suppression: the fire is decided on the rows the read
+    /// returned, and the item can only add a line.</para>
+    ///
     /// <para>Fires at <see cref="PgLongRunningQueryFireSeverity"/> — an explicit Warning, and only Warning
     /// (#3653); that constant's doc says why no Critical tier exists here.</para>
     /// </summary>
@@ -4842,12 +4867,28 @@ public sealed class DarlingWorker : BackgroundService
             var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
             var now = DateTime.UtcNow;
 
-            var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
+            /* #3743: the opt-out knob, normalised from the same two settings lists AlertEngine's SQL Server
+               arm normalises (trim, blanks dropped, case-insensitive dedupe) and translated ONCE by the shared
+               builder over this engine's two columns; the reader takes the rendered text and its operands,
+               numbered from the reader's own first free ordinal. An empty knob renders as two FALSE arms and
+               the read's rows are exactly the pre-#3743 rows. */
+            var exclusions = LongRunningQueryExclusions.From(
+                alertSettings.LongRunningQueryExcludedProgramNamePrefixes, alertSettings.LongRunningQueryExcludedLogins);
+            var exclusionSql = exclusions.BuildSqlPredicates(
+                DarlingPgSessionStatesReader.ExclusionProgramNameColumn,
+                DarlingPgSessionStatesReader.ExclusionLoginNameColumn,
+                DarlingPgSessionStatesReader.ExclusionFirstParameterOrdinal);
+
+            var read = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
                 PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults,
                 excludeBackups: alertSettings.LongRunningQueryExcludeBackups,
                 excludedDatabases: alertSettings.ExcludedDatabases,
+                programPrefixPredicate: exclusionSql.ProgramPrefixPredicate,
+                loginPredicate: exclusionSql.LoginPredicate,
+                exclusionOperands: exclusionSql.Operands,
                 cancellationToken);
+            var rows = read.Sessions;
             readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
@@ -4887,6 +4928,10 @@ public sealed class DarlingWorker : BackgroundService
                         Context: new AlertContext
                         {
                             Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
+                            /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
+                               labels) and under the same rule — only when the knob is SET; a cleared knob has no
+                               footnote. See the method summary. */
+                            Details = BuildPgLongRunningQueryExclusionDetails(exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin),
                         },
                         DetailText: null,
                         NumericCurrentValue: elapsedMinutes,
@@ -4931,6 +4976,27 @@ public sealed class DarlingWorker : BackgroundService
                 $"pid {row.Pid} running {row.QueryDurationMs / 60_000}m ({row.CommandTag ?? "(unknown)"})",
             },
             Database: row.DatabaseName);
+
+    /// <summary>
+    /// The PostgreSQL Long-Running Query card's knob receipt (#3743), pulled out of
+    /// <see cref="EvaluatePgLongRunningQueryAsync"/> for testability like the incident mapping above: the
+    /// SQL Server twin's <see cref="AlertContextBuilders.BuildLongRunningQueryExclusionItem"/> as the card's
+    /// one detail item when the knob is set, and NO item when both lists are empty — <c>AlertEngine</c>'s
+    /// rule, for its reason (an operator who said "evaluate everything" does not want "Excluded: 0" on
+    /// every card). The counts are the read's, taken ahead of the cap over the same capture as the rows.
+    /// </summary>
+    internal static List<AlertDetailItem> BuildPgLongRunningQueryExclusionDetails(
+        LongRunningQueryExclusions exclusions, int excludedByProgramPrefix, int excludedByLogin)
+    {
+        ArgumentNullException.ThrowIfNull(exclusions);
+        var details = new List<AlertDetailItem>();
+        if (!exclusions.IsEmpty)
+        {
+            details.Add(AlertContextBuilders.BuildLongRunningQueryExclusionItem(exclusions, excludedByProgramPrefix, excludedByLogin));
+        }
+
+        return details;
+    }
 
     /// <summary>
     /// The Postgres Poison Wait analogue (#2711): fires when a poison wait event — the IPC
