@@ -621,6 +621,64 @@ public sealed class RobustBaselineTests
     }
 
     [Fact]
+    public void WaitProfilePair_TheStoryNamesTheMeanBesideThePeak_AndTheScorerStillGradesThePeaks()
+    {
+        /* #3741: the wait-profile detector now fires its trusted arms only when the window MEAN clears its
+           bar beside the peak, and stamps avg_ms_per_sec / mean_modified_z beside current_ms_per_sec /
+           modified_z. The composed story says so — with the mean's robust deviation on the gate arm, its
+           multiple of the baseline on the ratio arm (modified z 0 by construction there), and as plain
+           context on is_new, where the bar is on the peak ALONE and the sentence must not claim a gate the
+           detector did not apply. A pre-#3741 fact (no mean) keeps its sentence verbatim. And the scorer
+           — FactScorer's wait-profile arm, unchanged — grades off modified_z / ratio exactly as before. */
+        static Fact Profile(bool withMean, bool robust, bool isNew)
+        {
+            var metadata = new Dictionary<string, double>
+            {
+                ["current_ms_per_sec"] = 3200, ["baseline_mean"] = 200, ["total_wait_ms"] = 7_710_000,
+                ["ratio"] = isNew ? AnomalyThresholds.NoBaselineRatio : 16.0,
+                ["modified_z"] = robust ? 20.235 : 0, ["is_new"] = isNew ? 1 : 0,
+                ["contrib_SOS_SCHEDULER_YIELD"] = 7_710_000,
+            };
+            if (withMean)
+            {
+                metadata["avg_ms_per_sec"] = 1606.25;
+                metadata["mean_modified_z"] = robust ? 9.485 : 0;
+            }
+            return new Fact { Source = "anomaly", Key = "ANOMALY_WAIT_PROFILE", Value = 7_710_000, Metadata = metadata };
+        }
+
+        static string Story(Fact f) =>
+            FactAdvice.Compose("ANOMALY_WAIT_PROFILE", new Dictionary<string, Fact> { ["ANOMALY_WAIT_PROFILE"] = f })!.Investigation;
+
+        var gateArm = Profile(withMean: true, robust: true, isNew: false);
+        var story = Story(gateArm);
+        Assert.Contains("peaked at about 3200 ms/sec", story, StringComparison.Ordinal);
+        Assert.Contains("the window's mean of 1606.3 ms/sec sat 9.5 robust σ above the baseline median", story, StringComparison.Ordinal);
+        Assert.Contains("fires only when the mean clears its bar as well", story, StringComparison.Ordinal);
+
+        var ratioArm = Profile(withMean: true, robust: false, isNew: false);
+        var ratioStory = Story(ratioArm);
+        Assert.Contains("the window's mean of 1606.3 ms/sec was roughly 8× that baseline", ratioStory, StringComparison.Ordinal);
+        Assert.Contains("fires only when the mean clears its bar as well", ratioStory, StringComparison.Ordinal);
+        Assert.DoesNotContain("robust σ", ratioStory, StringComparison.Ordinal);
+
+        var isNewArm = Profile(withMean: true, robust: false, isNew: true);
+        var isNewStory = Story(isNewArm);
+        Assert.Contains("(the window's mean was about 1606.3 ms/sec)", isNewStory, StringComparison.Ordinal);
+        Assert.DoesNotContain("fires only when", isNewStory, StringComparison.Ordinal); // the bar is on the peak alone here
+
+        var legacy = Profile(withMean: false, robust: true, isNew: false);
+        var legacyStory = Story(legacy);
+        Assert.DoesNotContain("window's mean", legacyStory, StringComparison.Ordinal);
+        Assert.Contains("peaked at about 3200 ms/sec this window — roughly 16× the 200 ms/sec normal", legacyStory, StringComparison.Ordinal);
+
+        /* The grade is the peak's, before and after the pair. */
+        Assert.Equal(Score(legacy), Score(gateArm));
+        Assert.Equal(1.0, Score(gateArm), precision: 3); // 20.2σ against the 5.0 cutoff saturates at 15σ
+        Assert.Equal(Score(Profile(withMean: false, robust: false, isNew: false)), Score(ratioArm));
+    }
+
+    [Fact]
     public void GenericAnomalyScoring_AnchorsTheRampOnTheFiringThreshold()
     {
         /* Review-caught on this PR: the generic deviation ramp was still 2σ→4σ while robust fires
