@@ -361,7 +361,7 @@ public sealed class PgTargetWaitTests
 
         var below = Aurora(LockRelation, bars.Concerning * 0.9);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(below));
-        Assert.Equal(0, below.Metadata["threshold_lineage"]);   /* stated even when not fired; a standout's per-event bars are unmeasured */
+        Assert.Equal(1, below.Metadata["threshold_lineage"]);   /* stated even when not fired; a standout's per-event bars are measured since the 2026-09-20 per-event read (§C3) */
 
         Assert.Equal(0.5, PgTargetScorer.ScoreBase(Aurora(LockRelation, bars.Concerning)), precision: 9);
         var mid = (bars.Concerning + bars.Critical) / 2;
@@ -375,7 +375,8 @@ public sealed class PgTargetWaitTests
         Assert.Equal(0.5, PgTargetScorer.ScoreBase(Rollup(Lock, PgTargetScorer.WaitRollupConcerning, maxStandout: 0.0)), precision: 9);
 
         /* An Aurora ROLLUP graded on its own fraction is graded on the fleet-measured type bars (#3691, 2026-09-19)
-           and says so; a standout on the same fraction is graded on the unmeasured per-event bars and says 0. */
+           and says so; a standout on the same fraction is graded on the per-event bars, measured in round 2
+           (2026-09-20, §C3: 0.15 ≈ p99.6 and 1.0 ≈ p99.99 of non-IO event buckets), and says 1 too. */
         var measuredRollup = Rollup(Lock, PgTargetScorer.WaitRollupConcerning, maxStandout: 0.0);
         PgTargetScorer.ScoreBase(measuredRollup);
         Assert.Equal(1, measuredRollup.Metadata["threshold_lineage"]);
@@ -384,13 +385,13 @@ public sealed class PgTargetWaitTests
         Assert.Equal(1, quietRollup.Metadata["threshold_lineage"]);   /* the verdict is on the bars, not the grade */
         var standout = Aurora(LockRelation, bars.Concerning);
         PgTargetScorer.ScoreBase(standout);
-        Assert.Equal(0, standout.Metadata["threshold_lineage"]);
+        Assert.Equal(1, standout.Metadata["threshold_lineage"]);
 
         /* One wait is graded once: a rollup whose named standout is itself a finding yields to it (scores 0,
            lineage still stated); a rollup whose standouts sit under their bar grades on its whole fraction. */
         var yielded = Rollup(Lock, 0.9, maxStandout: PgTargetScorer.WaitStandoutConcerning);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(yielded));
-        Assert.Equal(0, yielded.Metadata["threshold_lineage"]);   /* the yield was decided on the unmeasured standout bar */
+        Assert.Equal(1, yielded.Metadata["threshold_lineage"]);   /* the yield was decided on the standout bar, measured 2026-09-20 — the verdict is the population's */
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(Rollup(Io, 1.5, maxStandout: 0.6)));
         var unnamed = Rollup(Lock, 0.9, maxStandout: PgTargetScorer.WaitStandoutConcerning * 0.9);
         Assert.InRange(PgTargetScorer.ScoreBase(unnamed), 0.9, 1.0);

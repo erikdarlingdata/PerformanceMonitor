@@ -199,11 +199,18 @@ public sealed class PgTargetIoTests
         /* Neither quarter-hour read carries the hourly floor any more; the collector's window read never carried either. */
         Assert.DoesNotContain("reads >= 1000", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!, StringComparison.Ordinal);
         Assert.DoesNotContain("reads >= 1000", PgTargetAnomalyDetector.IoLatencyWindowSql, StringComparison.Ordinal);
-        /* The admission floor is stated with its lineage on the constant (unmeasured — §B1 distributed reads per hour, not per quarter-hour). */
+        /* The admission floor is stated with its lineage on the constant: measured by the 2026-09-20 read of reads per
+           quarter-hour (§C5 — 57 % of fleet buckets under it), and the comment states the consequence rather than
+           hiding it: half the fleet's I/O baseline is the hour-of-DAY collapse by construction. Round 1 had it
+           unmeasured because §B1 distributed reads per HOUR; that marker must be gone. */
         var scorerText = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Io.cs");
         var floorDoc = scorerText[..scorerText.IndexOf("public const double IoBaselineBucketMinimumReads", StringComparison.Ordinal)];
         var floorSummary = floorDoc[floorDoc.LastIndexOf("/// <summary>", StringComparison.Ordinal)..];
-        Assert.Contains("unmeasured", floorSummary, StringComparison.Ordinal);
+        Assert.Contains("<b>measured</b> as an admission floor", floorSummary, StringComparison.Ordinal);
+        Assert.DoesNotContain("unmeasured", floorSummary, StringComparison.Ordinal);
+        Assert.Contains("2026-09-20", floorSummary, StringComparison.Ordinal);
+        Assert.Contains("57 % of the fleet's buckets carry fewer than 250 reads", floorSummary, StringComparison.Ordinal);
+        Assert.Contains("hour-of-DAY collapse (0.85 confidence) BY", floorSummary, StringComparison.Ordinal);
         Assert.Contains("sample-ADMISSION floor, not a grading bar", floorSummary, StringComparison.Ordinal);
 
         /* Measured, and the scorer says so where the lineage census reads it; the population is named. */

@@ -1031,8 +1031,9 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
             foreach (var anomaly in anomalies)
             {
                 /* The verdict per detector: TPS and CPU are gated only on fleet-measured floors and fallbacks (1);
-                   the session detector's COUNT floors are unmeasured and the deadlock-rate detector's firing
-                   multiple is chosen (0). */
+                   the session detector's COUNT floors are unmeasured, and the deadlock-rate detector's firing
+                   multiple was read on 2026-09-20 as an empty interval on 22 (server, bucket) pairs — unplaced —
+                   with the scorer's ramp span still chosen (0). */
                 var measuredGate = anomaly.Key is PgTargetFactKeys.AnomalyTps or PgTargetFactKeys.AnomalyCpuSpike;
                 Assert.Equal(measuredGate ? 1 : 0, anomaly.Metadata["threshold_lineage"]);
                 Assert.True(anomaly.Metadata.ContainsKey("fire_threshold"), anomaly.Key);

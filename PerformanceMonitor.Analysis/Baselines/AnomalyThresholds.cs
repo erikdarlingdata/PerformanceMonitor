@@ -146,11 +146,16 @@ public static class AnomalyThresholds
        the whole PostgreSQL side): the TPS floor and fallback, the CPU floor and fallback, the deadlock-rate floor
        and the wait-profile bar are MEASURED and each constant names the percentile it sits at and the population
        (Aurora; where the quantity is engine-neutral the stock-PostgreSQL population is not yet measured). The
-       session-count floors are UNMEASURED in count terms (the read was sessions over each server's ceiling) and the
-       ratio families' firing multiple is unmeasured. The detector stamps threshold_lineage = 1 on the TPS and CPU
-       anomalies, whose every bar is measured, and 0 on the session, deadlock-rate and wait-profile anomalies, each
-       of which is still gated on at least one chosen number (see PgTargetAnomalyDetector). The deadlock-rate
-       fallback is an alias of a MEASURED bar and says so. */
+       session-count floors are UNMEASURED in count terms (the read was sessions over each server's ceiling). The
+       second calibration read (2026-09-20, the same 50 clusters, 28 days: hour-of-week centres from the first 21,
+       ratios over the last 7) placed the ratio families' firing multiple — see PgRatioAnomalyThreshold for the
+       per-family verdicts, which differ. The detector stamps threshold_lineage = 1 on the TPS and CPU anomalies,
+       whose every bar is measured (they are z-detectors and never grade on the multiple), and 0 on the session,
+       deadlock-rate and wait-profile anomalies, each of which is still gated on at least one chosen number: the
+       session COUNT floors; for the ratio families the heavy-tail cutoff (the SQL Server fleet's, by reference) and
+       the scorer's own ramp spans (PgTargetScorer.RatioAnomalySaturation, FirstOccurrenceExceedanceSpan), which
+       no read has placed (see PgTargetAnomalyDetector and PgTargetScorer.Anomaly.cs). The deadlock-rate fallback is
+       an alias of a MEASURED bar and says so. */
 
     /// <summary>Magnitude floor for the TPS z-detector: below fifty transactions a second a deviation is a
     /// quiet server's noise however many sigmas it reads. measured: ≈ the fleet p75 of per-server p50 TPS over
@@ -227,8 +232,11 @@ public static class AnomalyThresholds
     /// Aurora population's exact deltas (<c>pg_wait_stats</c>); the stock fleet's <c>pg_wait_sampling</c> rate at
     /// the honest <c>sampled_ms</c> denominator has no distribution yet (every pre-V133 row is NULL there), so
     /// calibrate against the per-server per-collection sampled rate over <c>pg_wait_sampling</c> before the next
-    /// release. Lane 9 left this constant undeclared while nothing read it; the detector that reads it is lane
-    /// 24's, and its facts carry <c>threshold_lineage = 0</c>.</summary>
+    /// release. Population 0 on the dogfood fleet as of 2026-09-20 (the second calibration read: every cluster is
+    /// Aurora with <c>pg_wait_stats</c>, none runs <c>pg_wait_sampling</c> or the service sampler, and the table had
+    /// zero rows fleet-wide) — unmeasured until a stock target joins the fleet; the note is here so nobody re-reads an
+    /// empty table for it. Lane 9 left this constant undeclared while nothing read it; the detector that reads it
+    /// is lane 24's, and its facts carry <c>threshold_lineage = 0</c>.</summary>
     public const double PgSampledWaitProfileFallbackMsPerSec = 500.0;   // sampled ms of waiting per second the sampler watched
 
     /// <summary>The deadlock-rate ratio detector's magnitude floor, a RATE per observed hour (#3538 A7: never a
@@ -251,12 +259,33 @@ public static class AnomalyThresholds
     /// <summary>The PostgreSQL ratio families' firing multiple (deadlock rate; the wait profile's classical
     /// trigger): the window's per-hour or per-second rate over the same hour-of-week's baseline mean. Three is
     /// the multiple at which a tripled rate against its own history is a workload change rather than the
-    /// bucket's dispersion. unmeasured: chosen, not measured — the SQL Server event-ratio detector happens to
-    /// use the same multiple, and this is NOT an alias of it: the two instruments must stay free to calibrate
-    /// apart, so calibrate this one against the per-server ratio distribution over pg_database_stats and
-    /// pg_wait_stats before the next release (the 2026-09-19 calibration read the levels, not the
-    /// hour-of-week ratios, so this multiple is the reason the deadlock-rate and wait-profile anomalies still
-    /// carry threshold_lineage = 0).</summary>
+    /// bucket's dispersion. The SQL Server event-ratio detector happens to use the same multiple, and this is
+    /// NOT an alias of it: the two instruments must stay free to calibrate apart. measured: the hour-of-week
+    /// RATIO distributions (each 5-minute sample over its bucket's mean — the detector's centre; centres from the
+    /// first 21 days, ratios over the last 7; 100,800 samples) over 28 days × 50 Aurora PostgreSQL clusters of the
+    /// dogfood fleet, 2026-09-20, and the verdict differs by family, so it is stated per family:
+    /// <list type="bullet">
+    /// <item><description><b>TPS</b> (pg_database_stats): ratio p99 1.32, p99.9 1.65, p99.99 24.4, maximum 296;
+    /// share at or above 3.0 = 0.024 % — about one 5-minute sample per server per week — so 3.0 sits at ≈ p99.97
+    /// of TPS ratios: well placed. Stated for the record: the TPS anomaly is a z-detector on PgTpsFloor /
+    /// PgTpsFallback and never grades on this multiple, so nothing flips on it.</description></item>
+    /// <item><description><b>Wait profile</b> (pg_wait_stats, total non-CPU rate): ratio p99 12.9, p99.9 31,
+    /// maximum 139; share at or above 3.0 = <b>7.1 %</b>. A quiet bucket's mean is tiny, so the wait rate's
+    /// hour-of-week ratio is heavy-tailed by nature and the multiple ALONE is routine at 3.0 (≈ p93 of wait-rate
+    /// ratios) — measured-inadequate alone. What keeps the wait-profile anomaly quiet is the magnitude floor
+    /// (PgWaitProfileFallbackMsPerSec, 500 = 0.5 ms/ms, measured at 8× the fleet p99 total non-CPU rate of
+    /// 0.062 ms/ms) and, since #3780, the peak-AND-mean gate: the multiple is asked of both statistics, the bar
+    /// of the peak. The wait-profile fact stays at threshold_lineage = 0 regardless — its robust arm is decided
+    /// on HeavyTailModifiedZThreshold, the SQL Server fleet's cutoff by reference, and the scorer's ramp spans
+    /// are chosen (PgTargetScorer.Anomaly.cs).</description></item>
+    /// <item><description><b>Deadlocks/h</b>: a measured EMPTY interval on a near-empty population — only 22 of
+    /// 8,400 (server, bucket) pairs (0.26 %) have a non-zero centre at all, and no ratio reached 3 in 7 days;
+    /// the deadlock anomaly is the first-occurrence (is_new) arm in practice. Twenty-two pairs place nothing, so
+    /// the deadlock-rate fact keeps threshold_lineage = 0 (the ratio arm's multiple is unplaced there, and the
+    /// scorer's saturation span is chosen).</description></item>
+    /// </list>
+    /// Engine-neutral quantities (ratios of a server to itself), Aurora population; the stock-PostgreSQL
+    /// population is not yet measured.</summary>
     public const double PgRatioAnomalyThreshold = 3.0;
 
     /* ── lane 11 (#3691): the I/O read-latency z-detector (PgTargetAnomalyDetector.Io.cs). ──

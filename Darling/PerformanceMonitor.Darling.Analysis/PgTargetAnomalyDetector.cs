@@ -48,10 +48,12 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <c>threshold_lineage</c>, the verdict on the PostgreSQL floors and bars in <c>AnomalyThresholds</c> the fact was
 /// gated on: 1 when every one of them is fleet-measured (the #3691 calibration of 2026-09-19 — TPS floor and
 /// fallback, CPU floor and fallback), 0 when at least one is still a chosen number (the session COUNT floors, which
-/// are unmeasured in count terms; the ratio families' firing multiple <c>PgRatioAnomalyThreshold</c> and the
-/// wait profile's borrowed heavy-tail cutoff, so the deadlock-rate and wait-profile anomalies stay at 0 even though
-/// their own floors are now measured). Each constant names its lineage, and <c>get_analysis_facts</c> shows the
-/// flag.</para>
+/// are unmeasured in count terms; the wait profile's borrowed heavy-tail cutoff; and the ratio arms' ramp spans in
+/// <c>PgTargetScorer.Anomaly.cs</c>, so the deadlock-rate and wait-profile anomalies stay at 0 even though their
+/// own floors are measured and the firing multiple <c>PgRatioAnomalyThreshold</c> was read on 2026-09-20 — well
+/// placed for TPS, which never grades on it; routine alone for the wait rate, where the measured magnitude floor
+/// and the peak-AND-mean gate do the work; an empty interval on 22 (server, bucket) pairs for deadlocks, which
+/// places nothing). Each constant names its lineage, and <c>get_analysis_facts</c> shows the flag.</para>
 ///
 /// <para><b>A known, deferred residue, copied rather than fixed (#3538 A8).</b> Like every SQL Server z-detector,
 /// the window statistic is the PEAK per-collection value and the baseline bucket is a distribution of PER-SAMPLE
@@ -519,8 +521,11 @@ LIMIT 6";
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = PgRatioAnomalyThreshold,
                 ["top_database_count"] = topCount,
-                /* 0, not 1: the floor (1/h) and the fallback (the measured alert tier) are measured, but the firing
-                   multiple PgRatioAnomalyThreshold is still a chosen number — one unmeasured bar keeps the flag at 0. */
+                /* 0, not 1: the floor (1/h) and the fallback (the measured alert tier) are measured, and the 2026-09-20
+                   read of PgRatioAnomalyThreshold found only 22 of 8,400 (server, bucket) pairs with a non-zero centre
+                   and no ratio at 3 in 7 days — an empty interval on a population too thin to PLACE the multiple, so
+                   it stays an unplaced bar here (this arm is the is_new one in practice); and the scorer's ramp span
+                   (PgTargetScorer.RatioAnomalySaturation) is chosen. One unplaced bar keeps the flag at 0. */
                 ["threshold_lineage"] = 0,
             };
             AddBaselineContext(metadata, baseline);
@@ -549,7 +554,8 @@ LIMIT 6";
     /// by reference as the shared robust-statistic cutoff; the PostgreSQL distribution has not been read, so the
     /// fact still carries <c>threshold_lineage = 0</c> although the magnitude bar itself was placed against the
     /// 2026-09-19 fleet read — see <see cref="AnomalyThresholds.PgWaitProfileFallbackMsPerSec"/>) AND the magnitude bar; classical bucket: the ratio at
-    /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/>; untrustworthy: the bar alone, <c>is_new</c>, no
+    /// <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/> (read 2026-09-20 and routine alone for this family —
+    /// the bar is what decides; see the constant); untrustworthy: the bar alone, <c>is_new</c>, no
     /// sentinel. Top contributors ride as <c>contrib_Type:event</c>. The stock sampled estimate is never read here
     /// and the fact therefore never carries <c>is_sampled</c>; the sampled arm is its own metric, key and bar
     /// (<c>DetectSampledWaitProfileAnomalies</c>, lane 24) and sits out whenever this table has rows.
@@ -634,7 +640,8 @@ LIMIT 6";
                 ratio = peakRate / baseline.Mean;
                 meanRatio = meanRate / baseline.Mean;
                 fallbackExceedance = 0;
-                /* unmeasured: PgRatioAnomalyThreshold on both statistics, PgWaitProfileFallbackMsPerSec on the peak. */
+                /* measured: PgRatioAnomalyThreshold on both statistics (routine alone for the wait rate, 2026-09-20),
+                   PgWaitProfileFallbackMsPerSec on the peak (the bar that decides, 2026-09-19). */
                 if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
             }
             else
@@ -662,8 +669,11 @@ LIMIT 6";
                 ["is_new"] = isNew ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = isNew ? 0 : (baseline.EffectiveRobustSigma > 0 ? HeavyTailModifiedZThreshold : PgRatioAnomalyThreshold),
-                /* 0, not 1: the magnitude bar is measured (2026-09-19) but the heavy-tail cutoff is the SQL Server
-                   fleet's and the ratio multiple is chosen — one unmeasured bar keeps the flag at 0. */
+                /* 0, not 1: the magnitude bar is measured (2026-09-19) and the ratio multiple was read (2026-09-20:
+                   routine ALONE at 3.0 — ≈ p93 of wait-rate ratios, 7.1 % of samples at or above it — so the floor
+                   and the peak-AND-mean gate are what decide, not the multiple), but the heavy-tail cutoff is the SQL
+                   Server fleet's by reference and the scorer's ramp spans are chosen — one unmeasured bar keeps the
+                   flag at 0. */
                 ["threshold_lineage"] = 0,
             };
             AddBaselineContext(metadata, baseline);

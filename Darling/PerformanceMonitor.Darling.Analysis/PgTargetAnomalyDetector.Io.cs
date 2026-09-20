@@ -135,8 +135,9 @@ FROM rated";
             metadata["peak_ms_per_read"] = peakMsPerRead;
             metadata["avg_ms_per_read"] = avgMsPerRead;
             /* The quarter-hour sample the peak came from, the reads behind it, and the admission floor those reads
-               cleared (PgTargetScorer.IoBaselineBucketMinimumReads — unmeasured, stated on the constant; a sample-
-               admission floor, not a grading bar, so the lineage stamp above stays 1 for the measured fire bars). */
+               cleared (PgTargetScorer.IoBaselineBucketMinimumReads — measured as an admission floor on 2026-09-20,
+               §C5, stated on the constant with its consequence for the baseline tier; a sample-admission floor, not a
+               grading bar, so the lineage stamp above is 1 for the measured fire bars and now for the floor too). */
             metadata["peak_sample_reads"] = peakSampleReads;
             metadata["peak_sample_ticks"] = peakSample?.Ticks ?? 0;
             metadata["bucket_reads_floor"] = PgTargetScorer.IoBaselineBucketMinimumReads;
