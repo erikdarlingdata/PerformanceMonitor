@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -35,6 +37,156 @@ public sealed partial class PgTargetFactCollector
     /// than reading last month's state as today's. A STALENESS horizon for a state read, not a bar.
     /// </summary>
     internal const int PlanStateLookbackDays = 2;
+
+    /// <summary>
+    /// How many captured plans the Seq-Scan read walks, at most, newest first — a PAGE SIZE, not a threshold. Each row
+    /// carries a whole redacted <c>plan_json</c> (kilobytes), so the read is bounded in bytes as well as rows; two
+    /// thousand logged-slow plans in one window is a server past <c>auto_explain.log_min_duration</c> two thousand
+    /// times, which the truncated count still says. Truncation lowers a figure the advice already calls a lower bound.
+    /// The text prefilter (<c>plan_json LIKE '%Seq Scan%'</c>) keeps plans without the node off the wire entirely;
+    /// the walker is what decides.
+    /// </summary>
+    internal const int SeqScanCaptureRowCap = 2_000;
+
+    /// <summary>
+    /// The captured plans that MAY hold a Seq Scan node, newest first — the read behind <c>PG_SEQ_SCAN_ADVISORY</c>'s
+    /// walk (<see cref="WalkSeqScans"/>). <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row
+    /// cap (<see cref="SeqScanCaptureRowCap"/>). Orphans (<c>query_id = 0</c>, no <c>%Q</c>) are excluded as the flip
+    /// read excludes them: a scan with no statement joins no predicate and no bad actor. The <c>LIKE</c> is a
+    /// prefilter on the redacted JSON text, never the decision — a plan whose <c>Filter</c> prose happened to hold the
+    /// words is walked and found to have no such node.
+    /// </summary>
+    public const string PgTargetSeqScanCapturesSql = @"
+SELECT query_id,
+       plan_json
+FROM pg_plan_capture
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   query_id IS NOT NULL
+AND   query_id <> 0
+AND   plan_json IS NOT NULL
+AND   plan_json LIKE '%Seq Scan%'
+ORDER BY collection_time DESC
+LIMIT $4";
+
+    /// <summary>
+    /// The two witnesses for every (statement, relation) pair the walk found, in ONE round trip: the predicate
+    /// (<c>pg_qualstats</c> via <c>pg_predicate_stats</c>) and the size (<c>pg_table_bloat_stats</c>). <c>$1</c>
+    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the state lookback days
+    /// (<see cref="PlanStateLookbackDays"/> — both tables describe a STATE, hourly, so the newest row before the
+    /// window's end inside the lookback is the honest answer), <c>$5</c> the statement ids and <c>$6</c> the relation
+    /// names as parallel arrays (<c>unnest</c> in the select list walks them in lockstep, so the pairs need no
+    /// temporary table and the FROM/JOIN census sees only collector tables and CTEs).
+    ///
+    /// <para><b>The predicate witness is the newest row per column, the most selective column per pair.</b>
+    /// <c>pg_qualstats</c>' counters are cumulative and the reader's discipline (<c>DarlingPgPredicateStatsReader</c>)
+    /// is newest-not-differenced: the question is the accumulated shape, and a delta would fight the sampler. Per
+    /// (statement, database, schema, table, column) the newest row inside the lookback is taken; per (statement,
+    /// database, schema, table) the columns are listed most-selective-first (<c>predicate_columns</c> — the ONLY
+    /// place a column name enters this family, and the only source the advice may name an index column from) with
+    /// the most selective column's figures on the row; per (statement, table) the most selective (database, schema)
+    /// wins, since the plan's <c>Relation Name</c> carries neither. <c>rows_evaluated = 0</c> rows are dropped (a
+    /// predicate sampled at the moment it evaluated nothing has no selectivity).</para>
+    ///
+    /// <para><b>The size witness prefers the same relation the predicate named.</b> <c>heap_bytes</c> is per
+    /// (database, schema, table); when the predicate witness knows the database and schema, that relation's newest
+    /// sample is used; otherwise the LARGEST same-named relation on the server, with <c>relations_named</c> saying
+    /// how many share the name so the advice can say the size is the largest candidate's, not "the" relation's.</para>
+    /// </summary>
+    public const string PgTargetSeqScanWitnessSql = @"
+WITH candidates AS (
+    SELECT DISTINCT query_id, table_name
+    FROM (SELECT unnest($5::bigint[]) AS query_id, unnest($6::text[]) AS table_name) AS pairs
+),
+newest AS (
+    SELECT DISTINCT ON (p.query_id, p.database_name, p.schema_name, p.table_name, p.column_name)
+           p.query_id,
+           p.database_name,
+           p.schema_name,
+           p.table_name,
+           p.column_name,
+           p.rows_evaluated,
+           p.rows_filtered,
+           p.rows_filtered::double precision / p.rows_evaluated AS selectivity,
+           p.sample_rate,
+           p.worst_estimate_error_ratio
+    FROM pg_predicate_stats AS p
+    JOIN candidates AS c
+      ON c.query_id = p.query_id
+     AND c.table_name = p.table_name
+    WHERE p.server_id = $1
+    AND   p.collection_time <= $3
+    AND   p.collection_time >= $2 - make_interval(days => $4)
+    AND   p.column_name IS NOT NULL
+    AND   p.rows_evaluated > 0
+    ORDER BY p.query_id, p.database_name, p.schema_name, p.table_name, p.column_name, p.collection_time DESC
+),
+per_relation AS (
+    SELECT query_id,
+           database_name,
+           schema_name,
+           table_name,
+           MAX(selectivity)                                                        AS selectivity,
+           (array_agg(rows_evaluated ORDER BY selectivity DESC, column_name))[1]   AS rows_evaluated,
+           (array_agg(rows_filtered  ORDER BY selectivity DESC, column_name))[1]   AS rows_filtered,
+           MIN(sample_rate)                                                        AS sample_rate,
+           MAX(worst_estimate_error_ratio)                                         AS worst_estimate_error_ratio,
+           string_agg(column_name, ', ' ORDER BY selectivity DESC, column_name)    AS predicate_columns,
+           COUNT(*)                                                                AS predicate_column_count
+    FROM newest
+    GROUP BY query_id, database_name, schema_name, table_name
+),
+witness AS (
+    SELECT DISTINCT ON (query_id, table_name) *
+    FROM per_relation
+    ORDER BY query_id, table_name, selectivity DESC, database_name, schema_name
+),
+heaps AS (
+    SELECT DISTINCT ON (b.database_name, b.schema_name, b.table_name)
+           b.database_name,
+           b.schema_name,
+           b.table_name,
+           b.heap_bytes
+    FROM pg_table_bloat_stats AS b
+    JOIN candidates AS c
+      ON c.table_name = b.table_name
+    WHERE b.server_id = $1
+    AND   b.collection_time <= $3
+    AND   b.collection_time >= $2 - make_interval(days => $4)
+    AND   b.heap_bytes IS NOT NULL
+    ORDER BY b.database_name, b.schema_name, b.table_name, b.collection_time DESC
+),
+sizes AS (
+    SELECT table_name,
+           MAX(heap_bytes) AS heap_bytes,
+           COUNT(*)        AS relations_named
+    FROM heaps
+    GROUP BY table_name
+)
+SELECT c.query_id,
+       c.table_name,
+       w.database_name,
+       w.schema_name,
+       w.selectivity,
+       w.rows_evaluated,
+       w.rows_filtered,
+       w.sample_rate,
+       w.worst_estimate_error_ratio,
+       w.predicate_columns,
+       COALESCE(h.heap_bytes, z.heap_bytes) AS heap_bytes,
+       CASE WHEN h.heap_bytes IS NOT NULL THEN 1 ELSE z.relations_named END AS relations_named
+FROM candidates AS c
+LEFT JOIN witness AS w
+  ON w.query_id = c.query_id
+ AND w.table_name = c.table_name
+LEFT JOIN heaps AS h
+  ON h.table_name = c.table_name
+ AND h.database_name = w.database_name
+ AND h.schema_name = w.schema_name
+LEFT JOIN sizes AS z
+  ON z.table_name = c.table_name
+ORDER BY c.query_id, c.table_name";
 
     /// <summary>
     /// The two trackedness facets this family needs, as ONE row: whether <c>auto_explain</c> is loaded (the
@@ -294,9 +446,30 @@ LIMIT $5";
     /// <c>pg_plan_capture</c> first saw the statement's last <c>plan_hash</c>; <c>PG_PARAMETER_SENSITIVITY</c> from
     /// <c>plan_hash</c> variance per <c>query_id</c> beside <c>pg_column_stats</c>' <c>top_value_frequency</c> on the
     /// predicate columns <c>pg_predicate_stats</c> names; and (lane 30) <c>PG_SEQ_SCAN_ADVISORY</c> from <c>plan_json</c>
-    /// Seq Scan nodes beside <c>pg_predicate_stats</c>. The statement travels through the <c>ObjectName</c> seam as its
-    /// <c>query_id</c> (<c>Fact.Metadata</c> is doubles-only and a 64-bit id is exact in one only to 2^53 — lane 7's
-    /// reason); a fact naming an index candidate carries evidence, never DDL (D8).
+    /// Seq Scan nodes beside <c>pg_predicate_stats</c> and <c>pg_table_bloat_stats</c>. The statement travels through
+    /// the <c>ObjectName</c> seam as its <c>query_id</c> on the first two (<c>Fact.Metadata</c> is doubles-only and a
+    /// 64-bit id is exact in one only to 2^53 — lane 7's reason); the Seq-Scan fact's <c>ObjectName</c> is the
+    /// RELATION (with the predicate columns, when known) and its statement ids ride as two 32-bit halves per pair.
+    /// The Seq-Scan fact carries evidence first — rate, shares, selectivity, size — and the advice names an index
+    /// only where <c>pg_qualstats</c> named the columns and every gate holds (the maintainer's 2026-09-20 ruling).
+    ///
+    /// <para><b>The Seq-Scan read walks plans in C#, not in SQL.</b> <c>plan_json</c> is <c>text</c>, and a
+    /// <c>::jsonb</c> cast in the query would fail the whole read on one malformed row; <see cref="WalkSeqScans"/>
+    /// parses each plan defensively with <c>System.Text.Json</c> — a plan that does not parse, or a node without the
+    /// fields, is skipped, never guessed — and the nodes are aggregated per (statement, relation) in memory before ONE
+    /// witness read fetches the predicate and the size for every pair. The pairs are ranked by
+    /// <c>captures_per_hour × rows_removed_share</c> (the qualstats selectivity standing in for the share when the
+    /// plans carried no <c>Actual Rows</c>) and the top <see cref="PgTargetScorer.SeqScanCarriedPairs"/> ride the
+    /// fact; the rate is over OBSERVED hours (#3538 A7).</para>
+    ///
+    /// <para><b>Silence, and the two unavailable shapes.</b> No Seq Scan node in the window is "not slow enough to
+    /// log", never "no sequential scans" — nothing is emitted, unless the readiness collector says the library is
+    /// NOT loaded, when the fact is <c>unavailable</c> with <c>reason_auto_explain_off</c> beside the regression's
+    /// same-reason fact (two keys, two questions, two occurrence histories — <c>get_analysis_facts</c> filtered by
+    /// either must answer). Nodes found but <c>pg_qualstats</c> KNOWN absent is <c>unavailable</c> with
+    /// <c>reason_pg_qualstats_absent</c> AND the plan-side evidence (what was seen is said; what it means is not
+    /// graded). Nodes found, extension installed or unknown, no predicate row for the pair: the fact is emitted with
+    /// the selectivity ABSENT, the gate fails on the unknown, the scorer grades 0 and the advice says why.</para>
     ///
     /// <para><b>One fact per key, the worst of the window.</b> Both keys are static (the reconciler, the occurrence
     /// history and the graph key on them), so a pass emits the ONE regression that cleared the scorer's bars by the
@@ -373,8 +546,22 @@ LIMIT $5";
                     facts.Add(fact);
             }
 
-            /* lane 30: Seq-Scan read — PG_SEQ_SCAN_ADVISORY from plan_json Seq Scan nodes beside pg_predicate_stats,
-               on this connection, after the two facts above so it can read them by key. Evidence only, never DDL (D8). */
+            /* lane 30: Seq-Scan read — PG_SEQ_SCAN_ADVISORY from plan_json Seq Scan nodes beside pg_predicate_stats and
+               pg_table_bloat_stats, on this connection, after the two facts above. Evidence first; the advice names an
+               index only where the predicate columns are pg_qualstats' own and every gate holds. */
+            var captures = await ReadSeqScanCapturesAsync(context, connection);
+            var nodes = AggregateSeqScans(captures);
+            if (nodes.Count == 0)
+            {
+                if (autoExplainLoaded == false)
+                    facts.Add(SeqScanUnavailableFact(context));
+            }
+            else
+            {
+                var witnesses = await ReadSeqScanWitnessesAsync(context, connection, nodes);
+                var qualstatsAbsent = qualstatsState is "absent" or "available";
+                facts.Add(SeqScanFact(context, PickSeqScans(nodes, witnesses, context.ObservedDurationMs / 3_600_000.0), qualstatsAbsent));
+            }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -385,6 +572,254 @@ LIMIT $5";
             ReportCollectionFailure(ex, context);
         }
     }
+
+    /// <summary>One captured plan the Seq-Scan prefilter admitted, as <see cref="PgTargetSeqScanCapturesSql"/> returns it.</summary>
+    internal sealed record SeqScanCaptureRow(long QueryId, string PlanJson);
+
+    /// <summary>One Seq Scan node with a Filter, as <see cref="WalkSeqScans"/> reads it off a plan: the relation, the
+    /// planner's estimate and — when <c>auto_explain.log_analyze</c> was on — the rows kept and the rows the filter
+    /// removed. Null where the plan carried no such field; never 0.</summary>
+    internal sealed record SeqScanNode(string RelationName, double? PlanRows, double? ActualRows, double? RowsRemovedByFilter);
+
+    /// <summary>One (statement, relation) pair aggregated over the window's captures: how many plans held the node,
+    /// and the summed kept / removed rows over the captures that carried them (the share is
+    /// <c>removed / (kept + removed)</c>, null when none did).</summary>
+    internal sealed record SeqScanAggregate(long QueryId, string RelationName, int Captures, double? PlanRows, double KeptRows, double RemovedRows, int AnalyzedCaptures)
+    {
+        public double? RowsRemovedShare => AnalyzedCaptures > 0 && KeptRows + RemovedRows > 0 ? RemovedRows / (KeptRows + RemovedRows) : null;
+    }
+
+    /// <summary>The two witnesses for one pair, as <see cref="PgTargetSeqScanWitnessSql"/> returns them. Every column
+    /// but the pair's identity is null when its source had no row.</summary>
+    internal sealed record SeqScanWitnessRow(
+        long QueryId, string TableName, string? DatabaseName, string? SchemaName, double? Selectivity, long? RowsEvaluated, long? RowsFiltered,
+        double? SampleRate, double? WorstEstimateErrorRatio, string? PredicateColumns, long? HeapBytes, long? RelationsNamed);
+
+    /// <summary>One ranked pair, ready for the fact: the aggregate, its witnesses, and the rate over observed hours.</summary>
+    internal sealed record SeqScanPair(SeqScanAggregate Scan, SeqScanWitnessRow? Witness, double CapturesPerHour)
+    {
+        /// <summary>The rank key: scans per hour × the share of rows the filter removed — the plan's own share where
+        /// the captures carried Actual Rows, else the qualstats selectivity (the same quantity, measured by the other
+        /// instrument), else 0 (a pair with neither ranks last, and is still shown).</summary>
+        public double RankScore => CapturesPerHour * (Scan.RowsRemovedShare ?? Witness?.Selectivity ?? 0);
+
+        /// <summary>The relation as the fact names it: <c>schema.table</c> when the predicate witness knows the schema.</summary>
+        public string QualifiedRelation => string.IsNullOrEmpty(Witness?.SchemaName) ? Scan.RelationName : Witness!.SchemaName + "." + Scan.RelationName;
+    }
+
+    /// <summary>
+    /// Every Seq Scan node with a <c>Relation Name</c> and a <c>Filter</c> in one redacted <c>auto_explain</c> plan.
+    /// The root is <c>{"Plan": {…}}</c> (the parser drops <c>Query Text</c> and keeps the tree), children nest under
+    /// <c>"Plans"</c> arrays at any depth (InitPlans, SubPlans and CTE scans included — they are just nodes); an
+    /// <c>EXPLAIN (FORMAT JSON)</c> array root is walked too. A plan that does not parse, a node that is not an object,
+    /// a Seq Scan without a relation name or without a Filter (reading the whole relation IS the plan's intent — no
+    /// predicate, nothing to index) is skipped, never guessed. Numbers are read only when the field is a JSON number.
+    /// Pure, so the walk is testable on arranged JSON.
+    /// </summary>
+    internal static List<SeqScanNode> WalkSeqScans(string planJson)
+    {
+        var nodes = new List<SeqScanNode>();
+        try
+        {
+            using var document = JsonDocument.Parse(planJson);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var element in root.EnumerateArray())
+                    WalkRoot(element, nodes);
+            }
+            else
+            {
+                WalkRoot(root, nodes);
+            }
+        }
+        catch (JsonException)
+        {
+            /* Not a plan this walk can read: the redactor stored what auto_explain wrote, and a truncated log line or a
+               foreign row is a plan with no nodes, not an error worth the family's silence. */
+        }
+
+        return nodes;
+
+        static void WalkRoot(JsonElement element, List<SeqScanNode> nodes)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                return;
+            if (element.TryGetProperty("Plan", out var plan))
+                WalkNode(plan, nodes);
+            else if (element.TryGetProperty("Node Type", out _))
+                WalkNode(element, nodes);
+        }
+
+        static void WalkNode(JsonElement node, List<SeqScanNode> nodes)
+        {
+            if (node.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (node.TryGetProperty("Node Type", out var type) && type.ValueKind == JsonValueKind.String
+                && string.Equals(type.GetString(), "Seq Scan", StringComparison.Ordinal)
+                && node.TryGetProperty("Relation Name", out var relation) && relation.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(relation.GetString())
+                && node.TryGetProperty("Filter", out var filter) && filter.ValueKind == JsonValueKind.String)
+            {
+                nodes.Add(new SeqScanNode(relation.GetString()!, Number(node, "Plan Rows"), Number(node, "Actual Rows"), Number(node, "Rows Removed by Filter")));
+            }
+
+            if (node.TryGetProperty("Plans", out var children) && children.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var child in children.EnumerateArray())
+                    WalkNode(child, nodes);
+            }
+        }
+
+        static double? Number(JsonElement node, string name) =>
+            node.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var d) ? d : null;
+    }
+
+    /// <summary>The window's captures collapsed to (statement, relation) pairs: one capture counts once per relation
+    /// it scans sequentially (a plan scanning the same relation at two nodes is one capture of that pair, its rows
+    /// summed), kept / removed rows summed over the captures that carried Actual Rows. Pure.</summary>
+    internal static List<SeqScanAggregate> AggregateSeqScans(IReadOnlyList<SeqScanCaptureRow> captures)
+    {
+        var byPair = new Dictionary<(long, string), (int Captures, double? PlanRows, double Kept, double Removed, int Analyzed)>();
+        foreach (var capture in captures)
+        {
+            /* One capture, one relation, one entry: the nodes scanning the same relation in one plan are summed here,
+               then the capture counts once for the pair. */
+            var perRelation = new Dictionary<string, (double? PlanRows, double Kept, double Removed, bool Analyzed)>(StringComparer.Ordinal);
+            foreach (var node in WalkSeqScans(capture.PlanJson))
+            {
+                perRelation.TryGetValue(node.RelationName, out var soFar);
+                var analyzed = node.ActualRows is { } kept && node.RowsRemovedByFilter is { } removed;
+                perRelation[node.RelationName] = (
+                    node.PlanRows is { } planRows ? Math.Max(soFar.PlanRows ?? 0, planRows) : soFar.PlanRows,
+                    soFar.Kept + (analyzed ? node.ActualRows!.Value : 0),
+                    soFar.Removed + (analyzed ? node.RowsRemovedByFilter!.Value : 0),
+                    soFar.Analyzed || analyzed);
+            }
+
+            foreach (var (relation, rows) in perRelation)
+            {
+                byPair.TryGetValue((capture.QueryId, relation), out var agg);
+                byPair[(capture.QueryId, relation)] = (
+                    agg.Captures + 1,
+                    rows.PlanRows is { } planRows ? Math.Max(agg.PlanRows ?? 0, planRows) : agg.PlanRows,
+                    agg.Kept + rows.Kept,
+                    agg.Removed + rows.Removed,
+                    agg.Analyzed + (rows.Analyzed ? 1 : 0));
+            }
+        }
+
+        return byPair
+            .Select(kv => new SeqScanAggregate(kv.Key.Item1, kv.Key.Item2, kv.Value.Captures, kv.Value.PlanRows, kv.Value.Kept, kv.Value.Removed, kv.Value.Analyzed))
+            .OrderBy(a => a.QueryId).ThenBy(a => a.RelationName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>The pairs ranked by <see cref="SeqScanPair.RankScore"/> (ties: more captures, then the smaller id, then
+    /// the name — a stable order for the fact), each with its witness row when one exists, the rate over
+    /// <paramref name="observedHours"/>. Pure; the caller takes the top <see cref="PgTargetScorer.SeqScanCarriedPairs"/>.</summary>
+    internal static List<SeqScanPair> PickSeqScans(IReadOnlyList<SeqScanAggregate> scans, IReadOnlyList<SeqScanWitnessRow> witnesses, double observedHours)
+    {
+        var byPair = witnesses.ToDictionary(w => (w.QueryId, w.TableName), w => w);
+        return scans
+            .Select(s => new SeqScanPair(s, byPair.GetValueOrDefault((s.QueryId, s.RelationName)), observedHours > 0 ? s.Captures / observedHours : 0))
+            .OrderByDescending(p => p.RankScore)
+            .ThenByDescending(p => p.Scan.Captures)
+            .ThenBy(p => p.Scan.QueryId)
+            .ThenBy(p => p.Scan.RelationName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>The <c>PG_SEQ_SCAN_ADVISORY</c> fact for the ranked pairs: <see cref="Fact.Value"/> is the top pair's
+    /// rank score, <see cref="Fact.ObjectName"/> the top pair's relation with its predicate columns when known
+    /// (<c>schema.table (col1, col2)</c> — the ONE string seam; the advice splits it), <see cref="Fact.DatabaseName"/>
+    /// the predicate witness's database; per carried pair the id halves, captures, rate, share, size, selectivity and
+    /// their companions under a <c>_N</c> suffix, absent where the source had no row. With <c>pg_qualstats</c> KNOWN
+    /// absent the fact is <c>unavailable</c> with the reason and still carries the plan-side evidence.</summary>
+    internal static Fact SeqScanFact(AnalysisContext context, IReadOnlyList<SeqScanPair> ranked, bool qualstatsAbsent)
+    {
+        var top = ranked[0];
+        var carried = Math.Min(ranked.Count, PgTargetScorer.SeqScanCarriedPairs);
+        var fact = new Fact
+        {
+            Source = PgTargetSources.PlansSource,
+            Key = PgTargetFactKeys.SeqScanAdvisory,
+            Value = top.RankScore,
+            ServerId = context.ServerId,
+            ObjectName = string.IsNullOrEmpty(top.Witness?.PredicateColumns) ? top.QualifiedRelation : top.QualifiedRelation + " (" + top.Witness!.PredicateColumns + ")",
+            DatabaseName = top.Witness?.DatabaseName,
+            Metadata =
+            {
+                [PgTargetScorer.SeqScanPairsKey] = carried,
+                [PgTargetScorer.SeqScanCandidatePairsKey] = ranked.Count,
+                ["observed_hours"] = context.ObservedDurationMs / 3_600_000.0,
+            },
+        };
+
+        for (var rank = 1; rank <= carried; rank++)
+        {
+            var pair = ranked[rank - 1];
+            var (hi, lo) = PgTargetScorer.SeqScanSplitQueryId(pair.Scan.QueryId);
+            Set(PgTargetScorer.SeqScanQueryIdHiKey, hi);
+            Set(PgTargetScorer.SeqScanQueryIdLoKey, lo);
+            Set(PgTargetScorer.SeqScanCapturesKey, pair.Scan.Captures);
+            Set(PgTargetScorer.SeqScanCapturesPerHourKey, pair.CapturesPerHour);
+            Set("analyzed_captures", pair.Scan.AnalyzedCaptures);
+            /* Absent rather than zero, throughout: a plan without Actual Rows did not remove 0 rows, a relation the bloat
+               collector never sampled is not 0 bytes, a predicate pg_qualstats never saw is not 0 % selective. */
+            if (pair.Scan.PlanRows is { } planRows) Set("plan_rows", planRows);
+            if (pair.Scan.RowsRemovedShare is { } share)
+            {
+                Set(PgTargetScorer.SeqScanRowsRemovedShareKey, share);
+                Set("actual_rows", pair.Scan.KeptRows);
+                Set("rows_removed_by_filter", pair.Scan.RemovedRows);
+            }
+            if (pair.Witness is { } w)
+            {
+                if (w.HeapBytes is { } heap) Set(PgTargetScorer.SeqScanHeapBytesKey, heap);
+                if (w.RelationsNamed is { } named) Set("relations_named", named);
+                if (!qualstatsAbsent && w.Selectivity is { } selectivity)
+                {
+                    Set(PgTargetScorer.SeqScanSelectivityKey, selectivity);
+                    if (w.RowsEvaluated is { } evaluated) Set("rows_evaluated", evaluated);
+                    if (w.RowsFiltered is { } filtered) Set("rows_filtered", filtered);
+                    if (w.SampleRate is { } rate) Set("sample_rate", rate);
+                    if (w.WorstEstimateErrorRatio is { } error) Set(PgTargetScorer.SeqScanEstimateErrorKey, error);
+                }
+            }
+
+            void Set(string key, double value) => fact.Metadata[PgTargetScorer.SeqScanPairKey(key, rank)] = value;
+        }
+
+        if (qualstatsAbsent)
+        {
+            fact.Value = 0;
+            fact.Metadata[PgTargetScorer.PlanUnavailableKey] = 1;
+            fact.Metadata[PgTargetScorer.PlanReasonQualstatsAbsentKey] = 1;
+            /* 1, not 0: nothing is graded off the unavailable shape (the write family's rule). */
+            fact.Metadata["threshold_lineage"] = 1;
+        }
+
+        return fact;
+    }
+
+    /// <summary>The Seq-Scan fact's <c>unavailable</c> shape when the library is KNOWN off and no node was found — the
+    /// regression's twin, on this key.</summary>
+    private static Fact SeqScanUnavailableFact(AnalysisContext context) => new()
+    {
+        Source = PgTargetSources.PlansSource,
+        Key = PgTargetFactKeys.SeqScanAdvisory,
+        Value = 0,
+        ServerId = context.ServerId,
+        Metadata =
+        {
+            [PgTargetScorer.PlanUnavailableKey] = 1,
+            [PgTargetScorer.PlanReasonAutoExplainOffKey] = 1,
+            /* 1, not 0: nothing is graded off the unavailable shape (the write family's rule). */
+            ["threshold_lineage"] = 1,
+        },
+    };
 
     /// <summary>One flipped statement, as <see cref="PgTargetPlanFlipSql"/> returns it.</summary>
     internal sealed record PlanFlipRow(
@@ -612,6 +1047,54 @@ LIMIT $5";
                 TopValueFrequency: reader.IsDBNull(5) ? null : Convert.ToDouble(reader.GetValue(5)),
                 NDistinct: reader.IsDBNull(6) ? null : Convert.ToDouble(reader.GetValue(6)),
                 WorstEstimateErrorRatio: reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7))));
+        }
+
+        return rows;
+    }
+
+    private async Task<List<SeqScanCaptureRow>> ReadSeqScanCapturesAsync(AnalysisContext context, NpgsqlConnection connection)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetSeqScanCapturesSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(SeqScanCaptureRowCap);
+
+        var rows = new List<SeqScanCaptureRow>();
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+            rows.Add(new SeqScanCaptureRow(ToInt64(reader.GetValue(0)), reader.GetString(1)));
+
+        return rows;
+    }
+
+    private async Task<List<SeqScanWitnessRow>> ReadSeqScanWitnessesAsync(AnalysisContext context, NpgsqlConnection connection, IReadOnlyList<SeqScanAggregate> scans)
+    {
+        using var cmd = new NpgsqlCommand(PgTargetSeqScanWitnessSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(PlanStateLookbackDays);
+        cmd.Parameters.AddWithValue(scans.Select(s => s.QueryId).ToArray());
+        cmd.Parameters.AddWithValue(scans.Select(s => s.RelationName).ToArray());
+
+        var rows = new List<SeqScanWitnessRow>();
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            rows.Add(new SeqScanWitnessRow(
+                QueryId: ToInt64(reader.GetValue(0)),
+                TableName: reader.GetString(1),
+                DatabaseName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                SchemaName: reader.IsDBNull(3) ? null : reader.GetString(3),
+                Selectivity: reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
+                RowsEvaluated: reader.IsDBNull(5) ? null : ToInt64(reader.GetValue(5)),
+                RowsFiltered: reader.IsDBNull(6) ? null : ToInt64(reader.GetValue(6)),
+                SampleRate: reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)),
+                WorstEstimateErrorRatio: reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
+                PredicateColumns: reader.IsDBNull(9) ? null : reader.GetString(9),
+                HeapBytes: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
+                RelationsNamed: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11))));
         }
 
         return rows;
