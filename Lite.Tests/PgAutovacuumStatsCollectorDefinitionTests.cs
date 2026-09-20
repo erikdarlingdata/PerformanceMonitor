@@ -133,13 +133,23 @@ public class PgAutovacuumStatsCollectorDefinitionTests
             sql.Replace("\n", " ").Replace("\r", " "));
     }
 
-    /// <summary>A table with autovacuum switched off is its own finding, so the flag must be read.</summary>
+    /// <summary>A table with autovacuum switched off is its own finding, so the flag must be read — and read
+    /// through the boolean input function, not a string compare (#3691 lane 36's bug). <c>pg_options_to_table</c>
+    /// returns the reloption literal as typed, so <c>WITH (autovacuum_enabled = off)</c> — the docs' own spelling —
+    /// stores <c>off</c>, and <c>lower(option_value) = 'false'</c> read every such table as enabled
+    /// (<c>autovacuum_disabled = f</c> on all 47 rows of a live PostgreSQL 18 table with autovacuum off).
+    /// <c>NOT option_value::boolean</c> accepts exactly the set the server accepted when it validated the option.
+    /// Pinned in BOTH places the flag is computed — the projected column and the activity filter's keep clause —
+    /// because the old text was wrong in both and fixing one would have kept the table out of the rows while
+    /// the column said it was disabled.</summary>
     [Fact]
-    public void DetectsAutovacuumDisabledPerTable()
+    public void DetectsAutovacuumDisabledPerTable_ThroughTheBooleanCast_NotAStringCompare()
     {
         var sql = PgAutovacuumStatsCollector.Instance.BuildQuery(MakeContext()).Text;
 
         Assert.Contains("'autovacuum_enabled'", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"SELECT NOT option_value::boolean FROM pg_options_to_table\(c\.reloptions\)\s+WHERE option_name = 'autovacuum_enabled'").Count);
+        Assert.DoesNotContain("= 'false'", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

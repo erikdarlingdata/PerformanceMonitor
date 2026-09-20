@@ -277,7 +277,7 @@ public sealed class DarlingMcpPgPercentDenominatorTests
     private static DarlingPgDatabaseReader.PgDatabaseRow Database(int i) => new(
         DatabaseName: "db" + i, XactCommit: 100, XactRollback: 1, BlksRead: i == 0 ? 100 : 900, BlksHit: i == 0 ? 900 : 100,
         TempFiles: Series[i], TempBytes: Series[i] * 10, Deadlocks: 1, StatsResetCount: 0, CounterRewindCount: 0,
-        StatsReset: null, SampleCount: 2, FirstSampleAt: null, LastSampleAt: null);
+        StatsReset: null, SampleCount: 2, FirstSampleAt: null, LastSampleAt: null, PeakNumbackends: null);
 
     private static DarlingPgDatabaseReader.PgDatabasePage DatabasePage(params DarlingPgDatabaseReader.PgDatabaseRow[] rows) =>
         new([.. rows], WindowDatabaseCount: 3, WindowTotalTempFiles: WindowTotal, WindowTotalTempBytes: WindowTotal * 10,

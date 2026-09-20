@@ -4023,6 +4023,7 @@
                                     <DataGridTextColumn Header="Rollbacks" Binding="{Binding XactRollback}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Rollback %" Binding="{Binding RollbackPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Peak Backends" Binding="{Binding PeakNumbackends}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="140"/>
                                     <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="*"/>
                                 </DataGrid.Columns>

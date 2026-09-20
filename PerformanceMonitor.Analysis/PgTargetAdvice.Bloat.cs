@@ -96,11 +96,11 @@ public static partial class PgTargetAdvice
 
         var pctText = pctComputable ? $" ({Pct(pct)} of the earlier estimate)" : " (from an earlier estimate of zero — no percentage to state)";
         var headline = graded
-            ? $"{table}{db} grew {FmtBytes(growth)} of estimated bloat{pctText} across {samples:0} hourly samples spanning {FmtHours(spanHours)}"
-            : $"{table}{db} is the fastest-growing estimable table at {FmtBytes(growth)}{pctText} across {samples:0} hourly samples — under the measured line";
+            ? $"{table}{db} grew {FmtBytes(growth)} of estimated bloat{pctText} across {samples:0} samples spanning {FmtHours(spanHours)}"
+            : $"{table}{db} is the fastest-growing estimable table at {FmtBytes(growth)}{pctText} across {samples:0} samples — under the measured line";
 
         var inv = new StringBuilder();
-        inv.Append($"The bloat-bytes estimate for this table moved from {FmtBytes(earlier)} to {FmtBytes(latest)} between its earliest and latest usable samples inside the {lookback:0}-day lookback ending at the analysis window ({samples:0} hourly samples, {FmtHours(spanHours)} apart at the ends). ");
+        inv.Append($"The bloat-bytes estimate for this table moved from {FmtBytes(earlier)} to {FmtBytes(latest)} between its earliest and latest usable samples inside the {lookback:0}-day lookback ending at the analysis window ({samples:0} samples, {FmtHours(spanHours)} apart at the ends). ");
         inv.Append($"The heap measures {FmtBytes(heap)} (pg_relation_size, measured — not estimated)");
         if (m.TryGetValue(PgTargetScorer.BloatDeadTuplesKey, out var dead))
         {

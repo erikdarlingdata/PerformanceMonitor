@@ -191,12 +191,25 @@ public static partial class PgTargetScorer
     }
 
     /// <summary>
-    /// Layer-2 amplifiers for the <c>ANOMALY_PG_*</c> keys. The LOAD family — TPS, session count, CPU —
-    /// corroborate one another (a real surge moves more than one of them; the root's own key is omitted so a
-    /// family never corroborates itself) and are confirmed by the MEASURED <c>PG_CPU_PERCENT</c> fact at the
-    /// capacity warning bar. The confirmer reads the capacity-measured flag first: a fact whose value is the raw
-    /// percent-of-allocated reading confirms nothing, however high it reads (#3281). On stock PostgreSQL there is
-    /// no CPU fact at all and the arm is inert — the advice never implies CPU was checked (D6).
+    /// Layer-2 amplifiers for the <c>ANOMALY_PG_*</c> keys. The LOAD family — TPS, session count, CPU capacity
+    /// (Aurora) and, since the third between-waves batch of #3691, CPU burn (<c>pg_stat_kcache</c>, stock and
+    /// Aurora alike) — corroborate one another (a real surge moves more than one of them; the root's own key is
+    /// omitted so a family never corroborates itself) and are confirmed by the MEASURED <c>PG_CPU_PERCENT</c> fact
+    /// at the capacity warning bar. The confirmer reads the capacity-measured flag first: a fact whose value is the
+    /// raw percent-of-allocated reading confirms nothing, however high it reads (#3281). On stock PostgreSQL there
+    /// is no CPU capacity fact at all and that arm is inert — the advice never implies capacity was checked (D6).
+    ///
+    /// <para><b>Why the burn anomaly joined the load family (lane 36's measurement, 2026-09-20).</b> On the stock
+    /// rig every reachable family cleared the 1.5 notify line except the load pair: a planted storm fired
+    /// <c>ANOMALY_PG_TPS</c> and <c>ANOMALY_PG_SESSION_SPIKE</c> at 1.30 exactly — extreme, plus ONE corroborator
+    /// (each other) — while <c>ANOMALY_PG_CPU_BURN</c> fired at 25σ (12.55 cores) beside them and nothing read it,
+    /// because both CPU confirmers were Aurora-only. Cores busy above this server's own hour-of-week routine is the
+    /// same statement about a surge that the capacity anomaly makes on Aurora, from the kernel's counters instead of
+    /// Performance Insights', so it is the load family's second independent corroborator on stock: an extreme TPS or
+    /// session anomaly with the burn beside it now reads 1.6 and pages, which is #3584's two-corroborator bar. The
+    /// burn anomaly takes the load arms in return (symmetry: a family never corroborates itself, everyone else
+    /// corroborates it), and <c>PgTargetFactKeys.AnomalyToFamilies</c> folds it onto <c>PG_CPU_DECOMPOSITION</c>
+    /// beside the base-0 <c>PG_CPU_BURN_CORES</c> so the fold has a positive-base parent to land on.</para>
     ///
     /// <para>The wait profile is corroborated by the load family moving (a surge is driving the shift) and by a
     /// <c>PG_WAIT_*</c> standout crossing its own threshold (the shift is a nameable wait, not diffuse noise). The
@@ -205,7 +218,8 @@ public static partial class PgTargetScorer
     /// </summary>
     private static partial List<AmplifierDefinition> AnomalyAmplifiers(string key)
     {
-        if (key is PgTargetFactKeys.AnomalyTps or PgTargetFactKeys.AnomalySessionSpike or PgTargetFactKeys.AnomalyCpuSpike)
+        if (key is PgTargetFactKeys.AnomalyTps or PgTargetFactKeys.AnomalySessionSpike or PgTargetFactKeys.AnomalyCpuSpike
+            or PgTargetFactKeys.AnomalyCpuBurn)
             return LoadAnomalyAmplifiers(key);
 
         /* Both wait profiles (Aurora exact; lane 24's stock sampled) take the load arms plus the named-standout arm:
@@ -257,6 +271,10 @@ public static partial class PgTargetScorer
         Sibling(PgTargetFactKeys.AnomalySessionSpike, "Session-count anomaly co-fired — the surge is visible in connections too");
         Sibling(PgTargetFactKeys.AnomalyTps, "Transaction-rate anomaly co-fired — the surge is visible in throughput too");
         Sibling(PgTargetFactKeys.AnomalyCpuSpike, "Capacity anomaly co-fired — the surge is consuming CPU far above this instance's norm");
+        /* The stock confirmer (lane 36's measurement): cores busy from pg_stat_kcache against this server's own
+           hour-of-week routine — the same surge statement as the capacity anomaly, available where there is no
+           Performance Insights. See the summary above for why it joined. */
+        Sibling(PgTargetFactKeys.AnomalyCpuBurn, "CPU-burn anomaly co-fired — cores busy ran far above this server's own routine for the hour, so the surge is burning real CPU");
         amplifiers.Add(new()
         {
             Description = "Instance CPU at or past the capacity warning bar (Aurora, percent of the configured ceiling) — the surge is consuming real capacity, not just moving a counter",

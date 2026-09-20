@@ -343,7 +343,7 @@ public sealed class PgTargetVacuumTests
         var advice = FactAdvice.Compose(PgTargetFactKeys.AutovacuumBacklog, Lookup(fact))!;
 
         Assert.Contains("public.hot in appdb", advice.Headline, StringComparison.Ordinal);
-        Assert.Contains("5,250 dead tuples, 5× its own autovacuum trigger line, for 4 consecutive hourly samples", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("5,250 dead tuples, 5× its own autovacuum trigger line, for 4 consecutive samples", advice.Headline, StringComparison.Ordinal);
         Assert.Contains("trigger line of 1,050", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("rose at 1,083 per hour", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("autovacuum ran on the table 2 times", advice.Investigation, StringComparison.Ordinal);
@@ -627,7 +627,7 @@ public sealed class PgTargetVacuumTests
         var block = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(backlog, disabled))!;
         Assert.Equal("public.hot in appdb has autovacuum_enabled = off and sits at 4.2× its own autovacuum trigger line for 6 hours", block.Headline);
         Assert.Contains("4,410 dead tuples against its own trigger line of 1,050", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("for 7 consecutive hourly samples spanning 6 hours", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("for 7 consecutive samples spanning 6 hours", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("autovacuum last ran on this table 30 hours before the window end", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("7.8 MB on disk", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("2 more disabled tables have met the same gate (3.1× for 5 hours, 1.4× for 2 hours)", block.Investigation, StringComparison.Ordinal);
