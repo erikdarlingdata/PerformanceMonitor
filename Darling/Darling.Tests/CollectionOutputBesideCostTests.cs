@@ -429,17 +429,18 @@ public sealed class CollectionOutputBesideCostTests
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
             "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
 
-        /* The precondition. 26 columns since #3754's session_missing_count - 16 at #2460, plus #2472's
-           four fan-out columns, #2804's abandoned_count, #3010's last_denied_time, #3017's two and
-           #3240's extension_missing_count. A parse that stopped finding them would otherwise turn the
-           comparison below into two empty maps agreeing. */
-        Assert.Equal(26, darling.Count);
-        Assert.Equal(26, lite.Count);
+        /* The precondition. 29 columns since #3819's three - 16 at #2460, plus #2472's four fan-out
+           columns, #2804's abandoned_count, #3010's last_denied_time, #3017's two, #3240's
+           extension_missing_count, #3754's session_missing_count and #3819's current_status,
+           last_non_skip_time and last_productive_time. A parse that stopped finding them would
+           otherwise turn the comparison below into two empty maps agreeing. */
+        Assert.Equal(29, darling.Count);
+        Assert.Equal(29, lite.Count);
 
-        /* No gaps and no duplicates: ordinals 0..25 exactly once each. A duplicate would let two fields
+        /* No gaps and no duplicates: ordinals 0..28 exactly once each. A duplicate would let two fields
            read one column while a third read nothing, which compiles and is silently wrong. */
-        Assert.Equal(Enumerable.Range(0, 26), darling.Values.OrderBy(o => o));
-        Assert.Equal(Enumerable.Range(0, 26), lite.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 29), darling.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 29), lite.Values.OrderBy(o => o));
 
         /* And the same field at the same ordinal on both sides. */
         Assert.Equal(
@@ -455,6 +456,10 @@ public sealed class CollectionOutputBesideCostTests
         Assert.Equal(21, darling["LastDeniedTime"]);
         Assert.Equal(24, darling["ExtensionMissingCount"]);
         Assert.Equal(25, darling["SessionMissingCount"]);
+        /* #3819's three, appended together at the top of the range. */
+        Assert.Equal(26, darling["CurrentStatus"]);
+        Assert.Equal(27, darling["LastNonSkipTime"]);
+        Assert.Equal(28, darling["LastProductiveTime"]);
     }
 
     /// <summary>

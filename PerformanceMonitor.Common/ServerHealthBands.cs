@@ -1603,6 +1603,146 @@ namespace PerformanceMonitor.Common
             return lastSuccessTimeUtc is null || lastDeniedTimeUtc.Value > lastSuccessTimeUtc.Value;
         }
 
+        /// <summary>
+        /// A collector that WAS producing rows and now reports a named skip every cycle has REGRESSED, and
+        /// this is the predicate that says so (#3819). Three stored instants out of the one aggregate the
+        /// health reads already take, so a caller can never compose it from instants describing different
+        /// windows.
+        ///
+        /// <para><b>The reading this exists to end.</b> The <c>.453</c> install took
+        /// <c>pg_statement_stats</c> from 85% productive to <c>EXTENSION_MISSING</c> every cycle on 23 of
+        /// 50 PostgreSQL clusters. For the first day after it, the row read HEALTHY — the ladder saw a
+        /// recent success (the last productive cycle, hours old), no errors, and rates of zero — and the
+        /// install countersign, which reads this surface, accepted that for 24 hours. Only when the success
+        /// clock ran past the FAILING cutoff did any band move. A named skip on a collector that had been
+        /// producing is a different fact from the same status on one that never has, and nothing here could
+        /// tell them apart.</para>
+        ///
+        /// <para><b>Why the band arms cannot catch it.</b>
+        /// <see cref="ExtensionMissing"/> and <see cref="NoPermissions"/> are both gated on
+        /// <c>successCount == 0</c> — the window's story has to be nothing but the skip. A regressed
+        /// collector's window holds its productive days, so it never reaches either arm; it falls through
+        /// to the staleness ladder and reads HEALTHY until the success ages out. The two conditions are
+        /// therefore disjoint by construction: the benign band and this predicate cannot both describe one
+        /// row, which is what keeps the Aurora optional-extension class honest.</para>
+        ///
+        /// <para><b>Why it takes instants rather than a status word.</b> The named-skip vocabulary lives in
+        /// <c>CollectorRuntimePrecondition</c>, in the collector assembly, and this one deliberately
+        /// depends on nothing (the boundary <see cref="OnLoadCollectorNames"/> keeps). The reads resolve
+        /// the vocabulary at the STORE — where the question is asked of every row anyway — and hand back
+        /// two instants: when this collector last did something that was NOT a named skip, and when it
+        /// last stored a row. Both are plain aggregates over the window the read already takes, so the
+        /// fleet rollup and the per-server grid compute the identical predicate without the fleet read
+        /// growing a window function.</para>
+        ///
+        /// <para><b>What it is bounded by, stated rather than implied.</b> Both reads window seven days,
+        /// so this can only see productivity that is still inside that window. A skip older than the
+        /// window leaves no productive row to find and the collector reverts to its ordinary band — which
+        /// is the honest answer, because at that point the read holds no evidence of a regression, and a
+        /// WARNING that never expires is a mute nobody tracks. The install countersign this serves reads
+        /// the surface within hours of an install, which is well inside that bound.</para>
+        /// </summary>
+        /// <param name="lastRunTimeUtc">The newest run of ANY status (<c>last_run_time</c>). Null means the
+        /// collector left no row in the window at all, which is NEVER_RUN's question, not this one.</param>
+        /// <param name="lastNonSkipTimeUtc">
+        /// The newest run whose status was NOT a named skip (<c>last_non_skip_time</c>) — the instant the
+        /// current skip streak began after. Null means every run in the window was a skip, which is the
+        /// never-produced-here case the benign band already describes correctly.
+        /// </param>
+        /// <param name="lastProductiveTimeUtc">The newest run that stored rows
+        /// (<c>last_productive_time</c>). Null means the window holds no productivity to have regressed
+        /// from.</param>
+        public static bool RegressedFromProductive(
+            DateTime? lastRunTimeUtc,
+            DateTime? lastNonSkipTimeUtc,
+            DateTime? lastProductiveTimeUtc)
+        {
+            if (lastRunTimeUtc is null || lastNonSkipTimeUtc is null || lastProductiveTimeUtc is null)
+            {
+                return false;
+            }
+
+            /* Currently skipping: the newest run postdates the newest non-skip, so every run since that
+               instant was a named skip. Strictly greater, for the reason DeniedSinceLastSuccess is strict —
+               equal instants mean the newest run IS the non-skip one, and a tie decided the other way
+               would claim a streak that has not started. */
+            if (lastNonSkipTimeUtc.Value >= lastRunTimeUtc.Value)
+            {
+                return false;
+            }
+
+            /* And the productivity has to sit BEFORE the streak rather than inside it. A named skip stores
+               nothing, so this holds on every row the store can currently produce; asserted anyway, because
+               what makes this a regression is the ORDER of the two facts, and a predicate that assumed the
+               order would be reporting its own assumption. */
+            return lastProductiveTimeUtc.Value <= lastNonSkipTimeUtc.Value;
+        }
+
+        /// <summary>
+        /// The band a row carries once <see cref="RegressedFromProductive"/> is known: WARNING where the
+        /// ladder said HEALTHY, and the ladder's own answer everywhere else (#3819).
+        ///
+        /// <para><b>It can only ever make a row louder.</b> HEALTHY is the only band a regressed collector
+        /// reaches that is quieter than WARNING — the two benign skip bands are unreachable for it (see
+        /// <see cref="RegressedFromProductive"/>), and STALE, FAILING and STOPPED all already say more than
+        /// WARNING would. So this is a floor, not a re-banding: nothing that was alarming becomes less so,
+        /// and the attribution a louder band carries is not traded away for a flag. A row that keeps its
+        /// louder band still reports <c>regressed_from_productive</c> and still counts in the fleet's
+        /// regressed total, because the flag and the band answer different questions.</para>
+        ///
+        /// <para><b>WARNING rather than a new band string</b>, for the reason
+        /// <see cref="WarningAbandonRatePercent"/> gives: WARNING is already the "degrading but still
+        /// running" verdict, and a new string would have to be learned by four independent display
+        /// mappings, two of which default in opposite directions — one to "Unknown" and one to the brush it
+        /// gives HEALTHY. Attribution is not lost by sharing the band, because the regression flag and its
+        /// finding sit on the same row.</para>
+        /// </summary>
+        public static string BandWithRegression(string band, bool regressedFromProductive) =>
+            regressedFromProductive && string.Equals(band, Healthy, StringComparison.Ordinal)
+                ? Warning
+                : band;
+
+        /// <summary>
+        /// The sentence a regressed collector carries (#3819), or null when the row is not one. States the
+        /// three facts an operator needs in the order they happened: how much it was producing, when it
+        /// stopped, and what it has said since.
+        ///
+        /// <para>The closing clause names a restart or an upgrade because that is what the measured case
+        /// was, and because it is the one cause an operator reading a collection-health surface would not
+        /// otherwise consider: nothing about the monitored server changed, so the natural reading is that
+        /// the target lost something, when in fact the monitoring build did.</para>
+        ///
+        /// <para><paramref name="rowsInPriorWindow"/> is the row's <c>rows_stored</c> over the read's own
+        /// seven-day window. On a regressed row that is entirely pre-regression, because a named skip
+        /// stores nothing — which is why the count can be taken from the window total instead of needing a
+        /// second, differently-bounded aggregate that could describe different runs.</para>
+        /// </summary>
+        /// <param name="rowsInPriorWindow">Rows stored over the window (<c>rows_stored</c>).</param>
+        /// <param name="lastNonSkipTimeUtc">The instant the skip streak began after
+        /// (<c>last_non_skip_time</c>) — the newest run that was not a named skip.</param>
+        /// <param name="currentStatus">The status the collector has been reporting since
+        /// (<c>current_status</c>). Null on a surface that does not read it, which answers null rather than
+        /// composing a sentence with a hole in it.</param>
+        public static string? FormatRegressedFromProductiveFinding(
+            long rowsInPriorWindow,
+            DateTime? lastNonSkipTimeUtc,
+            string? currentStatus)
+        {
+            if (lastNonSkipTimeUtc is null || string.IsNullOrWhiteSpace(currentStatus))
+            {
+                return null;
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "produced {0:N0} rows in the seven days before {1}; has reported {2} since — a restart or "
+                + "upgrade changed what this collector can read",
+                rowsInPriorWindow,
+                DateTime.SpecifyKind(lastNonSkipTimeUtc.Value, DateTimeKind.Utc)
+                    .ToString("u", CultureInfo.InvariantCulture),
+                currentStatus);
+        }
+
         /// <summary>The FAILING cutoff (hours since last success) for a collector of the given cadence.</summary>
         public static double FailingThresholdHours(int frequencyMinutes) =>
             Math.Max(FailingFloorHours, FailingCadenceMultiplier * (frequencyMinutes / 60.0));

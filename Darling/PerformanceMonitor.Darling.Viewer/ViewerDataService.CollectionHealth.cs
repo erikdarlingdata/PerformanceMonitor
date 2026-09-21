@@ -138,7 +138,21 @@ public sealed partial class ViewerDataService
             -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
             -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, never
             -- inserted: this result set is read positionally by one shared mapper.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3819: the two instants that, with last_run_time above, say whether this collector
+            -- STOPPED producing rather than never having produced here. The same named skip carries
+            -- opposite meanings on those two rows, and the band read both as the benign resting state.
+            -- This grid bands through the SAME shared classifier as the service's reads, so it has to
+            -- feed it the same inputs — left unselected they default to null, this COMPILES, and the
+            -- grid would call a regressed collector HEALTHY while get_collection_health called it
+            -- WARNING. That is #3240's lesson and #2804's before it. The FINDING that names the rows and
+            -- the status is deliberately not carried here: this projection has no rows_stored to count
+            -- and the grid has no column to render prose in, so the band is the whole of what this
+            -- surface needs to agree about. APPENDED, read positionally by the one shared mapper.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -281,7 +295,16 @@ public sealed partial class ViewerDataService
             -- so it must feed it the same inputs — an unselected count defaults to 0, COMPILES, and
             -- quietly bands an extension-missing collector FAILING here while the per-server grid says
             -- EXTENSION_MISSING (the #2804 lesson, same shape). APPENDED, read positionally.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            -- #3819: #3240's reasoning again — this rollup bands through the same shared classifier as
+            -- the per-server grid, so the regression floor has to see the same inputs on both or the
+            -- status bar's fleet total would disagree with the tab beside it.
+            --
+            -- Both are plain aggregates, so this cumulative read gains no subquery and no sort.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -392,10 +415,11 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 16-column health projection (per-server or fleet, ordinals 0-15) to a
+    /// <summary>Maps one row of the shared 18-column health projection (per-server or fleet, ordinals 0-17) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
-    /// through this one mapper, so it must match them exactly (16 since #3240 appended
-    /// extension_missing_count at ordinal 15; #2804's abandoned_count sits at 14).</summary>
+    /// through this one mapper, so it must match them exactly (18 since #3819 appended
+    /// last_non_skip_time and last_productive_time at ordinals 16-17; #3240's extension_missing_count sits
+    /// at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -420,6 +444,10 @@ public sealed partial class ViewerDataService
         /* Appended (#3240). Both reads compute it, for the same reason: the band it feeds must agree
            between the per-server grid and the fleet rollup. */
         ExtensionMissingCount = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+        /* Appended (#3819). Computed by BOTH reads, for the reason the two counts above are: the band
+           floor they feed must agree between the grid and the fleet total. */
+        LastNonSkipTime = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+        LastProductiveTime = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
     };
 
     /// <summary>
@@ -557,6 +585,37 @@ public class CollectorHealthRow
     /// extension stops banding NO_PERMISSIONS. Always 0 for SQL Server collectors.</summary>
     public long ExtensionMissingCount { get; set; }
 
+    /* ── Regressed from productive (#3819) ────────────────────────────────────────────────────────
+       A named skip on a collector that had been producing is a different fact from the same status on
+       one that never has. These two instants are what tells them apart; the
+       predicate below is composed from the shared classifier so this grid, the service's MCP tool and
+       Lite's grid cannot answer differently. The SENTENCE that names the rows and the status stays with
+       the two surfaces that have a rows_stored to count and a field to render it in. */
+
+    /// <summary>
+    /// The newest run whose status was NOT one of <c>CollectorRuntimePrecondition.NamedSkipStatuses</c>
+    /// (<c>last_non_skip_time</c>) — the instant the current skip streak began after. Null when every
+    /// run in the window was a skip, which is the never-produced-here case the benign band already
+    /// describes correctly.
+    /// </summary>
+    public DateTime? LastNonSkipTime { get; set; }
+
+    /// <summary>
+    /// The newest run that stored anything (<c>last_productive_time</c>). Its ORDER against
+    /// <see cref="LastNonSkipTime"/> is what makes a regression a regression rather than two unrelated
+    /// facts.
+    /// </summary>
+    public DateTime? LastProductiveTime { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and now reports a named skip every cycle (#3819) — the
+    /// distinction <see cref="HealthStatus"/> could not make on its own, because the benign skip bands
+    /// are gated on the window holding no success and a regressed collector's window holds its
+    /// productive days.
+    /// </summary>
+    public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
+        LastRunTime, LastNonSkipTime, LastProductiveTime);
+
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -612,9 +671,17 @@ public class CollectorHealthRow
     private int FrequencyMinutes =>
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
-    public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+    /// <summary>
+    /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
+    /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
+    /// answer everywhere else. Applied outside <c>Classify</c> because that signature takes RUN-CLASS
+    /// COUNTS and nothing about output, a discipline both suites pin off the type.
+    /// </summary>
+    public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
+        CollectorHealthClassifier.Classify(
+            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+        RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"
