@@ -28,9 +28,17 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// Critical, and the copy that drifts is never the one being read.</para>
 ///
 /// <para><b>What IS here</b> is the projection — the grid cannot bind a nullable record graph, so each arm's
-/// figures are flattened onto one row with the absences rendered as the em-dash every other Viewer grid uses
-/// for "not measured", and the stamps passed through <see cref="ViewerTimeHelper.ForDisplay"/> like every
-/// other timestamp the Viewer shows.</para>
+/// figures are flattened onto one row, and the stamps are passed through
+/// <see cref="ViewerTimeHelper.ForDisplay"/> like every other timestamp the Viewer shows.</para>
+///
+/// <para><b>The measurements stay NUMBERS and nulls, and the em-dash is the XAML's job.</b> This is a grid
+/// whose whole purpose is ranking, so a column has to sort by magnitude; a pre-formatted string sorts
+/// lexicographically, which puts 9 above 1,234 while looking like a working sort — the same defect class as
+/// a band sorted alphabetically. So every measured figure is a nullable numeric that WPF sorts correctly, and
+/// each column's binding carries <c>StringFormat</c> for the value and <c>TargetNullValue</c> for the
+/// absence, which is where the em-dash every other Viewer grid uses for "not measured" comes from. Only the
+/// genuinely textual cells — the band, the reason tokens, the exclusion and the capture mode — are strings,
+/// and those carry the dash themselves.</para>
 ///
 /// <para><b>The replica exclusion is a COLUMN, never a filter.</b> A database whose <c>readonly_reason</c>
 /// carries the readable-secondary bit stays in the grid with <c>Excluded</c> = "excluded" and
@@ -60,27 +68,31 @@ public partial class ViewerDataService
         /// (<c>qs_read_only_replica</c>) — never blank on an excluded row.</summary>
         public string ExcludedReason { get; init; } = "";
 
-        public string RunsSlowestPct { get; init; } = "";
-        public string SlowestSharePct { get; init; } = "";
-        public string SlowestItemMsP50 { get; init; } = "";
-        public string DominanceRatio { get; init; } = "";
-        public string PlansPerQueryP95 { get; init; } = "";
-        public string PlansPerQueryMax { get; init; } = "";
-        public string NewPlansPerDay { get; init; } = "";
-        public string OneShotFraction { get; init; } = "";
-        public string DistinctPlans { get; init; } = "";
+        /* Nullable throughout: a null is an arm the window held nothing for, and it must not sort or read
+           as a zero. The grid renders it through TargetNullValue, so the absence looks like every other
+           unmeasured cell in the Viewer while still sorting as "no value". */
+        public double? RunsSlowestPct { get; init; }
+        public double? SlowestSharePct { get; init; }
+        public int? SlowestItemMsP50 { get; init; }
+        public double? DominanceRatio { get; init; }
+        public int? PlansPerQueryP95 { get; init; }
+        public int? PlansPerQueryMax { get; init; }
+        public double? NewPlansPerDay { get; init; }
+        public double? OneShotFraction { get; init; }
+        public int? DistinctPlans { get; init; }
         public string ActualState { get; init; } = "";
 
         /// <summary>The V137 (#3796) <c>query_capture_mode</c> verbatim. An em-dash is a health capture
         /// older than that rung — the mode was never asked for — and is NOT the engine's <c>NONE</c>.</summary>
         public string CaptureMode { get; init; } = "";
 
-        public string MaxPlansPerQuery { get; init; } = "";
-        public string StaleQueryThresholdDays { get; init; } = "";
-        public string PctOfCap { get; init; } = "";
+        public long? MaxPlansPerQuery { get; init; }
+        public long? StaleQueryThresholdDays { get; init; }
+        public double? PctOfCap { get; init; }
 
-        /// <summary>When the options row this verdict read was captured, on the display clock.</summary>
-        public string OptionsCaptured { get; init; } = "";
+        /// <summary>When the options row this verdict read was captured, already on the display clock, so the
+        /// column sorts chronologically rather than by the text of a formatted stamp.</summary>
+        public DateTime? OptionsCaptured { get; init; }
 
         /// <summary>The composition's prose for this row's reasons, one sentence per reason — the same
         /// sentences the MCP payload and the web panel carry. Shown as the row's tooltip and in the
@@ -111,11 +123,15 @@ public partial class ViewerDataService
     public sealed class QueryStoreOverheadWaitRow
     {
         public string WaitType { get; init; } = "";
-        public string WaitMsPerHour { get; init; } = "";
-        public string WaitMsTotal { get; init; } = "";
-        public string WaitingTasks { get; init; } = "";
-        public string MeasuredSeconds { get; init; } = "";
-        public string LastObserved { get; init; } = "";
+
+        /// <summary>Null when no row in the window carried a knowable interval — a rate that cannot be
+        /// formed, which is not a rate of zero.</summary>
+        public double? WaitMsPerHour { get; init; }
+
+        public long WaitMsTotal { get; init; }
+        public long WaitingTasks { get; init; }
+        public long MeasuredSeconds { get; init; }
+        public DateTime LastObserved { get; init; }
     }
 
     /// <summary>Both halves of one read: the per-database rows and the one per-server overhead block.</summary>
@@ -173,25 +189,23 @@ public partial class ViewerDataService
             Reasons = row.Reasons.Count == 0 ? Absent : string.Join(", ", row.Reasons),
             Excluded = row.Excluded ? "excluded" : Absent,
             ExcludedReason = row.ExcludedReason ?? Absent,
-            RunsSlowestPct = a is null ? Absent : Fixed(QueryStoreClutter.RunsSlowestPct(a), 1),
-            SlowestSharePct = a is null ? Absent : Fixed(a.SlowestSharePctP50, 1),
-            SlowestItemMsP50 = a is null ? Absent : Whole(a.SlowestItemMsP50),
-            DominanceRatio = a is null ? Absent : Fixed(QueryStoreClutter.DominanceRatio(a), 2),
-            PlansPerQueryP95 = b is null ? Absent : Whole(b.PlansPerQueryP95),
-            PlansPerQueryMax = b is null ? Absent : Whole(b.PlansPerQueryMax),
-            NewPlansPerDay = b is null ? Absent : Fixed(QueryStoreClutter.NewPlansPerDay(b), 1),
-            OneShotFraction = b is null ? Absent : Fixed(QueryStoreClutter.NeverSeenTwiceFraction(b), 3),
-            DistinctPlans = b is null ? Absent : Whole(b.DistinctPlans),
+            RunsSlowestPct = a is null ? null : Math.Round(QueryStoreClutter.RunsSlowestPct(a), 1),
+            SlowestSharePct = a is null ? null : Math.Round(a.SlowestSharePctP50, 1),
+            SlowestItemMsP50 = a?.SlowestItemMsP50,
+            DominanceRatio = a is null ? null : Round(QueryStoreClutter.DominanceRatio(a), 2),
+            PlansPerQueryP95 = b?.PlansPerQueryP95,
+            PlansPerQueryMax = b?.PlansPerQueryMax,
+            NewPlansPerDay = b is null ? null : Round(QueryStoreClutter.NewPlansPerDay(b), 1),
+            OneShotFraction = b is null ? null : Round(QueryStoreClutter.NeverSeenTwiceFraction(b), 3),
+            DistinctPlans = b?.DistinctPlans,
             ActualState = c is null ? Absent : c.ActualState,
             /* A pre-rung capture and an engine-set NONE are different facts and must not render alike; the
                dash is the one this grid already uses for "not measured". */
             CaptureMode = c?.QueryCaptureMode is { Length: > 0 } mode ? mode : Absent,
-            MaxPlansPerQuery = c is null ? Absent : Whole(c.MaxPlansPerQuery),
-            StaleQueryThresholdDays = c is null ? Absent : Whole(c.StaleQueryThresholdDays),
-            PctOfCap = c is null ? Absent : Fixed(QueryStoreClutter.PctOfCap(c), 1),
-            OptionsCaptured = c is null
-                ? Absent
-                : ViewerTimeHelper.ForDisplay(c.CapturedAt).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+            MaxPlansPerQuery = c?.MaxPlansPerQuery,
+            StaleQueryThresholdDays = c?.StaleQueryThresholdDays,
+            PctOfCap = c is null ? null : Round(QueryStoreClutter.PctOfCap(c), 1),
+            OptionsCaptured = c is null ? null : ViewerTimeHelper.ForDisplay(c.CapturedAt),
             Recommendation = string.Join(" ", QueryStoreClutter.Recommendations(row)),
         };
     }
@@ -206,11 +220,11 @@ public partial class ViewerDataService
             .Select(w => new QueryStoreOverheadWaitRow
             {
                 WaitType = w.WaitType,
-                WaitMsPerHour = Fixed(QueryStoreClutter.WaitMsPerHour(w.RatedWaitMs, w.MeasuredSeconds), 1),
-                WaitMsTotal = Whole(w.WaitMsTotal),
-                WaitingTasks = Whole(w.WaitingTasksTotal),
-                MeasuredSeconds = Whole(w.MeasuredSeconds),
-                LastObserved = ViewerTimeHelper.ForDisplay(w.LastObserved).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+                WaitMsPerHour = Round(QueryStoreClutter.WaitMsPerHour(w.RatedWaitMs, w.MeasuredSeconds), 1),
+                WaitMsTotal = w.WaitMsTotal,
+                WaitingTasks = w.WaitingTasksTotal,
+                MeasuredSeconds = w.MeasuredSeconds,
+                LastObserved = ViewerTimeHelper.ForDisplay(w.LastObserved),
             })
             .ToList();
 
@@ -234,14 +248,11 @@ public partial class ViewerDataService
         };
     }
 
-    /// <summary>The em-dash every Viewer grid uses for a value that was not measured — never a zero.</summary>
+    /// <summary>The em-dash every Viewer grid uses for a value that was not measured — never a zero. Only the
+    /// TEXT cells carry it here; a numeric cell's absence is a null the XAML renders through
+    /// <c>TargetNullValue</c>, so the column still sorts by magnitude.</summary>
     private const string Absent = "—";
 
-    private static string Fixed(double? value, int digits) =>
-        value.HasValue ? value.Value.ToString("N" + digits.ToString(CultureInfo.InvariantCulture), CultureInfo.CurrentCulture) : Absent;
-
-    private static string Fixed(double value, int digits) =>
-        value.ToString("N" + digits.ToString(CultureInfo.InvariantCulture), CultureInfo.CurrentCulture);
-
-    private static string Whole(long value) => value.ToString("N0", CultureInfo.CurrentCulture);
+    /// <summary>Rounds a nullable figure, keeping null as null — an unmeasured quantity never becomes 0.</summary>
+    private static double? Round(double? value, int digits) => value.HasValue ? Math.Round(value.Value, digits) : null;
 }

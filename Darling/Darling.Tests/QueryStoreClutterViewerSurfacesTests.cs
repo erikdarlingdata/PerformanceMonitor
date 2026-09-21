@@ -288,6 +288,51 @@ public sealed class QueryStoreClutterViewerSurfacesTests
     /// Queries group's own <c>&lt;TabItem Header="Queries"&gt;</c> would otherwise be counted as the first of
     /// its own sub-tabs and shift every index by one.</summary>
     /// <summary>
+    /// Every measured column on the clutter grid binds a NUMBER, not a pre-formatted string.
+    ///
+    /// <para>This grid exists to rank. A <c>DataGrid</c> sorts on the binding's path, so a column bound to
+    /// text sorts lexicographically — 9 above 1,234, 0.9 above 0.10 — while looking exactly like a working
+    /// sort, which is the same defect class as a band sorted alphabetically. The em-dash for an unmeasured
+    /// arm comes from <c>TargetNullValue</c> instead, so the absence still reads like every other absent
+    /// cell in the Viewer without the value becoming text or becoming a zero.</para>
+    /// </summary>
+    [Fact]
+    public void EveryMeasuredColumn_BindsANumber_WithTheAbsenceOnTheBinding()
+    {
+        var reader = ReadRepoFileLf(ViewerReaderPath);
+        var xaml = ReadRepoFileLf(ViewerXamlPath);
+        var grid = Between(xaml, "x:Name=\"QueryStoreClutterGrid\"", "</DataGrid>");
+
+        /* The row's measured members are nullable numerics, never strings. */
+        foreach (var member in new[]
+                 {
+                     "double? RunsSlowestPct", "double? SlowestSharePct", "int? SlowestItemMsP50",
+                     "double? DominanceRatio", "int? PlansPerQueryP95", "int? PlansPerQueryMax",
+                     "double? NewPlansPerDay", "double? OneShotFraction", "int? DistinctPlans",
+                     "long? MaxPlansPerQuery", "long? StaleQueryThresholdDays", "double? PctOfCap",
+                     "DateTime? OptionsCaptured",
+                 })
+        {
+            Assert.Contains("public " + member + " { get; init; }", reader, StringComparison.Ordinal);
+        }
+
+        /* And every one of those columns carries its own absence on the binding. */
+        foreach (var column in new[]
+                 {
+                     "RunsSlowestPct", "SlowestSharePct", "SlowestItemMsP50", "DominanceRatio",
+                     "PlansPerQueryP95", "PlansPerQueryMax", "NewPlansPerDay", "OneShotFraction",
+                     "DistinctPlans", "MaxPlansPerQuery", "StaleQueryThresholdDays", "PctOfCap",
+                     "OptionsCaptured",
+                 })
+        {
+            var binding = Regex.Match(grid, @"\{Binding " + column + @"(?<rest>[^}]*)\}");
+            Assert.True(binding.Success, column + " has no binding on the clutter grid");
+            Assert.Contains("TargetNullValue=", binding.Groups["rest"].Value, StringComparison.Ordinal);
+            Assert.Contains("StringFormat=", binding.Groups["rest"].Value, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// The clutter grid takes NO default SortDescription, and that is a decision rather than an omission.
     ///
     /// <para>The composition orders rows worst-first by band, then the read-cost share, then plans per query.
