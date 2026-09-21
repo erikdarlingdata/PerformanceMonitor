@@ -873,4 +873,123 @@ public class CollectorCostDigestTests
 
         Assert.DoesNotContain("first omitted", payload, StringComparison.Ordinal);
     }
+
+    /* ---------------- #3834: the structured rows beside the prose ---------------- */
+
+    /// <summary>
+    /// The feature, and the property that makes it additive rather than a migration: the SHIPPED fire now
+    /// carries structured detail items AND the prose is the same document it always was.
+    ///
+    /// <para>Asserted against the prose rather than against constants, because the failure worth catching is
+    /// a row whose figures disagree with the paragraph next to it — a reader handed both would have no way to
+    /// tell which lied. So every field value asserted here is required to appear in the rendered prose too:
+    /// the ratio, the per-run cost, the baseline and the signed seconds-per-day come from the mover, and the
+    /// digest prints all four.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDigestFire_CarriesOneStructuredRowPerMover_WhoseFiguresAppearInTheProseToo()
+    {
+        var h = new Harness();
+        await h.Build().ApplyCollectorCostDigestAsync(OneMover, OneCensusRow, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(fired.Context);
+        var context = fired.Context;
+        var prose = fired.DetailText ?? string.Empty;
+
+        var mover = OneMover[0];
+        var row = Assert.Single(context.Details,
+            d => d.Heading == $"{mover.CollectorName} on {mover.ServerName}");
+
+        /* The worked example's reading order, asserted as an order and not as a set: the delta leads because
+           the ranking ranks on it. */
+        Assert.Equal(
+            new[] { "Delta", "Per run", "Baseline", "Ratio", "Baseline p95", "Baseline worst", "Runs", "Worst run" },
+            row.Fields.Select(f => f.Label).ToArray());
+
+        /* Each figure is the mover's own, and each is a substring of the prose — the two renderings cannot
+           drift apart without this failing. */
+        var fields = row.Fields.ToDictionary(f => f.Label, f => f.Value, StringComparer.Ordinal);
+        Assert.Equal($"{mover.Ratio:N2}x", fields["Ratio"]);
+        Assert.Equal($"{mover.LatestMsPerRun:N1} ms", fields["Per run"]);
+        Assert.Equal($"{mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day", fields["Delta"]);
+        Assert.Contains($"{mover.Ratio:N2}x", prose, StringComparison.Ordinal);
+        Assert.Contains($"{mover.LatestMsPerRun:N1} ms/run", prose, StringComparison.Ordinal);
+        Assert.Contains($"{mover.BaselineMsPerRun:N1} ms/run", prose, StringComparison.Ordinal);
+        Assert.Contains($"{mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day", prose, StringComparison.Ordinal);
+
+        /* The census section is rows too — expensive-without-moving is #2862's catch and a structured
+           reader must not lose it. */
+        Assert.Single(context.Details, d => d.Heading == $"Heaviest: {OneCensusRow[0].CollectorName}");
+
+        /* And this report carries no incidents: it is not an incident, and Incidents is what would enter it
+           into per-event splitting and the incident delivery filter. */
+        Assert.Null(context.Incidents);
+    }
+
+    /// <summary>
+    /// The prose survives the structure, on the two paths that could have eaten it.
+    ///
+    /// <para><b>The persisted text is unchanged</b> — compared against the pure renderer's own output, so a
+    /// future edit that "helpfully" replaced the detail text with a flattened context would fail here.</para>
+    ///
+    /// <para><b>And the delivery gate still passes it through.</b>
+    /// <c>AlertDetailText.ProseForDelivery</c> suppresses prose only when it is textually EQUAL to
+    /// <c>Flatten</c> of the context (the engine alerts, whose detail text IS their flattened context). This
+    /// document's prose is an essay — the report-not-incident framing, the materiality floor, the
+    /// negative-means-cheaper sentence — none of which a field list contains, so the equality cannot fire.
+    /// Asserted rather than assumed, because had it fired, #3834 would have DELETED the paragraph this issue
+    /// went out of its way to keep.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheStructuredRows_DoNotDisplaceTheProse_OnEitherThePersistedOrTheDeliveredPath()
+    {
+        var h = new Harness();
+        await h.Build().ApplyCollectorCostDigestAsync(OneMover, OneCensusRow, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.RenderCollectorCostDigest(OneMover, OneCensusRow).Detail,
+            fired.DetailText);
+
+        var flattened = AlertDetailText.Flatten(fired.Context);
+        Assert.NotNull(flattened);
+        Assert.NotEqual(flattened, fired.DetailText);
+        Assert.Equal(fired.DetailText, AlertDetailText.ProseForDelivery(fired.DetailText, fired.Context));
+    }
+
+    /// <summary>
+    /// A cap that binds says so IN THE ROWS. The census cut is the cheap one to drive — eleven rows against a
+    /// ten-row ceiling — and the discipline is the prose's: a surface rendering only the structure must not be
+    /// able to read the document as complete. Twinned with the negative case, because "the remainder item
+    /// appears" also passes on a builder that always appends one.
+    /// </summary>
+    [Fact]
+    public async Task WhenTheCensusCapBinds_TheRowsStateTheRemainder_AndOtherwiseTheyDoNot()
+    {
+        var eleven = Enumerable.Range(1, 11)
+            .Select(i => Census("collector_" + i.ToString(CultureInfo.InvariantCulture), 43))
+            .ToArray();
+
+        var capped = new Harness();
+        await capped.Build().ApplyCollectorCostDigestAsync(OneMover, eleven, Ct);
+        var cappedFired = Assert.Single(capped.Deliverer.Outcomes);
+        Assert.NotNull(cappedFired.Context);
+        var cappedContext = cappedFired.Context;
+
+        /* Ten census rows listed, and the eleventh accounted for by a heading-only item naming the read that
+           holds the rest — the "+N more collectors" line the paragraph prints, as a row. */
+        Assert.Equal(10, cappedContext.Details.Count(d => d.Heading.StartsWith("Heaviest: ", StringComparison.Ordinal)));
+        var remainder = Assert.Single(cappedContext.Details,
+            d => d.Heading.StartsWith("+1 more collectors", StringComparison.Ordinal));
+        Assert.Empty(remainder.Fields);
+        Assert.Contains("get_collector_cost", remainder.Heading, StringComparison.Ordinal);
+
+        var uncapped = new Harness();
+        await uncapped.Build().ApplyCollectorCostDigestAsync(OneMover, OneCensusRow, Ct);
+        var uncappedFired = Assert.Single(uncapped.Deliverer.Outcomes);
+        Assert.NotNull(uncappedFired.Context);
+        var uncappedContext = uncappedFired.Context;
+        Assert.DoesNotContain(uncappedContext.Details, d => d.Heading.Contains("more collectors", StringComparison.Ordinal));
+    }
 }

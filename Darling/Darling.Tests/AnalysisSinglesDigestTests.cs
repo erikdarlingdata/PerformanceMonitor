@@ -430,4 +430,56 @@ public class AnalysisSinglesDigestTests
         Assert.Equal("\nAND   notification_type <> 'digest'", PgAlertHistoryStore.DigestExclusionFilter);
         Assert.Contains(AlertDelivery.ChannelDigest, PgAlertHistoryStore.DigestExclusionFilter, StringComparison.Ordinal);
     }
+
+    /* ---------------- #3834: the structured rows beside the prose ---------------- */
+
+    /// <summary>
+    /// The singles digest's rows, and why structuring THIS one matters most: an operator promoting a single
+    /// to a full drill-down needs the key and the dedup fingerprints by name, and an automation consuming
+    /// {{context_json}} was previously left to parse them out of a sentence. So each top-mover row carries
+    /// the KEY a page would have carried (the alert-history metric_name, with the story hash
+    /// get_analysis_findings resolves), the gate's reason and the fingerprints — as FIELDS, not as
+    /// AlertContext.Incidents, because those keys belong to other findings and populating Incidents would
+    /// enter a once-a-day report into per-event splitting and the incident delivery filter.
+    /// </summary>
+    [Fact]
+    public async Task TheSinglesDigestFire_CarriesARowPerMover_WithTheKeyAndDedupFingerprints()
+    {
+        var h = new Harness();
+        var rows = ThreeSinglesOnTwoServers();
+        await ApplyAsync(h, h.Build(), rows);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(fired.Context);
+        var context = fired.Context;
+
+        var summary = Assert.Single(context.Details, d => d.Heading == "Singles summary");
+        var summaryFields = summary.Fields.ToDictionary(f => f.Label, f => f.Value, StringComparer.Ordinal);
+        Assert.Equal("3", summaryFields["Singles"]);
+        Assert.Equal("2", summaryFields["Servers"]);
+
+        /* The top mover is the highest severity — the ranking the alert already applied, not re-sorted. */
+        var top = context.Details.First(d => d.Heading.StartsWith("#1 ", StringComparison.Ordinal));
+        var fields = top.Fields.ToDictionary(f => f.Label, f => f.Value, StringComparer.Ordinal);
+        Assert.Equal("pm-server-2", fields["Server"]);
+        Assert.Equal("Analysis: anomaly [bbbbbbbb]", fields["Key"]);
+        Assert.Equal("1.91", fields["Severity"]);
+        Assert.Contains("uncorroborated", fields["Routing reason"], StringComparison.Ordinal);
+        Assert.Equal("dk-2a, dk-2b", fields["Dedup keys"]);
+
+        /* The family blocks are rows too, one per family. */
+        Assert.Single(context.Details, d => d.Heading == "Family: anomaly");
+        Assert.Single(context.Details, d => d.Heading == "Family: queries");
+
+        Assert.Null(context.Incidents);
+
+        /* The prose is the renderer's own output, unchanged, and the delivery gate still passes it. */
+        var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(rows);
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.RenderAnalysisSinglesDigest(
+                facts, h.Now - DarlingSelfAlertEvaluator.AnalysisSinglesDigestInterval, h.Now).Detail,
+            fired.DetailText);
+        Assert.NotEqual(AlertDetailText.Flatten(context), fired.DetailText);
+        Assert.Equal(fired.DetailText, AlertDetailText.ProseForDelivery(fired.DetailText, context));
+    }
 }

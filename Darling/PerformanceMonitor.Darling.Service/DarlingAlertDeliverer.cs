@@ -85,8 +85,13 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// <para><b>What comes back.</b> On the combined send (Summary mode, or any alert without incidents,
     /// which is every self-alert) the exact <see cref="AlertDelivery"/> the history row was written with.
     /// On a Per-event split there are N sends and N rows and no single disposition describes them, so this
-    /// returns <c>null</c> — "unreported" — rather than electing one; the two callers that read the
-    /// answer (the digest and the rollup) fire with <c>Context: null</c> and never take that path. The
+    /// returns <c>null</c> — "unreported" — rather than electing one; the callers that read the answer (the
+    /// three daily documents) carry structured <see cref="AlertContext.Details"/> since #3834 but no
+    /// <see cref="AlertContext.Incidents"/>, so the Per-event branch below — which is gated on incidents,
+    /// not on a context existing — remains unreachable for them and their disposition is always reported.
+    /// That is a property of what a report IS rather than an accident of how it fires: an incident-carrying
+    /// context would enter these documents into per-event splitting and the incident delivery filter, which
+    /// are paging mechanisms a once-a-day report stays outside of (#3834 states this at each builder). The
     /// belt-and-suspenders catch below also answers <c>null</c>: both <c>TrySendAsync</c> and
     /// <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something outside the
     /// channels and says nothing about whether they delivered.</para>
