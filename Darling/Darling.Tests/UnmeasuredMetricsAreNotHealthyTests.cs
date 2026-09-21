@@ -93,7 +93,9 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             new DarlingFleetReader.DeadlockRow(deadlocks, deadlocks > 0 ? Now.AddMinutes(-5) : null),
             new DarlingFleetReader.PgDeadlockRow(pgDeadlocks, pgDeadlocks > 0 ? Now.AddMinutes(-7) : null, pgDeadlockIntervals),
             Now.AddSeconds(-30),
-            new DarlingFleetReader.CollectorCounts(bandedCollectors, 0, bandedCollectors, null, pgDeadlockBand),
+            /* #3819 appended Regressed after Total: zero here, because this file's subject is the
+               measured-vs-unmeasured distinction and a regressed collector would move the band under it. */
+            new DarlingFleetReader.CollectorCounts(bandedCollectors, 0, bandedCollectors, 0, null, pgDeadlockBand),
             null,
             Now,
             /* #3368: a real one-hour window and the shipped tiers. This file's subject is the

@@ -432,7 +432,27 @@ SELECT
     -- classifier as the per-server surfaces, and an unselected count defaults to 0, COMPILES, and
     -- would band an extension-missing collector FAILING here (no success, staleness path) while every
     -- other surface says EXTENSION_MISSING. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+    -- #3819: the two instants that, with last_run_time above, say whether this collector STOPPED
+    -- producing rather than never having produced here. The fleet card counts the rows where they do
+    -- (regressed_collector_count), so an install that flips a productive collector to a named skip is a
+    -- NUMBER on the card and in the install countersign rather than a status word nobody re-reads.
+    --
+    -- Both are plain aggregates, which is the whole reason the fleet read can ask this at all: the
+    -- per-server twin resolves the same predicate through its existing ranked subquery, but this
+    -- statement has none, and adding one to hold a window function would put a sort of the fleet's whole
+    -- 7-day collection_log in front of a GROUP BY that hashes today. #3735 memoized this read because
+    -- three concurrent copies of it crossed the mcp role's 15 s statement_timeout; buying a boolean with
+    -- a fleet-wide sort would spend that headroom again. Nothing here needs the streak's WIDTH, only
+    -- whether the newest run is inside one, and two MAX()es answer that.
+    --
+    -- A NULL status counts as non-skip, like the per-server twin: it is not one of the declared skip
+    -- words, and reading it as one would let an unwritten status manufacture a streak. APPENDED, read
+    -- positionally.
+    MAX(CASE WHEN status IS NULL
+              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+             THEN collection_time END) AS last_non_skip_time,
+    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
 FROM v_collection_log
 WHERE collection_time >= $1
 AND   server_id <> 0
@@ -770,6 +790,7 @@ GROUP BY server_id, collector_name";
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             HealthyCollectorCount = collectors.Healthy,
             FailedCollectorCount = collectors.Failing,
+            RegressedCollectorCount = collectors.Regressed,
             CollectorCount = collectors.Total,
             CollectorSeverity = ServerHealthClassifier.CollectorSeverity(collectors.Failing, collectors.Total),
             OverallMetricSeverity = overall,
@@ -1329,6 +1350,15 @@ GROUP BY server_id, collector_name";
                 AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
                 /* Appended (#3240) — the band this row computes must agree with the per-server reads. */
                 ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                /* Appended (#3819) — same reasoning as the two counts above. These feed
+                   CollectorHealth.RegressedFromProductive, which HealthStatus reads as its floor, so
+                   leaving them unset would band a regressed collector HEALTHY here while the per-server
+                   grid called it WARNING. That is the #2779/#2784 failure shape: one surface fixed, its
+                   sibling quietly left on the old reading, and it would COMPILE, because the default is
+                   silent. CurrentStatus is deliberately NOT read: it composes display prose this rollup
+                   never renders, and the predicate does not take it. */
+                LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
             };
 
             counts.TryGetValue(serverId, out var existing);
@@ -1338,6 +1368,11 @@ GROUP BY server_id, collector_name";
                 existing.Failing + (status == "FAILING" ? 1 : 0),
                 /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
                 existing.Total + 1,
+                /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
+                   population. The band floor only moves a row that would have read HEALTHY; a collector
+                   whose success clock has already run out reads FAILING and is regressed as well. Keyed
+                   on the band, this count would go quiet exactly when the regression got worse. */
+                existing.Regressed + (health.RegressedFromProductive ? 1 : 0),
                 /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
                    kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
                    no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
@@ -1396,7 +1431,16 @@ GROUP BY server_id, collector_name";
     /// A8d) — the denominator <see cref="ServerHealthClassifier.CollectorSeverity"/> grades the failing count
     /// against. Healthy + Failing is NOT it: STALE, WARNING, STOPPED, NO_PERMISSIONS and EXTENSION_MISSING rows
     /// are all banded collectors that are neither.</param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, string? DeadlockBand = null, string? PgDeadlockBand = null);
+    /// <param name="Regressed">Collectors on this server that WERE producing rows and now report a named
+    /// skip every cycle (#3819) — <c>CollectorHealth.RegressedFromProductive</c>, counted off the
+    /// predicate rather than off the band.
+    ///
+    /// <para><b>It is not disjoint from <paramref name="Failing"/> and the two must never be added.</b> A
+    /// regression's first day reads HEALTHY on the staleness ladder (the last productive cycle is hours
+    /// old), so the band floor moves it to WARNING; by the second day the success clock has run out and
+    /// the same collector reads FAILING while still being regressed. Counting off the band would make
+    /// this go quiet precisely as the regression got worse.</para></param>
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null);
 
     /// <summary>One completed 7-day collection-health scan (#3735): the per-server counts
     /// <see cref="ReadFailingCollectorCountsAsync"/> produced and the <c>nowUtc</c> the scan was started with —
@@ -1833,6 +1877,27 @@ public sealed class FleetServerCard
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
+
+    /// <summary>
+    /// Collectors on this server that WERE producing rows and now report a named skip every cycle
+    /// (#3819) — the number an install countersign reads instead of a status word.
+    ///
+    /// <para><b>The reading it exists to end.</b> The <c>.453</c> install took <c>pg_statement_stats</c>
+    /// from 85% productive to <c>EXTENSION_MISSING</c> every cycle on 23 of 50 PostgreSQL clusters. That
+    /// status is a legitimate resting state for an optional module, so every surface read it as one — and
+    /// for the first day the collectors' own band read HEALTHY besides, because their last productive
+    /// cycle was hours old and the staleness ladder had nothing to fire on. The countersign accepted it
+    /// for 24 hours. A named skip on a collector that had been producing is a different fact from the
+    /// same status on one that never has, and this is the card's half of telling them apart.</para>
+    ///
+    /// <para><b>Deliberately NOT a component of <see cref="FailedCollectorCount"/>, and never to be added
+    /// to it.</b> The two populations overlap: a regression reads HEALTHY-floored-to-WARNING on day one
+    /// and FAILING on day two, regressed throughout. They are separate axes of the same rows, so a sum
+    /// would double-count exactly the servers this is for. <see cref="CollectorSeverity"/> still grades
+    /// the FAILING share alone, because widening a severity is a separate question with its own evidence
+    /// bar.</para>
+    /// </summary>
+    [JsonPropertyName("regressed_collector_count")] public int RegressedCollectorCount { get; init; }
     /// <summary>Every collector banded for this server in the health window, on any band (#3539 A8d) — the
     /// denominator <c>collector_severity</c> grades <c>failed_collector_count</c> against. Not
     /// healthy + failed: STALE, WARNING, STOPPED and the permission bands are banded collectors that are

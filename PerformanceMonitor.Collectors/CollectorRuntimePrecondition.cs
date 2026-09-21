@@ -90,6 +90,58 @@ public static class CollectorRuntimePrecondition
     public const string ExtensionMissingStatus = "EXTENSION_MISSING";
 
     /// <summary>
+    /// The NAMED SKIP vocabulary: every <c>collection_log</c> status meaning the run was neither a result
+    /// nor a fault, but a deliberate stand-down because a runtime precondition on the monitored server was
+    /// unsatisfied. The three constants above, gathered — this class is where each of them is declared and
+    /// explained, so it is also where the question "is this status a skip" is answered.
+    ///
+    /// <para><b>Gathered rather than listed, so a fourth cannot be added without a decision here.</b> Each
+    /// entry is the CONSTANT, not the word, so renaming a status word moves the set and
+    /// <see cref="NamedSkipStatusSqlList"/> with it. A reader that hand-lists the words instead goes stale
+    /// in the direction that makes it pass: the next precondition status to be split out gets read as an
+    /// ordinary outcome until somebody remembers the second copy.</para>
+    ///
+    /// <para><c>ERROR</c>, <c>YIELDED</c> and <c>ABANDONED</c> are deliberately out. An ERROR is a
+    /// monitoring fault and is already loud; a YIELDED is the lock-timeout guard firing on a contended
+    /// target, which is transient by construction and nobody sets or clears; an ABANDONED is the
+    /// wall-clock budget giving up, which has its own count and its own WARNING band. None of the three is
+    /// a state an operator can satisfy on the monitored server, which is what a precondition is.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> NamedSkipStatuses =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            ExtensionMissingStatus,
+            DegradedStatus,
+            CaptureSessionMissingStatus,
+        };
+
+    /// <summary>
+    /// <see cref="NamedSkipStatuses"/> as a quoted, comma-separated SQL <c>IN</c> list, for the health
+    /// reads that have to ask the store the same question (#3819).
+    ///
+    /// <para><b>A <c>const</c>, built by concatenating the three constants</b>, because the reads that
+    /// consume it are themselves <c>const</c> interpolated strings — the same shape
+    /// <c>EnumeratedCollectorDriver.AbandonedRunPredicateSql</c> is consumed in. So the SQL cannot carry a
+    /// status word this class does not declare, and a rename reaches the store without anybody editing
+    /// SQL. Ordered as declared rather than sorted: the order is not read by anything, and pinning it to a
+    /// sort would make the list's text depend on a collation nothing else here depends on.</para>
+    ///
+    /// <para>A pin holds this string and <see cref="NamedSkipStatuses"/> to the same membership, so a
+    /// fourth status added to one and not the other fails a build rather than leaving a read asking about
+    /// three of four.</para>
+    /// </summary>
+    public const string NamedSkipStatusSqlList =
+        "'" + ExtensionMissingStatus + "', '" + DegradedStatus + "', '" + CaptureSessionMissingStatus + "'";
+
+    /// <summary>
+    /// True when <paramref name="status"/> is one of <see cref="NamedSkipStatuses"/>. A null or unknown
+    /// status answers FALSE: absence of a status is not a claim that a run stood down, and a status this
+    /// build has never heard of is not one this build may classify as benign.
+    /// </summary>
+    public static bool IsNamedSkip(string? status) =>
+        status is not null && NamedSkipStatuses.Contains(status);
+
+    /// <summary>
     /// How long a collector has to have gone dark — no run of any kind, measured against the server's OWN
     /// most recent collection — before <see cref="GatedOffMessage"/> will call its gate off.
     ///

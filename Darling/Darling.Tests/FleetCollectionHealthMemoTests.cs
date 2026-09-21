@@ -67,7 +67,8 @@ public sealed class FleetCollectionHealthMemoTests
             Gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
             gate.SetResult(new Dictionary<int, DarlingFleetReader.CollectorCounts>
             {
-                [1] = new(healthyForServerOne, 0, healthyForServerOne),
+                /* #3819 appended Regressed after Total; this fixture's subject is the memo, not the band. */
+                [1] = new(healthyForServerOne, 0, healthyForServerOne, 0),
             });
         }
 
