@@ -112,6 +112,14 @@ public static class PgTargetSources
     /// share on Aurora (lane 32).</summary>
     public const string MemorySource = "pg_memory";
 
+    /// <summary>Object-growth facts from <c>pg_database_size_stats</c> — the hourly per-database size series (V136,
+    /// lane R5: <c>size_bytes</c> per database, NULL where the monitoring role may not size it; <c>total_bytes</c> the
+    /// instance total denormalised onto every row, NULL on every row when any database is unsized). The family reads a
+    /// TREND across a fourteen-day lookback, never a spot size — the bloat family's lesson (design v2 "object growth /
+    /// contention anomalies", the growth half; lane 38). The table is one day old at the family's birth, so every bar
+    /// is unmeasured; the family says so on every fact it emits.</summary>
+    public const string GrowthSource = "pg_growth";
+
     /// <summary>The prefix every PostgreSQL-target source carries; the shared scorer routes on it.</summary>
     public const string Prefix = "pg_";
 
@@ -119,9 +127,9 @@ public static class PgTargetSources
     /// keeps, so the two lists can be compared without re-sorting.</summary>
     public static readonly IReadOnlyList<string> All = new[]
     {
-        BloatSource, BlockingSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, IoSource, KernelSource, MemorySource,
-        PlansSource, PostureSource, QueriesSource, ReplicationSource, SessionsSource, TempSource, VacuumSource, WaitsSource,
-        WriteSource,
+        BloatSource, BlockingSource, BufferSource, ConfigSource, CpuSource, DatabaseSource, GrowthSource, IoSource, KernelSource,
+        MemorySource, PlansSource, PostureSource, QueriesSource, ReplicationSource, SessionsSource, TempSource, VacuumSource,
+        WaitsSource, WriteSource,
     };
 
     /// <summary>Whether <paramref name="source"/> is a PostgreSQL-target source.</summary>
@@ -440,6 +448,24 @@ public static class PgTargetFactKeys
     /// connectivity) when the card does. The card's own grade is a CONTEXT band since this lane; the deviation is
     /// the grade (Erik's ruling, 2026-09-20: own-baseline deviation, absolute share as context). Lane 34.</summary>
     public const string AnomalyBadActorShare = "ANOMALY_PG_BAD_ACTOR_SHARE";
+    /* Lane 38 — object growth, from pg_database_size_stats (V136, lane R5). Declared BY the content lane itself: the v3
+       plumbing declared no stub for this family (P3), so the lane adds the vocabulary, the partials and the root arms in
+       one PR — the same root edits the plumbing lanes made, with no stub in between. */
+
+    /// <summary>A database (or the instance total) whose size grew past the line across a fourteen-day lookback of
+    /// <c>pg_database_size_stats</c> — a TREND, never a spot size: the latest <c>size_bytes</c> against the earliest
+    /// sample inside the lookback, in bytes and as a fraction of where it started, with the straight-line days-to-double
+    /// the slope implies. Unsized databases (NULL <c>size_bytes</c> — the role may not size them) are excluded and
+    /// COUNTED, never read as zero growth; fewer than three samples is <c>insufficient_samples</c>, not a trend. Named
+    /// by the worst database through <see cref="Fact.ObjectName"/> / <see cref="Fact.DatabaseName"/>; the top three by
+    /// growth ride in metadata by name. Every bar unmeasured (the table is a day old) — <c>threshold_lineage = 0</c> on
+    /// every fact. Lane 38.</summary>
+    public const string DatabaseGrowth = "PG_DATABASE_GROWTH";
+    /// <summary>The instance total's growth rate against its own baseline (<c>pg_database_growth_bytes_per_day</c>:
+    /// the per-collection <c>total_bytes</c> difference of <c>pg_database_size_stats</c>, rated per day) — z-score
+    /// shape; folds onto <see cref="DatabaseGrowth"/>. Silent where the instance total is NULL (a managed target with
+    /// a database the role may not size) — the trend fact still speaks for the databases it can see. Lane 38.</summary>
+    public const string AnomalyDatabaseGrowth = "ANOMALY_PG_DATABASE_GROWTH";
 
     /* Wave 2 — declared so the name is settled; no stub, no lane in this wave. */
 
@@ -575,6 +601,8 @@ public static class PgTargetFactKeys
             [AnomalyPlanRegression] = [PlanRegression],
             [AnomalyCpuBurn] = [CpuBurnCores, CpuDecomposition],
             [AnomalyBadActorShare] = [BadActorFamily],
+            /* lane 38 (#3691): the growth-rate deviation is the statistical reading of the trend the regular fact names. */
+            [AnomalyDatabaseGrowth] = [DatabaseGrowth],
         };
 
     /// <summary>The metadata prefix the wait-profile detector stamps its top contributors under —

@@ -234,6 +234,9 @@ WITH clean AS (
            (PgTargetBaselineProvider.Plans.cs / .Kernel.cs). */
         MetricNames.PgStatementMeanMs => StatementMeanMsBaselineQuery(),
         MetricNames.PgCpuBurnCores => CpuBurnCoresBaselineQuery(),
+        /* lane 38 (#3691): the instance total's growth in bytes per day per collection over pg_database_size_stats
+           (PgTargetBaselineProvider.Growth.cs). */
+        MetricNames.PgDatabaseGrowthBytesPerDay => DatabaseGrowthBytesPerDayBaselineQuery(),
 
         _ => null,
     };
@@ -245,6 +248,7 @@ WITH clean AS (
     private static partial string? SampledWaitBaselineQuery();
     private static partial string? StatementMeanMsBaselineQuery();
     private static partial string? CpuBurnCoresBaselineQuery();
+    private static partial string? DatabaseGrowthBytesPerDayBaselineQuery();
 
     /// <summary>
     /// The KEYED metric → SQL map (#3691 lane 33): the arms the five-argument

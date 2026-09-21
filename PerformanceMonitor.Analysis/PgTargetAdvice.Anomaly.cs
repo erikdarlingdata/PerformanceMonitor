@@ -169,6 +169,10 @@ public static partial class PgTargetAdvice
                (PgTargetAdvice.Queries.cs), where the card's numbers and the queryid caveat already live. */
             case PgTargetFactKeys.AnomalyBadActorShare:
                 return ComposeBadActorShareAnomaly(factsByKey);
+            /* lane 38 (#3691): the database-growth anomaly composes in its family file (PgTargetAdvice.Growth.cs) — never
+               the SQL Server "Anomalous spike" composer. */
+            case PgTargetFactKeys.AnomalyDatabaseGrowth:
+                return ComposeGrowthAnomaly(factsByKey);
 
             default:
                 return null;

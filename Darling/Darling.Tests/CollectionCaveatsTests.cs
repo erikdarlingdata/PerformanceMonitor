@@ -88,11 +88,12 @@ public sealed class CollectionCaveatsTests
     [Fact]
     public void TheFamilyCount_IsDerivedFromTheCollectorType_AndMatchesTheEmissionLists()
     {
-        /* 19 PostgreSQL-target families (the census in PgTargetFactCollectorTests names them — sixteen through the
-           wave-3 blocking stub, nineteen since the #3691 v3 plumbing added the plan, kernel and memory stubs; a stub
-           is a family read that happens to return nothing, and the denominator counts reads, not facts); 32 SQL
-           Server reads (thirty-one families plus the coverage witness, the class doc's count). */
-        Assert.Equal(19, CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector)));
+        /* 20 PostgreSQL-target families (the census in PgTargetFactCollectorTests names them — sixteen through the
+           wave-3 blocking stub, nineteen since the #3691 v3 plumbing added the plan, kernel and memory stubs, twenty
+           since lane 38 added the object-growth family with no stub in between; a stub is a family read that happens
+           to return nothing, and the denominator counts reads, not facts); 32 SQL Server reads (thirty-one families
+           plus the coverage witness, the class doc's count). */
+        Assert.Equal(20, CollectionCaveats.CountFamilies(typeof(PgTargetFactCollector)));
         Assert.Equal(32, CollectionCaveats.CountFamilies(typeof(PgFactCollector)));
     }
 

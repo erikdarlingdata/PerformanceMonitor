@@ -87,7 +87,10 @@ public static class DarlingRetentionHorizons
     /// family's heaviest read and the one whose 30-day default retention an operator is likeliest to shorten, which
     /// would have starved <c>ANOMALY_PG_PLAN_REGRESSION</c> the same silent way. Lane 28 (v3) added <c>pg_kernel_stats</c>, read directly by the
     /// <c>pg_cpu_burn_cores</c> arm (the per-collection cores-busy series behind <c>ANOMALY_PG_CPU_BURN</c>); its 30-day
-    /// schedule default was, again, the only thing covering the baseline window.</para>
+    /// schedule default was, again, the only thing covering the baseline window. Lane 38 added
+    /// <c>pg_database_size_stats</c>, read directly by the <c>pg_database_growth_bytes_per_day</c> arm (the instance
+    /// total's per-collection growth behind <c>ANOMALY_PG_DATABASE_GROWTH</c>); its schedule default is a year, so the
+    /// floor is a no-op today and exists so a shortened retention cannot starve the detector tomorrow.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> BaselineServingRawCollectors =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -99,6 +102,7 @@ public static class DarlingRetentionHorizons
             "pg_wait_sampling",
             "pg_statement_stats",
             "pg_kernel_stats",
+            "pg_database_size_stats",
         };
 
     /// <summary>

@@ -94,4 +94,12 @@ public static class MetricNames
     /// <summary>Cores busy — user-plus-system CPU seconds per wall second from the reset-aware <c>pg_kernel_stats</c>
     /// differences summed across statements per collection. Lane 28.</summary>
     public const string PgCpuBurnCores = "pg_cpu_burn_cores";
+
+    /// <summary>The instance's growth in bytes per DAY per collection — the difference of consecutive
+    /// <c>pg_database_size_stats</c> <c>total_bytes</c> samples (one per <c>collection_time</c>; the total is
+    /// denormalised onto every row and NULL wherever a database could not be sized) over the samples' own gap, scaled
+    /// to a day, shrinks clamped to zero (the series is GROWTH). The collector is hourly, so a 30-day baseline holds
+    /// ~720 samples — about four per hour-of-week bucket, thirty per hour — and the bucket will sit at the
+    /// <c>HourOnly</c> tier (or <c>Flat</c>) for months; the detector says so and leans on its magnitude floor. Lane 38.</summary>
+    public const string PgDatabaseGrowthBytesPerDay = "pg_database_growth_bytes_per_day";
 }

@@ -267,6 +267,9 @@ LIMIT 6";
            (PgTargetAnomalyDetector.Queries.cs) — the bad actor's grade since the ruling; after the plan detector because
            it reads the same table and its candidates are the queries family's own. */
         await DetectBadActorShareAnomalies(context, anomalies);
+        /* lane 38 (#3691): the instance total's growth rate against its own baseline (PgTargetAnomalyDetector.Growth.cs);
+           silent wherever total_bytes is NULL (a database the role may not size). */
+        await DetectDatabaseGrowthAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -283,6 +286,7 @@ LIMIT 6";
     private partial Task DetectPlanRegressionAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectCpuBurnAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectDatabaseGrowthAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;

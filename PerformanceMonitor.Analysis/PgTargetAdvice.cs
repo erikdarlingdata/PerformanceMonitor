@@ -94,6 +94,10 @@ public static partial class PgTargetAdvice
                 => ComposeKernel(rootFactKey, factsByKey),
             PgTargetFactKeys.ConfigMemoryOvercommit or PgTargetFactKeys.HostMemoryPressure
                 => ComposeMemory(rootFactKey, factsByKey),
+            /* lane 38 (#3691): the object-growth family's measured key; its anomaly takes the ANOMALY_PG_ prefix arm
+               above into ComposeAnomaly, whose ANOMALY_PG_DATABASE_GROWTH case delegates to ComposeGrowthAnomaly. */
+            PgTargetFactKeys.DatabaseGrowth
+                => ComposeGrowth(rootFactKey, factsByKey),
             _ when rootFactKey.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal)
                 => ComposeConfig(rootFactKey, factsByKey),
             _ => null,
@@ -149,4 +153,9 @@ public static partial class PgTargetAdvice
     private static partial AdviceBlock? ComposeKernel(string key, IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeCpuBurnAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
     private static partial AdviceBlock? ComposeMemory(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+
+    /* lane 38 (#3691) — PgTargetAdvice.Growth.cs, declared and filled by the content lane (no stub existed); the anomaly
+       composer is declared here so ComposeAnomaly's arm lives beside its siblings (the #3737 hook shape). */
+    private static partial AdviceBlock? ComposeGrowth(string key, IReadOnlyDictionary<string, Fact> factsByKey);
+    private static partial AdviceBlock? ComposeGrowthAnomaly(IReadOnlyDictionary<string, Fact> factsByKey);
 }

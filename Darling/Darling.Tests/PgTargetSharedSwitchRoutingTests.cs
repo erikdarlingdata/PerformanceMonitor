@@ -38,8 +38,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
     {
         /* Eleven v1 sources (#3542) plus the three v2 families (#3691: pg_io, pg_replication, pg_bloat) plus the wave-3
            blocking family's source, declared with its stubs by the between-waves batch (pg_blocking), plus the three v3
-           families' sources, declared with their stubs by the v3 plumbing (pg_plans, pg_kernel, pg_memory). */
-        Assert.Equal(18, PgTargetSources.All.Count);
+           families' sources, declared with their stubs by the v3 plumbing (pg_plans, pg_kernel, pg_memory), plus lane 38's
+           object-growth source, declared WITH its family (no stub existed — P3 declared none) (pg_growth). */
+        Assert.Equal(19, PgTargetSources.All.Count);
+        Assert.Contains(PgTargetSources.GrowthSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.PlansSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.KernelSource, PgTargetSources.All);
         Assert.Contains(PgTargetSources.MemorySource, PgTargetSources.All);
@@ -180,6 +182,8 @@ public sealed class PgTargetSharedSwitchRoutingTests
            dynamic. The map documents the relationship; the graph's alias edge is what puts the two in one incident
            (PgTargetQueriesTests pins that, and that the static entry cannot fold by itself). */
         Assert.Equal(new[] { PgTargetFactKeys.BadActorFamily }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBadActorShare]);
+        /* lane 38 (#3691): the growth-rate anomaly folds onto the trend fact that names the database. */
+        Assert.Equal(new[] { PgTargetFactKeys.DatabaseGrowth }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyDatabaseGrowth]);
         /* The wait profile is resolved per story, never statically. */
         Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyWaitProfile));
     }
@@ -447,6 +451,13 @@ public sealed class PgTargetSharedSwitchRoutingTests
            in the lookup); the sum is routed by name to ComposeMemory ahead of the config prefix arm. Moved from Null. */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 */
         Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
+        /* lane 38 (#3691): the object-growth family arrived filled (no stub) — the trend key composes its own block and the
+           anomaly's ComposeAnomaly arm delegates to the same file (never the SQL Server "Anomalous spike" composer). */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.DatabaseGrowth));          /* lane 38 */
+        var pgGrowthAnomaly = FactAdvice.GetForFactKey(PgTargetFactKeys.AnomalyDatabaseGrowth);   /* lane 38: the anomaly too */
+        Assert.NotNull(pgGrowthAnomaly);
+        Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyDatabaseGrowth), pgGrowthAnomaly);
+        Assert.DoesNotContain("Anomalous spike", pgGrowthAnomaly!.Headline, StringComparison.Ordinal);
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from

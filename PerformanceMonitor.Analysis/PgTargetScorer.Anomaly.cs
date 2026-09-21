@@ -71,7 +71,10 @@ public static partial class PgTargetScorer
                (lane 33's keyed pg_statement_share arm) — a peak-AND-mean z-score on one keyed series, graded by the
                shared deviation ramp off AnomalyGate's metadata like every z family here. The membership is the one edit
                this lane makes to a scorer root; the detector, the card's context band and the advice are the family's. */
-            or PgTargetFactKeys.AnomalyBadActorShare;
+            or PgTargetFactKeys.AnomalyBadActorShare
+            /* #3691 lane 38: the database-growth anomaly is a peak-vs-own-baseline z-score on one series (the instance
+               total's growth in bytes per day per collection) — registered by shape with the family that fills it. */
+            or PgTargetFactKeys.AnomalyDatabaseGrowth;
 
     /// <summary>The PostgreSQL ratio-vs-own-baseline families — <see cref="ScoreRatioAnomaly"/> grades these.</summary>
     public static bool IsPgRatioAnomalyKey(string? key) =>

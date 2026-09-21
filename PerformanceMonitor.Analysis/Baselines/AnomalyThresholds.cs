@@ -390,4 +390,27 @@ public static class AnomalyThresholds
     /// routine exists. unmeasured: chosen, not measured — the same un-calibratable population as the floor; calibrate
     /// against a stock population's upper tail before the next release that monitors one.</summary>
     public const double PgCpuBurnCoresFallback = 4.0;                     // cores busy in one collection
+
+    // lane 38 (#3691): the database-growth z-detector's floor and fallback (PgTargetAnomalyDetector.Growth.cs).
+
+    /// <summary>Magnitude floor for the <c>pg_database_growth_bytes_per_day</c> z-detector — the instance total's
+    /// growth between consecutive hourly <c>pg_database_size_stats</c> samples, rated per DAY. Under a quarter of a
+    /// gibibyte a day a deviation is a quiet instance's ripple however many sigmas it reads: an instance whose routine
+    /// is 10 MB/day tripling to 30 MB/day is a batch job, not a growth event, and the hourly cadence puts two or three
+    /// samples into a one-to-four-hour analysis window, so the floor carries most of the grade until the bucket has
+    /// history. unmeasured: chosen, not measured — the table (V136) is one day old at this bar's birth and the
+    /// 2026-09-19 calibration ran before it existed; calibrate against the per-collection <c>total_bytes</c> difference
+    /// of <c>pg_database_size_stats</c> once it holds 14 d before the next release. The detector stamps
+    /// <c>threshold_lineage = 0</c>. NOT a SQL Server constant reused by value: the SQL Server engine has no growth
+    /// baseline at all.</summary>
+    public const double PgDatabaseGrowthFloorBytesPerDay = 256.0 * 1024.0 * 1024.0;     // 256 MiB of growth per day
+
+    /// <summary>Absolute-fallback bar for database growth on an untrustworthy baseline — a young store, or an instance
+    /// whose 30 days of hourly totals never moved (a zero-activity bucket by <c>EffectiveStdDev</c>'s contract, which is
+    /// the routine shape of a read-mostly instance and the reason this path matters here): eight times the floor, two
+    /// gibibytes a day, is a rate at which the trend fact's own 1 GiB / 10 % line is crossed inside a day on a small
+    /// instance and inside a week on a 100 GB one — growth an operator would want named whatever the baseline says.
+    /// unmeasured: chosen, not measured — the same day-old table as the floor; calibrate against the upper tail of the
+    /// per-collection growth rate before the next release.</summary>
+    public const double PgDatabaseGrowthFallbackBytesPerDay = 2.0 * 1024.0 * 1024.0 * 1024.0;  // 2 GiB of growth per day
 }
