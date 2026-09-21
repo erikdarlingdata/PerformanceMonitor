@@ -1756,7 +1756,13 @@ internal sealed class DarlingSelfAlertEvaluator
                count, the Stale Mute Rules shape). */
             numericCurrentValue: movers.Count,
             numericThresholdValue: 0,
-            cancellationToken);
+            cancellationToken,
+            /* #3834: the same rows the prose lists, as structured items — the prose above is unchanged and
+               still leads every channel (it carries the report-not-incident framing and the materiality
+               floor, which no field list states), and these give every surface that can render a table
+               something to render: the Viewer's dialog, the Teams fact sets, Slack's field sections and
+               {{context_json}}. Carries no Incidents, so this report stays outside per-event splitting. */
+            context: BuildCollectorCostDigestContext(movers, census));
 
         await RecordDocumentDeliveredAsync(
             _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
@@ -1787,7 +1793,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// baseline day count are that week, compressed, and the closing line names
     /// <c>get_collector_cost</c> as where the series itself lives.</para>
     /// </summary>
-    private static (string ShortMessage, string Detail) RenderCollectorCostDigest(
+    /* Internal rather than private so the pin over the prose can compare the SHIPPED fire's detail_text
+       against this renderer's own output (#3834) — the two sibling documents' renderers are already
+       internal for the same reason. */
+    internal static (string ShortMessage, string Detail) RenderCollectorCostDigest(
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
     {
@@ -1868,6 +1877,368 @@ internal sealed class DarlingSelfAlertEvaluator
         sb.Append(CostIsNotAllTargetSide);
 
         return (shortMessage, sb.ToString());
+    }
+
+    /* ------------------------- #3834: the three reports' structured rows ------------------------- */
+
+    /// <summary>
+    /// The collector-cost digest's rows as an <see cref="AlertContext"/> (#3834) — ADDITIVE beside the prose
+    /// <see cref="RenderCollectorCostDigest"/> returns, never a replacement for it.
+    ///
+    /// <para><b>Why both.</b> The prose is doing work a table cannot: it states that this is a REPORT and not
+    /// an incident, that nothing is degraded and nothing needs doing before morning, and it names the
+    /// materiality floor and the absence of a ratio factor. A reader handed thirteen rows of milliseconds and
+    /// no sentence reasonably concludes something is wrong. The rows are doing work the paragraph cannot: the
+    /// top mover's run count being 1 (one daily run getting more expensive, not a rate over hundreds of
+    /// executions — a different problem with a different fix) and the least-material row's 45x worst-run
+    /// outlier are both IN the prose and neither survives being read as prose. So the sentence leads and the
+    /// structure follows, and every surface renders whichever it can: the Viewer's dialog binds these items
+    /// as label/value pairs instead of falling back to a 45-character-wide box, the Teams card renders fact
+    /// sets, Slack renders field sections, and <c>{{context_json}}</c> finally carries the figures to the
+    /// automation that was parsing prose for them.</para>
+    ///
+    /// <para><b>The prose is unchanged to the byte, and that is what keeps the delivery gate working.</b>
+    /// <see cref="AlertDetailText.ProseForDelivery"/> suppresses an alert's prose only when it is textually
+    /// EQUAL to <see cref="AlertDetailText.Flatten"/> of its context — the engine alerts, whose detail text IS
+    /// their flattened context. This document's prose is an essay with sentences no field list contains, so
+    /// the equality can never fire and the prose keeps delivering on every channel exactly as it did. The
+    /// fields carry the same figures under the same names the prose speaks, which is duplication a reader
+    /// benefits from rather than noise: one is the argument, the other is the table.</para>
+    ///
+    /// <para><b>The caps are the prose's caps, and a bound that binds says so.</b> Movers arrive already
+    /// capped at <see cref="MaxListedCostMovers"/> by the read; the census is cut at
+    /// <see cref="MaxListedCostHeaviest"/> here exactly as the prose cuts it, and the remainder gets its own
+    /// heading-only item — the <c>+N more</c> line the paragraph prints, as a row, so a surface rendering ONLY
+    /// the rows cannot imply it showed everything. PURE and static like the renderer beside it, so the rows a
+    /// human reads are assertable against the figures the prose prints.</para>
+    /// </summary>
+    internal static AlertContext BuildCollectorCostDigestContext(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        var context = new AlertContext();
+
+        /* One item per (server, collector) mover, in the ranking the alert already applied — nothing is
+           re-sorted, so the row a reader finds first is the row the prose lists first. The field ORDER is
+           the reading order the issue's worked example settled on: the delta first, because "how much
+           collection time did this move" is the question the ranking answers, then the pair the ratio is
+           between, then the dispersion that makes the ratio judgeable, then the volume the per-run figure
+           averages over. */
+        foreach (var mover in movers)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"{mover.CollectorName} on {mover.ServerName}"),
+                Fields =
+                {
+                    ("Delta", string.Create(CultureInfo.InvariantCulture, $"{mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day")),
+                    ("Per run", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestMsPerRun:N1} ms")),
+                    ("Baseline", string.Create(CultureInfo.InvariantCulture,
+                        $"{mover.BaselineMsPerRun:N1} ms over {mover.BaselineDays:N0} prior days")),
+                    ("Ratio", string.Create(CultureInfo.InvariantCulture, $"{mover.Ratio:N2}x")),
+                    ("Baseline p95", string.Create(CultureInfo.InvariantCulture, $"{mover.BaselineP95MsPerRun:N1} ms")),
+                    ("Baseline worst", string.Create(CultureInfo.InvariantCulture, $"{mover.BaselineWorstDayMsPerRun:N1} ms")),
+                    ("Runs", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestRuns:N0}")),
+                    ("Worst run", string.Create(CultureInfo.InvariantCulture, $"{mover.LatestWorstMs:N0} ms")),
+                }
+            });
+        }
+
+        /* The heaviest-first census, cut where the prose cuts it. Expensive-without-moving is this section's
+           whole catch (#2862), and a movement ranking cannot see it — so the rows carry it too rather than
+           leaving the structured reader with only the movers. */
+        var listed = 0;
+        foreach (var row in census)
+        {
+            if (listed >= MaxListedCostHeaviest)
+            {
+                break;
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Heaviest: {row.CollectorName}"),
+                Fields =
+                {
+                    ("Total", string.Create(CultureInfo.InvariantCulture, $"{row.TotalSqlMs:N0} ms")),
+                    ("Runs", string.Create(CultureInfo.InvariantCulture, $"{row.RunCount:N0}")),
+                    ("Servers", string.Create(CultureInfo.InvariantCulture, $"{row.ServerCount:N0}")),
+                    ("Per run", string.Create(CultureInfo.InvariantCulture, $"{row.AvgSqlMs:N0} ms")),
+                    ("Worst run", string.Create(CultureInfo.InvariantCulture, $"{row.MaxSqlMs:N0} ms")),
+                }
+            });
+            listed++;
+        }
+
+        var remaining = census.Count - listed;
+        if (remaining > 0)
+        {
+            /* A heading-only item, the shape AlertContextBuilders already uses for a stated remainder
+               (BuildBlockingContext's "+N more distinct blocking incident(s)"): a surface that renders only
+               rows must not be able to read this document as complete. */
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{remaining:N0} more collectors not listed (see get_collector_cost)")
+            });
+        }
+
+        return context;
+    }
+
+    /// <summary>
+    /// The fleet-sweep rollup's rows as an <see cref="AlertContext"/> (#3834) — the digest's argument applied
+    /// to the second document: additive beside the prose, one item per thing that HAPPENED, every cap the
+    /// prose applies applied here with its remainder stated as a row.
+    ///
+    /// <para>Band transitions come first because the rollup's own headline ranks them first, then the watch
+    /// items that opened and closed, then the would-have-paged ledger's families — the three lists a reader
+    /// scans. The rollup's aggregate counts (sweeps, muted sweeps, liveness incidents, unreadable items) lead
+    /// as a single summary item rather than being spread across the rows: they describe the WINDOW, not any
+    /// one row in it, and a surface that renders rows alone would otherwise lose the fact that some covered
+    /// sweeps could not prove their instruments — quiet is not clean, and that sentence has to survive into
+    /// the structure.</para>
+    /// </summary>
+    internal static AlertContext BuildFleetSweepRollupContext(
+        FleetSweepRollupFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var context = new AlertContext();
+
+        /* The window and its aggregates as one leading item — the frame the #2506 echo discipline requires a
+           report to carry, in the structure as well as in the sentence: a report that does not say what
+           window it covers invites the reader to assume a different one. */
+        var summary = new AlertDetailItem
+        {
+            Heading = "Rollup window",
+            Fields =
+            {
+                ("Window start (UTC)", string.Create(CultureInfo.InvariantCulture, $"{spanStartUtc:o}")),
+                ("Window end (UTC)", string.Create(CultureInfo.InvariantCulture, $"{spanEndUtc:o}")),
+                ("Sweeps", string.Create(CultureInfo.InvariantCulture, $"{facts.Sweeps:N0}")),
+                ("Band transitions", string.Create(CultureInfo.InvariantCulture, $"{facts.Transitions.Count:N0}")),
+                ("Watch opened", string.Create(CultureInfo.InvariantCulture, $"{facts.Opened.Count:N0}")),
+                ("Watch closed", string.Create(CultureInfo.InvariantCulture, $"{facts.Closed.Count:N0}")),
+                ("Liveness incidents", string.Create(CultureInfo.InvariantCulture, $"{facts.LivenessIncidents:N0}")),
+                ("Muted sweeps", string.Create(CultureInfo.InvariantCulture, $"{facts.MutedSweeps:N0}")),
+                ("Unreadable items", string.Create(CultureInfo.InvariantCulture, $"{facts.UnreadableItems:N0}")),
+            }
+        };
+
+        if (facts.NewestBands.Count > 0)
+        {
+            summary.Fields.Add(("Fleet as of newest readable sweep", string.Join(", ", facts.NewestBands.Select(b =>
+                string.Create(CultureInfo.InvariantCulture, $"{b.Key} {b.Value}")))));
+        }
+
+        context.Details.Add(summary);
+
+        var listedTransitions = 0;
+        foreach (var transition in facts.Transitions)
+        {
+            if (listedTransitions >= MaxListedRollupTransitions)
+            {
+                break;
+            }
+
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Band transition: {transition.Server}"),
+                Fields =
+                {
+                    ("Server", transition.Server),
+                    ("From", transition.From),
+                    ("To", transition.To),
+                }
+            };
+            if (transition.Reason is not null)
+            {
+                item.Fields.Add(("Reason", transition.Reason));
+            }
+
+            context.Details.Add(item);
+            listedTransitions++;
+        }
+
+        if (facts.Transitions.Count > listedTransitions)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{facts.Transitions.Count - listedTransitions:N0} more band transitions (see the web timeline)")
+            });
+        }
+
+        AppendWatchItems(context, "opened", facts.Opened);
+        AppendWatchItems(context, "closed", facts.Closed);
+
+        /* The ledger only exists when a covered sweep ran muted; its rows are what the silence cost, and the
+           prose renders them per family with the server names capped. Same shape here. */
+        foreach (var family in facts.Ledger)
+        {
+            var servers = string.Join(", ", family.Servers.Take(MaxListedRollupLedgerServers));
+            if (family.Servers.Count > MaxListedRollupLedgerServers)
+            {
+                servers += string.Create(CultureInfo.InvariantCulture,
+                    $" +{family.Servers.Count - MaxListedRollupLedgerServers:N0} more servers");
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Would have paged: {family.Family}"),
+                Fields =
+                {
+                    ("Family", family.Family),
+                    ("Rows", string.Create(CultureInfo.InvariantCulture, $"{family.Rows:N0}")),
+                    ("Servers", servers),
+                }
+            });
+        }
+
+        return context;
+    }
+
+    /// <summary>One watch-event section's rows ("opened" or "closed"), capped and with the remainder stated
+    /// as its own heading-only item — <see cref="AppendWatchSection"/>'s discipline, in structure.</summary>
+    private static void AppendWatchItems(
+        AlertContext context, string verb, IReadOnlyList<RollupWatchEvent> events)
+    {
+        var listed = 0;
+        foreach (var item in events)
+        {
+            if (listed >= MaxListedRollupWatchEvents)
+            {
+                break;
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Watch {verb}: {item.ItemKey}"),
+                Fields =
+                {
+                    ("Item", item.ItemKey),
+                    ("Subject", item.Subject),
+                    ("Condition", item.Condition),
+                }
+            });
+            listed++;
+        }
+
+        if (events.Count > listed)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{events.Count - listed:N0} more watch items {verb} (see the watch-item worklist)")
+            });
+        }
+    }
+
+    /// <summary>
+    /// The analysis singles digest's rows as an <see cref="AlertContext"/> (#3834) — the third document, on the
+    /// same terms: additive beside the prose, the alert's own ranking preserved, every cap's remainder stated
+    /// as a row.
+    ///
+    /// <para>One item per top mover by severity, each carrying the KEY a page would have carried (the
+    /// alert-history <c>metric_name</c> and the story hash <c>get_analysis_findings</c> resolves), the gate's
+    /// reason and the #1140 dedup fingerprints — which is the whole point of structuring this one: an operator
+    /// promoting a single to a drill-down needs those identifiers by name, and an automation consuming
+    /// <c>{{context_json}}</c> was previously left to parse them out of a sentence. The by-family blocks follow
+    /// as one item per family, the per-family server list capped as the prose caps it.</para>
+    ///
+    /// <para>The dedup keys ride as a FIELD rather than as <see cref="AlertContext.Incidents"/>: these are the
+    /// fingerprints of OTHER alerts' findings, quoted so they can be looked up, not incidents of this report —
+    /// and populating Incidents here would enter this document into per-event splitting and the incident
+    /// delivery filter, which is a paging mechanism this report deliberately stays outside of.</para>
+    /// </summary>
+    internal static AlertContext BuildAnalysisSinglesDigestContext(AnalysisSinglesDigestFacts facts)
+    {
+        var context = new AlertContext();
+
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Singles summary",
+            Fields =
+            {
+                ("Singles", string.Create(CultureInfo.InvariantCulture, $"{facts.Singles:N0}")),
+                ("Servers", string.Create(CultureInfo.InvariantCulture, $"{facts.Servers:N0}")),
+                ("Ledger rows", string.Create(CultureInfo.InvariantCulture, $"{facts.Rows:N0}")),
+                ("Families", string.Create(CultureInfo.InvariantCulture, $"{facts.Families.Count:N0}")),
+            }
+        });
+
+        var rank = 0;
+        foreach (var single in facts.TopMovers)
+        {
+            rank++;
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"#{rank} {single.Server} — {single.Family}"),
+                Fields =
+                {
+                    ("Server", single.Server),
+                    ("Family", single.Family),
+                    ("Key", single.Key),
+                    ("Severity", string.Create(CultureInfo.InvariantCulture, $"{single.Severity:F2}")),
+                    ("Last recorded (UTC)", string.Create(CultureInfo.InvariantCulture, $"{single.LastRecordedUtc:o}")),
+                }
+            };
+            if (!string.IsNullOrEmpty(single.Reason))
+            {
+                item.Fields.Add(("Routing reason", single.Reason));
+            }
+            if (single.DedupKeys.Count > 0)
+            {
+                item.Fields.Add(("Dedup keys", string.Join(", ", single.DedupKeys)));
+            }
+
+            context.Details.Add(item);
+        }
+
+        if (facts.Singles > facts.TopMovers.Count)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"+{facts.Singles - facts.TopMovers.Count:N0} more singles below the top {MaxListedSinglesMovers}, listed by family")
+            });
+        }
+
+        foreach (var family in facts.Families)
+        {
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Family: {family.Family}"),
+                Fields =
+                {
+                    ("Singles", string.Create(CultureInfo.InvariantCulture, $"{family.Singles:N0}")),
+                    ("Servers", string.Create(CultureInfo.InvariantCulture, $"{family.Servers.Count:N0}")),
+                }
+            };
+
+            foreach (var server in family.Servers.Take(MaxListedSinglesServersPerFamily))
+            {
+                var keys = string.Join("; ", server.Singles.Take(MaxListedSinglesPerServer).Select(s =>
+                    string.Create(CultureInfo.InvariantCulture, $"{s.Key} {s.Severity:F2}")));
+                if (server.Singles.Count > MaxListedSinglesPerServer)
+                {
+                    keys += string.Create(CultureInfo.InvariantCulture,
+                        $" +{server.Singles.Count - MaxListedSinglesPerServer:N0} more");
+                }
+
+                item.Fields.Add((server.Server, keys));
+            }
+
+            if (family.Servers.Count > MaxListedSinglesServersPerFamily)
+            {
+                item.Fields.Add(("Not listed",
+                    string.Create(CultureInfo.InvariantCulture,
+                        $"+{family.Servers.Count - MaxListedSinglesServersPerFamily:N0} more servers")));
+            }
+
+            context.Details.Add(item);
+        }
+
+        return context;
     }
 
     /* ------------------------- #3466 lane 4: the fleet sweep's daily rollup ------------------------- */
@@ -2028,7 +2399,9 @@ internal sealed class DarlingSelfAlertEvaluator
                it as a count, the digest's shape). */
             numericCurrentValue: facts.Sweeps,
             numericThresholdValue: 0,
-            cancellationToken);
+            cancellationToken,
+            /* #3834: the digest's structured rows, on the same terms — see BuildFleetSweepRollupContext. */
+            context: BuildFleetSweepRollupContext(facts, spanStartUtc, spanEndUtc));
 
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
@@ -2153,7 +2526,11 @@ internal sealed class DarlingSelfAlertEvaluator
                renders it as a count, the digest's shape). */
             numericCurrentValue: facts.Singles,
             numericThresholdValue: 0,
-            cancellationToken);
+            cancellationToken,
+            /* #3834: the digest's structured rows, on the same terms — see
+               BuildAnalysisSinglesDigestContext, including why the dedup keys ride as a field rather than
+               as Incidents. */
+            context: BuildAnalysisSinglesDigestContext(facts));
 
         await RecordDocumentDeliveredAsync(
             _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
