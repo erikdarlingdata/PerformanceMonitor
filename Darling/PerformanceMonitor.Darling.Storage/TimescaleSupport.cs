@@ -23,7 +23,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// store must work with or without the extension (plain PostgreSQL remains fully supported), so
 /// the versioned <see cref="PgMigrations"/> scripts stay engine-plain and every Timescale feature
 /// here is gated on extension presence, detected at runtime, never assumed. The service calls
-/// <see cref="TryEnableAsync"/> once at startup right after migration; when the extension is
+/// <see cref="TryEnableAsync"/> at startup right after migration, and again on its hourly
+/// store-maintenance tick for as long as the answer is no (#3815 — the detection records whether an
+/// ATTEMPT succeeded, and the conditions that fail it are transient); when the extension is
 /// present it converts the collector tables to hypertables and applies compression policies —
 /// all idempotent (<c>if_not_exists</c> everywhere), so every restart re-converges, and a store
 /// that grew new collector tables since the last start picks them up on the next.

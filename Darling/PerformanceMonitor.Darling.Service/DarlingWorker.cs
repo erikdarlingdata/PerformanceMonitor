@@ -143,6 +143,21 @@ public sealed class DarlingWorker : BackgroundService
        as they were and says so; the next hour re-judges them. */
     private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);
 
+    /* The whole-pass budget for the hourly TimescaleDB availability re-probe (#3815), the #2327 shape and a
+       far tighter number than its neighbour above, from a different enclosing constraint. The probe is two
+       statements — CREATE EXTENSION IF NOT EXISTS and a one-row pg_extension read — and both carry
+       TimescaleSupport's 300 s bulk-setup CommandTimeout, which is right for a first conversion and is ten
+       minutes of serial-sweep-loop block here. The bound is the tick's own PHASE: the compression read
+       behind this probe samples the job catalog at TimescaleSupport.CompressionCheckPhaseSeconds past the
+       minute, half a grid step from the :MM:00 instants the compression policies start on (#3575), so
+       anything awaited ahead of it spends that guard band. Ten seconds is a third of the half-step, which
+       leaves the sample twenty seconds clear of the next boundary even on the pass where the probe is slow
+       AND succeeds — and a probe that succeeds on a reachable store is two sub-second catalog statements, so
+       that pass is the pathological one rather than the normal one. A store that cannot answer CREATE
+       EXTENSION IF NOT EXISTS inside ten seconds is not one this hour's probe was going to heal; the next
+       hour retries, and the latch stays exactly where it was meanwhile. */
+    private static readonly TimeSpan s_timescaleReprobeBudget = TimeSpan.FromSeconds(10);
+
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
        series exists to forecast weeks out, and the compression tier only changes state once a day per
        chunk — so hourly matches the compression check it rides beside, and each run is a handful of
@@ -505,10 +520,14 @@ public sealed class DarlingWorker : BackgroundService
        (#3575) so no steady-state sample lands on the :MM:00 instant the compression policies fire on. The
        first sample is deliberately left unpinned — a restart is when an operator is reading the log and wants
        the store's job health now — and the confirm-read inside ReadStuckCompressionJobsAsync covers it like
-       every other sample. Fleet-level (one shared store), so it is a single field, not per-server; only
-       consulted when _timescaleAvailable. Since #3812 the same due time also fires the hourly retention
-       re-evaluation (ReevaluateRetentionPoliciesAsync), AFTER the compression read so the :30 sample is not
-       pushed by the pass ahead of it — one stamp, two failure-isolated halves. */
+       every other sample. Fleet-level (one shared store), so it is a single field, not per-server. Since
+       #3812 the same due time also fires the hourly retention re-evaluation
+       (ReevaluateRetentionPoliciesAsync), AFTER the compression read so the :30 sample is not pushed by the
+       pass ahead of it; since #3815 it fires the availability re-probe
+       (ReprobeTimescaleAvailabilityAsync) AHEAD of both, which is why the stamp advances whether or not the
+       store is on TimescaleDB — the probe by definition runs while _timescaleAvailable is false, and a due
+       time that only moved behind that flag would fire it on every 15-second sweep pass. One stamp, three
+       failure-isolated tenants. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
@@ -541,9 +560,16 @@ public sealed class DarlingWorker : BackgroundService
        NOT a per-ServerLoopState flag). Cleared when the working set recovers below the threshold. */
     private bool _memoryGuardTrippedThisEpisode;
 
-    /* Set once at startup by the TimescaleSupport detection (cached per data source — the
-       extension can't appear or vanish under a running service without a restart anyway);
-       branches the retention purge onto drop_chunks. */
+    /* The store's TimescaleDB availability: seeded by the start-path detection and RE-PROBED on the hourly
+       store-maintenance tick for as long as it reads false (#3815). What it records is whether a detection
+       ATTEMPT succeeded, not whether the extension exists — the start-path block force-clears it on any
+       fault, and the faults that reach it are transient (the store restarting, a failover, a lock held
+       elsewhere, a momentary connection failure). A false value nothing revisits runs a genuinely Timescale
+       store in plain-PostgreSQL mode for the life of a service designed to run for months, AND switches off
+       the store background-job health check that is the only surface that would report it, so the latch is
+       re-decided hourly rather than at startup only. Every consumer reads it at call time — the retention
+       purge's drop_chunks branch, the self-metrics sweep's hypertable arm, the two provider delegates — so a
+       flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
@@ -2285,7 +2311,8 @@ public sealed class DarlingWorker : BackgroundService
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
                die (next_start = -infinity) or hang, halting the store's archival tier so uncompressed data grows
                without bound until the disk fills and collection stops for the WHOLE fleet (the field incident).
-               Timescale-only; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync.
+               Timescale-only — gated one level in since #3815 put the availability re-probe ahead of it on
+               this same tick; own hourly cadence; failure-isolated inside EvaluateCompressionJobHealthAsync.
 
                The next due time is SNAPPED to the wall clock rather than taken from this fire (#3575). The
                dead-job arm the check judges reads next_start = -infinity, which is also what the scheduler
@@ -2297,38 +2324,66 @@ public sealed class DarlingWorker : BackgroundService
                half the grid step from every policy's start in both directions. The read itself now confirms
                a -infinity trip with a second read five seconds later (ReadStuckCompressionJobsAsync), so the
                phase is hardening on top of the fix, not the fix. */
-            if (_timescaleAvailable && DateTime.UtcNow >= _nextCompressionCheckUtc)
+            if (DateTime.UtcNow >= _nextCompressionCheckUtc)
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
-                await EvaluateCompressionJobHealthAsync(stoppingToken);
 
-                /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line the
-                   only thing that armed a held retention policy was the start-path ensure above, so "the gate
-                   releases the hold by itself once the backfill covers raw" was true only after a restart — a
-                   store on a stable build sat held indefinitely after a backfill that had worked, with the
-                   Retention Held alert still firing and reading like the backfill had failed. Same tick as the
-                   compression check (the constant's comment says why this cadence and why this order), each
-                   half failure-isolated inside its own method with its own catch, so a retention pass that
-                   throws or runs out its budget cannot skip the compression read and a compression fault
-                   cannot skip the retention pass. The Retention Held self-alert rides INSIDE the compression
-                   method and therefore reads the flags as they stood before this pass: a policy armed here
-                   shows as held on this tick's alert read and resolves on the next hour's, one tick of lag on
-                   the resolution edge that is stated rather than traded for #3575's phase. The first pass
-                   after startup fires within seconds of the start-path ensure (this stamp seeds at MinValue);
-                   that pass is deliberately not skipped — its "Retention re-evaluation:" line is the proof
-                   the hourly path is wired on this store, visible in the same log window an operator reads
-                   after a restart, and it costs twenty catalog rows and twenty chunk-pruned min() reads.
+                /* #3815: the availability re-probe, and the one tenant of this tick that runs OUTSIDE the
+                   _timescaleAvailable gate below — because it is the tenant that CORRECTS that flag. Behind
+                   the gate it would be unreachable in exactly the state it exists for: a latch reading false
+                   cannot be re-opened from inside the block the latch closes. That is why this tick's guard
+                   is the due time alone and the flag moved down one level, and why the stamp is taken above
+                   the probe rather than behind the flag — on a store whose latch reads false the due time
+                   has to advance anyway, or the probe would fire on every 15-second sweep pass instead of
+                   hourly.
 
-                   THE HOURLY STORE-MAINTENANCE TICK, named. This guard is the home for every "we decided this
-                   at startup and never re-decided it" defect on the store side: #3812 is its first tenant, and
-                   #3815 (TimescaleDB availability probed only at startup), #3816 (job self-heal covers
-                   compression only) and #3817 (store-object convergence only at startup) are queued as further
-                   tenants — not built here. The contract a tenant signs: its own method, its own catch-all,
-                   awaited as its own statement in this block AFTER the compression read (the #3575 phase
-                   argument on s_compressionCheckInterval), in the order it appears; a new tenant is one more
-                   await line below this one. No delegate list yet, deliberately — two tenants do not justify
-                   the indirection, and a list would hide the order the phase argument depends on. */
-                await ReevaluateRetentionPoliciesAsync(stoppingToken);
+                   The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
+                   that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
+                   hour, on a pooled connection, saying nothing above Debug. Nothing else on this tick runs
+                   for such a store at all, which is what lets the probe carry the whole of the ungated
+                   half. */
+                if (!_timescaleAvailable)
+                {
+                    await ReprobeTimescaleAvailabilityAsync(stoppingToken);
+                }
+
+                if (_timescaleAvailable)
+                {
+                    await EvaluateCompressionJobHealthAsync(stoppingToken);
+
+                    /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line
+                       the only thing that armed a held retention policy was the start-path ensure above, so
+                       "the gate releases the hold by itself once the backfill covers raw" was true only after
+                       a restart — a store on a stable build sat held indefinitely after a backfill that had
+                       worked, with the Retention Held alert still firing and reading like the backfill had
+                       failed. Same tick as the compression check (the constant's comment says why this cadence
+                       and why this order), each half failure-isolated inside its own method with its own
+                       catch, so a retention pass that throws or runs out its budget cannot skip the
+                       compression read and a compression fault cannot skip the retention pass. The Retention
+                       Held self-alert rides INSIDE the compression method and therefore reads the flags as
+                       they stood before this pass: a policy armed here shows as held on this tick's alert read
+                       and resolves on the next hour's, one tick of lag on the resolution edge that is stated
+                       rather than traded for #3575's phase. The first pass after startup fires within seconds
+                       of the start-path ensure (this stamp seeds at MinValue); that pass is deliberately not
+                       skipped — its "Retention re-evaluation:" line is the proof the hourly path is wired on
+                       this store, visible in the same log window an operator reads after a restart, and it
+                       costs twenty catalog rows and twenty chunk-pruned min() reads.
+
+                       THE HOURLY STORE-MAINTENANCE TICK, named. It is the home for every "we decided this at
+                       startup and never re-decided it" defect on the store side: #3812 and #3815 are its
+                       tenants, and #3816 (job self-heal covers compression only) and #3817 (store-object
+                       convergence only at startup) are queued as further ones — not built here. The contract
+                       a tenant signs: its own method, its own catch-all, awaited as its own statement in the
+                       gated block AFTER the compression read (the #3575 phase argument on
+                       s_compressionCheckInterval), in the order it appears; a new tenant is one more await
+                       line below this one. A tenant that CORRECTS the gate is the single exception and signs a
+                       different contract — it goes above the gate, not below the compression read, because
+                       inside it a false flag would block its own correction. #3815 is that case, and the gate
+                       has exactly one input, so there is no second one to write. No delegate list yet,
+                       deliberately — three tenants do not justify the indirection, and a list would hide the
+                       order the phase argument depends on. */
+                    await ReevaluateRetentionPoliciesAsync(stoppingToken);
+                }
             }
 
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
@@ -5956,6 +6011,93 @@ LIMIT 1";
             _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// The #3815 TimescaleDB availability re-probe (fleet-level, on the hourly store-maintenance tick, and
+    /// only while <see cref="_timescaleAvailable"/> reads <c>false</c>): re-run
+    /// <see cref="TimescaleSupport.TryEnableAsync"/> on a connection of its own and flip the latch when the
+    /// store answers that the extension is there after all.
+    ///
+    /// <para><b>Why the call site is ABOVE the flag's gate and not inside it.</b> The latch decides whether
+    /// the store background-job health check runs at all, and that check is the only surface that reports a
+    /// dead compression job (#1581), a job running past its cadence (#2136) or a held retention policy
+    /// (#2813). Put the correction inside the block the latch gates and it is unreachable in precisely the
+    /// state it exists for — the false value suppresses its own repair, and the service is left with the
+    /// #1581 field incident's backstop switched off and no way to say so. So the tick's guard is the due time
+    /// alone, this runs first, and the compression read and the retention pass sit one level in behind the
+    /// flag this may have just flipped.</para>
+    ///
+    /// <para><b>A DEDICATED connection, and nothing touches it after a <c>false</c> (#1922).</b>
+    /// <c>CREATE EXTENSION IF NOT EXISTS timescaledb</c> TERMINATES the backend when the library is on disk
+    /// but missing from <c>shared_preload_libraries</c>, and <see cref="TimescaleSupport.TryEnableAsync"/>
+    /// turns that into <c>false</c> like any other failure — so its contract reads as "carry on in
+    /// plain-PostgreSQL mode" while the connection it was handed is dead. This method is written to the same
+    /// rule the start-path block is: a connection of its own out of the worker's pool, the result checked
+    /// before anything else uses it, and the <c>false</c> arm returning straight to the <c>await using</c>
+    /// that disposes it. Adding a second statement on <c>connection</c> below that check reintroduces the
+    /// masking, on an hourly cadence rather than once a start.</para>
+    ///
+    /// <para><b>What the flip does, and what it deliberately leaves alone.</b> It restores the READS: the
+    /// job health check, the <c>drop_chunks</c> branch of the daily purge, the self-metrics sweep's
+    /// per-hypertable rows and the two provider delegates all consult the field at call time, so each picks
+    /// the flip up on its next pass with no further wiring. It does NOT re-run the setup sequence — hypertable
+    /// conversion, compression policies, continuous aggregates, retention policies. Those stay on the start
+    /// path, the recovery line says so, and putting them on a cadence is #3817's subject, whose whole content
+    /// is the ordering and the fire-and-forget backfill that sequence carries. Restoring the checks is where
+    /// the damage in #3815 is: a store that was converted by an earlier start and lost only the flag is fully
+    /// healed by the flip alone, and a store that was never converted at least regains the surface that can
+    /// report it.</para>
+    ///
+    /// <para><b>The logging is split by TRANSITION, which is why the logger handed down is null.</b>
+    /// <see cref="TimescaleSupport.TryEnableAsync"/> writes its own Information line on every outcome, which
+    /// is right once at a start and is a line an hour forever on a store that is genuinely plain PostgreSQL —
+    /// a fully supported configuration. So this passes no logger and says it itself: the recovery at
+    /// Information, because a service that has been silently degraded since its start must announce that it
+    /// no longer is; the unchanged pass at Debug, because "still plain PostgreSQL" is the same sentence the
+    /// start already wrote. Failure-isolated with the three outcomes the retention pass uses — shutdown
+    /// quiet, the budget its own WARNING, anything else a WARNING naming the message — and no rethrow, so
+    /// the sweep loop never sees this pass fail.</para>
+    /// </summary>
+    private async Task ReprobeTimescaleAvailabilityAsync(CancellationToken cancellationToken)
+    {
+        var probeClock = Stopwatch.StartNew();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_timescaleReprobeBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var available = await TimescaleSupport.TryEnableAsync(connection, null, budget.Token);
+            if (!available)
+            {
+                _logger.LogDebug(
+                    "TimescaleDB re-probe after {ElapsedMs} ms: still unavailable, so the store stays in plain-PostgreSQL mode and the next hourly store-maintenance tick probes again.",
+                    probeClock.ElapsedMilliseconds);
+                return;
+            }
+
+            _timescaleAvailable = true;
+            _logger.LogInformation(
+                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and retention policies are still applied on the start path only, so anything that start left unbuilt stays unbuilt until the next one. This pass took {ElapsedMs} ms, connection acquisition included.",
+                probeClock.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown - quiet and expected. The next start probes this from scratch. */
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "TimescaleDB re-probe exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - the availability latch keeps the value it had and the next hourly tick probes again. A store that cannot answer CREATE EXTENSION IF NOT EXISTS and a one-row pg_extension read inside that budget is the finding here, not the extension.",
+                (long)s_timescaleReprobeBudget.TotalSeconds, probeClock.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "TimescaleDB re-probe could not run after {ElapsedMs} ms - the availability latch keeps the value it had and the next hourly tick probes again: {Message}",
+                probeClock.ElapsedMilliseconds, ex.Message);
         }
     }
 
