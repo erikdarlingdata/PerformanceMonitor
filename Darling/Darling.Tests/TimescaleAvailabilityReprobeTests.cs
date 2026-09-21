@@ -161,8 +161,16 @@ public sealed class TimescaleAvailabilityReprobeTests
             "the tick runs: due-time guard, stamp, availability re-probe, compression read, retention pass - in "
           + $"that order (got {guardAt}, {stampAt}, {reprobeAt}, {compressionAt}, {retentionAt})");
 
-        /* And the stamp itself is not behind the latch, which is the cadence claim proper. */
+        /* And the stamp itself is not behind the latch, which is the cadence claim proper. The instrument
+           check comes first for the reason it does above: "no guard requires the latch" is satisfied just as
+           well by a walk that found no guards at all, and the stamp is REQUIRED to be inside the tick's own
+           due-time condition, so a walk that cannot see that one cannot be trusted about the absence of the
+           other. */
         var stampGuards = EnclosingGuards(code, stampAt);
+        Assert.True(
+            stampGuards.Any(g => g.Contains("_nextCompressionCheckUtc", StringComparison.Ordinal)),
+            "the guard walk did not find the tick's due-time condition around the stamp, so the assertion "
+          + $"below would pass on an empty list: {Describe(stampGuards)}");
         Assert.True(
             !stampGuards.Any(TestsTheLatchPositively),
             "the due time is stamped forward from inside a guard that requires _timescaleAvailable, so on a "
