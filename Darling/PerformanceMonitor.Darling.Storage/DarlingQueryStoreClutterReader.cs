@@ -20,6 +20,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// write, and not one new query against a monitored server. The maintainer's design intent, verbatim spirit:
 /// <i>some sort of view of Query Store clutter; not a new query — analyse what we've already collected.</i>
 ///
+/// <para><b>Here rather than in the service's <c>Mcp/</c> folder</b>, beside the <c>DarlingPg*Reader</c>
+/// family and for the reason that family moved (#2530): three surfaces answer this question — the MCP tool,
+/// the web server tab that reads it, and the WPF Viewer, which has no route to the service and runs these
+/// statements in process. The alternative is a second copy of four statements carrying a window floor, a
+/// discrete-percentile definition that has to agree with the C# beside it, and a replica gate read off one
+/// engine bit; the copy that drifts is never the one being read.</para>
+///
 /// <para><b>Why four separate statements rather than one composite.</b> Each arm has its own honest grain
 /// and its own retention. Read cost is per DATABASE per collector RUN and lives in <c>collection_log</c>
 /// (weeks of retention, small); plan churn is per DATABASE per plan and lives in <c>query_store_stats</c>

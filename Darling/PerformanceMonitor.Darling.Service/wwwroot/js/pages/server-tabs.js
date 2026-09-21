@@ -1113,19 +1113,20 @@ export const SERVER_TABS = [
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
           "the window there is nothing to compare against, and the read says so rather than calling it clear."
       ),
-      /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server overhead
-         proxy and the fleet reference — because the read composes four arms over two raw hypertables and
-         three separate fetches of it would pay for that three times on one tab (the fanout() reason).
+      /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
+         block and the per-server memory clerk — because the read composes four arms over two raw hypertables
+         and three separate fetches of it would pay for that three times on one tab (the fanout() reason).
 
-         The fleet reference is NOT requested here: include_fleet_median walks query_store_stats and
-         wait_stats fleet-wide over the window, which is the read deadline's whole budget on a large store,
-         and a server tab is a per-server question. The panel prints the payload's own sentence saying so,
-         rather than leaving a reader to wonder whether the medians were computed and came back empty.
+         include_fleet_median is deliberately NOT sent. It walks query_store_stats and wait_stats fleet-wide
+         over the window, which on a large store is the read deadline's whole budget, and a server tab is a
+         per-server question; fleet_median therefore reads null here with the payload's own note saying it was
+         not computed, which an agent calling the tool can ask for and this page does not.
 
-         The overhead panel is a SERVER block beside DATABASE rows, and its title says so: the QDS_* waits and
-         the Query Store memory clerk are instance-wide, and nothing on this page attributes them to a
-         database. `excluded_note` is shown as the panel's notice because the proxy is the NON-sleep QDS
-         waits only — a reader who takes it for the whole of Query Store's cost is reading it wrong. */
+         The last two panels are SERVER blocks beside DATABASE rows, and their titles say so: the QDS_* waits
+         and the Query Store memory clerk are instance-wide, and nothing on this page attributes them to a
+         database. Each shows the payload's own note as its notice — the wait block because the proxy is the
+         NON-sleep QDS types only and a reader who takes it for the whole of Query Store's cost is reading it
+         wrong, the clerk because its absence is a RANK (outside the collector's top 25) and not a zero. */
       ...fanout("get_query_store_clutter", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "Query Store Clutter",
