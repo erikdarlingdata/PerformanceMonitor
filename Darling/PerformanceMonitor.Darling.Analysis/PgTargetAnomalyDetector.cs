@@ -764,7 +764,11 @@ LIMIT 6";
     /// <c>IsExtremeAnomaly</c>), key for key what <see cref="PgAnomalyDetector"/> writes, plus the lineage stamp:
     /// <paramref name="barsMeasured"/> is the caller's verdict on ITS floor and fallback pair in
     /// <c>AnomalyThresholds</c> (TPS and CPU measured 2026-09-19; the session counts not), stated at the call so the
-    /// stamp sits beside the constants it describes.</summary>
+    /// stamp sits beside the constants it describes.
+    /// <para>#3691 lane 41: <c>baseline_zero_history</c> rides beside <c>baseline_low_quality</c> here, so every
+    /// PostgreSQL-target family inherits the zero-history stamp from the one helper it already shares. The two are
+    /// mutually exclusive by the gate's construction — a zero-history fire stamps <c>baseline_low_quality = 0</c>
+    /// and <c>baseline_zero_history = 1</c>, and the advice reads the pair to choose its third shape.</para></summary>
     private static Dictionary<string, double> ZScoreMetadata(BaselineBucket baseline, AnomalyGate.ZDecision decision, long windowSamples, bool barsMeasured = false)
     {
         var metadata = new Dictionary<string, double>
@@ -774,6 +778,7 @@ LIMIT 6";
             ["deviation_sigma"] = decision.Sigma,
             ["fire_threshold"] = decision.ThresholdUsed,
             ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
+            ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
             ["fallback_exceedance"] = decision.FallbackExceedance,
             ["baseline_samples"] = baseline.SampleCount,
             ["window_samples"] = windowSamples,
@@ -793,6 +798,12 @@ LIMIT 6";
         metadata["baseline_median"] = baseline.Median;
         metadata["baseline_mad"] = baseline.Mad;
         metadata["confidence"] = baseline.Confidence;
+        /* #3691 lane 41: the DISTINCT-DAY count, which the bucket has always carried and no fact ever showed.
+           The zero-history extremity's whole claim is "N samples across D days of this hour, never once
+           non-zero", and a sample count alone cannot say it — 250 samples from two busy afternoons is not a
+           month. Stamped on every z-family fact, not just the zero-history ones, because it is the same
+           quality signal IsTrustworthy's day floor reads and an operator reading any baseline fact wants it. */
+        metadata["baseline_distinct_days"] = baseline.DistinctDays;
     }
 
     /// <summary>Kind-Unspecified for parameter binds — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>

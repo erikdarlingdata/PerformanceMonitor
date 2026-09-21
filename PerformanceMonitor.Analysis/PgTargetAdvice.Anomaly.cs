@@ -22,7 +22,10 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para><b>Three honesty rules the composed prose keeps.</b> A <c>baseline_low_quality</c> z-fact and an
 /// <c>is_new</c> ratio-fact render as "first occurrence, no baseline yet for this hour-of-week" and never print a
-/// sigma or a multiple the detector did not trust — the sentinel-ratio lie the SQL Server composer retired. The
+/// sigma or a multiple the detector did not trust — the sentinel-ratio lie the SQL Server composer retired. A
+/// <c>baseline_zero_history</c> z-fact (#3691 lane 41) is the OPPOSITE case and reads as such: the baseline is the
+/// strongest one there is (a month of measured zeros for this hour), the finding is an extremity rather than a
+/// deviation, and still no sigma is printed — the stored one is the display cap, not a measurement. The
 /// CPU anomaly's number is percent of the CONFIGURED capacity ceiling and the prose says so, with the raw
 /// percent-of-allocated reading beside it as "a core was pinned" and never as the deviation (#3281). The
 /// wait-profile anomaly exists only for the Aurora measured series in v1, so its prose says "the engine
@@ -182,6 +185,14 @@ public static partial class PgTargetAdvice
     /// <summary>
     /// The z-family composer: observed value, sigmas above the hour-of-week baseline, the baseline itself and the
     /// sample count — or, on a <c>baseline_low_quality</c> fact, the first-occurrence rendering with NO sigma.
+    /// <para><b>The third shape (#3691 lane 41): <c>baseline_zero_history</c>.</b> A bucket that cleared its tier's
+    /// sample and distinct-day floors and held nothing but zeros is the STRONGEST baseline statement there is for a
+    /// metric bounded below by zero, not the absence of one — so it gets its own prose, and the two shapes above
+    /// stay byte-identical. The headline says the quantity and that this hour saw NONE of it in the baseline month;
+    /// the investigation names the samples and the distinct days the claim rests on, because "never once" is only
+    /// worth anything with the exposure behind it. NO σ figure anywhere: the stored <c>deviation_sigma</c> on this
+    /// arm is the display CAP, not a measurement (the true deviation from a zero centre with zero dispersion is
+    /// unbounded), so the prose says "beyond any σ" and prints no number it cannot stand behind.</para>
     /// </summary>
     private static AdviceBlock ComposeDeviation(Fact fact, AdviceBlock fallback, string noun, string observedKey, Func<double, string> fmt)
     {
@@ -190,6 +201,26 @@ public static partial class PgTargetAdvice
 
         var samples = fact.Metadata.GetValueOrDefault("baseline_samples");
         var samplesClause = samples > 0 ? $" (over {samples.ToString("N0", CultureInfo.InvariantCulture)} baseline samples)" : string.Empty;
+
+        if (fact.Metadata.GetValueOrDefault("baseline_zero_history") >= 1.0)
+        {
+            var days = fact.Metadata.GetValueOrDefault("baseline_distinct_days");
+            var restsOn = samples > 0
+                ? $"{samples.ToString("N0", CultureInfo.InvariantCulture)} baseline sample{(samples == 1 ? "" : "s")}" +
+                  (days > 0 ? $" across {days.ToString("N0", CultureInfo.InvariantCulture)} distinct day{(days == 1 ? "" : "s")}" : string.Empty)
+                : "this server's hour-of-week baseline";
+            return fallback with
+            {
+                Headline = $"{noun} reached {fmt(observed)} — against a month in which this hour saw none",
+                Investigation =
+                    $"{noun} reached {fmt(observed)} this window. This server's baseline for this hour-of-week is not thin — it " +
+                    $"is a measured ZERO: {restsOn}, not one of them above zero. So this is not a deviation to be counted in " +
+                    "sigmas, it is an extremity: the quantity went from never-happens to this, and there is no dispersion to " +
+                    "divide by precisely because there was nothing to divide. " + SourceSentence(fallback) +
+                    " Beyond any σ — no figure is printed for the deviation because none would be honest against a history of " +
+                    "zeros." + s_anomalyHedge,
+            };
+        }
 
         if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
         {

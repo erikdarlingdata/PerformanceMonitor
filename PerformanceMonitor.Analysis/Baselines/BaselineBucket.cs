@@ -124,12 +124,23 @@ public class BaselineBucket
     /// selection collapsed to (a Flat verdict rests on a coarser claim than a Full one) and how
     /// close the bucket is to its tier's trust floors. An untrustworthy bucket scores 0 — its
     /// verdicts already route to the absolute-fallback path, which does not use confidence.
+    /// <para>
+    /// #3691 lane 41: a ZERO-HISTORY bucket (<see cref="IsZeroHistory"/>) scores the confidence its
+    /// tier and density earn, exactly as if it were trustworthy — because it IS quality. It is not
+    /// trustworthy (there is no dispersion to divide by, so no z-score is meaningful), but the
+    /// statement it makes — "this hour has never once been non-zero across N samples over D days" —
+    /// is the most confident thing a baseline can say about a metric bounded below by zero, and the
+    /// scorer multiplies THIS number into the extremity's severity. Scoring it 0 would have zeroed
+    /// the finding the zero-history arm exists to raise. No non-zero-history value moves: a bucket
+    /// that is neither trustworthy nor zero-history still reads 0, and a trustworthy one is
+    /// untouched (the two states are mutually exclusive by construction — see IsZeroHistory).
+    /// </para>
     /// </summary>
     public double Confidence
     {
         get
         {
-            if (!IsTrustworthy) return 0.0;
+            if (!IsTrustworthy && !IsZeroHistory) return 0.0;
             var tierFactor = Tier switch
             {
                 BaselineTier.Full => 1.0,
@@ -152,6 +163,56 @@ public class BaselineBucket
     };
 
     /// <summary>
+    /// The QUANTITY half of baseline quality, factored out (#3691 lane 41) so the two gates that ask it —
+    /// <see cref="IsTrustworthy"/> and <see cref="IsZeroHistory"/> — cannot drift apart. It is the same
+    /// question in both places: does this bucket carry enough samples, spread over enough DISTINCT days,
+    /// for its tier's claim to be about a trend rather than one busy afternoon? The DISPERSION half is what
+    /// separates the two callers: trustworthy needs real dispersion to divide by, zero-history needs the
+    /// exact absence of any.
+    /// </summary>
+    private bool ClearsTierFloors
+    {
+        get
+        {
+            var (sampleMin, dayMin) = TrustFloors;
+            return SampleCount >= sampleMin && DistinctDays >= dayMin;
+        }
+    }
+
+    /// <summary>
+    /// #3691 lane 41: a bucket whose tier floors are CLEARED and whose every statistic is zero — a full
+    /// month of samples, across enough distinct days, in which this metric was never once non-zero.
+    /// <para>
+    /// <b>The lie this replaced.</b> <see cref="EffectiveStdDev"/> returns 0 for a zero-activity bucket and
+    /// <see cref="IsTrustworthy"/> is therefore false for it, regardless of how many samples it holds — so a
+    /// server with thirty days of logged captures that never once saw a blocked session, a deadlock, a temp
+    /// spill or an idle-in-transaction backend was routed to the gate's absolute fallback and told the
+    /// operator "first occurrence, no baseline yet". Measured consequence (the face of this lane):
+    /// ANOMALY_PG_BLOCKING with 92 blocked sessions against a clean month scored 0.5 — under the CRITICAL
+    /// band, worded as if the engine had never looked. That is backwards. For a metric bounded below by zero,
+    /// a month of zeros is the STRONGEST statement a baseline can make about what this hour usually looks
+    /// like: there is no dispersion to divide by precisely because there is nothing to divide.
+    /// </para>
+    /// <para>
+    /// <b>Mutually exclusive with <see cref="IsTrustworthy"/>, never both.</b> Trustworthy requires
+    /// <c>EffectiveStdDev &gt; 0</c>, which an all-zero bucket cannot have, and zero-history requires all four
+    /// statistics at zero, which a bucket with dispersion cannot have. A bucket can be trustworthy,
+    /// zero-history, or neither — the third case (too few samples AND all zero) is a young store that has not
+    /// looked long enough to claim anything, and it keeps the absolute-fallback path it has always had.
+    /// </para>
+    /// <para>
+    /// <b>BOTH frames must be zero</b> (mean/stddev AND median/MAD), not just the one the caller happens to
+    /// read: the robust frame is what <c>AnomalyGate.DecideRobustFirst</c> reaches for first, and a bucket
+    /// whose classical statistics collapsed while its median/MAD did not is a rollup artefact, not a quiet
+    /// hour. Requiring all four keeps this flag meaning exactly one thing. <c>&lt;= 0</c> on the dispersions
+    /// mirrors <see cref="EffectiveStdDev"/>'s own guard: the providers can hand back a negative from a
+    /// single-sample variance, and that is not dispersion either.
+    /// </para>
+    /// </summary>
+    public bool IsZeroHistory =>
+        ClearsTierFloors && Mean == 0 && StdDev <= 0 && Median == 0 && Mad <= 0;
+
+    /// <summary>
     /// Whether this baseline is dense enough to trust a z-score / ratio against. Requires real
     /// dispersion, the tier's sample floor, AND enough DISTINCT days. A low-quality baseline is NOT
     /// silenced — the detector falls back to an absolute-threshold bar instead. This gate and the
@@ -164,8 +225,7 @@ public class BaselineBucket
         get
         {
             if (EffectiveStdDev <= 0) return false;
-            var (sampleMin, dayMin) = TrustFloors;
-            return SampleCount >= sampleMin && DistinctDays >= dayMin;
+            return ClearsTierFloors;
         }
     }
 }

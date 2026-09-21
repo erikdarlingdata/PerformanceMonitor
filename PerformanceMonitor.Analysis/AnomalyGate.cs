@@ -28,6 +28,13 @@ namespace PerformanceMonitor.Analysis;
 ///   <item>Untrustworthy baseline → do NOT trust z (a z-score against a non-existent baseline is
 ///     meaningless); fire only on the HIGHER absolute-fallback bar. Not silence — absolute rules
 ///     preserve new-deployment coverage.</item>
+///   <item><b>ZERO-HISTORY baseline (#3691 lane 41) → the STRONGEST evidence there is, not the
+///     weakest.</b> A bucket that cleared its tier's sample AND distinct-day floors and was never once
+///     non-zero (<c>BaselineBucket.IsZeroHistory</c>) is not "no baseline" — for a metric bounded below
+///     by zero it is the most confident statement a baseline can make about this hour, and it had been
+///     routed to the absolute fallback because an all-zero bucket has no dispersion and so cannot be
+///     trustworthy. Any peak clearing the MAGNITUDE FLOOR against a month of zeros is an extremity;
+///     see the arm's own remarks in <c>Decide</c> for why the floor is the only noise guard there.</item>
 /// </list>
 /// The displayed sigma is always computed from whatever dispersion the baseline has (capped), so a
 /// fallback-fired anomaly still shows how far above baseline it landed.
@@ -93,7 +100,14 @@ public static class AnomalyGate
     /// <paramref name="Sigma"/> (classical mean/stddev or robust median/MAD), for the story's second
     /// clause. <c>null</c> when the caller supplied no window mean (the transitional peak-only overloads)
     /// — never 0, which would read as "the mean sat at baseline".</param>
-    public readonly record struct ZDecision(bool Fire, double Sigma, bool LowQualityBaseline, double FallbackExceedance, double ThresholdUsed = 0, double? MeanSigma = null);
+    /// <param name="ZeroHistory">#3691 lane 41: the decision took the ZERO-HISTORY extremity arm — the
+    /// bucket cleared its tier's floors and held nothing but zeros, so the peak is an extremity against the
+    /// strongest baseline statement there is rather than a deviation measured in sigmas. Mutually exclusive
+    /// with <paramref name="LowQualityBaseline"/>: on this arm the baseline is NOT low quality and the
+    /// detectors stamp it <c>baseline_low_quality = 0</c>, <c>baseline_zero_history = 1</c>. <c>Sigma</c> and
+    /// <c>MeanSigma</c> are the display CAP on this arm, not measurements — the advice says "beyond any σ"
+    /// and prints no figure.</param>
+    public readonly record struct ZDecision(bool Fire, double Sigma, bool LowQualityBaseline, double FallbackExceedance, double ThresholdUsed = 0, double? MeanSigma = null, bool ZeroHistory = false);
 
     /// <summary>
     /// Decides whether a z-score anomaly fires on the window PEAK alone — the pre-#3653 verdict,
@@ -108,6 +122,10 @@ public static class AnomalyGate
     /// <param name="absoluteFallbackBar">The higher bar the observed peak must clear when the baseline
     /// is untrustworthy. Should be strictly above <paramref name="magnitudeFloor"/>.</param>
     /// <param name="sigmaCap">Display cap for the reported sigma (#1486's 25σ cap).</param>
+    /// <param name="isZeroHistory">#3691 lane 41: the bucket's <c>IsZeroHistory</c>. Defaulted false because
+    /// this primitive frame has no bucket to ask — the frozen Dashboard twin passes its OWN bucket type's
+    /// three primitives here (bug-fix support, its baseline model is a separate copy) and a caller that does
+    /// not name it gets exactly today's verdict, byte for byte.</param>
     public static ZDecision EvaluateZScore(
         double mean,
         double effectiveStdDev,
@@ -116,9 +134,10 @@ public static class AnomalyGate
         double deviationThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        bool isZeroHistory = false)
         => Decide(mean, effectiveStdDev, isTrustworthy, peak, windowMean: null,
-            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory);
 
     /// <summary>
     /// #3653: the PAIR gate on the classical frame — fires only when the window <paramref name="peak"/>
@@ -138,9 +157,10 @@ public static class AnomalyGate
         double deviationThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        bool isZeroHistory = false)
         => Decide(mean, effectiveStdDev, isTrustworthy, peak, windowMean,
-            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory);
 
     /// <summary>
     /// #1743: the robust-first gate on the window PEAK alone — the pre-#3653 verdict, kept
@@ -157,6 +177,9 @@ public static class AnomalyGate
     /// EffectiveRobustSigma 0 and degrades to the classical gate at
     /// <paramref name="classicalDeviationThreshold"/> — never silence, never a misfire against
     /// zeroed robust fields.
+    /// <para>#3691 lane 41: the two bucket overloads read <c>baseline.IsZeroHistory</c> themselves, so every
+    /// caller that hands in a bucket inherits the zero-history extremity arm with no source change — which is
+    /// how both SKUs and every PostgreSQL-target family get it at once.</para>
     /// </summary>
     public static ZDecision EvaluateZScore(
         BaselineBucket baseline,
@@ -204,12 +227,15 @@ public static class AnomalyGate
         {
             return Decide(
                 baseline.Mean, baseline.EffectiveStdDev, baseline.IsTrustworthy, peak, windowMean,
-                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
         }
 
+        /* A zero-history bucket cannot reach here: IsZeroHistory requires Mad <= 0, which is EffectiveRobustSigma
+           0 (absent an absolute floor, which only bounded metrics carry and which is itself dispersion the bucket
+           does have). The flag is threaded anyway so the two calls read the same and neither can silently drop it. */
         return Decide(
             baseline.Median, robustSigma, baseline.IsTrustworthy, peak, windowMean,
-            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
     }
 
     /// <summary>
@@ -229,8 +255,53 @@ public static class AnomalyGate
         double threshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        bool isZeroHistory = false)
     {
+        /* #3691 lane 41: the ZERO-HISTORY arm, ONE `if` at the very top, so every verdict for every other
+           baseline shape is structurally untouched — nothing runs before this test, nothing below it changed.
+
+           A bucket that cleared its tier's sample AND distinct-day floors and held nothing but zeros (the
+           BaselineBucket.IsZeroHistory contract) was reaching the untrustworthy path below, because an
+           all-zero bucket has no dispersion and so can never be trustworthy. That routed a month of MEASURED
+           quiet to the absolute-fallback bar — a bar deliberately sized for a peak on a young store, where the
+           honest answer really is "we do not know your normal yet". Here we do know it, exactly: for a metric
+           bounded below by zero, thirty days of zeros across enough distinct days is the strongest statement a
+           baseline can make about this hour. Measured consequence, the face of this lane: ANOMALY_PG_BLOCKING
+           with 92 blocked sessions against a clean month read 0.5, "first occurrence, no baseline yet".
+
+           So the peak is judged as an EXTREMITY, not as a deviation: any peak clearing the magnitude floor is
+           categorically outside a history with no non-zero sample in it. peakSigma is pinned at sigmaCap — a
+           CAP, not a measurement (the true quantity is unbounded: (peak - 0) / 0), which is why the advice for
+           this arm prints no σ figure and says "beyond any σ" instead.
+
+           THE MAGNITUDE FLOOR IS THE ONLY NOISE GUARD HERE, DELIBERATELY. The #3653 pair gate cannot
+           discriminate on this arm: against a zero centre with zero dispersion, ANY non-zero window mean is
+           infinitely far out, so a mean clause would either be vacuous (every non-zero mean passes) or an
+           arbitrary new bar this lane has no measurement for. MeanSigma therefore carries the same cap when
+           the caller supplied a mean and stays null when it did not — never 0, which would read as "the mean
+           sat at baseline". The floor is what keeps the single lock handoff caught mid-flight (1 blocked
+           session against PgBlockedSessionsFloor = 3) out, and it is the bar these families' floors were
+           chosen as: the lowest value that is not trivial. A peak UNDER the floor does not fire, exactly as
+           today.
+
+           LowQualityBaseline stays FALSE here and ZeroHistory says which arm ran, so the detectors stamp
+           baseline_low_quality = 0 / baseline_zero_history = 1 and the scorer grades the capped sigma on its
+           normal deviation ramp (FactScorer.ScoreAnomalyFact) rather than the young-store fallback ramp that
+           floors at 0.5. FallbackExceedance is 0: no absolute bar was used, and the scorer must not grade one. */
+        if (isZeroHistory)
+        {
+            var zeroHistorySigma = sigmaCap;
+            return new ZDecision(
+                peak >= magnitudeFloor,
+                zeroHistorySigma,
+                LowQualityBaseline: false,
+                FallbackExceedance: 0.0,
+                ThresholdUsed: threshold,
+                MeanSigma: windowMean is null ? null : zeroHistorySigma,
+                ZeroHistory: true);
+        }
+
         var peakSigma = dispersion > 0
             ? Math.Min((peak - center) / dispersion, sigmaCap)
             : 0.0;
