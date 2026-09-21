@@ -132,7 +132,9 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static bool IsInformational(string? metricName) =>
             metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
-                or "Store TOAST Slack" or "Store Checkpointer Pressure";
+                or "Store TOAST Slack" or "Store Checkpointer Pressure"
+                /* #3816: a policy job that fails and retries is alive — INFO at its fire site, INFO here. */
+                or "Store Job Failing";
 
         /// <summary>
         /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor

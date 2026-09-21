@@ -8517,7 +8517,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// The discriminator is <c>pg_extension.extversion</c>, read separately by
     /// <see cref="ReadTimescaleVersionAsync"/> on the pass where the arm trips, and applied to the verdict's
     /// text and re-arm by <see cref="ClassifyStuckPolicyJobs"/>.</para>
-    /// </summary>
+    ///
     /// <para><b>Renamed from <c>StuckCompressionJobsSql</c> and widened past compression (#3816), which is
     /// the whole content of that issue.</b> The failure mode is not compression-specific:
     /// <c>next_start = -infinity</c> is how the scheduler retires ANY job it has given up on, and a dead

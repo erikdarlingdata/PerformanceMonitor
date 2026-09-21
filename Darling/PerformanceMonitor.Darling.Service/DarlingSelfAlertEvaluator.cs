@@ -5318,6 +5318,17 @@ internal sealed class DarlingSelfAlertEvaluator
     private async Task ApplyPolicyJobFailuresAsync(
         IReadOnlyList<PolicyJobRunReading> jobs, DateTime now, CancellationToken cancellationToken)
     {
+        /* #3464: the master switch, consulted before the first store write like every sibling apply — the
+           baseline below is still advanced so re-enabling alerts does not replay a quiet hour as new failures. */
+        if (!_settings.AlertsEnabled)
+        {
+            foreach (var job in jobs)
+            {
+                _policyJobFailureBaseline[job.JobId.ToString(CultureInfo.InvariantCulture)] = job.TotalFailures;
+            }
+            return;
+        }
+
         foreach (var job in jobs)
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
