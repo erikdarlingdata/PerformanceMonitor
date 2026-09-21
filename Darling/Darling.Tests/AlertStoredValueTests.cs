@@ -309,14 +309,17 @@ public sealed class AlertStoredValueTests
         var rig = new Rig();
 
         /* 8 hours into a run, against the 6-hour floor StuckRunningBound applies to a 30-minute schedule. */
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: false, jobStatus: "Running",
             lastRunStartedAtUtc: rig.Now.AddMinutes(-480), scheduleInterval: TimeSpan.FromMinutes(30),
             nowUtc: rig.Now, out var reason));
         Assert.StartsWith("stuck in the Running state for 480 minutes", reason, StringComparison.Ordinal);
 
-        await rig.Build().ApplyCompressionJobsStuckAsync(
-            new[] { new StuckCompressionJob(9001L, "wait_stats", reason) }, _ => Task.FromResult(true), Ct);
+        await rig.Build().ApplyPolicyJobsStuckAsync(
+            new StorePolicyJobHealth(
+                new[] { new StuckPolicyJob(9001L, "wait_stats", reason) },
+                Array.Empty<PolicyJobRunReading>()),
+            _ => Task.FromResult(true), Ct);
 
         /* Stored 480 before #1881. The sibling branch below has no duration at all. */
         Assert.Equal(480.0, AlertValueParser.ParseOrDefault(reason));
@@ -328,12 +331,15 @@ public sealed class AlertStoredValueTests
     {
         var rig = new Rig();
 
-        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+        Assert.True(TimescaleSupport.IsPolicyJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromMinutes(30), nowUtc: rig.Now, out var reason));
 
-        await rig.Build().ApplyCompressionJobsStuckAsync(
-            new[] { new StuckCompressionJob(9001L, "wait_stats", reason) }, _ => Task.FromResult(true), Ct);
+        await rig.Build().ApplyPolicyJobsStuckAsync(
+            new StorePolicyJobHealth(
+                new[] { new StuckPolicyJob(9001L, "wait_stats", reason) },
+                Array.Empty<PolicyJobRunReading>()),
+            _ => Task.FromResult(true), Ct);
 
         /* This branch always stored 0 — its reason carries no digit — but the metric was NOT classified
            state-only, so the grid rendered "0.00" for it. Both halves had to move. */
@@ -512,6 +518,11 @@ public sealed class AlertStoredValueTests
             "Collection Stopped", "Capture Down", "Agent Not Running", "Server Unreachable",
             "AG Failover", "AG Replica Disconnected", "AG Sync Fell Behind", "AG Database Suspended",
             "Compression Job Stuck", DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #3816: the two new per-family stuck names store the same sentinel for the same reason — the
+               reason text is elapsed minutes on the hung arm and a scheduler state with no duration on the
+               -infinity arm. "Store Job Failing" is absent on purpose: its value is how many MORE failures
+               were recorded since the previous sample, which is a real measurement. */
+            "Refresh Job Stuck", "Retention Job Stuck",
         };
 
         var notClassified = selfAlertMetrics.Where(m => !AlertMetricClassifier.IsStateOnly(m)).ToList();

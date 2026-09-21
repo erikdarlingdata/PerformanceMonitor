@@ -324,6 +324,12 @@ public class AlertSeverityTests
             /* Darling self-alerts (#2090's batch — all fire Critical at their sites). */
             "Capture Down", "Collection Stopped", "Agent Not Running",
             "Store Disk Pressure", "Store Runtime Upgrade", "Compression Job Stuck",
+            /* #3816: the policy-job self-heal's other two families. Each fires ONE tier at its site
+               (refresh Critical, retention Warning), so each name's arm is the faithful replay colour. The
+               issue's fourth alert, "Store Job Failing", is deliberately NOT listed: it is one of the
+               declared INFO metrics, like the digests and the store's two physical-health conditions, so it
+               is meant to reach the arm this inventory refuses. */
+            "Refresh Job Stuck", "Retention Job Stuck",
         })
         {
             var (hex, badge, _) = AlertSeverity.ForMetric(metric);

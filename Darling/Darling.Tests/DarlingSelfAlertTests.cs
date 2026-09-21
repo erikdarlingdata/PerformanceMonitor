@@ -2457,16 +2457,35 @@ public sealed class DarlingSelfAlertTests
         };
     }
 
-    private static IReadOnlyList<StuckCompressionJob> Stuck(params long[] jobIds)
+    /// <summary>
+    /// The pre-#3816 fixture, now returning the whole pass (#3816): the same <c>-infinity</c> compression
+    /// rows, plus the census the evaluator's summary line and failure arm read. Both come from the same job
+    /// ids on purpose — a stuck job IS a job the pass read, so a census that omitted it would be a shape no
+    /// real read produces.
+    /// </summary>
+    private static StorePolicyJobHealth Stuck(params long[] jobIds) => Reading(StuckJobs(jobIds));
+
+    private static IReadOnlyList<StuckPolicyJob> StuckJobs(params long[] jobIds)
     {
-        var list = new List<StuckCompressionJob>();
+        var list = new List<StuckPolicyJob>();
         foreach (var id in jobIds)
         {
-            list.Add(new StuckCompressionJob(id, "wait_stats", "next_start is -infinity — the scheduler will never run it again"));
+            list.Add(new StuckPolicyJob(
+                id, "wait_stats", "next_start is -infinity — the scheduler will never run it again",
+                Arm: StuckPolicyJobArm.NextStartNegativeInfinity));
         }
 
         return list;
     }
+
+    /// <summary>One pass whose census is exactly its stuck jobs, plus any extra healthy rows a pin needs.</summary>
+    private static StorePolicyJobHealth Reading(
+        IReadOnlyList<StuckPolicyJob> stuck, params PolicyJobRunReading[] alsoRead) =>
+        new(stuck,
+            stuck.Select(j => new PolicyJobRunReading(
+                    j.JobId, j.Family, j.HypertableName, Held: false, LastRunStatus: null, TotalFailures: 0))
+                .Concat(alsoRead)
+                .ToList());
 
     [Fact]
     public async Task StoreUpgrade_Succeeded_FiresOnceNamingBothVersions()
@@ -2598,7 +2617,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Re-armed exactly once. */
         Assert.Equal(1001L, Assert.Single(rearm.Calls));
@@ -2618,11 +2637,11 @@ public sealed class DarlingSelfAlertTests
         var rearm = new RearmRecorder();
 
         /* Check 1: detect + re-arm + fire. */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Check 2 (an hour later): STILL stuck = a re-hang. Escalate, and do NOT re-arm again. */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         Assert.Single(rearm.Calls);  /* never re-armed a second time */
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
@@ -2638,20 +2657,20 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* detect + re-arm */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* detect + re-arm */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* escalate (fire) */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* escalate (fire) */
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* Inside the 5-minute cooldown after the escalation: no re-fire, no re-arm. */
         h.Now = h.Now.AddMinutes(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* After the cooldown: re-fires (still no re-arm). */
         h.Now = h.Now.AddMinutes(5);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
     }
@@ -2663,7 +2682,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder { Result = false };  /* alter_job fails (e.g. permission) */
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         /* Tried once, failed -> escalated with an "auto-re-arm FAILED" alert. */
         Assert.Single(rearm.Calls);
@@ -2673,7 +2692,7 @@ public sealed class DarlingSelfAlertTests
 
         /* Next check: never retries the re-arm (already escalated). */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
     }
 
@@ -2684,12 +2703,12 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* stuck */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* stuck */
         Assert.Empty(h.History.Records);
 
         /* No longer stuck: exactly one "Compression Job Recovered" audit row (BuildResolutionRecord maps the
            resolution Title onto the history MetricName, mirroring the disk-pressure recovery). */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Compression Job Recovered", resolved.MetricName);
         Assert.False(resolved.AlertSent); /* #3169: a resolution has no send channel to have used */
@@ -2697,10 +2716,10 @@ public sealed class DarlingSelfAlertTests
 
         /* Still healthy next check — no duplicate resolution (edge-triggered), and a re-stuck job would be a
            fresh first-detection again (state was cleared) -> a new re-arm. */
-        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         Assert.Single(h.History.Records);
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Equal(2, rearm.Calls.Count);  /* re-stuck after recovery -> re-armed fresh */
     }
 
@@ -2712,7 +2731,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
 
         Assert.Empty(rearm.Calls);
         Assert.Empty(h.Deliverer.Outcomes);
@@ -2725,7 +2744,7 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001, 1002, 1003), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001, 1002, 1003), rearm.Delegate, Ct);
 
         Assert.Equal(new[] { 1001L, 1002L, 1003L }, rearm.Calls);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
@@ -2741,20 +2760,23 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
 
         /* A throwing mute check (inside FireAsync, after a successful re-arm) is isolated. */
-        await e.EvaluateCompressionJobsAsync(Stuck(1001), _ => Task.FromResult(true), Ct);
+        await e.EvaluatePolicyJobsAsync(Stuck(1001), _ => Task.FromResult(true), Ct);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* A throwing re-arm delegate is isolated too. */
         var e2 = new Harness().Build();
-        await e2.EvaluateCompressionJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
+        await e2.EvaluatePolicyJobsAsync(Stuck(1002), _ => throw new InvalidOperationException("boom"), Ct);
     }
 
     /* ---------------- #3591: a crash-backoff row the scheduler recovers by itself ---------------- */
 
     /// <summary>The 2.26.4+ shape of the -infinity row: the reader marks it SchedulerRetries with the version's sentence.</summary>
-    private static IReadOnlyList<StuckCompressionJob> CrashBackoff(params long[] jobIds) =>
-        jobIds.Select(id => new StuckCompressionJob(
-            id, "wait_stats", TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, SchedulerRetries: true)).ToList();
+    private static StorePolicyJobHealth CrashBackoff(params long[] jobIds) => Reading(CrashBackoffJobs(jobIds));
+
+    private static IReadOnlyList<StuckPolicyJob> CrashBackoffJobs(params long[] jobIds) =>
+        jobIds.Select(id => new StuckPolicyJob(
+            id, "wait_stats", TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, SchedulerRetries: true,
+            Arm: StuckPolicyJobArm.NextStartNegativeInfinity)).ToList();
 
     [Fact]
     public async Task CompressionJobs_SchedulerRetries_FirstSight_NoRearm_NoPage_LoggedAtInformation()
@@ -2767,14 +2789,19 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
 
         Assert.Empty(rearm.Calls);
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
-        var info = Assert.Single(h.Log.Entries, x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information);
+        /* #3816 added the unconditional per-pass summary line at Information, so this pin now names the
+           entry it is about instead of asserting that Information has exactly one member. The claim is
+           unchanged: the crash-backoff row produced a LOG line and no alert. */
+        var info = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                && x.Message.Contains("crash backoff", StringComparison.Ordinal));
         Assert.Contains("1001", info.Message, StringComparison.Ordinal);
-        Assert.Contains("crash backoff", info.Message, StringComparison.Ordinal);
         Assert.Contains("not re-armed, not alerted", info.Message, StringComparison.Ordinal);
         Assert.Contains("#3591", info.Message, StringComparison.Ordinal);
     }
@@ -2790,9 +2817,9 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
 
         Assert.Empty(rearm.Calls);
         var fired = Assert.Single(h.Deliverer.Outcomes);
@@ -2805,7 +2832,7 @@ public sealed class DarlingSelfAlertTests
 
         /* Escalated: an hour later, still there, still no re-arm; re-fires only on the cooldown. */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
         Assert.Empty(rearm.Calls);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Contains("after escalation", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
@@ -2821,9 +2848,9 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
 
         Assert.Empty(rearm.Calls);
         Assert.Empty(h.Deliverer.Outcomes);
@@ -2834,7 +2861,7 @@ public sealed class DarlingSelfAlertTests
 
         /* Fresh first sight afterwards: deferred again, not escalated — the state was dropped. */
         h.Now = h.Now.AddHours(1);
-        await e.ApplyCompressionJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(rearm.Calls);
     }
@@ -2848,9 +2875,9 @@ public sealed class DarlingSelfAlertTests
         var e = h.Build();
         var rearm = new RearmRecorder();
 
-        var both = new List<StuckCompressionJob>(CrashBackoff(1001));
-        both.AddRange(Stuck(1002));
-        await e.ApplyCompressionJobsStuckAsync(both, rearm.Delegate, Ct);
+        var both = new List<StuckPolicyJob>(CrashBackoffJobs(1001));
+        both.AddRange(StuckJobs(1002));
+        await e.ApplyPolicyJobsStuckAsync(Reading(both), rearm.Delegate, Ct);
 
         Assert.Equal(1002L, Assert.Single(rearm.Calls));
         var fired = Assert.Single(h.Deliverer.Outcomes);
@@ -2862,7 +2889,330 @@ public sealed class DarlingSelfAlertTests
     public void CompressionJobs_TheOldRowShape_DefaultsToTheRearmPath()
     {
         /* The three-argument record every pre-#3591 caller and pin builds is the old semantics, by default. */
-        Assert.False(new StuckCompressionJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+        Assert.False(new StuckPolicyJob(1L, "wait_stats", "next_start is -infinity — the scheduler will never run it again").SchedulerRetries);
+    }
+
+    /* ---------------- #3816: the self-heal covers every policy family ---------------- */
+
+    /// <summary>One dead job of a given family, as the reader would hand it over.</summary>
+    private static StorePolicyJobHealth DeadJob(
+        long jobId, TimescaleSupport.StorePolicyJobFamily family, string relation, bool schedulerRetries = false) =>
+        Reading(new[]
+        {
+            new StuckPolicyJob(
+                jobId, relation,
+                schedulerRetries
+                    ? TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason
+                    : TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                SchedulerRetries: schedulerRetries,
+                Family: family,
+                Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+        });
+
+    /// <summary>
+    /// THE per-family banding pin (#3816): one dead job of each family, one pass each, and every
+    /// operator-visible field that must differ — the persisted metric name, the alert key, the severity and
+    /// the sentence that says what stalled.
+    ///
+    /// <para>The metric names are asserted as LITERALS on purpose. They are persisted identities — the string
+    /// in every history row, the string a mute rule matches, the key a route resolves — so a pin that read
+    /// them from the same constant the fire site reads would pass through a rename that orphaned every
+    /// deployed store's rules and history.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_EachFamily_FiresItsOwnMetricSeverityAndSentence()
+    {
+        foreach (var (family, relation, metric, key, severity, sentence) in new[]
+        {
+            (TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats",
+                "Compression Job Stuck", "compressjob:9001", AlertSeverityLevel.Critical,
+                "halts the store's archival tier"),
+            (TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly",
+                "Refresh Job Stuck", "refreshjob:9001", AlertSeverityLevel.Critical,
+                "A rollup has stopped materializing"),
+            (TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats",
+                "Retention Job Stuck", "retentionjob:9001", AlertSeverityLevel.Warning,
+                "The archival tier is stalled"),
+        })
+        {
+            var h = new Harness();
+            var e = h.Build();
+            var rearm = new RearmRecorder();
+
+            await e.ApplyPolicyJobsStuckAsync(DeadJob(9001, family, relation), rearm.Delegate, Ct);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(metric, fired.MetricName);
+            Assert.Equal(key, fired.ServerKey);
+            Assert.Equal(severity, fired.Severity);
+            Assert.Contains(sentence, fired.DetailText, StringComparison.Ordinal);
+            Assert.Contains(relation, fired.ShortMessage, StringComparison.Ordinal);
+
+            /* Every family is re-armed once on first sight, below 2.26.4 — the arm is proc-agnostic. */
+            Assert.Equal(9001L, Assert.Single(rearm.Calls));
+        }
+    }
+
+    /// <summary>
+    /// A dead refresh job's page has to name the loop #3816 exists to close: the retention hold an operator
+    /// meets first is this job's symptom, and the backfill they will be told to run clears the symptom and
+    /// leaves the cause. Asserted as words because that sentence IS the deliverable.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_DeadRefresh_NamesTheCoverageGateAndTheBackfillTrap()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9002, TimescaleSupport.StorePolicyJobFamily.Refresh, "query_store_stats_hourly"),
+            new RearmRecorder().Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("stale", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("coverage gate", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("--backfill-rollups", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("query_store_stats_hourly", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A dead retention job's page must say it is NOT the #2813 hold, because the two look alike to an
+    /// operator and their remedies are opposites: a hold clears with a backfill and must never be armed by
+    /// hand, an abandoned armed policy needs the scheduler looked at and no backfill affects it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_DeadRetention_SaysItIsNotARetentionHold()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9003, TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats"),
+            new RearmRecorder().Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Retention Job Stuck", fired.MetricName);
+        Assert.Contains("NOT the #2813 Retention Held condition", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("scheduled = false", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE RISKIEST LINE IN #3816, at the evaluator (the reader has its own pin): a job reported stuck while
+    /// NOT scheduled is a HELD policy, and the one thing that must never happen to it is a re-arm —
+    /// <c>alter_job(next_start => now())</c> on a held retention policy drops the only copy of the history
+    /// the #1680/#1877 coverage gate is holding it for.
+    ///
+    /// <para>The row here is hand-built, deliberately: <c>ClassifyStuckPolicyJobs</c> cannot produce it
+    /// today, and that is exactly why this gate is pinned separately — it exists for the regression upstream
+    /// that WOULD produce it, and a gate only reachable through a defect is a gate no integration test
+    /// covers.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_AHeldPolicyReportedAsStuck_IsNeverRearmed_NeverPaged_AndSaysSo()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9100, "query_store_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        var warned = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
+        Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3591's version arm is INHERITED UNCHANGED by the families #3816 added (the brief's requirement, and
+    /// the REVIEW-TRAPS line behind #3629): on a store whose scheduler recovers a <c>-infinity</c> row by
+    /// itself, first sight of a dead refresh or retention job is NOT re-armed and NOT paged — because
+    /// <c>alter_job</c> RESETS the crash backoff rather than shortening it — and the second consecutive
+    /// sighting escalates under that family's own metric name.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_SchedulerRetries_AppliesPerFamily_NoRearmEver_EscalatesUnderItsOwnMetric()
+    {
+        foreach (var (family, metric, key) in new[]
+        {
+            (TimescaleSupport.StorePolicyJobFamily.Refresh, "Refresh Job Stuck", "refreshjob:9200"),
+            (TimescaleSupport.StorePolicyJobFamily.Retention, "Retention Job Stuck", "retentionjob:9200"),
+        })
+        {
+            var h = new Harness();
+            var e = h.Build();
+            var rearm = new RearmRecorder();
+
+            /* First sight: deferred to the scheduler, logged, nothing fired. */
+            await e.ApplyPolicyJobsStuckAsync(
+                DeadJob(9200, family, "wait_stats_hourly", schedulerRetries: true), rearm.Delegate, Ct);
+            Assert.Empty(rearm.Calls);
+            Assert.Empty(h.Deliverer.Outcomes);
+
+            /* Still there a check later: one page under its OWN name, still no re-arm. */
+            h.Now = h.Now.AddHours(1);
+            await e.ApplyPolicyJobsStuckAsync(
+                DeadJob(9200, family, "wait_stats_hourly", schedulerRetries: true), rearm.Delegate, Ct);
+
+            Assert.Empty(rearm.Calls);
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(metric, fired.MetricName);
+            Assert.Equal(key, fired.ServerKey);
+            Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
+            Assert.Contains("#9360", fired.DetailText, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The recovery edge is addressed to the family that FIRED, not to whatever the current pass looks like:
+    /// a resolution written under the wrong metric name resolves nothing and leaves the real alert row open.
+    /// The job is by definition absent from the recovering pass, which is why the episode remembers its
+    /// family rather than re-deriving it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_Recovery_IsWrittenUnderTheFamilyThatFired()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9300, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly"), rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Refresh Job Recovered", resolved.MetricName);
+        Assert.Equal("refreshjob:9300", resolved.ServerId);
+    }
+
+    /// <summary>
+    /// #3756's discipline, this tick's third tenant (#3816): EVERY pass writes one Information summary, so a
+    /// tick that found nothing can still be shown to have run. Before it, "no alert" meant either "nothing is
+    /// wrong" or "the connection open threw, was swallowed at Debug, and nothing has been checked for days".
+    ///
+    /// <para>HELD is in the line and is never acted on, which is what makes the coverage gate legible on a
+    /// healthy store.</para>
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_EveryPass_WritesOneSummaryLine_CountingWhatItRead()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A clean store: two compression policies, one refresh, two retention — one of them HELD by the
+           coverage gate, which is the normal state of a fresh tier and not a fault. */
+        var clean = new StorePolicyJobHealth(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(1, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", false, "Success", 0),
+                new PolicyJobRunReading(2, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats_hourly", false, "Success", 0),
+                new PolicyJobRunReading(3, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", false, "Success", 0),
+                new PolicyJobRunReading(4, TimescaleSupport.StorePolicyJobFamily.Retention, "wait_stats", false, "Success", 0),
+                new PolicyJobRunReading(5, TimescaleSupport.StorePolicyJobFamily.Retention, "query_store_stats", true, "Success", 0),
+            });
+
+        await e.ApplyPolicyJobsStuckAsync(clean, new RearmRecorder().Delegate, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        var summary = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                && x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Equal(
+            "Store job health: 5 jobs read (compression 2, refresh 1, retention 2), 0 dead, 0 stuck, 1 held, 0 re-armed, 0 alerted (#3816)",
+            summary.Message);
+    }
+
+    /// <summary>The summary still runs with alerts switched off, and says so — a pass that deliberately
+    /// judged nothing must not read like a pass that found nothing wrong.</summary>
+    [Fact]
+    public async Task PolicyJobs_AlertsDisabled_StillSummarises_AndNamesTheReason()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            DeadJob(9400, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly"), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var summary = Assert.Single(
+            h.Log.Entries,
+            x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Contains("1 dead", summary.Message, StringComparison.Ordinal);
+        Assert.Contains("alerts are DISABLED", summary.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The <c>total_failures</c> arm (#3816): a job that FAILS without ever going <c>-infinity</c> is
+    /// invisible to both stuck arms, to #2136's cadence read (successful runs only) and to #2813's hold
+    /// check. This is the whole arm's decision table in one pass sequence.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobFailures_FireOnlyOnAGrownCounterWithAFailingLastRun_AndNeverOnTheFirstPass()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        StorePolicyJobHealth Pass(long failures, string? status, bool held = false) => new(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(
+                    7001, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", held, status, failures),
+            });
+
+        /* Pass 1 — the BASELINE. total_failures is cumulative since the policy was created, so a first pass
+           that treated an absent baseline as 0 would page about the store's whole history. */
+        await e.ApplyPolicyJobsStuckAsync(Pass(12, "Failed"), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Pass 2 — grew AND still failing: one Information alert naming both numbers. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(14, "Failed"), rearm.Delegate, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Job Failing", fired.MetricName);
+        Assert.Equal("jobfailing:7001", fired.ServerKey);
+        Assert.Null(fired.Severity);  /* no override: the DECLARED INFO arm in AlertSeverity.ForMetric decides */
+        Assert.Contains("2 new failure(s), 14 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("refresh job 7001 on wait_stats_hourly", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* Pass 3 — the counter did NOT grow, and last_run_status is still 'Failed' (it says Failed until the
+           next run: a state, not an event). One failure must not re-fire hourly forever. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(14, "Failed"), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Pass 4 — grew, but the retry SUCCEEDED. A job that fails and recovers is the scheduler working. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(15, "Success"), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Pass 5 — grew and failing, but the policy is HELD: its counters are frozen because it is not being
+           run, and anything to say about a hold belongs to #2813, not to this arm. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(17, "Failed", held: true), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     /* ---------------- #991 Availability Groups: sync-behind decision (pure) ---------------- */
@@ -4052,7 +4402,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
 
         var warnings = h.Log.Entries
             .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
@@ -4072,7 +4422,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness { Muted = true };
         var e = h.Build();
 
-        await e.ApplyCompressionJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), new RearmRecorder().Delegate, Ct);
 
         var warnings = h.Log.Entries
             .Where(x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning)

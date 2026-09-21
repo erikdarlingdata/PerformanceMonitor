@@ -21,17 +21,17 @@ namespace Darling.Tests;
 /// #3575: the compression-stuck check's <c>-infinity</c> arm is a NON-ATOMIC read of TimescaleDB's own view,
 /// and the fix is to read it twice.
 ///
-/// <para><b>The defect these pin against.</b> <see cref="TimescaleSupport.IsCompressionJobStuck"/> already
+/// <para><b>The defect these pin against.</b> <see cref="TimescaleSupport.IsPolicyJobStuck"/> already
 /// guarded its dead-job arm with <c>!isRunning</c>, and a production store paged through the guard anyway —
 /// the alert's stamp 53 ms inside a 63 ms scheduled run that succeeded. The 2.28.1 view definition explains
 /// it: <c>job_status</c> is <c>CASE WHEN pgs.state = 'active' THEN 'Running' … END</c> over a
 /// <c>LEFT JOIN pg_stat_activity</c> on <c>application_name</c>, and <c>next_start</c> is the
 /// <c>bgw_job_stat</c> row. The scheduler commits <c>-infinity</c> before the worker exists; the worker is
 /// gone before its <c>mark_end</c> is visible to a snapshot taken a moment earlier. A tight poll of
-/// <see cref="TimescaleSupport.StuckCompressionJobsSql"/> across a 10-second-cadence policy on a PG18 +
+/// <see cref="TimescaleSupport.StuckPolicyJobsSql"/> across a 10-second-cadence policy on a PG18 +
 /// TimescaleDB 2.28.1 rig caught <c>-infinity + Scheduled</c> at BOTH edges of every one of seven runs.
-/// The predicate stays pure and single-shot; <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
-/// re-reads after <see cref="TimescaleSupport.StuckCompressionConfirmDelay"/> and reports only what
+/// The predicate stays pure and single-shot; <see cref="ReadStuckAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+/// re-reads after <see cref="TimescaleSupport.StuckPolicyJobConfirmDelay"/> and reports only what
 /// persists. These tests script the two reads through the internal seam, so an edge and a dead row are
 /// each a pair of result sets and nothing here sleeps.</para>
 ///
@@ -47,22 +47,22 @@ public sealed class CompressionStuckConfirmReadTests
     /* The three row shapes the view can hand the predicate for one job, named for what they are. */
 
     /// <summary>The dead-job shape and the run-instant edge: identical on one read — that is the defect.</summary>
-    private static CompressionJobStatRow NegInfinityScheduled(long jobId, string hypertable = "file_io_stats") =>
+    private static PolicyJobStatRow NegInfinityScheduled(long jobId, string hypertable = "file_io_stats") =>
         new(jobId, NextStartIsNegativeInfinity: true, JobStatus: "Scheduled",
             LastRunStartedAtUtc: s_now.AddHours(-1), ScheduleInterval: TimeSpan.FromHours(1), HypertableName: hypertable);
 
     /// <summary>A healthy job between runs: finite next_start, not running.</summary>
-    private static CompressionJobStatRow Healthy(long jobId, string hypertable = "file_io_stats") =>
+    private static PolicyJobStatRow Healthy(long jobId, string hypertable = "file_io_stats") =>
         new(jobId, NextStartIsNegativeInfinity: false, JobStatus: "Scheduled",
             LastRunStartedAtUtc: s_now.AddMinutes(-1), ScheduleInterval: TimeSpan.FromHours(1), HypertableName: hypertable);
 
     /// <summary>The mid-run marker: -infinity WITH Running. Belongs to the elapsed arm, never the dead-job arm.</summary>
-    private static CompressionJobStatRow MidRun(long jobId, string hypertable = "file_io_stats") =>
+    private static PolicyJobStatRow MidRun(long jobId, string hypertable = "file_io_stats") =>
         new(jobId, NextStartIsNegativeInfinity: true, JobStatus: "Running",
             LastRunStartedAtUtc: s_now.AddMilliseconds(-40), ScheduleInterval: TimeSpan.FromHours(1), HypertableName: hypertable);
 
     /// <summary>A hung run: Running since eight hours ago against the six-hour floor.</summary>
-    private static CompressionJobStatRow HungRun(long jobId, string hypertable = "query_stats") =>
+    private static PolicyJobStatRow HungRun(long jobId, string hypertable = "query_stats") =>
         new(jobId, NextStartIsNegativeInfinity: true, JobStatus: "Running",
             LastRunStartedAtUtc: s_now.AddHours(-8), ScheduleInterval: TimeSpan.FromHours(1), HypertableName: hypertable);
 
@@ -75,9 +75,9 @@ public sealed class CompressionStuckConfirmReadTests
         private readonly Queue<object> _script = new();
         public int Calls { get; private set; }
 
-        public ScriptedReads Then(params CompressionJobStatRow[] rows)
+        public ScriptedReads Then(params PolicyJobStatRow[] rows)
         {
-            _script.Enqueue((IReadOnlyList<CompressionJobStatRow>)rows);
+            _script.Enqueue((IReadOnlyList<PolicyJobStatRow>)rows);
             return this;
         }
 
@@ -87,14 +87,14 @@ public sealed class CompressionStuckConfirmReadTests
             return this;
         }
 
-        public Task<IReadOnlyList<CompressionJobStatRow>> Read(CancellationToken ct)
+        public Task<IReadOnlyList<PolicyJobStatRow>> Read(CancellationToken ct)
         {
             Calls++;
             Assert.True(_script.Count > 0, $"the read was asked a {Calls}th time with nothing scripted for it");
             var next = _script.Dequeue();
             return next is Exception ex
-                ? Task.FromException<IReadOnlyList<CompressionJobStatRow>>(ex)
-                : Task.FromResult((IReadOnlyList<CompressionJobStatRow>)next);
+                ? Task.FromException<IReadOnlyList<PolicyJobStatRow>>(ex)
+                : Task.FromResult((IReadOnlyList<PolicyJobStatRow>)next);
         }
     }
 
@@ -110,6 +110,22 @@ public sealed class CompressionStuckConfirmReadTests
         }
     }
 
+    /// <summary>
+    /// #3816: the read returns the whole pass now — the stuck list AND the census of every job it looked at
+    /// — because the evaluator's summary line and its <c>total_failures</c> arm are both about the jobs that
+    /// are fine. Every pin in THIS file is a claim about the confirm read's effect on the STUCK list, so they
+    /// all go through this projection rather than restating <c>.Stuck</c> twenty times.
+    /// </summary>
+    private static async Task<IReadOnlyList<StuckPolicyJob>> ReadStuckAsync(
+        Func<CancellationToken, Task<IReadOnlyList<PolicyJobStatRow>>> readRows,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        DateTime nowUtc,
+        ILogger? logger,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<Version?>>? readVersion = null) =>
+        (await TimescaleSupport.ReadStuckPolicyJobsAsync(
+            readRows, delay, nowUtc, logger, cancellationToken, readVersion)).Stuck;
+
     /* ---------------- the arm projection ---------------- */
 
     [Fact]
@@ -117,21 +133,21 @@ public sealed class CompressionStuckConfirmReadTests
     {
         /* The boolean the existing pins hold is the classifier's projection, so the two cannot disagree — the
            reason the classifier is the implementation and not a sibling copy of the same branches. */
-        foreach (var (row, expected) in new (CompressionJobStatRow Row, StuckCompressionJobArm Arm)[]
+        foreach (var (row, expected) in new (PolicyJobStatRow Row, StuckPolicyJobArm Arm)[]
         {
-            (NegInfinityScheduled(1), StuckCompressionJobArm.NextStartNegativeInfinity),
-            (Healthy(2), StuckCompressionJobArm.None),
-            (MidRun(3), StuckCompressionJobArm.None),
-            (HungRun(4), StuckCompressionJobArm.RunningPastBound),
+            (NegInfinityScheduled(1), StuckPolicyJobArm.NextStartNegativeInfinity),
+            (Healthy(2), StuckPolicyJobArm.None),
+            (MidRun(3), StuckPolicyJobArm.None),
+            (HungRun(4), StuckPolicyJobArm.RunningPastBound),
         })
         {
-            var arm = TimescaleSupport.ClassifyCompressionJob(
+            var arm = TimescaleSupport.ClassifyPolicyJob(
                 row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, s_now, out var reason);
-            var stuck = TimescaleSupport.IsCompressionJobStuck(
+            var stuck = TimescaleSupport.IsPolicyJobStuck(
                 row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, s_now, out var boolReason);
 
             Assert.Equal(expected, arm);
-            Assert.Equal(arm != StuckCompressionJobArm.None, stuck);
+            Assert.Equal(arm != StuckPolicyJobArm.None, stuck);
             Assert.Equal(reason, boolReason);
         }
     }
@@ -147,7 +163,7 @@ public sealed class CompressionStuckConfirmReadTests
         var reads = new ScriptedReads().Then(Healthy(1), Healthy(2), MidRun(3));
         var delay = new RecordedDelay();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, delay.Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         Assert.Empty(result);
@@ -163,7 +179,7 @@ public sealed class CompressionStuckConfirmReadTests
         var reads = new ScriptedReads().Then(HungRun(4), Healthy(1));
         var delay = new RecordedDelay();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, delay.Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         var job = Assert.Single(result);
@@ -184,12 +200,12 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(1), NegInfinityScheduled(2));
         var delay = new RecordedDelay();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, delay.Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, result.Count);
         Assert.Equal(2, reads.Calls);
-        Assert.Equal(new[] { TimescaleSupport.StuckCompressionConfirmDelay }, delay.Waits);
+        Assert.Equal(new[] { TimescaleSupport.StuckPolicyJobConfirmDelay }, delay.Waits);
     }
 
     /* ---------------- the confirm-read: what the second read decides ---------------- */
@@ -207,7 +223,7 @@ public sealed class CompressionStuckConfirmReadTests
         var delay = new RecordedDelay();
         var log = new CapturingTestLogger();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, delay.Wait, s_now, log, TestContext.Current.CancellationToken);
 
         Assert.Empty(result);
@@ -230,7 +246,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(7, "wait_stats"))
             .Then(NegInfinityScheduled(7, "wait_stats"));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         var job = Assert.Single(result);
@@ -249,7 +265,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(1))
             .Then(MidRun(1));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         Assert.Empty(result);
@@ -265,7 +281,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(HungRun(4), NegInfinityScheduled(1), NegInfinityScheduled(2), Healthy(3))
             .Then(HungRun(4), NegInfinityScheduled(1), Healthy(2), Healthy(3));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { 4L, 1L }, result.Select(r => r.JobId).ToArray());
@@ -281,7 +297,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(1), Healthy(2))
             .Then(NegInfinityScheduled(1), NegInfinityScheduled(2));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { 1L }, result.Select(r => r.JobId).ToArray());
@@ -301,7 +317,7 @@ public sealed class CompressionStuckConfirmReadTests
             .ThenThrow(new InvalidOperationException("connection reset by peer"));
         var log = new CapturingTestLogger();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, log, TestContext.Current.CancellationToken);
 
         var job = Assert.Single(result);
@@ -323,7 +339,7 @@ public sealed class CompressionStuckConfirmReadTests
         var delay = new RecordedDelay();
         var log = new CapturingTestLogger();
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, delay.Wait, s_now, log, TestContext.Current.CancellationToken);
 
         Assert.Empty(result);
@@ -347,7 +363,7 @@ public sealed class CompressionStuckConfirmReadTests
         }
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            TimescaleSupport.ReadStuckCompressionJobsAsync(reads.Read, CancelInsteadOfWaiting, s_now, null, cts.Token));
+            ReadStuckAsync(reads.Read, CancelInsteadOfWaiting, s_now, null, cts.Token));
     }
 
     /* ---------------- the pure merge, pinned directly ---------------- */
@@ -355,11 +371,11 @@ public sealed class CompressionStuckConfirmReadTests
     [Fact]
     public void ConfirmStuckCompressionJobs_NullConfirm_DropsEveryNegInfinityTrip_KeepsRunningPastBound()
     {
-        var first = TimescaleSupport.ClassifyStuckCompressionJobs(
+        var first = TimescaleSupport.ClassifyStuckPolicyJobs(
             new[] { HungRun(4), NegInfinityScheduled(1), NegInfinityScheduled(2) }, s_now);
         Assert.Equal(3, first.Count);
 
-        var merged = TimescaleSupport.ConfirmStuckCompressionJobs(first, confirm: null, s_now, logger: null);
+        var merged = TimescaleSupport.ConfirmStuckPolicyJobs(first, confirm: null, s_now, logger: null);
 
         Assert.Equal(new[] { 4L }, merged.Select(m => m.JobId).ToArray());
     }
@@ -370,8 +386,8 @@ public sealed class CompressionStuckConfirmReadTests
         /* The reported job is built from the CONFIRM pass's row — the later read is the one that stood. Today the
            two reasons are the same string; the pin is on which row is carried, using the hypertable name the two
            passes would only ever disagree on in a test. */
-        var first = TimescaleSupport.ClassifyStuckCompressionJobs(new[] { NegInfinityScheduled(1, "first") }, s_now);
-        var merged = TimescaleSupport.ConfirmStuckCompressionJobs(
+        var first = TimescaleSupport.ClassifyStuckPolicyJobs(new[] { NegInfinityScheduled(1, "first") }, s_now);
+        var merged = TimescaleSupport.ConfirmStuckPolicyJobs(
             first, new[] { NegInfinityScheduled(1, "confirm") }, s_now, logger: null);
 
         var job = Assert.Single(merged);
@@ -405,7 +421,7 @@ public sealed class CompressionStuckConfirmReadTests
         var reads = new ScriptedReads().Then(Healthy(1), HungRun(4));
         var version = new ScriptedVersion(new Version(2, 28, 1));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
 
         Assert.Single(result);
@@ -424,7 +440,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(7, "wait_stats"));
         var version = new ScriptedVersion(new Version(2, 28, 1));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
 
         var job = Assert.Single(result);
@@ -442,7 +458,7 @@ public sealed class CompressionStuckConfirmReadTests
             .Then(NegInfinityScheduled(7));
         var version = new ScriptedVersion(new Version(2, 26, 3));
 
-        var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+        var result = await ReadStuckAsync(
             reads.Read, new RecordedDelay().Wait, s_now, logger: null, TestContext.Current.CancellationToken, version.Read);
 
         var job = Assert.Single(result);
@@ -468,7 +484,7 @@ public sealed class CompressionStuckConfirmReadTests
                 .Then(NegInfinityScheduled(7));
             var log = new CapturingTestLogger();
 
-            var result = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+            var result = await ReadStuckAsync(
                 reads.Read, new RecordedDelay().Wait, s_now, log, TestContext.Current.CancellationToken, reader);
 
             var job = Assert.Single(result);
@@ -483,8 +499,8 @@ public sealed class CompressionStuckConfirmReadTests
     {
         /* The merge applies the version to the CONFIRM pass — the row that is carried — and the hung run, judged
            from the first pass, never sees it. */
-        var first = TimescaleSupport.ClassifyStuckCompressionJobs(new[] { HungRun(4), NegInfinityScheduled(1) }, s_now);
-        var merged = TimescaleSupport.ConfirmStuckCompressionJobs(
+        var first = TimescaleSupport.ClassifyStuckPolicyJobs(new[] { HungRun(4), NegInfinityScheduled(1) }, s_now);
+        var merged = TimescaleSupport.ConfirmStuckPolicyJobs(
             first, new[] { HungRun(4), NegInfinityScheduled(1) }, s_now, logger: null, new Version(2, 28, 1));
 
         Assert.Equal(2, merged.Count);
@@ -499,7 +515,7 @@ public sealed class CompressionStuckConfirmReadTests
     [Fact]
     public void ConfirmDelay_ClearsTheMeasuredEdges_AndIsSmallAgainstEveryCadenceItSitsInside()
     {
-        var delay = TimescaleSupport.StuckCompressionConfirmDelay;
+        var delay = TimescaleSupport.StuckPolicyJobConfirmDelay;
 
         /* Quoted measurements, not derived: the rig's whole run was ~7.5 ms end to end and its start edge
            ~3 ms; the production store's hourly no-op runs were 40–100 ms; a Windows backend start is realistically

@@ -979,7 +979,9 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
-        ["Compression-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
+           every policy family, so "Compression-job health" would have named a third of what it isolates. */
+        ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
@@ -1676,9 +1678,9 @@ public sealed class AlertReadFailureSurfaceTests
            looked adjacent and their single restart looked sufficient. */
         Assert.Equal(new[] { 1 }, Scan(
             """
-            var a = await ReadStuckCompressionJobsAsync(c, log, ct);
+            var a = await ReadStuckPolicyJobsAsync(c, log, ct);
             readClock.Restart();
-            await _selfAlerts!.EvaluateCompressionJobsAsync(a, ct);
+            await _selfAlerts!.EvaluatePolicyJobsAsync(a, ct);
             var b = await ReadJobCadenceReadingsAsync(c, log, ct);
             readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(b, ct);

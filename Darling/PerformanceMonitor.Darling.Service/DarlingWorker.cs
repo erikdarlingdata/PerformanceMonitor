@@ -519,7 +519,7 @@ public sealed class DarlingWorker : BackgroundService
        every s_compressionCheckInterval, pinned to :30 past the minute by TimescaleSupport.NextCompressionCheckUtc
        (#3575) so no steady-state sample lands on the :MM:00 instant the compression policies fire on. The
        first sample is deliberately left unpinned — a restart is when an operator is reading the log and wants
-       the store's job health now — and the confirm-read inside ReadStuckCompressionJobsAsync covers it like
+       the store's job health now — and the confirm-read inside ReadStuckPolicyJobsAsync covers it like
        every other sample. Fleet-level (one shared store), so it is a single field, not per-server. Since
        #3812 the same due time also fires the hourly retention re-evaluation
        (ReevaluateRetentionPoliciesAsync), AFTER the compression read so the :30 sample is not pushed by the
@@ -2322,7 +2322,7 @@ public sealed class DarlingWorker : BackgroundService
                across those instants until, on a production store, it sampled one 53 ms into a 63 ms run and
                paged. NextCompressionCheckUtc puts every steady-state sample at :30 past its minute instead,
                half the grid step from every policy's start in both directions. The read itself now confirms
-               a -infinity trip with a second read five seconds later (ReadStuckCompressionJobsAsync), so the
+               a -infinity trip with a second read five seconds later (ReadStuckPolicyJobsAsync), so the
                phase is hardening on top of the fix, not the fix. */
             if (DateTime.UtcNow >= _nextCompressionCheckUtc)
             {
@@ -5845,16 +5845,30 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The #1581 compression-job self-heal check (fleet-level, hourly, Timescale-only): read every stuck
-    /// COMPRESSION-policy job (<see cref="TimescaleSupport.ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>)
+    /// The #1581 policy-job self-heal check (fleet-level, hourly, Timescale-only): read every stuck POLICY
+    /// job (<see cref="TimescaleSupport.ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>)
     /// and hand them to the self-alert evaluator's re-arm-once/escalate machine, wired to
     /// <see cref="TimescaleSupport.TryRearmJobAsync"/> on the SAME open connection. One stuck job whose
-    /// <c>next_start</c> went <c>-infinity</c> silently halts the store's archival tier — the field incident — so
+    /// <c>next_start</c> went <c>-infinity</c> silently halts a whole tier of the store — the field incident — so
     /// this makes it visible AND self-heals it. Failure-isolated at the worker level too (the connection open is
     /// OUTSIDE the evaluator's own isolation): a store hiccup logs and skips this check, never aborting the sweep —
     /// mirroring the purge / disk-check isolation.
     ///
-    /// <para><b>The stuck-job read may hold this method for <see cref="TimescaleSupport.StuckCompressionConfirmDelay"/>
+    /// <para><b>The method KEEPS its #1581 name while the check it performs is no longer compression-only
+    /// (#3816), and that is deliberate.</b> Its name and its POSITION on this tick are pinned as source text
+    /// by three sibling issues' tests — <c>RefreshCeilingStalenessTests</c> holds the signature,
+    /// <c>RetentionReevaluationTests</c> holds that #3812's retention re-evaluation is awaited AFTER it, and
+    /// <c>TimescaleAvailabilityReprobeTests</c> holds that #3815's re-probe runs BEFORE it and outside the
+    /// availability gate. Those three facts are the tick's ordering contract; renaming the method to match
+    /// this issue's vocabulary would rewrite all three pins to say the same thing about a different
+    /// identifier, and the ordering is what they are for.</para>
+    ///
+    /// <para>What the widening means here: compression, continuous-aggregate refresh and retention policies
+    /// all reach the same machine on the same pass, banded per family by the evaluator (different metric
+    /// name, severity and text each) — and every pass now writes one unconditional summary line, so a tick
+    /// that found nothing can still be shown to have run.</para>
+    ///
+    /// <para><b>The stuck-job read may hold this method for <see cref="TimescaleSupport.StuckPolicyJobConfirmDelay"/>
     /// (#3575)</b>, and only on a pass where a job's <c>-infinity</c> arm tripped: the read re-executes its query
     /// after that delay and reports the job only if the arm still trips, because TimescaleDB's view assembles
     /// <c>next_start</c> and <c>job_status</c> from independent sources and reads the dead-job shape for a few
@@ -5955,11 +5969,17 @@ LIMIT 1";
 
             readClock.Restart();
 
-            var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
+            /* #3816: one read, every policy family this product owns — compression (unscoped, as since
+               #1581), plus collect-scoped continuous-aggregate refresh and retention. Same statement, same
+               confirm-read, same hourly cadence and the SAME connection: the widening is in the WHERE and in
+               what the evaluator does with the family, not in what this tick costs. The reading carries the
+               stuck list AND the census of every job it looked at, because the unconditional summary line
+               and the total_failures arm are both about the jobs that are fine. */
+            var policyJobs = await TimescaleSupport.ReadStuckPolicyJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
             readClock.Restart();
-            await _selfAlerts!.EvaluateCompressionJobsAsync(
-                stuckJobs,
+            await _selfAlerts!.EvaluatePolicyJobsAsync(
+                policyJobs,
                 jobId => TimescaleSupport.TryRearmJobAsync(connection, jobId, _logger, cancellationToken),
                 cancellationToken);
             readClock.Restart();
