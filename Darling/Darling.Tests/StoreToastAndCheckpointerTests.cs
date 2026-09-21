@@ -971,7 +971,18 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
 
         /* The #3783 shape: half the rows go, VACUUM runs, the file keeps its pages. */
         await Exec(connection, $"DELETE FROM {dim} WHERE get_byte({PayloadDimensions.DigestColumn}, 0) % 2 = 0", ct);
+        /* The proxy read below compares n_live_tup to n_dead_tup on the TOAST relation, and those two counters
+           reach pg_stat_all_tables by different roads: VACUUM reports its reset straight into shared stats,
+           while the DELETE's dead-tuple increment sits in this backend's PENDING stats until the next report,
+           which PostgreSQL throttles to once per second (PGSTAT_MIN_INTERVAL). A fast DELETE → VACUUM therefore
+           lets the reset land FIRST and the increment SECOND, and the proxy reads ~64 % live on a freshly vacuumed
+           file — which is not the lie the rung rejected but a stats race, and it failed this assertion on two
+           consecutive CI runs of one PR (#3846) at the same 64.1. pg_stat_force_next_flush() (PostgreSQL 15+,
+           the store's floor) makes the DELETE's pending counters report at the next opportunity, ahead of the
+           VACUUM; the second call after VACUUM flushes anything the vacuum itself queued. */
+        await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
         await Exec(connection, $"VACUUM {dim}", ct);
+        await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
 
         var t1 = t0.AddHours(1);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t1, null, ct);
