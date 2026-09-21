@@ -50,6 +50,7 @@ public sealed class TimescaleAvailabilityReprobeTests
     private const string ReprobeCall = "await ReprobeTimescaleAvailabilityAsync(stoppingToken);";
     private const string CompressionCall = "await EvaluateCompressionJobHealthAsync(stoppingToken);";
     private const string RetentionCall = "await ReevaluateRetentionPoliciesAsync(stoppingToken);";
+    private const string ConvergenceCall = "await ConvergeStoreObjectsAsync(stoppingToken);";
     private const string TickGuard = "if (DateTime.UtcNow >= _nextCompressionCheckUtc)";
     private const string Stamp = "_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);";
     private const string Latch = "_timescaleAvailable";
@@ -147,6 +148,9 @@ public sealed class TimescaleAvailabilityReprobeTests
         Assert.Equal(1, CountOf(code, Stamp));
         Assert.Equal(1, CountOf(code, CompressionCall));
         Assert.Equal(1, CountOf(code, RetentionCall));
+        /* #3817's store-object convergence is the fourth tenant, and the count is here for the same reason
+           the other three are: a second call site is a second pass per hour. */
+        Assert.Equal(1, CountOf(code, ConvergenceCall));
 
         /* The latch is gone from the tick's OUTER condition; it now sits one level in. */
         Assert.DoesNotContain(Latch + " && DateTime.UtcNow >= _nextCompressionCheckUtc", code, StringComparison.Ordinal);
@@ -156,10 +160,13 @@ public sealed class TimescaleAvailabilityReprobeTests
         var reprobeAt = code.IndexOf(ReprobeCall, StringComparison.Ordinal);
         var compressionAt = code.IndexOf(CompressionCall, StringComparison.Ordinal);
         var retentionAt = code.IndexOf(RetentionCall, StringComparison.Ordinal);
+        var convergenceAt = code.IndexOf(ConvergenceCall, StringComparison.Ordinal);
         Assert.True(
-            guardAt > 0 && stampAt > guardAt && reprobeAt > stampAt && compressionAt > reprobeAt && retentionAt > compressionAt,
-            "the tick runs: due-time guard, stamp, availability re-probe, compression read, retention pass - in "
-          + $"that order (got {guardAt}, {stampAt}, {reprobeAt}, {compressionAt}, {retentionAt})");
+            guardAt > 0 && stampAt > guardAt && reprobeAt > stampAt && compressionAt > reprobeAt && retentionAt > compressionAt
+            && convergenceAt > retentionAt,
+            "the tick runs: due-time guard, stamp, availability re-probe, compression read, retention pass, "
+          + "store-object convergence - in that order (got "
+          + $"{guardAt}, {stampAt}, {reprobeAt}, {compressionAt}, {retentionAt}, {convergenceAt})");
 
         /* And the stamp itself is not behind the latch, which is the cadence claim proper. The instrument
            check comes first for the reason it does above: "no guard requires the latch" is satisfied just as
@@ -181,7 +188,8 @@ public sealed class TimescaleAvailabilityReprobeTests
            stamp: the start-path block carries the same text thousands of lines earlier. */
         var flagGateAt = code.IndexOf("if (" + Latch + ")", stampAt, StringComparison.Ordinal);
         Assert.True(flagGateAt > reprobeAt && flagGateAt < compressionAt,
-            "the compression read and the retention pass must still be behind the latch, one level in from the tick");
+            "the compression read, the retention pass and the store-object convergence must still be behind the "
+          + "latch, one level in from the tick");
     }
 
     /// <summary>
@@ -214,10 +222,11 @@ public sealed class TimescaleAvailabilityReprobeTests
         Assert.True(probeAt > 0, "the re-probe must call TryEnableAsync on its own connection with no logger of its own");
         Assert.DoesNotContain("connection", body[(probeAt + Probe.Length)..], StringComparison.Ordinal);
 
-        /* And TryEnableAsync is the ONLY thing this method calls on TimescaleSupport. The setup sequence -
-           conversion, compression, aggregates, retention - stays on the start path (that is #3817's subject),
-           and the recovery line below tells an operator exactly that, so a second call here would make the
-           line a lie as well as re-introducing the #1922 shape. */
+        /* And TryEnableAsync is the ONLY thing this method calls on TimescaleSupport. Since #3817 the setup
+           sequence - conversion, compression, aggregates, tuning - runs on this same tick, but from its OWN
+           tenant (ConvergeStoreObjectsAsync) on its OWN connection and budget, not from inside the probe:
+           this method's whole job is the latch, and a second call here would re-introduce the #1922 shape on
+           the one connection in the process most likely to have just been killed by a CREATE EXTENSION. */
         var touched = Regex.Matches(body, @"TimescaleSupport\.(\w+)").Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { "TryEnableAsync" }, touched);
 
@@ -300,16 +309,28 @@ public sealed class TimescaleAvailabilityReprobeTests
         var evaluators = CountOf(gated, "_selfAlerts!.Evaluate");
         var named = Regex.Matches(rawBody[rawBody.IndexOf(Recovery, StringComparison.Ordinal)..], @"\(#\d{4}\)").Count;
         Assert.True(
-            evaluators == 3 && named == evaluators + 1,
+            evaluators == 3 && named == evaluators + 2,
             $"the health check the latch gates runs {evaluators} self-alert evaluators and the recovery line "
-          + $"names {named - 1} of them beside its own issue number. The line tells an operator what has been "
-          + "off since the start; a check that gained an evaluator without the line gaining its number leaves "
-          + "them believing less was lost than was");
+          + $"names {named - 2} of them beside its own issue number and the convergence tenant's. The line tells "
+          + "an operator what has been off since the start; a check that gained an evaluator without the line "
+          + "gaining its number leaves them believing less was lost than was");
 
-        /* The two sentences the line must not lose: that no restart was needed, and that the SETUP sequence
-           still is not run here - the second is what keeps the line honest until #3817 lands. */
+        /* The two numbers that are NOT an evaluator's, named so the arithmetic above cannot be satisfied by
+           any two: the probe's own issue, and #3817's convergence pass — which is what the line now points
+           an operator at in place of the "still applied on the start path only" sentence it used to carry. */
+        Assert.Contains("(#3815)", rawBody, StringComparison.Ordinal);
+        Assert.Contains("(#3817)", rawBody, StringComparison.Ordinal);
+
+        /* The sentence the line must not lose: that no restart was needed. Its former companion - "hypertable
+           conversion, compression policies, continuous aggregates and retention policies are still applied on
+           the start path only" - was TRUE when #3815 shipped and is now FALSE: #3817 put the convergence pass
+           on this same tick, immediately behind the latch this probe just flipped, so the recovery no longer
+           leaves anything for the next start. The banned phrase is asserted absent rather than quietly
+           deleted, because that sentence was load-bearing for a real operator decision (restart now, or
+           wait) and its removal is the deliverable of the issue that removed it. */
         Assert.Contains("WITHOUT a restart (#3815)", rawBody, StringComparison.Ordinal);
-        Assert.Contains("are still applied on the start path only", rawBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("are still applied on the start path only", rawBody, StringComparison.Ordinal);
+        Assert.Contains("#3817", rawBody, StringComparison.Ordinal);
     }
 
     /// <summary>The <c>if</c> conditions whose braces enclose <paramref name="index"/>, outermost first.

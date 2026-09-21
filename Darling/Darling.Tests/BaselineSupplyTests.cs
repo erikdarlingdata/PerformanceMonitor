@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -719,12 +719,21 @@ public class BaselineSupplyTests
     {
         var worker = ReadWorkerSource();
 
+        /* #3817 moved this call into the shared convergence list both the start path and the hourly
+           store-maintenance tick walk, so the worker names it once as a LIST STEP and once as the ungated
+           SEGMENT that runs it. The mutation check the summary above promises still bites: delete the step
+           from the list and the first assertion reds; move the segment call inside the TimescaleDB gate and
+           the position assertion reds. The reachability property is asserted on the segment call, because
+           that is what decides which paths run it.
+           The hourly half is a strict addition to this guarantee, not a replacement — a relation that goes
+           missing while the service runs is now filled within the hour instead of at the next restart — and
+           it is pinned in StoreObjectConvergenceTests. */
         Assert.Contains("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", worker, StringComparison.Ordinal);
 
-        /* Not inside `if (_timescaleAvailable)` and not inside its negation — the call site must be reachable
-           on every path. Checked by position: it has to sit AFTER the TimescaleDB block's catch, which is the
-           only place all three gap routes have converged. */
-        var callAt = worker.IndexOf("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", StringComparison.Ordinal);
+        /* Not inside `if (_timescaleAvailable)` and not inside its negation — the segment that runs it must be
+           reachable on every path. Checked by position: it has to sit AFTER the TimescaleDB block's catch,
+           which is the only place all three gap routes have converged. */
+        var callAt = worker.IndexOf("StoreObjectConvergenceStage.Ungated, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
         Assert.True(plainModeAt > 0 && callAt > plainModeAt,
             "the fallback must run after the TimescaleDB block, on every path — not inside it");

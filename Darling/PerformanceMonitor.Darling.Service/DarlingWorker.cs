@@ -158,6 +158,230 @@ public sealed class DarlingWorker : BackgroundService
        hour retries, and the latch stays exactly where it was meanwhile. */
     private static readonly TimeSpan s_timescaleReprobeBudget = TimeSpan.FromSeconds(10);
 
+    /* ─────────────── store-object convergence (#3817) ─────────────── */
+
+    /// <summary>
+    /// Which segment of the start path a convergence step belongs to, and therefore which connection runs it
+    /// and where it sits in the ONE order both callers use.
+    ///
+    /// <para>The segments exist because the start path interleaves three things that are NOT convergence steps
+    /// between the ensures, and two of them have a load-bearing position: the superseded-rollup coverage log
+    /// (#3653 Q12) must follow the aggregate ensure, and the materialization-hole repair (#3653 Q10) is
+    /// LAUNCHED after that ensure and before the compression ensure so the nightly compression pass meets a
+    /// relation the repair has already closed. Splitting the list by segment rather than re-listing the steps
+    /// around them is what keeps the runtime order byte-identical to what it was while leaving exactly one
+    /// list: the segments are FILTERS over <see cref="s_storeObjectConvergence"/>, so a step cannot be in one
+    /// caller's order and not the other's.</para>
+    /// </summary>
+    internal enum StoreObjectConvergenceStage
+    {
+        /// <summary>Inside the TimescaleDB gate, before the hole repair is launched — the conversion,
+        /// compression, reshape, refresh-converge and aggregate ensures.</summary>
+        Timescale,
+
+        /// <summary>Inside the TimescaleDB gate, after the hole repair is launched — the dedup-index sweep and
+        /// the aggregate-compression ensure.</summary>
+        TimescaleAfterRepairLaunch,
+
+        /// <summary>The UNGATED block: the baseline relations, on every store shape. Deliberately not behind
+        /// the availability latch — a relation goes missing three ways and only one of them is "no
+        /// TimescaleDB" (the reasoning is at the start path's call site and in <c>BaselineSupplyTests</c>).</summary>
+        Ungated,
+
+        /// <summary>The composer/alerting performance tuning: results-invariant covering indexes and the
+        /// per-table autovacuum overrides, on every store shape.</summary>
+        Tuning,
+    }
+
+    /// <summary>
+    /// Whether a step's return value counts CHANGES it made or OBJECTS it found in place — the difference
+    /// between a number the summary line may report as "changed" and one it must not.
+    ///
+    /// <para>This is a property of the methods as they are written, not a policy: the converge-shaped ones
+    /// (<see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/>,
+    /// <see cref="TimescaleSupport.ConvergeContinuousAggregateRefreshAsync"/>,
+    /// <see cref="TimescaleSupport.DropStaleContinuousAggregatesAsync"/>,
+    /// <see cref="TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync"/>,
+    /// <see cref="TimescaleSupport.EnsureBaselineFallbackViewsAsync"/>,
+    /// <see cref="TimescaleSupport.DropRetiredBaselineAggregatesAsync"/>) return how many objects they altered,
+    /// dropped or filled, which is zero on a converged store. The ensure-shaped ones
+    /// (<see cref="TimescaleSupport.ConvertToHypertablesAsync"/>,
+    /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/>,
+    /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/>,
+    /// <see cref="TimescaleSupport.EnsureAggregateCompressionAsync"/>,
+    /// <see cref="PgTableTuning.ApplyAsync"/>) return how many objects are in place AFTERWARDS — 51 of 51
+    /// hypertables on every pass, changed or not — because they were written to answer "is the store
+    /// converged", which is the question a start-path log line asks. Reporting those as changes would make
+    /// every hourly line claim the store had just been rebuilt.</para>
+    ///
+    /// <para>So <c>InPlace</c> steps contribute to the step count and to the failure count and NEVER to the
+    /// changed count, and the summary line says so rather than implying a census it cannot take. The honest
+    /// alternative — teaching six ensures to return deltas — is a wider change than this issue, and the
+    /// per-object INFORMATION lines those methods already write are where a change on one of them is
+    /// visible.</para>
+    /// </summary>
+    internal enum StoreObjectChangeSignal
+    {
+        /// <summary>The returned count is a number of objects CHANGED this pass; zero means nothing moved.</summary>
+        Delta,
+
+        /// <summary>The returned count is a number of objects IN PLACE afterwards, so a change cannot be read
+        /// off it. Never counted as changed.</summary>
+        InPlace,
+    }
+
+    /// <summary>One store-object convergence step: what it is called in the summary line, which segment runs
+    /// it, how to read its return value, and the call itself.</summary>
+    internal sealed record StoreObjectConvergenceStep(
+        string Name,
+        StoreObjectConvergenceStage Stage,
+        StoreObjectChangeSignal Signal,
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> RunAsync);
+
+    /// <summary>
+    /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
+    /// store-maintenance tick run them (#3817). The start path runs it segment by segment
+    /// (<see cref="StoreObjectConvergenceStage"/>) so the three non-convergence steps interleaved with it keep
+    /// their positions; the tick runs the whole thing through
+    /// <see cref="ConvergeStoreObjectsAsync"/>. Two callers, ONE list — which is the point of the list, because
+    /// the failure this closes is a second caller whose order drifts from the first's, and the order here is
+    /// load-bearing in four places (each named on the step).
+    ///
+    /// <para><b>What is NOT here, and why.</b> Five things the start path does inside the same blocks are
+    /// deliberately start-path-only, and each is a different reason rather than one rule:</para>
+    /// <list type="bullet">
+    /// <item><description><see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> — already a tenant of this
+    /// tick under #3812 (<see cref="ReevaluateRetentionPoliciesAsync"/>), with a pass distinction the ensures
+    /// here do not have (a hold that was already a hold is Debug, an arm is Information). Putting it in this
+    /// list would run the sweep TWICE an hour and double every transition line it writes.</description></item>
+    /// <item><description><see cref="TimescaleSupport.LogSupersededHourlyRollupCoverageAsync"/> — an
+    /// INSTRUMENT, not an ensure: it changes nothing, and it writes one Information line per superseded pair.
+    /// Hourly that is a wall of no-op lines on a healthy store, which is the objection #3812's own issue
+    /// raised against an hourly sweep; the hand-over it reports moves over days, so a line per start is the
+    /// grain it is worth reading at.</description></item>
+    /// <item><description>The baseline backfill (#1757) and the materialization-hole repair (#3653 Q10) — both
+    /// BULK materializations, both deliberately launched-not-awaited on the start path for that reason, and
+    /// both already coverage-gated so they no-op once caught up. The issue asks for exactly this exclusion: a
+    /// periodic pass must not launch a second one over a first that is still running, and a re-run's cost
+    /// scales with history rather than with the catalog.</description></item>
+    /// <item><description><see cref="DarlingModuleMap"/>'s table ensure and refresh — the refresh is a DATA
+    /// upsert rather than a store object and it ALREADY has a periodic home (the daily purge tick), and the
+    /// table ensure is inseparable from it here because the refresh is gated on the bool it returns. A
+    /// module_map table that failed to create is also the one item on this list whose absence is not silent:
+    /// the daily refresh warns about it every day.</description></item>
+    /// </list>
+    ///
+    /// <para><b>Every step here was read for idempotence rather than assumed idempotent</b>, and the verdicts
+    /// are on the steps. The two that are worth an operator's attention: the compression ENABLE statements
+    /// (<c>ALTER TABLE ... SET (timescaledb.compress ...)</c>, inside
+    /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) are re-executed on every pass rather
+    /// than skipped under a catalog check, so those two steps are the pass's only unconditional DDL; they take
+    /// a brief lock on the hypertable's parent and nothing else. That is measured in the PR body rather than
+    /// asserted here, and it is why the summary line carries an elapsed.</para>
+    /// </summary>
+    private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =
+    {
+        /* if_not_exists => true on create_hypertable; migrate_data has nothing to move on a table that is
+           already a hypertable. A catalog check per table on a converged store. */
+        new("hypertable conversion", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            (connection, logger, ct) => TimescaleSupport.ConvertToHypertablesAsync(connection, logger, ct)),
+
+        /* The compression ENABLE is unconditional DDL (see the class remark); add_compression_policy's
+           if_not_exists returns -1 for a policy that exists. */
+        new("compression policies", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct)),
+
+        /* collection_log is outside the collector catalog, so the two steps above never reach it; same three
+           idempotent statements. */
+        new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
+
+        /* #1778: AFTER both compression steps, so it covers collection_log in the same pass. Selects only
+           policies whose cadence or phase DIFFERS — no rows, no DDL, on a converged store. */
+        new("compression schedule converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergeCompressionScheduleAsync(connection, logger, ct)),
+
+        /* BEFORE the aggregate ensure: drops old-shape aggregates so the ensure rebuilds them in the
+           composer-dimension shape. Probes information_schema.columns first; no-op once reshaped. */
+        new("stale aggregate reshape", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.DropStaleContinuousAggregatesAsync(connection, logger, ct)),
+
+        /* #3012, and this order is MEASURED rather than preferred: add_continuous_aggregate_policy raises
+           22023 against a policy whose window differs instead of skipping like its compression and retention
+           siblings, so the converge must precede the ensure or the ensure fails per-aggregate on every
+           already-deployed store. Alters only policies that differ. */
+        new("aggregate refresh converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, logger, ct)),
+
+        /* CREATE MATERIALIZED VIEW IF NOT EXISTS per aggregate plus its refresh policy (a quiet -1 once the
+           converge above has made the windows match). THE step the issue is loudest about: its per-aggregate
+           failure isolation is what leaves one rollup family missing on an otherwise healthy store. */
+        new("continuous aggregates", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            (connection, logger, ct) => TimescaleSupport.EnsureContinuousAggregatesAsync(connection, logger, ct)),
+
+        /* #3597: AFTER the aggregates exist. A catalog read that finds nothing on a store already in the
+           cheap shape, and a lock-timeout'd transaction per index when it finds one. */
+        new("dedup materialization indexes", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(connection, logger, ct)),
+
+        /* #3581 (and #3620's chunk-width ensure inside it): AFTER the aggregates exist. One state read, then
+           an ALTER only where compression is off, a policy only where none exists and a converge only where
+           values differ — nothing on a converged store. */
+        new("aggregate compression", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.InPlace,
+            (connection, logger, ct) => TimescaleSupport.EnsureAggregateCompressionAsync(connection, logger, ct)),
+
+        /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
+           could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a
+           TIME-dependent verdict: today it flips only on a restart, and this is the step that makes "drops
+           about five days after the successor arrives" true without one. */
+        new("retired baseline relations", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, logger, ct)),
+
+        /* #1757: probe-then-create per relation, and it NEVER touches an existing one (a continuous aggregate
+           is also a relkind='v' view, so an unconditional CREATE OR REPLACE VIEW here would destroy a
+           materialization). The second step the issue is loudest about: a gap here is one anomaly family
+           silently returning nothing. */
+        new("baseline fallback views", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, logger, ct)),
+
+        /* #3573 and the composer's covering indexes: CREATE INDEX IF NOT EXISTS (a catalog check) and the
+           per-table autovacuum overrides, plus the catalog-FILTERED hypertable insert-tuning sweep, which
+           finds nothing once every hypertable carries the reloption. Wrapped whole rather than per-statement
+           at its own call site today, which the issue names: one failure costs every index in the pass — so
+           on this cadence the next hour retries it, which is the change. */
+        new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct)),
+    };
+
+    /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
+    /// connections still produce ONE summary line.</summary>
+    internal sealed class StoreObjectConvergenceTally
+    {
+        public int Steps { get; set; }
+
+        public List<string> Changed { get; } = new();
+
+        public List<string> Failed { get; } = new();
+    }
+
+    /* The whole-pass budget for the hourly store-object convergence (#3817), the #2327 shape and the same
+       reasoning as the retention re-evaluation's five minutes beside it: the pass is AWAITED on the serial
+       sweep loop, and every statement inside it carries TimescaleSupport's 300 s bulk-setup CommandTimeout,
+       which is right for a first hypertable conversion on an adopted store and wrong for something the fleet
+       loop waits behind. Twelve steps over fifty-one hypertables and twenty aggregates is a few hundred
+       statements in the worst case, so the per-statement deadline bounds nothing useful here; one linked
+       budget for the pass does.
+
+       Five minutes rather than the retention pass's five for a different reason, which is why the number is
+       stated rather than shared: on a CONVERGED store this pass is catalog reads and two lock-brief ALTERs,
+       measured sub-second on a 2.28.1 rig, so the budget is not sizing the normal case at all — it is the
+       bound on the pass that arrives on a store which is NOT converged, where a first aggregate CREATE or a
+       first hypertable conversion is real work. That pass is the one a start path would have spent minutes on
+       too, and cutting it short costs only the steps it had not reached: they are idempotent, so the next
+       hour resumes at the one that was interrupted rather than redoing the ladder. */
+    private static readonly TimeSpan s_storeObjectConvergenceBudget = TimeSpan.FromMinutes(5);
+
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
        series exists to forecast weeks out, and the compression tier only changes state once a day per
        chunk — so hourly matches the compression check it rides beside, and each run is a handful of
@@ -1460,39 +1684,37 @@ public sealed class DarlingWorker : BackgroundService
            sweep; same lifetime, same drain. */
         Task? holeRepair = null;
 
+        /* #3817: the convergence pass's clock and tally, both declared HERE rather than in the TimescaleDB
+           block, because the pass spans four segments across three connections and two of those segments run
+           on a plain-PostgreSQL store where the block below never opens its gate. The clock covers every
+           segment including the connection opens, which is where a slow store actually spends this pass; the
+           tally is what makes the four segments one line instead of four. */
+        var startupConvergenceClock = Stopwatch.StartNew();
+        var startupConvergence = new StoreObjectConvergenceTally();
+
         try
         {
             await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
             _timescaleAvailable = await TimescaleSupport.TryEnableAsync(timescaleConnection, _logger, stoppingToken);
             if (_timescaleAvailable)
             {
-                await TimescaleSupport.ConvertToHypertablesAsync(timescaleConnection, _logger, stoppingToken);
-                await TimescaleSupport.ApplyCompressionPolicyAsync(timescaleConnection, _logger, stoppingToken);
-                await TimescaleSupport.EnsureCollectionLogHypertableAsync(timescaleConnection, _logger, stoppingToken);
+                /* #3817: the store-object ensures that the start path and the hourly store-maintenance tick
+                   BOTH run now come from ONE list (s_storeObjectConvergence), walked here segment by segment
+                   so the three non-convergence steps interleaved below keep the positions their own issues
+                   argued for. Every step, the four load-bearing ordering constraints among them, each step's
+                   idempotence verdict and the five things deliberately left start-path-only are documented on
+                   that list. What stood here was eleven await lines; this is the same eleven calls in the same
+                   order, READ off the list rather than restated, because the defect #3817 closes is precisely
+                   a second caller whose order drifts from this one's — and the only way two callers cannot
+                   drift is for there to be one order.
 
-                /* #1778: the two calls above carry the compression tick on the CREATE, but if_not_exists makes
-                   that a no-op against a policy this store already has — so a store that ever ran an older
-                   build keeps TimescaleDB's 12-hour default forever and its newest closed chunk stays
-                   uncompressed for up to half a day. This retunes the existing policies. AFTER both, so it
-                   covers collection_log (outside the collector catalog) in the same pass; a no-op on every
-                   start after the first, since it only selects policies whose interval differs. */
-                await TimescaleSupport.ConvergeCompressionScheduleAsync(timescaleConnection, _logger, stoppingToken);
-                // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
-                // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
-                await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
-                /* #3012: the refresh-window converge, and it runs BEFORE the ensure rather than after it —
-                   which is a measured ordering requirement, not a preference. add_continuous_aggregate_policy
-                   does NOT behave like its compression and retention siblings: against a policy whose window
-                   DIFFERS, if_not_exists => true does not return -1, it raises 22023 "refresh interval
-                   overlaps with an existing continuous aggregate policy". So on any store that ever ran an
-                   older build, the ensure below would fail per-aggregate on all thirteen hourly views and
-                   under-report how many are ready, while the policies stayed on the 3-day window. Converging
-                   first leaves the ensure looking at policies that already match, which is the quiet -1 it
-                   was written for. Only hourly policies, only ones that DIFFER, so the daily tier keeps its
-                   3-day window and a settled store is a no-op. */
-                await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(timescaleConnection, _logger, stoppingToken);
-
-                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                   The tally accumulates across all four segments and all three connections, so a start writes
+                   ONE "Store object convergence:" line (after the tuning block below) rather than one per
+                   segment, and the hourly pass writes the same line in the same shape. The per-object
+                   INFORMATION lines each ensure writes are unchanged and still land here on the start path,
+                   which is where an operator reads them. */
+                await RunStoreObjectConvergenceSegmentAsync(
+                    timescaleConnection, StoreObjectConvergenceStage.Timescale, startupConvergence, stoppingToken);
 
                 /* #3653 (Q12): one line per superseded hourly rollup — where the interval-honest successor's
                    materialized floor stands against the legacy's and against the hourly tier's horizon — so the
@@ -1515,25 +1737,14 @@ public sealed class DarlingWorker : BackgroundService
                    Drained with the command loop at shutdown. */
                 holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
 
-                /* #3597: AFTER the aggregates exist and BEFORE compression, take the eleven per-column group
-                   indexes off the interval-dedup materialization on any store whose aggregate predates
-                   create_group_indexes = false on its CREATE. Nothing reads them, and every hourly refresh paid
-                   twelve index inserts per re-materialized row for them — measured at 4.3x the WAL per bucket.
-                   Before compression so the nightly pass compresses a relation already without them. Its own
-                   catalog read, its own per-index isolation under a lock timeout that yields to a refresh in
-                   flight, its own summary line; a no-op on every start after the first. */
-                await TimescaleSupport.EnsureIntervalDedupMaterializationIndexesAsync(timescaleConnection, _logger, stoppingToken);
-
-                /* #3581: AFTER the aggregates exist, put their materializations on the compression ladder the raw
-                   tier has been on since the archival tier existed — none of the twenty ever was, and on the
-                   largest store they were 235 GiB of a 415 GiB database, larger than the 9x-compressed raw they
-                   roll up. Enables compression per materialization, attaches a once-a-day policy per aggregate
-                   on a daily band off the hourly phase grid (one aggregate per hour at :35Z), and stages the
-                   first runs one aggregate per night, largest first, so the backlog pass on an existing store
-                   is one bounded relation a night. The raw compression converge above skips these jobs by name
-                   or it would retune them to the hourly tick. Idempotent under the catalog, failure-isolated
-                   per aggregate, and a no-op on every start after the first. */
-                await TimescaleSupport.EnsureAggregateCompressionAsync(timescaleConnection, _logger, stoppingToken);
+                /* #3817 segment two: the ensures that must run AFTER the hole repair is LAUNCHED — #3597's
+                   dedup-index sweep and #3581's aggregate compression (which carries #3620's chunk-width
+                   ensure inside it). Both need the aggregates to exist, and the repair's comment above places
+                   itself ahead of both deliberately; splitting the walk here is what preserves that without
+                   giving the hole repair a position in a list of idempotent ensures it is not one of. Same
+                   list, same tally, next slice. */
+                await RunStoreObjectConvergenceSegmentAsync(
+                    timescaleConnection, StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, startupConvergence, stoppingToken);
 
                 /* AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
                    history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958). The
@@ -1584,8 +1795,12 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
-            await TimescaleSupport.DropRetiredBaselineAggregatesAsync(fallbackConnection, _logger, stoppingToken);
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(fallbackConnection, _logger, stoppingToken);
+            /* #3817: segment three of the one convergence list — the two baseline steps, in the same order,
+               off the same list, so the hourly pass runs them too. The UNGATED property is a property of this
+               CALL SITE (after the TimescaleDB block's catch, on every path), not of the list: the steps are
+               tagged Ungated and the hourly pass runs them on its own connection for the same reason. */
+            await RunStoreObjectConvergenceSegmentAsync(
+                fallbackConnection, StoreObjectConvergenceStage.Ungated, startupConvergence, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1604,9 +1819,18 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
-            await PgTableTuning.ApplyAsync(tuningConnection, _logger, stoppingToken);
+            /* #3817: segment four — the tuning pass, off the same list. The whole-block wrap the issue names
+               (one failure costing every index in the pass) is unchanged HERE and unchanged on the hourly
+               pass, because it is inside PgTableTuning.ApplyAsync's own per-statement isolation rather than
+               at this call site; what changes is that a pass which failed is retried within the hour instead
+               of at the next restart. */
+            await RunStoreObjectConvergenceSegmentAsync(
+                tuningConnection, StoreObjectConvergenceStage.Tuning, startupConvergence, stoppingToken);
             // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
             // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
+            /* NOT a convergence-list step (#3817): the refresh is a DATA upsert that already has a periodic
+               home on the daily purge tick, and the table ensure is inseparable from it here because the
+               refresh is gated on the bool it returns. */
             if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
             {
                 await DarlingModuleMap.RefreshAsync(tuningConnection, _logger, stoppingToken);
@@ -1616,6 +1840,16 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
         }
+
+        /* #3817: the ONE line this start's convergence pass writes, UNCONDITIONALLY — the #3756 discipline,
+           and the same line the hourly pass writes (LogStoreObjectConvergence is the single owner of the
+           template, so the two cadences cannot drift into two shapes). A start that changed nothing still
+           writes it, with zeros, because a pass whose negative outcome is indistinguishable from its
+           non-execution has not reported: before this, "did the aggregates get ensured on this start" was
+           answered by reading eleven per-object lines and inferring the absence of a twelfth. Written here
+           rather than inside the try blocks so it reports every segment including the ones that threw —
+           a segment's catch above is what makes its steps' absence visible in this count. */
+        LogStoreObjectConvergence(startupConvergence, startupConvergenceClock.ElapsedMilliseconds, startup: true);
 
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
            DuckDB seeding) so the first cycle after a service restart produces real deltas instead
@@ -2383,6 +2617,23 @@ public sealed class DarlingWorker : BackgroundService
                        deliberately — three tenants do not justify the indirection, and a list would hide the
                        order the phase argument depends on. */
                     await ReevaluateRetentionPoliciesAsync(stoppingToken);
+
+                    /* #3817: the FOURTH tenant, and the one that signs the contract the comment above spells
+                       out — its own method, its own catch-all, one awaited statement, LAST. The store-object
+                       convergence pass: every idempotent ensure the start path runs, re-run here, so one
+                       failed item heals within the hour instead of at the next restart. It is last for the
+                       same #3575 reason the retention pass is third: the compression read must sample the job
+                       catalog at :30 past the minute, and this pass — the heaviest of the four on a store
+                       that is NOT converged — must not be ahead of it pushing that sample toward the :MM:00
+                       instant the policies fire on. The ordering is pinned in RetentionReevaluationTests and
+                       TimescaleAvailabilityReprobeTests, both of which now name four tenants.
+
+                       Its first pass fires within seconds of the start-path pass (the tick's stamp seeds at
+                       MinValue), and that is deliberate for the reason #3812 gives about its own: the
+                       "Store object convergence:" line without the "at startup" prefix is the proof the
+                       hourly path is wired on THIS store, in the same log window an operator reads after a
+                       restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
+                    await ConvergeStoreObjectsAsync(stoppingToken);
                 }
             }
 
@@ -6104,7 +6355,7 @@ LIMIT 1";
 
             _timescaleAvailable = true;
             _logger.LogInformation(
-                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and retention policies are still applied on the start path only, so anything that start left unbuilt stays unbuilt until the next one. This pass took {ElapsedMs} ms, connection acquisition included.",
+                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and the composer's covering indexes are re-converged on this same tick by the store-object convergence pass (#3817), which runs a few statements after this line and writes its own 'Store object convergence:' summary — so anything the start path left unbuilt while the latch was false is rebuilt now, not at the next restart. This pass took {ElapsedMs} ms, connection acquisition included.",
                 probeClock.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -6186,6 +6437,209 @@ LIMIT 1";
             _logger.LogWarning(
                 "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The #3817 hourly store-object convergence (fleet-level, on the store-maintenance tick): run the WHOLE
+    /// <see cref="s_storeObjectConvergence"/> list, in the list's order, each step failure-isolated, and write
+    /// the one summary line. The fourth tenant of this tick and the last statement in its
+    /// <see cref="_timescaleAvailable"/> gate.
+    ///
+    /// <para><b>The lie this closes.</b> Every step in that list ran exactly once, at service start, each one
+    /// failure-isolated per item — which is the right posture and is exactly what makes a single failure
+    /// invisible and permanent. One missing continuous aggregate is one rollup family gone; one missing
+    /// baseline relation is one anomaly family silently returning an empty baseline (the provider reads them by
+    /// name and swallows the 42P01); an un-applied tuning pass is every composer query back on un-indexed
+    /// scans. On a service that runs for months, "until the next restart" and "forever" are the same sentence.
+    /// The code already knew: the ungated baseline-fallback block exists BECAUSE a startup step can silently
+    /// leave one relation unbuilt — and it was itself a startup step that can silently leave one relation
+    /// unbuilt.</para>
+    ///
+    /// <para><b>Why the whole list on one connection here, when the start path uses three.</b> The start path's
+    /// three connections are an artefact of its three try/catch blocks, whose boundaries carry meaning there
+    /// (the TimescaleDB block degrades the latch; the ungated block runs on every path; the tuning block
+    /// degrades to un-tuned queries). This pass has ONE outcome — the store is converged or this hour's
+    /// attempt says what it could not do — so it has one connection, one budget and one catch, and the
+    /// segments collapse. The steps' own per-item isolation is untouched and is still what keeps one failed
+    /// aggregate from costing the other nineteen.</para>
+    ///
+    /// <para><b>Cost on a converged store, which is the case that must be cheap.</b> Every step is a catalog
+    /// read plus DDL only where something is missing: <c>if_not_exists</c> on the hypertable and policy
+    /// creates, <c>IF NOT EXISTS</c> on the aggregate and index creates, probe-then-create on the baseline
+    /// relations, and differ-only <c>alter_job</c> on the three converges. Two statements are unconditional
+    /// rather than catalog-gated — the <c>ALTER TABLE ... SET (timescaledb.compress ...)</c> enable inside
+    /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and its <c>collection_log</c> twin — and
+    /// they are the reason this pass takes any locks at all; both are metadata-only on a table that already
+    /// carries the reloption. Measured on a converged rig (TimescaleDB 2.28.1): the figure is in the PR body
+    /// and the summary line carries the elapsed on every pass, which is the honest way to keep that claim
+    /// current on a real store rather than on a rig.</para>
+    ///
+    /// <para><b>The phase grid is not moved by running this hourly.</b> Creating a missing aggregate or policy
+    /// here runs the same DDL the start path would have run, and every phase it assigns is deterministic on
+    /// the registry — <see cref="TimescaleSupport.RefreshPhaseMinutesFor(string)"/> and
+    /// <see cref="TimescaleSupport.TryCompressionPhaseMinutesFor"/> are pure functions of the view or table name,
+    /// so the slot a policy lands on does not depend on WHEN the ensure ran. Two <c>initial_start</c>
+    /// expressions are clock-relative — the raw compression policy's "next hour plus this table's phase
+    /// minutes" and the aggregate compression band's "N nights after the next UTC midnight" — so a policy
+    /// created by an hourly pass rather than by a start takes its own first run from that pass's clock. That
+    /// is the same drift a restart at a different time of day already produces, it affects only a policy this
+    /// store did not have, and the MINUTE (the grid slot the phase argument protects) is identical either
+    /// way.</para>
+    ///
+    /// <para><b>Failure-isolated with the three outcomes this tick's tenants all use</b> (#3812's shape, and
+    /// the same reason): shutdown is quiet, the budget gets its own WARNING naming the budget, and anything
+    /// else gets a WARNING naming the message. Nothing rethrows — the sweep loop must never see this pass
+    /// fail. A pass cut short leaves the steps it had not reached exactly as they were; they are idempotent,
+    /// so the next hour resumes rather than restarting the ladder. Not counted by #3013's swallowed-read
+    /// counter: this is a maintenance ACTION, not an alert read whose failure would leave a condition
+    /// unjudged.</para>
+    /// </summary>
+    private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken)
+    {
+        var passClock = Stopwatch.StartNew();
+        var tally = new StoreObjectConvergenceTally();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_storeObjectConvergenceBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            foreach (var step in s_storeObjectConvergence)
+            {
+                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
+            }
+
+            LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown — quiet and expected. The next start's own pass runs every step again. */
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Store object convergence exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short — {Steps} step(s) ran, {Changed} changed, and the steps it had not reached are exactly as they were and are retried next hour (and at the next start). Every step is idempotent, so the next pass resumes at the one this pass was inside rather than redoing the ones behind it. A CONVERGED store answers this pass in well under a second; a store that spends five minutes in it is either building something real for the first time — a first hypertable conversion or a first aggregate on an adopted store — or is too slow to answer its own catalog, and which one it is shows in the per-object lines above.",
+                (long)s_storeObjectConvergenceBudget.TotalSeconds, passClock.ElapsedMilliseconds, tally.Steps, tally.Changed.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
+                passClock.ElapsedMilliseconds, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// One SEGMENT of <see cref="s_storeObjectConvergence"/> on the start path — the steps tagged
+    /// <paramref name="stage"/>, in the list's order, on the connection that segment's try block owns
+    /// (#3817). The hourly pass has no segments and walks the list whole; this exists only because the start
+    /// path interleaves three non-convergence steps between the ensures and two of those positions are
+    /// load-bearing.
+    ///
+    /// <para>NOT wrapped in a catch of its own: each segment's call site already sits inside the try that
+    /// decides what a failure THERE degrades to (the TimescaleDB latch, the baseline gap, un-tuned queries),
+    /// and those three outcomes read differently for reasons their own issues argued. Adding a fourth catch
+    /// here would convert a TimescaleDB-block fault into a silently-skipped segment and leave
+    /// <c>_timescaleAvailable</c> true.</para>
+    /// </summary>
+    private async Task RunStoreObjectConvergenceSegmentAsync(
+        NpgsqlConnection connection,
+        StoreObjectConvergenceStage stage,
+        StoreObjectConvergenceTally tally,
+        CancellationToken cancellationToken)
+    {
+        foreach (var step in s_storeObjectConvergence)
+        {
+            if (step.Stage != stage)
+            {
+                continue;
+            }
+
+            await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// One convergence step, failure-isolated, its outcome recorded in <paramref name="tally"/> (#3817) — the
+    /// #1775 shape, and the ONE place a step's result is judged, so the start path and the hourly pass cannot
+    /// disagree about what counts as changed or failed.
+    ///
+    /// <para>A step that THROWS writes its own WARNING here and is counted as failed. That is a second warning
+    /// on top of whatever the step's own per-item isolation already wrote, and deliberately so: the step's
+    /// internal warnings name one item, this one names the step that did not complete, and the difference
+    /// matters — a per-aggregate failure is one family, a throw out of
+    /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> itself is all twenty. Cancellation is
+    /// rethrown, so the budget and shutdown reach the pass's own catches rather than being recorded as twelve
+    /// step failures.</para>
+    ///
+    /// <para><see cref="StoreObjectChangeSignal"/> is what keeps the changed count honest: only the six
+    /// steps whose return value IS a change count can contribute to it, and the rest are counted as steps
+    /// that ran. The alternative reads "changed: hypertable conversion, compression policies, continuous
+    /// aggregates" on every hour of a store that has not changed since July.</para>
+    ///
+    /// <para><b>Static and internal, deliberately</b>, taking its logger rather than reading the field: this
+    /// is the one seam in the pass whose behaviour can be DRIVEN rather than read off the source. The
+    /// property that matters — a step which throws on one pass is retried on the next, counted failed then
+    /// changed — needs two passes over the same step and nothing else, so
+    /// <c>StoreObjectConvergenceStepBehaviourTests</c> drives it with a fake step instead of standing up a
+    /// host, a store and a clock. Everything else about the pass is a call site or a list entry, which is
+    /// textual and pinned as such.</para>
+    /// </summary>
+    internal static async Task RunStoreObjectConvergenceStepAsync(
+        NpgsqlConnection connection,
+        StoreObjectConvergenceStep step,
+        StoreObjectConvergenceTally tally,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var count = await step.RunAsync(connection, logger, cancellationToken);
+            tally.Steps++;
+            if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
+            {
+                tally.Changed.Add($"{step.Name} {count.ToString(CultureInfo.InvariantCulture)}");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            tally.Steps++;
+            tally.Failed.Add(step.Name);
+            logger.LogWarning(
+                "Store object convergence step '{Step}' failed — whatever it had not yet ensured stays unbuilt until the next hourly pass or the next start retries it (the step's own lines above name any individual object it did isolate): {Message}",
+                step.Name, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The ONE line a convergence pass writes, on both cadences, whatever it found (#3817, the #3756
+    /// discipline). One owner so the start-path and hourly lines cannot drift into two shapes; the only
+    /// difference between them is which of the two literal templates the <paramref name="startup"/> switch
+    /// picks, exactly as <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/>'s pass switch does.
+    ///
+    /// <para>A pass that changed NOTHING still writes it, because that is the pass this line exists for: a
+    /// check whose negative outcome is indistinguishable from its non-execution has not reported, and before
+    /// this the only evidence a convergence pass had run was eleven per-object lines and the absence of a
+    /// twelfth. The changed list names the steps rather than counting them, because "2 changed" sends an
+    /// operator back through the per-object lines to find out which.</para>
+    /// </summary>
+    private void LogStoreObjectConvergence(StoreObjectConvergenceTally tally, long elapsedMs, bool startup)
+    {
+        var changed = tally.Changed.Count == 0 ? "none" : string.Join(", ", tally.Changed);
+        var failed = tally.Failed.Count == 0 ? "none" : string.Join(", ", tally.Failed);
+
+        if (startup)
+        {
+            _logger.LogInformation(
+                "Store object convergence at startup: {Steps} steps, {Changed} changed ({ChangedNames}), {Failed} failed ({FailedNames}), {ElapsedMs} ms",
+                tally.Steps, tally.Changed.Count, changed, tally.Failed.Count, failed, elapsedMs);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Store object convergence: {Steps} steps, {Changed} changed ({ChangedNames}), {Failed} failed ({FailedNames}), {ElapsedMs} ms",
+                tally.Steps, tally.Changed.Count, changed, tally.Failed.Count, failed, elapsedMs);
         }
     }
 

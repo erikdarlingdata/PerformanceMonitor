@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -409,20 +409,31 @@ public sealed class IntervalHonestHourlyRollupTests
     /// The source-order pin for the start path (the RetiredBaselineAggregateTests shape): the coverage log runs
     /// AFTER the ensure that creates the successors, inside the TimescaleDB block, and before compression —
     /// and it is an instrument, so it is the only #3653 call there: no drop, no policy removal.
+    ///
+    /// <para><b>Re-anchored by #3817, which is why the anchors below are segment walks rather than the two
+    /// ensure calls they used to be.</b> The ensures either side of this log moved into one shared list
+    /// (<c>s_storeObjectConvergence</c>) that the start path and the hourly store-maintenance tick both walk,
+    /// so "the aggregate ensure" and "the aggregate-compression ensure" no longer appear as literal call sites
+    /// in the worker at all. The PROPERTY this pin holds is unchanged and is in fact what #3817 had to
+    /// preserve: the coverage log sits between the segment that ends with the aggregate ensure and the segment
+    /// that begins with the dedup/compression pair, so its position relative to both is still asserted — now
+    /// against the boundary that enforces it rather than against two calls that happened to straddle it. The
+    /// list's own ordering (aggregates before compression) is pinned in <c>StoreObjectConvergenceTests</c>,
+    /// which is where the one-order claim belongs.</para>
     /// </summary>
     [Fact]
     public void Worker_LogsTheSupersededCoverage_AfterTheEnsure_AndRemovesNothing()
     {
         var worker = ReadWorkerSource();
 
-        var ensureAt = worker.IndexOf("TimescaleSupport.EnsureContinuousAggregatesAsync(", StringComparison.Ordinal);
+        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale,", StringComparison.Ordinal);
         var logAt = worker.IndexOf("TimescaleSupport.LogSupersededHourlyRollupCoverageAsync(", StringComparison.Ordinal);
-        var compressionAt = worker.IndexOf("TimescaleSupport.EnsureAggregateCompressionAsync(", StringComparison.Ordinal);
+        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch,", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
 
         Assert.True(ensureAt > 0 && logAt > 0 && compressionAt > 0 && plainModeAt > 0);
-        Assert.True(ensureAt < logAt, "the coverage log must run after the ensure that creates the successors");
-        Assert.True(logAt < compressionAt, "the coverage log sits before the compression ensure, with the other post-ensure catalog reads");
+        Assert.True(ensureAt < logAt, "the coverage log must run after the segment whose last step is the ensure that creates the successors");
+        Assert.True(logAt < compressionAt, "the coverage log sits before the post-repair segment that carries the compression ensure");
         Assert.True(logAt < plainModeAt, "the coverage log is inside the TimescaleDB block — it reads timescaledb_information");
 
         /* Code references only — the comment beside the call names the registry, which is what a comment is
