@@ -26,7 +26,10 @@
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
                                 CornerRadius="3">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <!-- #3835: RecognizesAccessKey, because a CUSTOM template does not inherit the stock Button
+                                 template's true - without it the access-key marker in Content renders as a literal
+                                 underscore and the Alt combination binds to nothing. -->
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
