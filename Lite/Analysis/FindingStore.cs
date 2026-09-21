@@ -198,6 +198,9 @@ public class FindingStore
                    root metadata below — no analysis_findings column for them. */
                 MatchedAmplifiers = story.MatchedAmplifiers,
                 DefinedAmplifiers = story.DefinedAmplifiers,
+                /* #3691: the config levers the greedy walk skipped, so analyze_server can render their cards
+                   beside this chain. In memory only, like the two above. */
+                SideLeafKeys = story.SideLeafKeys,
                 RootFactMetadata = story.RootFactMetadata
             });
         }
