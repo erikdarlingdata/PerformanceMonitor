@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -120,6 +121,35 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
+           points exactly like the five edges above — the history row records resolution.Title into
+           metric_name — and each was falling to the per-server fallback because nothing folded it onto its
+           firing. Their canonicals have no SectionsByMetric entry ON PURPOSE: the fleet-level arm of
+           SectionsFor answers them through this same fold, which is what keeps this the last list that has
+           to grow (a NEW store family needs its alias here, but no section mapping). */
+        (DarlingSelfAlertEvaluator.RetentionHoldClearedMetric, DarlingSelfAlertEvaluator.RetentionHoldMetric),
+        (DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric),
+        (DarlingSelfAlertEvaluator.ToastSlackClearedMetric, DarlingSelfAlertEvaluator.ToastSlackMetric),
+        (DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric),
+    };
+
+    /// <summary>
+    /// The store self-alerts that fire under a MONITORED SERVER's name rather than the store's label — the
+    /// self-monitor family's per-server members. The condition is about the monitor (a collector that stopped,
+    /// a capture session that is gone, a collector whose own cost regressed) but it is scoped to ONE server,
+    /// the alert carries that server's real name, and the per-server reads are exactly the drill-down an
+    /// operator wants. They are named here because they are the EXCEPTION to the family rule in
+    /// <see cref="IsFleetLevelStoreMetric"/>, and the exception list is the half that does not grow: the
+    /// population that keeps growing is the fleet-level one (#3833), and nothing has to be added here when it
+    /// does. Declared ABOVE <see cref="SectionsByMetric"/> because the map's alias loop calls
+    /// <see cref="IsFleetLevelStoreMetric"/> during type initialization, and static fields initialize in
+    /// declaration order.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> PerServerSelfMonitorMetrics = new[]
+    {
+        "Collection Stopped",
+        "Capture Down",
+        "Collector Cost Regression",
     };
 
     /// <summary>
@@ -302,12 +332,24 @@ internal static class DarlingTriageEndpoint
             },
         };
 
-        /* Alias AFTER the literals so each resolution title shares its firing metric's exact list — a
-           canonical named here but absent above is a construction error, and failing the process at type
-           initialization is louder than any test. */
+        /* Alias AFTER the literals so each resolution title shares its firing metric's exact list. A
+           canonical with no entry above is legitimate exactly when the fleet-level arm answers it (#3833) —
+           SectionsFor folds the alias through IsFleetLevelStoreMetric and lands on the store sections, so
+           copying nothing here still renders the pair identically. A canonical that is NEITHER mapped nor
+           fleet-level is a construction error — a typo, or a per-server alias nobody wired — and failing the
+           process at type initialization is louder than any test. */
         foreach (var (alias, canonical) in ResolutionAliases)
         {
-            map[alias] = map[canonical];
+            if (map.TryGetValue(canonical, out var sections))
+            {
+                map[alias] = sections;
+            }
+            else if (!IsFleetLevelStoreMetric(canonical))
+            {
+                throw new InvalidOperationException(
+                    $"ResolutionAliases: '{alias}' folds to '{canonical}', which has no section mapping and " +
+                    "is not a fleet-level store metric. Map it, fix the name, or add its family exception.");
+            }
         }
 
         return map;
@@ -342,12 +384,92 @@ internal static class DarlingTriageEndpoint
     internal static readonly TriageSection CollectionLogSection =
         S("Recent collection log", "get_collection_log", ("hours", "2"), ("limit", "100"));
 
-    /// <summary>The sections for one metric: the exact-name mapping, else <see cref="DefaultSections"/>.
-    /// Null/blank (a hand-built URL) also falls back rather than erroring.</summary>
-    internal static IReadOnlyList<TriageSection> SectionsFor(string? metricName) =>
-        !string.IsNullOrWhiteSpace(metricName) && SectionsByMetric.TryGetValue(metricName.Trim(), out var sections)
-            ? sections
-            : DefaultSections;
+    /// <summary>
+    /// Does this metric NAME say the alert is fleet-level — about the monitoring store itself rather than a
+    /// monitored server (#3833)?
+    ///
+    /// <para><b>Why the name and not the request's server.</b> #2768 fixed this page for the store family by
+    /// adding four names to <see cref="SectionsByMetric"/>, and every self-alert family that landed after it
+    /// — the retention hold, the collector-cost digest, the fleet sweep rollup, the custom-rule health check,
+    /// TOAST slack, checkpointer pressure, the analysis singles digest — arrived without an entry and
+    /// silently reopened the original defect for its own metric: the page emitted the fleet-level note and
+    /// then rendered two per-server sections under it, each reading "Could not resolve server". A list that
+    /// has to be maintained in step with a growing taxonomy keeps falling behind; a rule does not. So the
+    /// decision is derived from the <see cref="AlertFamily"/> census — the taxonomy a new alert cannot ship
+    /// without being added to, because <c>NotificationRoutingTests</c> reds when it is not — and the four-name
+    /// list is no longer what makes a store alert render correctly.</para>
+    ///
+    /// <para><b>Both store-fired families count.</b> <see cref="AlertFamily.SelfMonitor"/> is the monitor's own
+    /// health and <see cref="AlertFamily.Reports"/> is the three daily documents the store composes about
+    /// ITSELF and the fleet (the collector-cost digest, the fleet sweep rollup, the analysis singles digest) —
+    /// all fired under the store's label, and the digest is the metric the #3833 report was filed against.
+    /// <see cref="AlertFamily.Canonical"/> folds a delivered recovery name onto its firing, and
+    /// <see cref="ResolutionAliases"/> covers the resolution TITLES the store writes to history, so an
+    /// all-clear row ("Retention Hold Cleared", "Store TOAST Slack Cleared") is fleet-level exactly like the
+    /// firing it clears — the #2768 lesson that "Store Disk Pressure" was mapped while its own resolution was
+    /// not.</para>
+    ///
+    /// <para>PURE, and keyed on the metric alone: the arm is testable without a request, which a predicate
+    /// reading the request-scoped server label would not be.</para>
+    /// </summary>
+    internal static bool IsFleetLevelStoreMetric(string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+        {
+            return false;
+        }
+
+        var trimmed = metricName.Trim();
+
+        /* A resolution TITLE is not a delivered metric name, so the census does not know it; the alias table
+           already states which firing each one clears, and that firing is what the family is read for. */
+        foreach (var (alias, canonical) in ResolutionAliases)
+        {
+            if (string.Equals(alias, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                trimmed = canonical;
+                break;
+            }
+        }
+
+        foreach (var perServer in PerServerSelfMonitorMetrics)
+        {
+            if (string.Equals(perServer, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        var family = AlertFamily.Of(trimmed);
+        return string.Equals(family, AlertFamily.SelfMonitor, StringComparison.Ordinal)
+            || string.Equals(family, AlertFamily.Reports, StringComparison.Ordinal);
+    }
+
+    /// <summary>The sections for one metric: the exact-name mapping, else the store's own reads when the
+    /// metric NAME says the alert is fleet-level (<see cref="IsFleetLevelStoreMetric"/> — #3833), else
+    /// <see cref="DefaultSections"/>. The mapping stays an OVERRIDE layer rather than the gate: the six
+    /// entries with tailored reads (disk pressure's store metrics, stale-mute's rule list, the TLS
+    /// certificate's history) keep them, and every other store metric gets correct sections instead of the
+    /// per-server fallback's two resolver errors. Null/blank (a hand-built URL) still falls back rather than
+    /// erroring.</summary>
+    internal static IReadOnlyList<TriageSection> SectionsFor(string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+        {
+            return DefaultSections;
+        }
+
+        if (SectionsByMetric.TryGetValue(metricName.Trim(), out var sections))
+        {
+            return sections;
+        }
+
+        return IsFleetLevelStoreMetric(metricName) ? s_fleetLevelStoreSections : DefaultSections;
+    }
+
+    /// <summary>The fleet-level fallback, held as ONE instance so a caller can compare identity the way the
+    /// pins compare against <see cref="DefaultSections"/>.</summary>
+    private static readonly IReadOnlyList<TriageSection> s_fleetLevelStoreSections = StoreSections();
 
     /// <summary>
     /// Is this link's <c>server</c> the label the fleet-level store self-alerts fire under (#2768)? Those
@@ -448,8 +570,12 @@ internal static class DarlingTriageEndpoint
             /* #2768: a store self-alert's server is the store's label — the synthetic StoreServerLabel, or
                #3500's opted-in peers.storeName — which cannot resolve by design either way. Recognise it up
                front and skip resolution rather than reporting a failure the operator can do nothing about —
-               the sections this page then runs are fleet-level and take no server. */
-            var fleetLevelStore = IsFleetLevelStoreServer(serverQuery);
+               the sections this page then runs are fleet-level and take no server.
+               Since #3833 the metric NAME is the second, equal arm: it is what decides the sections below, so
+               reading it here too keeps the note, the skipped collection log and the section choice on ONE
+               answer — and a store alert whose server param was lost or rewritten in transit through a
+               channel still renders as the fleet-level alert it is. */
+            var fleetLevelStore = IsFleetLevelStoreServer(serverQuery) || IsFleetLevelStoreMetric(metric);
 
             /* Server resolution — a failure is a NOTE, not a 500: the page still renders the alert-history
                match (fleet-wide) and whatever sections can answer without a resolvable server. */

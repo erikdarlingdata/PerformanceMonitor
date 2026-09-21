@@ -58,6 +58,11 @@
          directly (it also flows transitively through Darling.Analysis) since it is a direct dependency. -->
     <ProjectReference Include="..\..\PerformanceMonitor.PlanAnalysis\PerformanceMonitor.PlanAnalysis.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
+    <!-- #3833: the triage page reads the AlertFamily census to decide whether a metric is a fleet-level
+         store alert, so the taxonomy every new alert must be registered in is what selects its sections.
+         Flows transitively through Alerting/Analysis already; named directly because it is now a direct
+         dependency of this project's own code. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
   </ItemGroup>
 
   <ItemGroup>

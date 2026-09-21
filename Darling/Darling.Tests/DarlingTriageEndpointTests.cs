@@ -12,6 +12,7 @@ using System.Linq;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -98,17 +99,111 @@ public sealed class DarlingTriageEndpointTests
     /// <summary>Review catch: resolution rows record <c>resolution.Title</c> — not the firing metric — into
     /// <c>metric_name</c>, and the Alert History Triage link makes every one of them an entry point. Each
     /// alias must land on the SAME section list as its firing metric, so a "CPU Resolved" click-through
-    /// carries the CPU drill-down that confirms the recovery instead of the thin fallback.</summary>
+    /// carries the CPU drill-down that confirms the recovery instead of the thin fallback. Since #3833 a
+    /// canonical may legitimately have NO mapping — the fleet-level arm answers it — so the guard here is the
+    /// same one the map's construction enforces: mapped, or fleet-level store; never neither.</summary>
     [Fact]
     public void EveryResolutionAlias_SharesItsFiringMetricsSections()
     {
         Assert.NotEmpty(DarlingTriageEndpoint.ResolutionAliases);
         foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
         {
-            Assert.True(DarlingTriageEndpoint.SectionsByMetric.ContainsKey(canonical),
-                $"resolution alias '{alias}' names a canonical metric '{canonical}' with no mapping");
+            Assert.True(
+                DarlingTriageEndpoint.SectionsByMetric.ContainsKey(canonical)
+                    || DarlingTriageEndpoint.IsFleetLevelStoreMetric(canonical),
+                $"resolution alias '{alias}' names a canonical metric '{canonical}' that has no mapping and "
+                    + "is not a fleet-level store metric");
             Assert.Same(DarlingTriageEndpoint.SectionsFor(canonical), DarlingTriageEndpoint.SectionsFor(alias));
             Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(alias));
+        }
+    }
+
+    /// <summary>
+    /// #3833's census. Every store-fired metric — the self-monitor family minus its three per-server members,
+    /// plus the reports family — renders the store's own reads, and every section it renders is fleet-level,
+    /// so the page never binds the store's synthetic label as if it were a server. The population is
+    /// enumerated from <see cref="AlertFamily.MetricFamilies"/>, the taxonomy a new alert cannot ship without
+    /// joining (<c>NotificationRoutingTests</c> reds when one is missing) — which is the point: #2768 fixed
+    /// this page with a four-name list, seven store metrics landed after it, and every one of them reopened
+    /// the defect because nothing forced the list to grow. This census grows by construction. The floor keeps
+    /// a broken enumeration from passing as an empty one.
+    /// </summary>
+    [Fact]
+    public void EveryFleetLevelStoreMetric_RendersStoreReads_NotThePerServerFallback()
+    {
+        var fleetLevel = AlertFamily.MetricFamilies
+            .Where(kv => kv.Value is AlertFamily.SelfMonitor or AlertFamily.Reports)
+            .Select(kv => kv.Key)
+            .Where(metric => !DarlingTriageEndpoint.PerServerSelfMonitorMetrics.Contains(
+                metric, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        Assert.True(fleetLevel.Count >= 10,
+            $"census floor: expected at least 10 store-fired metrics, found {fleetLevel.Count}");
+
+        foreach (var metric in fleetLevel)
+        {
+            var sections = DarlingTriageEndpoint.SectionsFor(metric);
+            Assert.NotSame(DarlingTriageEndpoint.DefaultSections, sections);
+            Assert.All(sections, section => Assert.True(section.FleetLevel,
+                $"'{metric}': section '{section.Title}' binds a server on a fleet-level page"));
+        }
+    }
+
+    /// <summary>The exception half of the #3833 rule. Three self-monitor metrics fire under a REAL monitored
+    /// server's name — the condition is about the monitor, the scope is one server — so they keep the
+    /// per-server reads that can actually drill into that server. Pinned by identity against
+    /// <see cref="DarlingTriageEndpoint.DefaultSections"/>, and each must remain a census member of the
+    /// self-monitor family: a rename on either side turns this red instead of silently changing which half
+    /// of the rule the metric falls into.</summary>
+    [Fact]
+    public void PerServerSelfMonitorMetrics_KeepTheirPerServerReads()
+    {
+        Assert.Equal(3, DarlingTriageEndpoint.PerServerSelfMonitorMetrics.Count);
+        foreach (var metric in DarlingTriageEndpoint.PerServerSelfMonitorMetrics)
+        {
+            Assert.Equal(AlertFamily.SelfMonitor, AlertFamily.Of(metric));
+            Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreMetric(metric),
+                $"'{metric}' is in the per-server exception list but classifies as fleet-level");
+            Assert.Same(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(metric));
+        }
+    }
+
+    /// <summary>The drift alarm for the NEXT resolution edge (#3833's second half). A resolution title is a
+    /// triage entry point, and one that misses <see cref="DarlingTriageEndpoint.ResolutionAliases"/> renders
+    /// the #2768 defect no matter how correct the firing metric's own page is — four titles were doing
+    /// exactly that. The store evaluator names its resolution titles in constants whose names end in
+    /// <c>Resolved/Cleared/Recovered/RenewedMetric</c>, so this census reflects over that convention and
+    /// requires an alias for every one. Its known blind spot is a title emitted as a bare literal — which is
+    /// precisely how "Retention Hold Cleared" drifted, and why #3833 promoted it to a constant — so the floor
+    /// pins today's population and a new family whose author follows the file's own naming lands in the net
+    /// automatically.</summary>
+    [Fact]
+    public void EveryEvaluatorResolutionConstant_HasAResolutionAlias()
+    {
+        var titles = typeof(DarlingSelfAlertEvaluator)
+            .GetFields(System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Static)
+            .Where(field => field.IsLiteral && field.FieldType == typeof(string))
+            .Where(field => field.Name.EndsWith("ResolvedMetric", StringComparison.Ordinal)
+                || field.Name.EndsWith("ClearedMetric", StringComparison.Ordinal)
+                || field.Name.EndsWith("RecoveredMetric", StringComparison.Ordinal)
+                || field.Name.EndsWith("RenewedMetric", StringComparison.Ordinal))
+            .Select(field => (string)field.GetRawConstantValue()!)
+            .ToList();
+
+        Assert.True(titles.Count >= 7,
+            $"census floor: expected at least 7 resolution-title constants, found {titles.Count}");
+
+        var aliases = DarlingTriageEndpoint.ResolutionAliases
+            .Select(pair => pair.Alias)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var title in titles)
+        {
+            Assert.True(aliases.Contains(title),
+                $"evaluator resolution title '{title}' has no ResolutionAliases entry — its history rows "
+                    + "will render the per-server fallback");
         }
     }
 

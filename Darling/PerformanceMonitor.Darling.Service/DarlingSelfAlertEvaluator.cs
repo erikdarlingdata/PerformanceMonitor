@@ -812,6 +812,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the deliverer's per-metric cooldown and the resolution correlate cleanly.</summary>
     internal const string RetentionHoldMetric = "Retention Held";
 
+    /// <summary>The resolution title <see cref="RetentionHoldMetric"/> clears with. A constant (rather than
+    /// the inline literal it was) because the triage endpoint's <c>ResolutionAliases</c> folds this title onto
+    /// its firing metric (#3833), and a string that exists in two files with no shared symbol is how the four
+    /// store families after #2768 drifted out of that fold in the first place.</summary>
+    internal const string RetentionHoldClearedMetric = "Retention Hold Cleared";
+
     /// <summary>Prefixes the fleet-level retention-hold alert serverKey so it never parses as a server_id.</summary>
     private const string RetentionHoldKeyPrefix = "retentionhold:";
 
@@ -5102,7 +5108,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         await RecordResolutionAsync(new AlertResolution(
             StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
-            "Retention Hold Cleared",
+            RetentionHoldClearedMetric,
             /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
             $"{_storeLabel}: {label} {why}"), cancellationToken);
     }
