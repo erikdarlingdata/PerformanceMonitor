@@ -315,15 +315,18 @@ public static partial class PgTargetAdvice
     /* ── PG_XMIN_HOLD ── */
 
     private static readonly AdviceBlock s_xminStatic = new(
-        Headline: "One holder has pinned the xmin horizon for a majority of the window's observations",
+        Headline: "The xmin horizon stayed pinned across a majority of the window's consecutive captures",
         Investigation:
             "VACUUM can remove only tuples older than the cluster's oldest active snapshot (the xmin horizon). " +
             "Four unrelated causes hold it back and look identical by symptom — dead tuples accumulate, autovacuum " +
             "reports success, nothing shrinks — so the collector attributes each capture to its source: a session " +
             "(idle in transaction or a long query), a replication slot's xmin or catalog_xmin, a standby's " +
-            "hot_standby_feedback, or a prepared transaction. This finding uses the same age bar and majority-of-" +
-            "observations persistence the xmin alert pages on, so a holder seen once (a query that ran long) is context, " +
-            "not a finding.",
+            "hot_standby_feedback, or a prepared transaction. Persistence is measured on the HORIZON — the winning " +
+            "age, whoever won, staying at or above the same bar the xmin alert pages on for a run of consecutive " +
+            "captures — because equally old transactions taking turns as the winner pin the horizon exactly as hard " +
+            "as one transaction does. Who held it is reported beside that as shares per kind and a distinct-holder " +
+            "count, and named only when one holder won most of the run. A horizon that reached the bar once (a query " +
+            "that ran long and finished) is context, not a finding.",
         Remediation:
             "The fix differs completely by holder kind: end an idle-in-transaction session (pg_terminate_backend) and " +
             "find why the application left it open; drop an inactive replication slot whose consumer is gone " +
@@ -337,40 +340,55 @@ public static partial class PgTargetAdvice
             return s_xminStatic;
 
         var m = f.Metadata;
-        var holder = string.IsNullOrEmpty(f.ObjectName) ? "an unidentified holder" : f.ObjectName;
+        var subject = string.IsNullOrEmpty(f.ObjectName) ? null : f.ObjectName;
         var source = HolderSourceName(m.GetValueOrDefault(PgTargetScorer.XminHolderSourceKey));
+        var latestSource = HolderSourceName(m.GetValueOrDefault(PgTargetScorer.XminLatestHolderSourceKey, m.GetValueOrDefault(PgTargetScorer.XminHolderSourceKey)));
         var age = m.GetValueOrDefault(PgTargetScorer.XminAgeKey, f.Value);
+        var floor = m.GetValueOrDefault(PgTargetScorer.XminHorizonFloorAgeKey, age);
+        var runPeak = m.GetValueOrDefault(PgTargetScorer.XminHorizonRunPeakAgeKey, floor);
         var total = m.GetValueOrDefault(PgTargetScorer.XminObservationsTotalKey);
-        var held = m.GetValueOrDefault(PgTargetScorer.XminObservationsHeldKey);
-        var above = m.GetValueOrDefault(PgTargetScorer.XminObservationsAboveThresholdKey);
-        var identityArm = m.GetValueOrDefault(PgTargetScorer.XminIdentityArmKey) >= 1;
+        var heldCaptures = m.GetValueOrDefault(PgTargetScorer.XminHeldCapturesKey);
+        var distinctHolders = m.GetValueOrDefault(PgTargetScorer.XminDistinctHoldersKey);
+        var modalShare = m.GetValueOrDefault(PgTargetScorer.XminModalHolderShareKey);
+        var dominantSourceShare = m.GetValueOrDefault(PgTargetScorer.XminDominantSourceShareKey);
+        var attributed = m.GetValueOrDefault(PgTargetScorer.XminHolderAttributedKey) >= 1;
+        var persistenceArm = m.GetValueOrDefault(PgTargetScorer.XminPersistenceArmKey) >= 1;
         var freezeMaxAge = m.GetValueOrDefault(PgTargetScorer.XminFreezeMaxAgeKey);
         var sinceLast = m.GetValueOrDefault(PgTargetScorer.XminMinutesSinceLastHolderKey);
         var backlog = facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0;
         var wraparound = facts.TryGetValue(PgTargetFactKeys.WraparoundTrend, out var wa) && wa.Severity > 0;
 
-        var kind = source switch
-        {
-            "session" => "a session",
-            "replication_slot" => "a replication slot's xmin",
-            "replication_slot_catalog" => "a logical slot's catalog_xmin",
-            "standby_feedback" => "a standby's hot_standby_feedback",
-            "prepared_transaction" => "a prepared transaction",
-            _ => "an unrecognised holder kind",
-        };
+        /* Sources ALTERNATED: something dominated the run's captures but no KIND reached the dominance share, so
+           there is no remedy to lead with. Distinguished from an unrecognised source name (which does reach the
+           share, and reads as "unknown") by the share itself — the two would otherwise both arrive as code 0. */
+        var sourcesAlternated = heldCaptures > 0
+            && dominantSourceShare > 0
+            && dominantSourceShare < PgTargetScorer.XminHolderDominanceShare;
 
-        var headline = identityArm
-            ? $"{holder} ({kind}) is holding the xmin horizon {Fmt(age)} transactions back, in {held:0} of {total:0} holder-bearing collections"
-            : $"{holder} ({kind}) held the xmin horizon {Fmt(age)} transactions back — a transient holder, not a chronic one";
+        var kind = KindPhrase(source);
+        var holder = subject ?? (sourcesAlternated || !attributed ? "no single holder" : "an unidentified holder");
+
+        var headline = persistenceArm
+            ? attributed
+                ? $"The xmin horizon sat at least {Fmt(floor)} transactions back for {heldCaptures:0} of {total:0} consecutive captures, held by {holder} ({kind})"
+                : $"The xmin horizon sat at least {Fmt(floor)} transactions back for {heldCaptures:0} of {total:0} consecutive captures — {distinctHolders:0} holders took turns holding it"
+            : $"The xmin horizon reached {Fmt(age)} transactions back but did not stay there ({heldCaptures:0} of {total:0} captures) — a transient hold, not a pinned horizon";
 
         var inv = new StringBuilder();
-        inv.Append($"Latest winning holder: {holder}, {kind}, horizon held {Fmt(age)} transactions back (the shared warning bar is {Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}), last seen {sinceLast:0} min before the window end. ");
-        inv.Append($"Persistence: this holder won {held:0} of the {total:0} collections in the window that recorded ANY holder ({(total > 0 ? held / total : 0):P0}; the alert's majority standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
-        inv.Append(identityArm
-            ? "That is the chronic-holder shape the xmin alert pages on; the alert and this finding grade on the same bars. "
-            : "That does not meet the chronic-holder standard — a query that ran long and finished looks like this — so it is context, not a finding, exactly as the alert would decline to page it. ");
-        if (above > 0)
-            inv.Append($"The horizon sat at or above the bar in {above:0} collections regardless of who held it; a parade of DIFFERENT holders (the alert's horizon arm) is not graded here in v1 because its honest denominator is the collector's own capture log, which this read does not consume. ");
+        inv.Append($"Persistence is measured on the HORIZON: the winning age, whoever won, stayed at or above the shared warning bar ({Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}) for {heldCaptures:0} consecutive captures of the {total:0} in the window that recorded any holder ({(total > 0 ? heldCaptures / total : 0):P0}; the alert's majority standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
+        if (heldCaptures > 0)
+            inv.Append($"Across that run the horizon never came nearer than {Fmt(floor)} transactions and reached {Fmt(runPeak)}; the severity is graded on the floor, because that is the age it held for every capture of the run. ");
+        inv.Append(persistenceArm
+            ? "That is the pinned-horizon shape the xmin alert pages on, graded on the same bars — and it is graded on the AGE rather than on one holder's identity, because equally old transactions taking turns as the winner hold the horizon exactly as hard as one transaction does (the shape that read 0 before #3691). "
+            : "That does not meet the pinned-horizon standard — a query that ran long and finished looks like this — so it is context, not a finding, exactly as the alert would decline to page it. ");
+        if (heldCaptures > 0)
+        {
+            inv.Append($"Attribution, separately: {distinctHolders:0} distinct holder(s) won captures of the run — client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
+            inv.Append(attributed
+                ? $"{holder} won {modalShare:P0} of the run, at or past the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before it names a holder (a chosen line, not a measured one — threshold_lineage = 0 — and it gates only the NAME, never the grade), so the remedy below is its kind's. "
+                : $"No holder reached the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before naming one (a chosen line, not a measured one — threshold_lineage = 0 — gating only the name, never the grade); the largest won {modalShare:P0}, so the fact names none. ");
+        }
+        inv.Append($"The latest capture's winner was {(latestSource == "unknown" ? "not attributable to a kind" : KindPhrase(latestSource))}, {Fmt(age)} transactions back, {sinceLast:0} min before the window end. ");
         if (freezeMaxAge > 0)
             inv.Append($"Held past this server's autovacuum_freeze_max_age ({Fmt(freezeMaxAge)}) the hold would also stop the anti-wraparound vacuum advancing relfrozenxid; the severity ramps toward critical as the held age approaches it. ");
         if (backlog)
@@ -378,7 +396,9 @@ public static partial class PgTargetAdvice
         if (wraparound)
             inv.Append("PG_WRAPAROUND_TREND co-fired: the freeze age is already climbing past the engine's line. ");
 
-        var rem = source switch
+        var rem = sourcesAlternated
+            ? "Holders of SEVERAL KINDS took turns pinning the horizon, so there is no one remedy: read the shares above, then take the set in order of share — pg_stat_activity (backend_xmin, backend_xid) for backends, pg_replication_slots (xmin, catalog_xmin) for slots, pg_stat_replication for standby feedback, pg_prepared_xacts for prepared transactions. Counter-objective: each release has a different cost (a rolled-back transaction, a consumer that must re-initialise, an irreversible two-phase resolution), which is why the kinds are not treated as one."
+            : source switch
         {
             "session" =>
                 $"A backend is holding a snapshot — idle in transaction, or a query running for hours. Identify it (pg_stat_activity WHERE backend_xmin IS NOT NULL ORDER BY age(backend_xmin) DESC; the holder text names the pid) and end it with pg_terminate_backend(pid) if it is idle in transaction; then find why the application left the transaction open (a missing COMMIT on an error path, a pooler in transaction mode holding a dead client). Set idle_in_transaction_session_timeout so the next one cannot pin the cluster for hours. Counter-objective: the terminated transaction's work is rolled back.",
@@ -394,10 +414,34 @@ public static partial class PgTargetAdvice
                 "The holder kind is not one the collector recognises: read pg_stat_activity (backend_xmin), pg_replication_slots (xmin, catalog_xmin) and pg_prepared_xacts directly to find what is pinning the horizon. Counter-objective: none until the holder is identified — every release has a cost only its kind can name.",
         };
 
-        if (!identityArm)
-            rem = "No action on this evidence alone — a transient holder is normal; if it recurs: " + rem;
+        /* Same-kind alternation (five client backends taking turns) keeps the kind's remedy — it is the right
+           remedy — but not the promise that one release fixes it: the horizon moves to the next holder. */
+        if (heldCaptures > 0 && !attributed && !sourcesAlternated)
+            rem = $"{distinctHolders:0} equally old holders took turns holding the horizon — resolving one moves the horizon to the next, not back; look at the SET, not the latest winner. " + rem;
+
+        if (!persistenceArm)
+            rem = "No action on this evidence alone — a transient hold is normal; if it recurs: " + rem;
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem);
+    }
+
+    /// <summary>The <c>pg_xmin_horizon.source</c> vocabulary as English, one phrase per kind.</summary>
+    private static string KindPhrase(string source) => source switch
+    {
+        "session" => "a session",
+        "replication_slot" => "a replication slot's xmin",
+        "replication_slot_catalog" => "a logical slot's catalog_xmin",
+        "standby_feedback" => "a standby's hot_standby_feedback",
+        "prepared_transaction" => "a prepared transaction",
+        _ => "an unrecognised holder kind",
+    };
+
+    /// <summary>A share of the held run as a whole percent for the attribution sentence (0 when the metadata carried
+    /// none), spelled the way the same paragraph spells its other shares — no space before the sign — so
+    /// "client backends 100%" and "won 76%" read as one voice.</summary>
+    private static string HolderShare(double share)
+    {
+        return string.Format(CultureInfo.InvariantCulture, "{0:0}%", share * 100);
     }
 
     /* ── CONFIG_PG_AUTOVACUUM_OFF / CONFIG_PG_MAINT_WORK_MEM (collected and base-scored by the config lane;
