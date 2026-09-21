@@ -474,7 +474,7 @@ public sealed class PgTargetAnomalyTests
            cores busy; both z-score, both deviation-scored), plus lane 34's own-normal share of ONE statement
            (a keyed series — z-score, deviation-scored), plus lane 38's database-growth anomaly (the instance
            total's growth in bytes per day — z-score, deviation-scored, registered by the family that fills it). */
-        Assert.Equal(13, anomalyKeys.Count);
+        Assert.Equal(14, anomalyKeys.Count);
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalySampledWaitProfile));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyPlanRegression));
