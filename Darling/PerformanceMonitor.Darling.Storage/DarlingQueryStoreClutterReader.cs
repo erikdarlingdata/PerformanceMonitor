@@ -408,6 +408,11 @@ public static class DarlingQueryStoreClutterReader
     /// not, and the tool says so rather than reaching outside it. <c>DISTINCT ON</c> rather than a
     /// <c>MAX(capture_time)</c> anchor because the newest capture is per DATABASE, not per server — a
     /// database the collector could not enter on the newest cycle still has its previous row.
+    ///
+    /// <para><c>query_capture_mode</c> is the last projected column, and its position is load-bearing: the
+    /// reader maps it at ordinal 12, so anything inserted before it shifts every ordinal above. A NULL there
+    /// is a row the collector wrote before the column existed — never asked, and never the engine's
+    /// <c>NONE</c>.</para>
     /// $1 server_id array, $2/$3 window (naive UTC).
     /// </summary>
     public const string ConfigSql = """
@@ -424,8 +429,6 @@ public static class DarlingQueryStoreClutterReader
             max_plans_per_query,
             interval_length_minutes,
             capture_time,
-            /* V137 (#3796). NULL on every row captured before that rung and on a row a 2016 engine's
-               collector wrote nothing into; the composition publishes the NULL as "never asked". */
             query_capture_mode
         FROM v_query_store_health
         WHERE server_id = ANY($1::int[])

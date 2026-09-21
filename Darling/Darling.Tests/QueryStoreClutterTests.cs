@@ -542,7 +542,14 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("SELECT DISTINCT ON (server_id, database_name)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_store_health", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY server_id, database_name, capture_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("capture_time\n", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        /* One anchor carrying three facts at once: capture_time is PROJECTED (not merely ORDER BY'd — the
+           line break is what tells the two occurrences apart), query_capture_mode follows it, and the mode is
+           the LAST projected column, which is what makes the reader's ordinal 12 the mode rather than a shift
+           of every ordinal before it (V137, #3796). */
+        Assert.Contains(
+            "capture_time,\n    query_capture_mode\nFROM v_query_store_health",
+            sql.Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
         /* not a MAX(capture_time) anchor: the newest capture is per database, not per server */
         Assert.DoesNotContain("MAX(capture_time)", sql, StringComparison.Ordinal);
     }

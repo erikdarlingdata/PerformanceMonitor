@@ -284,9 +284,6 @@ public sealed class QueryStoreClutterViewerSurfacesTests
         }
     }
 
-    /// <summary>The text strictly BETWEEN the two anchors — the opening anchor is excluded, because the
-    /// Queries group's own <c>&lt;TabItem Header="Queries"&gt;</c> would otherwise be counted as the first of
-    /// its own sub-tabs and shift every index by one.</summary>
     /// <summary>
     /// Every measured column on the clutter grid binds a NUMBER, not a pre-formatted string.
     ///
@@ -349,6 +346,9 @@ public sealed class QueryStoreClutterViewerSurfacesTests
         Assert.Contains("Warning above Critical", tab, StringComparison.Ordinal);
     }
 
+    /// <summary>The text strictly BETWEEN the two anchors — the opening anchor is excluded, because the
+    /// Queries group's own <c>&lt;TabItem Header="Queries"&gt;</c> would otherwise be counted as the first of
+    /// its own sub-tabs and shift every index by one.</summary>
     private static string Between(string text, string open, string close)
     {
         var start = text.IndexOf(open, StringComparison.Ordinal);
