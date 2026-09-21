@@ -153,7 +153,12 @@
                             CornerRadius="3"
                             Padding="{TemplateBinding Padding}"
                             TextElement.Foreground="{TemplateBinding Foreground}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <!-- #3835: RecognizesAccessKey, because a CUSTOM template does not inherit the stock Button
+                             template's true. Without it the access-key marker in Content renders as a literal underscore
+                             ("E_dit Collector Schedules...", "_Save") and the Alt combination binds to nothing. The
+                             CheckBox and MenuItem presenters further down this file have always carried it; the whole
+                             button family missed it, in every theme, for as long as these templates have existed. -->
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -199,7 +204,9 @@
                             CornerRadius="3"
                             Padding="{TemplateBinding Padding}"
                             TextElement.Foreground="{TemplateBinding Foreground}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <!-- #3835: see the base Button template above - a custom template loses access keys unless its
+                             presenter asks for them. -->
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True">
                             <!-- #3577: see the TabItem header presenter. A plain-string Content becomes a
                                  TextBlock that the app-level implicit style would repaint in ForegroundBrush;
                                  shadowing that style lets the text inherit the button's Foreground. -->
@@ -343,7 +350,7 @@
                             CornerRadius="3"
                             Padding="{TemplateBinding Padding}"
                             TextElement.Foreground="{TemplateBinding Foreground}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -396,7 +403,8 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}">
                         <ContentPresenter HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"/>
+                                          VerticalAlignment="Center"
+                                          RecognizesAccessKey="True"/>
                     </Border>
                 </ControlTemplate>
             </Setter.Value>
