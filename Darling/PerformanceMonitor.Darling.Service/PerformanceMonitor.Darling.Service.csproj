@@ -19,6 +19,19 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <!-- #3838: the Entra (Active Directory) authentication providers were split OUT of the core
+         Microsoft.Data.SqlClient package in 7.x, so a project that sets
+         SqlAuthenticationMethod.ActiveDirectory* on a connection string and does NOT carry this
+         package opens with "Cannot find an authentication provider for '...'" - which is exactly
+         what a service-principal target reported. The core driver finds the provider by the
+         assembly's PRESENCE in the dependency closure: measured against 7.0.3, GetProvider returns
+         null for every AAD method without it and ActiveDirectoryAuthenticationProvider with it, so
+         there is no registration call to make and nothing to wire at startup. The version is already
+         pinned centrally (Lite has carried this reference since the 7.0 bump), which is why this line
+         is the whole fix. THIS project is where the reference has to be: every SQL Server connection
+         the collector opens is here, and so is the test_connect command the Viewer's Test Connection
+         button enqueues rather than opening itself. -->
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
     <!-- Restrictive ACLs on the DPAPI credential files (the data dir parent, the *.dpapi files, the
          transient init pwfile). Windows-only, like every credential surface here; the extension
