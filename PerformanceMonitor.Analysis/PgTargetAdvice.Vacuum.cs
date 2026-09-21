@@ -436,9 +436,9 @@ public static partial class PgTargetAdvice
         _ => "an unrecognised holder kind",
     };
 
-    /// <summary>A share of the held run as a percentage, 0 when the metadata carried none.</summary>
-    /// <summary>Whole-percent share for the attribution sentence, spelled the way the same paragraph spells its other
-    /// shares (<c>{x:P0}</c>, no space before the sign) so "client backends 100%" and "won 76%" read as one voice.</summary>
+    /// <summary>A share of the held run as a whole percent for the attribution sentence (0 when the metadata carried
+    /// none), spelled the way the same paragraph spells its other shares — no space before the sign — so
+    /// "client backends 100%" and "won 76%" read as one voice.</summary>
     private static string HolderShare(double share)
     {
         return string.Format(CultureInfo.InvariantCulture, "{0:0}%", share * 100);
