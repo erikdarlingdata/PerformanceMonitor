@@ -729,4 +729,260 @@ public sealed class RobustBaselineTests
         Assert.Equal(3.5, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.Cpu));
         Assert.Equal(3.5, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.SessionCount));
     }
+
+    /* ── #3691 lane 41: a zero-history baseline is the STRONGEST evidence, not none ──
+
+       An all-zero bucket has no dispersion, so EffectiveStdDev is 0 and IsTrustworthy is false for it
+       however many samples it holds — which routed a month of measured quiet to the absolute-fallback bar
+       sized for a young store. The measured face: ANOMALY_PG_BLOCKING, 92 blocked sessions against a clean
+       month, severity 0.5, worded "first occurrence, no baseline yet". These pins hold the new arm AND the
+       byte-identity of every verdict where isZeroHistory is false (the calibration pins above are the rest
+       of that proof and are deliberately untouched). */
+
+    /// <summary>A month of one-minute blocked-session captures for one hour-of-week, none of them non-zero:
+    /// the shape PgTargetBaselineProvider's blocking arm returns for a server that never blocks (every logged
+    /// capture a measured zero). Full tier, 257 samples over 30 distinct days — well past the Full floors
+    /// (10 samples, 3 days).</summary>
+    private static BaselineBucket ZeroHistoryBlockingBucket(
+        long samples = 257, long days = 30, double mean = 0, double stdDev = 0, double median = 0, double mad = 0,
+        BaselineTier tier = BaselineTier.Full) => new()
+    {
+        Tier = tier, HourOfDay = 14, DayOfWeek = 2,
+        Mean = mean, StdDev = stdDev, Median = median, Mad = mad,
+        SampleCount = samples, DistinctDays = days, AbsStdDevFloor = 0,
+    };
+
+    [Fact]
+    public void ZeroHistory_TheMatrix_TrustworthyAndZeroHistoryAreMutuallyExclusive_AndFloorsStillBind()
+    {
+        /* Enough samples + all zero → zero-history, and NOT trustworthy (the existing contract every caller
+           reads is unchanged: there is still no dispersion to divide by). */
+        var quiet = ZeroHistoryBlockingBucket();
+        Assert.True(quiet.IsZeroHistory);
+        Assert.False(quiet.IsTrustworthy);
+        Assert.Equal(0, quiet.EffectiveStdDev);
+        Assert.Equal(0, quiet.EffectiveRobustSigma);
+
+        /* Enough samples + non-zero → trustworthy, never zero-history. */
+        var busy = TrustedCpuBaseline();
+        Assert.True(busy.IsTrustworthy);
+        Assert.False(busy.IsZeroHistory);
+
+        /* Too few samples + all zero → NEITHER: a young store that has not looked long enough to claim
+           "never happens", so it keeps the absolute-fallback path it has always had. */
+        var young = ZeroHistoryBlockingBucket(samples: 9);
+        Assert.False(young.IsZeroHistory);
+        Assert.False(young.IsTrustworthy);
+
+        /* Enough samples but too few DAYS + all zero → also neither: 257 samples from two afternoons is not
+           a month of quiet, and the day floor is the gate that says so (the SAME floors IsTrustworthy uses,
+           read through the one shared helper so the two cannot drift). */
+        var twoDays = ZeroHistoryBlockingBucket(days: 2);
+        Assert.False(twoDays.IsZeroHistory);
+        Assert.False(twoDays.IsTrustworthy);
+
+        /* A bucket whose CLASSICAL frame collapsed but whose robust frame did not is a rollup artefact, not a
+           quiet hour — all four statistics must be zero. */
+        Assert.False(ZeroHistoryBlockingBucket(median: 3, mad: 1).IsZeroHistory);
+        Assert.False(ZeroHistoryBlockingBucket(mean: 0.2, stdDev: 0.45).IsZeroHistory);
+
+        /* Confidence is the tier/density quality it earns — it IS quality — where an untrustworthy,
+           non-zero-history bucket still reads 0. Full tier, 257 samples → saturated density → 1.0. */
+        Assert.Equal(1.0, quiet.Confidence, precision: 3);
+        Assert.Equal(0.0, young.Confidence);
+        Assert.Equal(0.0, twoDays.Confidence);
+        Assert.Equal(0.7, ZeroHistoryBlockingBucket(tier: BaselineTier.Flat).Confidence, precision: 3);
+    }
+
+    [Fact]
+    public void ZeroHistory_PeakOverTheFloor_FiresAsAnExtremity_BothFrames_SigmaIsTheCap()
+    {
+        var quiet = ZeroHistoryBlockingBucket();
+
+        /* The robust-first frame (the bucket overloads every PostgreSQL-target family calls): 92 blocked
+           sessions over the 3-session floor against a month of zeros → fire, as an extremity. */
+        var pair = AnomalyGate.EvaluateZScore(
+            quiet, peak: 92, windowMean: 40,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(pair.Fire);
+        Assert.True(pair.ZeroHistory);
+        Assert.False(pair.LowQualityBaseline);              // NOT low quality — the whole point
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pair.Sigma);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pair.MeanSigma!.Value);
+        Assert.Equal(0.0, pair.FallbackExceedance);         // no absolute bar was used; the scorer must not grade one
+
+        /* The classical frame, primitives in: the same verdict, so neither entry point can drift. */
+        var classical = AnomalyGate.EvaluateZScore(
+            quiet.Mean, quiet.EffectiveStdDev, quiet.IsTrustworthy, 92, 40,
+            AnomalyThresholds.DefaultDeviationThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap, isZeroHistory: quiet.IsZeroHistory);
+        Assert.Equal(pair, classical);
+
+        /* The peak-only overload keeps its contract: null MeanSigma, never a 0 that reads as "at baseline". */
+        var peakOnly = AnomalyGate.EvaluateZScore(
+            quiet, 92,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(peakOnly.Fire);
+        Assert.True(peakOnly.ZeroHistory);
+        Assert.Null(peakOnly.MeanSigma);
+
+        /* THE FACE OF THE LANE: this is what used to happen — the untrustworthy path, 92 under the 10-session
+           fallback bar... which it clears, so it fired, but as a low-quality "first occurrence" whose severity
+           came off the fallback ramp's 0.5 floor. Pinned as the pre-state by passing isZeroHistory: false. */
+        var asItWas = AnomalyGate.EvaluateZScore(
+            quiet.Mean, quiet.EffectiveStdDev, quiet.IsTrustworthy, 92, 40,
+            AnomalyThresholds.DefaultDeviationThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(asItWas.LowQualityBaseline);
+        Assert.False(asItWas.ZeroHistory);
+        Assert.Equal(0.0, asItWas.Sigma);                   // no dispersion → no sigma at all
+    }
+
+    [Fact]
+    public void ZeroHistory_PeakUnderTheMagnitudeFloor_StaysQuiet_TheFloorIsTheOnlyNoiseGuard()
+    {
+        /* One lock handoff caught mid-flight is a 1 against a month of zeros: infinitely far out in sigmas,
+           and exactly the noise the magnitude floor exists to keep out. The floor is the ONLY guard on this
+           arm (the pair gate cannot discriminate against a zero centre), so this pin is what stands between
+           the arm and a fact per quiet minute. */
+        var quiet = ZeroHistoryBlockingBucket();
+
+        var one = AnomalyGate.EvaluateZScore(
+            quiet, peak: 1, windowMean: 0.004,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.False(one.Fire);
+        Assert.True(one.ZeroHistory);
+
+        /* AT the floor it fires — inclusive, like every other bar in the gate. */
+        var atFloor = AnomalyGate.EvaluateZScore(
+            quiet, peak: AnomalyThresholds.PgBlockedSessionsFloor, windowMean: 0.02,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(atFloor.Fire);
+
+        /* And a mean of zero does not veto: against a zero history the mean carries no information the peak
+           has not already given, which is stated in the arm's remarks and pinned here so nobody "fixes" it
+           into a second bar this lane has no measurement for. */
+        var quietWindow = AnomalyGate.EvaluateZScore(
+            quiet, peak: 92, windowMean: 0,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThreshold,
+            AnomalyThresholds.PgBlockedSessionsFloor, AnomalyThresholds.PgBlockedSessionsFallback,
+            AnomalyThresholds.SigmaDisplayCap);
+        Assert.True(quietWindow.Fire);
+    }
+
+    [Fact]
+    public void ZeroHistory_TheScorerGradesTheExtremityPastTheFaceLine_AndTheThirdAdviceShapePrintsNoSigma()
+    {
+        /* Severity: the arm invents no scale — it stamps the capped sigma and the shared deviation ramp does
+           the rest. 25σ against a 2.0 anchor is saturated (0.5 + 0.5 x min((25-2)/2, 1) = 1.0), times the
+           bucket's honest confidence (1.0 for a Full 257-sample bucket) → 1.0. The face line — "sat at 0.5
+           with 92 blocked sessions against a clean month" — is answered by this number. */
+        var extremity = new Fact
+        {
+            Source = "anomaly",
+            Key = PgTargetFactKeys.AnomalyBlocking,
+            Value = 92,
+            Metadata = new Dictionary<string, double>
+            {
+                ["peak_blocked_sessions"] = 92,
+                ["avg_blocked_sessions"] = 40,
+                ["deviation_sigma"] = AnomalyThresholds.SigmaDisplayCap,
+                ["fire_threshold"] = AnomalyThresholds.DefaultDeviationThreshold,
+                ["baseline_low_quality"] = 0,
+                ["baseline_zero_history"] = 1,
+                ["fallback_exceedance"] = 0,
+                ["baseline_samples"] = 257,
+                ["baseline_distinct_days"] = 30,
+                ["confidence"] = 1.0,
+                ["threshold_lineage"] = 0,
+            },
+        };
+        Assert.Equal(1.0, Score(extremity), precision: 3);
+        Assert.True(Score(extremity) > 0.5, "the face line: 92 blocked sessions against a clean month must not read 0.5");
+
+        /* The third advice shape: the quantity, that this hour saw NONE of it, the samples AND days the claim
+           rests on — and no σ figure, because the stored one is a cap rather than a measurement. */
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = extremity })!;
+        Assert.Equal("Blocked sessions per capture reached 92 sessions — against a month in which this hour saw none", block.Headline);
+        Assert.Contains("is not thin — it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Beyond any σ", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("σ above", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("first occurrence", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("too thin", block.Investigation, StringComparison.Ordinal);
+        /* The source sentence survives: the composed prose still names the table and the zero rule. */
+        Assert.Contains("pg_blocking_edges", block.Investigation, StringComparison.Ordinal);
+
+        /* The other two shapes are byte-identical to what they were — the stamp is absent or 0 on every fact
+           that is not a zero-history fire, and the arm is one `if` above them. */
+        var trusted = new Fact
+        {
+            Source = "anomaly",
+            Key = PgTargetFactKeys.AnomalyBlocking,
+            Value = 12,
+            Metadata = new Dictionary<string, double>
+            {
+                ["peak_blocked_sessions"] = 12, ["baseline_mean"] = 0.2, ["baseline_median"] = 0,
+                ["deviation_sigma"] = 6.2, ["fire_threshold"] = 2.0, ["baseline_low_quality"] = 0,
+                ["baseline_zero_history"] = 0, ["baseline_samples"] = 257, ["confidence"] = 1.0,
+            },
+        };
+        var trustedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = trusted })!;
+        Assert.Equal("Blocked sessions per capture spiked to 12 sessions — 6.2σ above its baseline for this time of week", trustedBlock.Headline);
+
+        var unstamped = new Fact { Source = trusted.Source, Key = trusted.Key, Value = trusted.Value, Metadata = new Dictionary<string, double>(trusted.Metadata) };
+        unstamped.Metadata.Remove("baseline_zero_history");
+        var unstampedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = unstamped })!;
+        Assert.Equal(trustedBlock.Headline, unstampedBlock.Headline);
+        Assert.Equal(trustedBlock.Investigation, unstampedBlock.Investigation);
+        Assert.Equal(trustedBlock.Remediation, unstampedBlock.Remediation);
+    }
+
+    [Fact]
+    public void ZeroHistory_TheSqlServerHalf_SameThirdShape_AndTheTrustedSentenceUnmoved()
+    {
+        /* One engine, one truth: the SQL Server composer gets the same third shape from the same stamp (the
+           gate is shared, so a SQL Server target with a month of zero blocked sessions reaches the arm too).
+           FactAdvice's trusted sentence is byte-identical either side of the change. */
+        static Fact Sessions(bool zeroHistory) => new()
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_SESSION_SPIKE",
+            Value = 300,
+            Metadata = new Dictionary<string, double>
+            {
+                ["peak_connections"] = 300, ["baseline_mean"] = zeroHistory ? 0 : 20, ["baseline_samples"] = 257,
+                ["baseline_distinct_days"] = 30, ["deviation_sigma"] = zeroHistory ? AnomalyThresholds.SigmaDisplayCap : 8.0,
+                ["fire_threshold"] = 2.0, ["baseline_low_quality"] = 0,
+                ["baseline_zero_history"] = zeroHistory ? 1 : 0, ["confidence"] = 1.0,
+            },
+        };
+
+        var extremity = FactAdvice.Compose("ANOMALY_SESSION_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_SESSION_SPIKE"] = Sessions(zeroHistory: true) })!;
+        Assert.Contains("against a month in which this hour saw none", extremity.Headline, StringComparison.Ordinal);
+        Assert.Contains("257 baseline samples across 30 distinct days, not one of them above zero", extremity.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Beyond any σ", extremity.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("σ above its", extremity.Investigation, StringComparison.Ordinal);
+
+        var trusted = FactAdvice.Compose("ANOMALY_SESSION_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_SESSION_SPIKE"] = Sessions(zeroHistory: false) })!;
+        Assert.Contains("8σ above its", trusted.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Beyond any", trusted.Investigation, StringComparison.Ordinal);
+
+        var unstamped = Sessions(zeroHistory: false);
+        unstamped.Metadata.Remove("baseline_zero_history");
+        unstamped.Metadata.Remove("baseline_distinct_days");
+        var unstampedBlock = FactAdvice.Compose("ANOMALY_SESSION_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_SESSION_SPIKE"] = unstamped })!;
+        Assert.Equal(trusted.Headline, unstampedBlock.Headline);
+        Assert.Equal(trusted.Investigation, unstampedBlock.Investigation);
+        Assert.Equal(trusted.Remediation, unstampedBlock.Remediation);
+    }
 }
