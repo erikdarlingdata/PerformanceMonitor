@@ -196,7 +196,19 @@ public static partial class PgTargetAdvice
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.BadActorKeyPrefix))
             inv.Append(" PG_BAD_ACTOR fired for the same queryid: the statement that regressed also holds a large share of the window's execution time, so the step is the workload's, not a corner's.");
         if (factsByKey.TryGetValue(PgTargetFactKeys.AnomalyPlanRegression, out var anomaly) && anomaly.BaseSeverity > 0)
-            inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {anomaly.Metadata.GetValueOrDefault("peak_mean_ms"):0.#} ms against this hour's baseline — the statistical reading of the same step.");
+        {
+            /* Which series the deviation was read on decides what the sentence may claim: the keyed one is about THIS
+               statement (and only when it names it — a different flipped statement's deviation is its own story and
+               says so), the fallback is about the server. One predicate, shared with the amplifier and the edge. */
+            var keyedAnomaly = anomaly.Metadata.GetValueOrDefault(PgTargetScorer.PlanAnomalySeriesKey) >= 1.0;
+            var peak = anomaly.Metadata.GetValueOrDefault("peak_mean_ms");
+            if (!keyedAnomaly)
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {peak:0.#} ms against this hour's baseline — a blunt corroboration, used because no flipped statement has its own history yet.");
+            else if (PgTargetScorer.PlanRegressionAnomalyCorroborates(factsByKey))
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached {peak:0.#} ms against its hour-of-week routine — the statistical reading of the same step.");
+            else
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION fired for a DIFFERENT flipped statement (queryid {anomaly.ObjectName}) at {peak:0.#} ms per call against its own routine — more than one plan changed in this window; that deviation is not evidence about this statement.");
+        }
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity)
             && factsByKey.TryGetValue(PgTargetFactKeys.ParameterSensitivity, out var sensitivity))
             inv.Append(CultureInfo.InvariantCulture, $" PG_PARAMETER_SENSITIVITY names the likely mechanism: a predicate column of this statement has a top value covering {sensitivity.Value * 100:0}% of its table.");
@@ -282,41 +294,101 @@ public static partial class PgTargetAdvice
     }
 
     /// <summary>
-    /// The anomaly's block — <c>ANOMALY_PG_PLAN_REGRESSION</c>, the SERVER-WIDE per-call mean (every statement's
-    /// stored exec-time deltas over every statement's stored call deltas, per collection) against this server's
-    /// hour-of-week baseline of the same quantity. The limitation is the block's first sentence: the baseline seam
-    /// keys one series per (server, metric) and has no per-statement dimension, so this anomaly says "this server's
-    /// statements got slower per call than this hour usually sees", not "this statement did" — the per-statement
-    /// flip is <c>PG_PLAN_REGRESSION</c>'s, and this anomaly folds onto it as the corroborator.
+    /// The anomaly's block — <c>ANOMALY_PG_PLAN_REGRESSION</c>, one of TWO series since lane 39 and the block says
+    /// which. On the KEYED series (<c>series = 1</c>) the fact names a <c>queryid</c> and the prose is about that
+    /// statement's own per-call history: "queryid 7001's calls cost 200 ms against its routine 20 ms for this hour".
+    /// On the COLD FALLBACK (<c>series = 0</c> — no flipped statement on this server has a trustworthy bucket yet)
+    /// it is the server-wide mean and the limitation is the block's own sentence: it says "this server's statements
+    /// got slower per call than this hour usually sees", not "this statement did". Either way the per-statement flip
+    /// is <c>PG_PLAN_REGRESSION</c>'s and this anomaly folds onto it as the corroborator.
     /// </summary>
-    /* filled by lane 27 — the ANOMALY_PG_PLAN_REGRESSION arm of ComposeAnomaly delegates here (PgTargetAdvice.Anomaly.cs),
-       so the anomaly's prose lives with its family and the shared prefix routing never reaches a SQL Server composer. */
+    /* filled by lane 27, keyed by lane 39 — the ANOMALY_PG_PLAN_REGRESSION arm of ComposeAnomaly delegates here
+       (PgTargetAdvice.Anomaly.cs), so the anomaly's prose lives with its family and the shared prefix routing never
+       reaches a SQL Server composer. */
     private static partial AdviceBlock? ComposePlanRegressionAnomaly(IReadOnlyDictionary<string, Fact> factsByKey)
     {
-        var fallback = PlanRegressionAnomalyStatic();
-        return factsByKey.TryGetValue(PgTargetFactKeys.AnomalyPlanRegression, out var anomaly)
-            ? ComposeDeviation(anomaly, fallback, "The server-wide mean execution time per statement call", "peak_mean_ms", v => v.ToString("0.#", CultureInfo.InvariantCulture) + " ms")
-            : fallback;
+        if (!factsByKey.TryGetValue(PgTargetFactKeys.AnomalyPlanRegression, out var anomaly))
+            return PlanRegressionAnomalyStatic(keyed: false);
+
+        var keyed = anomaly.Metadata.GetValueOrDefault(PgTargetScorer.PlanAnomalySeriesKey) >= 1.0;
+        var fallback = PlanRegressionAnomalyStatic(keyed);
+        var noun = keyed && !string.IsNullOrEmpty(anomaly.ObjectName)
+            ? "Statement queryid " + anomaly.ObjectName + "'s mean execution time per call"
+            : "The server-wide mean execution time per statement call";
+        var block = ComposeDeviation(anomaly, fallback, noun, "peak_mean_ms", v => v.ToString("0.#", CultureInfo.InvariantCulture) + " ms");
+        if (ReferenceEquals(block, fallback) || !keyed)
+            return block;
+
+        /* Value-stated, and every count labelled for what bounds it: the candidate set is the window's FLIPPED
+           statements (a plan-cache-free instrument — pg_plan_capture only holds what auto_explain logged, so the set
+           is capture-bounded, which the sentence says), and "beyond its own normal" is a verdict per candidate. */
+        var candidates = anomaly.Metadata.GetValueOrDefault("candidates_evaluated");
+        var fired = anomaly.Metadata.GetValueOrDefault("candidates_fired");
+        var blind = anomaly.Metadata.GetValueOrDefault("candidates_without_baseline");
+        var inv = new StringBuilder(block.Investigation);
+        if (candidates > 0)
+        {
+            inv.Append(CultureInfo.InvariantCulture,
+                $" {candidates:0} statement(s) changed plan in this window and were judged against their own hour-of-week per-call history");
+            if (fired > 1)
+                inv.Append(CultureInfo.InvariantCulture, $"; {fired:0} were beyond it and this is the furthest.");
+            else
+                inv.Append("; this is the one beyond it.");
+            if (blind > 0)
+                inv.Append(CultureInfo.InvariantCulture, $" {blind:0} had no trustworthy own history yet and were not graded — never judged against the server's mean as a stand-in.");
+            inv.Append(" The set is what auto_explain logged: a statement whose plan changed without a captured plan is not in it.");
+        }
+
+        return block with { Investigation = inv.ToString() };
     }
 
     /// <summary>Built per call (not <c>static readonly</c>), for the reason <c>PgTargetAdvice.Io.cs</c> states: it
     /// composes the hedge and remediation strings declared in <c>PgTargetAdvice.Anomaly.cs</c>, and static
-    /// initialisers across partial files have no defined order.</summary>
-    private static AdviceBlock PlanRegressionAnomalyStatic() => new(
-        Headline: "Statements ran slower per call than this server's normal for this time of week",
-        Investigation:
-            "The window's peak SERVER-WIDE mean execution time per statement call (every statement's stored " +
-            "delta_total_exec_time_ms over every statement's stored delta_calls, per pg_statement_stats collection) was " +
-            "judged against this server's hour-of-week baseline of the same quantity over the last 30 days. Both the peak " +
-            "and the window's mean had to clear the bar, so one slow minute does not fire it. This is a server-level " +
-            "reading: the baseline keys one series per server and has no per-statement dimension, so it says the " +
-            "server's statements got slower per call than this hour usually sees — not which one. PG_PLAN_REGRESSION " +
-            "names the statement whose plan flipped, and this anomaly folds into that story when both fire; alone it is " +
-            "as likely a heavier parameter mix or a colder cache as a plan change." + s_anomalyHedge,
-        Remediation:
-            "get_pg_top_queries ranks the window's statements by time and shows which mean moved; get_pg_query_duration_trend " +
-            "for the heaviest shows whether its mean STEPPED (a plan change) or its calls did (a workload change); " +
-            "get_pg_plans has the captured plans where auto_explain is configured. " + s_anomalyRemediation);
+    /// initialisers across partial files have no defined order. Two shapes, because the fact has two series and a
+    /// static block that claimed the keyed reading on a fallback fact (or the reverse) would be the lie the
+    /// <c>series</c> stamp exists to prevent.</summary>
+    private static AdviceBlock PlanRegressionAnomalyStatic(bool keyed)
+    {
+        if (keyed)
+        {
+            return new AdviceBlock(
+                Headline: "A statement whose plan changed ran slower per call than its own normal for this time of week",
+                Investigation:
+                    "For every statement captured under two or more distinct plan hashes in this window, its peak and mean " +
+                    "per-call execution time (its stored delta_total_exec_time_ms over its stored delta_calls, per " +
+                    "pg_statement_stats collection) was judged against THAT STATEMENT's own hour-of-week baseline of the " +
+                    "same quantity over the last 30 days. Both the peak and the window's mean had to clear the bar, so one " +
+                    "slow minute does not fire it, and a statement with no trustworthy history of its own is recorded and " +
+                    "never graded. The fleet read behind this shape: across fifty PostgreSQL clusters the SERVER-WIDE " +
+                    "per-call mean never reached three times its hour-of-week normal in a week, while a single statement's " +
+                    "own series reaches ninety times — a per-statement step dilutes to nothing in a server's mean, so the " +
+                    "deviation is asked of the statement. PG_PLAN_REGRESSION grades what the flip cost per call; this is " +
+                    "the statistical reading of the same step, and the two share one story when they name one statement." +
+                    s_anomalyHedge,
+                Remediation:
+                    "get_pg_plans for this queryid shows both plans and when each first appeared; get_pg_query_duration_trend " +
+                    "for it shows whether the mean STEPPED (a plan change) or the calls did (a workload change); " +
+                    "get_pg_top_queries has the statement's text. " + s_anomalyRemediation);
+        }
+
+        return new AdviceBlock(
+            Headline: "Statements ran slower per call than this server's normal for this time of week",
+            Investigation:
+                "The window's peak SERVER-WIDE mean execution time per statement call (every statement's stored " +
+                "delta_total_exec_time_ms over every statement's stored delta_calls, per pg_statement_stats collection) was " +
+                "judged against this server's hour-of-week baseline of the same quantity over the last 30 days. Both the peak " +
+                "and the window's mean had to clear the bar, so one slow minute does not fire it. This is the FALLBACK " +
+                "reading, used because no statement whose plan changed in this window has enough of its own history to be " +
+                "judged against: it says the server's statements got slower per call than this hour usually sees — not " +
+                "which one — and a fleet read of fifty clusters found this series blunt (a single statement's step barely " +
+                "moves it), so treat it as a pointer, not a verdict. PG_PLAN_REGRESSION names the statement whose plan " +
+                "flipped, and this anomaly folds into that story when both fire; alone it is as likely a heavier parameter " +
+                "mix or a colder cache as a plan change." + s_anomalyHedge,
+            Remediation:
+                "get_pg_top_queries ranks the window's statements by time and shows which mean moved; get_pg_query_duration_trend " +
+                "for the heaviest shows whether its mean STEPPED (a plan change) or its calls did (a workload change); " +
+                "get_pg_plans has the captured plans where auto_explain is configured. " + s_anomalyRemediation);
+    }
 
     /// <summary>
     /// The Seq-Scan block, value-stated from the carried pairs; the two <c>unavailable</c> shapes say which instrument

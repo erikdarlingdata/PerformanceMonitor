@@ -16,18 +16,24 @@ public sealed partial class PgTargetBaselineProvider
     /// row stamped with one <c>collection_time</c>, the collector's STORED deltas (never a re-differencing of the
     /// cumulative columns — <c>PgTargetFactCollector.Queries.cs</c>'s discipline) and so already reset-aware.
     ///
-    /// <para><b>THE DECISION LANE 27 OWNED FIRST, taken: (a) the server-wide series.</b>
+    /// <para><b>THE CONSTRAINT THAT CHOSE THIS ARM IS LIFTED; the arm is now the COLD FALLBACK.</b>
     /// When this arm was written <c>PgBaselineProvider.GetBaselineAsync</c> keyed one series on (<c>server_id</c>, metric)
     /// with no per-statement dimension, so a per-<c>queryid</c> baseline needed either a key dimension on the shared
     /// seam (a shared-file change, reported to the coordinator as an out-of-lane item, never made inside the lane) or
-    /// ONE series for the whole server. The keyed seam exists since #3810 (<c>ResolveKeyedBaselineQuery</c>, the third
-    /// seam); switching this anomaly to a per-<c>queryid</c> series is lane 27's follow-up and this arm still serves
-    /// the server-wide mean. The coordinator's ruling for v3 is the server-wide mean — honest but blunt: the anomaly it feeds
-    /// says "this server's statements got slower per call than this hour usually sees", not "this statement did".
-    /// The per-statement flip is <c>PG_PLAN_REGRESSION</c>'s (the collector, with its own bars); the anomaly is the
-    /// server-level corroborator that folds onto it (<c>PgTargetFactKeys.AnomalyToFamilies</c>). A heavier parameter
-    /// mix, a colder cache or one new expensive statement all move this series too, and the detector's doc and the
-    /// advice both say so.</para>
+    /// ONE series for the whole server — and v3 took the second. The key dimension landed in #3810
+    /// (<c>ResolveKeyedBaselineQuery</c>, the third seam) with a keyed arm of this very metric
+    /// (<c>PgTargetBaselineProvider.Statements.cs</c>), and calibration D then measured both series over the same
+    /// 50 Aurora PostgreSQL clusters (§D5, 28 days fenced at 2026-09-19 16:40Z): the server-wide mean's hour-of-week
+    /// ratio never reached the 3.0 multiple in a week (p99 2.05, maximum 4.4) while the keyed series' tail runs to
+    /// 90× — a per-statement step is diluted to nothing in the server's mean. So <c>ANOMALY_PG_PLAN_REGRESSION</c>
+    /// grades on the KEYED series (lane 39) and this arm is retained for exactly one case: a server with no
+    /// trustworthy keyed bucket for any flipped statement, where a blunt reading beats no reading and the fact
+    /// stamps <c>series = 0</c> to say which it is. Blunt is the word: the anomaly it feeds on that path says
+    /// "this server's statements got slower per call than this hour usually sees", not "this statement did" — a
+    /// heavier parameter mix, a colder cache or one new expensive statement all move this series too, and the
+    /// detector's doc and the advice both say so. The per-statement flip is <c>PG_PLAN_REGRESSION</c>'s (the
+    /// collector, with its own bars), which the anomaly folds onto either way
+    /// (<c>PgTargetFactKeys.AnomalyToFamilies</c>).</para>
     ///
     /// <para><b>Why a per-call mean and not a total.</b> Σ exec time per collection is throughput-shaped — it rises
     /// with calls — and lane 9's <c>pg_tps</c> already baselines throughput. Dividing by calls gives the quantity a

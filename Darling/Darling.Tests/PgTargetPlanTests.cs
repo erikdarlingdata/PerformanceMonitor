@@ -462,8 +462,20 @@ public sealed class PgTargetPlanTests
         var trusted = FactAdvice.Compose(PgTargetFactKeys.AnomalyPlanRegression, new List<Fact> { Anomaly(sigma: 8, peak: 55) }.ToFactLookup())!;
         Assert.StartsWith("The server-wide mean execution time per statement call spiked to 55 ms — ", trusted.Headline, StringComparison.Ordinal);
         Assert.Contains("55 ms this window, 8σ above its", trusted.Investigation, StringComparison.Ordinal);
-        Assert.Contains("no per-statement dimension", trusted.Investigation, StringComparison.Ordinal);
+        /* Lane 39: the un-stamped fact IS the server-wide series (series absent = 0 = the cold fallback), and the
+           advice now says so in those words — a pointer, not a verdict — instead of claiming a dimension it lacks. */
+        Assert.Contains("This is the FALLBACK reading", trusted.Investigation, StringComparison.Ordinal);
+        Assert.Contains("not which one", trusted.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Anomalous spike", trusted.Headline, StringComparison.Ordinal);
+
+        /* The keyed series names the statement it judged, against ITS OWN hour-of-week history. */
+        var keyedFact = Anomaly(sigma: 8, peak: 55);
+        keyedFact.Metadata[PgTargetScorer.PlanAnomalySeriesKey] = 1;
+        keyedFact.ObjectName = HotQueryId.ToString(CultureInfo.InvariantCulture);
+        var keyed = FactAdvice.Compose(PgTargetFactKeys.AnomalyPlanRegression, new List<Fact> { keyedFact }.ToFactLookup())!;
+        Assert.Contains(HotQueryId.ToString(CultureInfo.InvariantCulture), keyed.Headline, StringComparison.Ordinal);
+        Assert.Contains("own hour-of-week", keyed.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("FALLBACK reading", keyed.Investigation, StringComparison.Ordinal);
 
         var first = FactAdvice.Compose(PgTargetFactKeys.AnomalyPlanRegression, new List<Fact> { Anomaly(sigma: 0, peak: 300, lowQuality: true, exceedance: 1.2) }.ToFactLookup())!;
         Assert.Contains("first occurrence, no baseline yet", first.Headline, StringComparison.Ordinal);
@@ -699,12 +711,16 @@ public sealed class PgTargetPlanTests
 
             var anomalies = await new PgTargetAnomalyDetector(postgres, baselines).DetectAnomaliesAsync(context);
             var anomaly = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyPlanRegression);
-            /* (20,000 + 500 + 2c + 1,000 + 200) / (200 + c) for the jittered c ∈ [190, 210]: 53.9 … 56.6 ms; the peak is the
-               c = 190 minute. The window's mean: an hour at ≈ 10 ms and three at ≈ 55 ms. */
-            Assert.InRange(anomaly.Value, 56.5, 56.7);
+            /* Lane 39 (calibration D): the anomaly is the KEYED per-statement reading — the hot statement's OWN per-call
+               mean (a flat 200 ms after the flip, 20 ms before) against its own hour-of-week bucket, and it names the
+               statement. The server-wide arithmetic ((20,000 + 500 + 2c + 1,000 + 200) / (200 + c) ≈ 54–57 ms) is the
+               COLD FALLBACK now and does not appear when a flipped statement has a trustworthy own-normal. */
+            Assert.Equal(HotQueryId.ToString(CultureInfo.InvariantCulture), anomaly.ObjectName);
+            Assert.Equal(1, anomaly.Metadata[PgTargetScorer.PlanAnomalySeriesKey]);
+            Assert.Equal(200, anomaly.Value, precision: 6);
             Assert.Equal(anomaly.Value, anomaly.Metadata["peak_mean_ms"]);
-            Assert.InRange(anomaly.Metadata["avg_mean_ms"], 40, 50);
-            Assert.Equal(1, anomaly.Metadata["server_wide"]);
+            Assert.InRange(anomaly.Metadata["avg_mean_ms"], 100, 200);
+            Assert.Equal(0, anomaly.Metadata["server_wide"]);
             Assert.Equal(0, anomaly.Metadata["baseline_low_quality"]);
             Assert.Equal(0, anomaly.Metadata["threshold_lineage"]);
             Assert.True(anomaly.Metadata["deviation_sigma"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
@@ -734,7 +750,7 @@ public sealed class PgTargetPlanTests
                 Assert.Contains("over 6,000 calls before the flip and 3,100 after", investigation, StringComparison.Ordinal);
                 Assert.Contains($"(plan hash {HashA[..12]}… before the flip, {HashC[..12]}… after)", investigation, StringComparison.Ordinal);
                 Assert.Contains("PG_BAD_ACTOR fired for the same queryid", investigation, StringComparison.Ordinal);
-                Assert.Contains("ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached 56.6 ms", investigation, StringComparison.Ordinal);
+                Assert.Contains("ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached 200 ms against its hour-of-week routine", investigation, StringComparison.Ordinal);
                 Assert.Contains("PG_PARAMETER_SENSITIVITY names the likely mechanism", investigation, StringComparison.Ordinal);
                 Assert.DoesNotContain("CREATE INDEX", investigation + advice.GetProperty("remediation").GetString(), StringComparison.OrdinalIgnoreCase);
                 var tools = card.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
@@ -753,7 +769,8 @@ public sealed class PgTargetPlanTests
                 var anomalyCard = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.AnomalyPlanRegression);
                 Assert.Equal(card.GetProperty("incident_id").GetString(), anomalyCard.GetProperty("incident_id").GetString());
                 var anomalyHeadline = anomalyCard.GetProperty("advice").GetProperty("headline").GetString()!;
-                Assert.StartsWith("The server-wide mean execution time per statement call spiked to 56.6 ms — ", anomalyHeadline, StringComparison.Ordinal);
+                Assert.StartsWith($"Statement queryid {HotQueryId}'s mean execution time", anomalyHeadline, StringComparison.Ordinal);
+                Assert.Contains("200 ms", anomalyHeadline, StringComparison.Ordinal);
                 Assert.DoesNotContain("Anomalous spike", anomalyHeadline, StringComparison.Ordinal);
 
                 Assert.All(findings.SelectMany(f => f.GetProperty("next_tools").EnumerateArray()).Select(t => t.GetProperty("tool").GetString()!), t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));

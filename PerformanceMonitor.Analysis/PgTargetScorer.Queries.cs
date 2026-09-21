@@ -69,6 +69,18 @@ namespace PerformanceMonitor.Analysis;
 /// chosen number, and the shared ramp that grades the anomaly rests on cutoffs reused by name and unmeasured for
 /// statement share (the anomaly says so on its own fact). The quantities are engine-neutral; the stock-PostgreSQL
 /// population is not yet measured.</para>
+///
+/// <para><b>Round 3 (2026-09-21) moved neither stamp, and this is the argument.</b> §D3A placed the RATIO of a
+/// statement's share to its own hour-of-week mean — 3.0 ≈ p99.1, ≈ p99.6 with this floor — and that read is what
+/// justifies grading the bad actor on its own series at all. It does not place a single bar either fact grades
+/// on: the card is graded by <see cref="BadActorContextBand"/> (chosen) behind the measured busy floor, and the
+/// anomaly by the shared classical and robust SIGMA cutoffs (<c>DefaultDeviationThreshold</c>,
+/// <c>ModifiedZThresholdFor</c>'s default) reused by name, which a ratio percentile cannot place — a 3× share and
+/// a 3σ share are different statements about different distributions. So the card keeps 0 and
+/// <c>ANOMALY_PG_BAD_ACTOR_SHARE</c> keeps 0: the flag contract is "every bar that DECIDED this fact is measured
+/// or engine-defined", and the honest answer on both is still no. What the round bought is the placement of the
+/// multiple on the record (<c>AnomalyThresholds.PgRatioAnomalyThreshold</c>) and of this floor in its
+/// anomaly-side role.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
@@ -82,6 +94,14 @@ public static partial class PgTargetScorer
     /// given a busy hour, share ≥ 0.25 on 84.9 % of hours (p50 0.55), ≥ 0.60 on 43.5 % (p90 0.85, p99 0.90). A bar
     /// that fires on 85 % of the hours it is asked about is a description of the workload, not a grade — which is why
     /// the grade moved to the statement's own baseline and these stay as the named context lines they are.
+    ///
+    /// <para>The third read measured the CONCERNING line in its OTHER role — the peak magnitude floor lane 34's
+    /// anomaly requires before a deviation is the story (2026-09-21, 1,487 statement-hours, top-5 statements × 50
+    /// Aurora PostgreSQL clusters, 28 days fenced at 2026-09-19 16:40Z — §D3A): of the statement-hours whose own-share
+    /// ratio reached 3×, requiring this floor on the peak as well cuts the population from 0.94 % to 0.40 % of
+    /// statement-hours. So the floor is doing the work it was kept for — it removes three fifths of the large
+    /// deviations, the ones where a statement went from a half-percent share to a few percent — and it is measured
+    /// in that role too. It is still CONTEXT on the card and never its grade.</para>
     /// </summary>
     public const double BadActorShareConcerning = 0.25;
     public const double BadActorShareCritical = 0.60;
