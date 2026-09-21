@@ -696,11 +696,14 @@ internal sealed class DarlingSelfAlertEvaluator
        collides with a real server_id (an int hash) — the deliverer's #1236 int.TryParse override no-ops on it,
        exactly like the non-numeric DiskKey. */
     /* AwaitingSchedulerRetry (#3591): a -infinity row on a TimescaleDB whose scheduler recovers it by itself
-       (StuckCompressionJob.SchedulerRetries) — seen once, not re-armed, not paged; a second consecutive
+       (StuckPolicyJob.SchedulerRetries) — seen once, not re-armed, not paged; a second consecutive
        sighting escalates. The other two states are #1581's. */
-    private enum CompressionJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
-    private readonly ConcurrentDictionary<string, CompressionJobHealth> _compressionJobState = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, DateTime> _lastCompressionJobAlert = new(StringComparer.Ordinal);
+    /* #3816: the state is now keyed by job_id across EVERY policy family, not only compression, and each
+       entry remembers which family it fired under — see PolicyJobEpisode for why the recovery edge needs
+       that. One dictionary rather than one per family because a job_id is unique within a store. */
+    private enum PolicyJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
+    private readonly ConcurrentDictionary<string, PolicyJobEpisode> _policyJobState = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobAlert = new(StringComparer.Ordinal);
 
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
     /// re-fires share it, so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly;
@@ -709,6 +712,81 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
+
+    /// <summary>
+    /// #3816: the metric name a dead or hung CONTINUOUS-AGGREGATE REFRESH policy fires under.
+    ///
+    /// <para><b>A new name beside <see cref="CompressionJobMetric"/> rather than a widening of it.</b> A
+    /// metric name is a PERSISTED IDENTITY: it is the string in every <c>config_alert_log</c> row, the string
+    /// a mute rule matches, the key a notification route resolves, and the key the triage page's read map is
+    /// built on. Renaming "Compression Job Stuck" to something family-neutral would orphan every existing
+    /// history row and silently break every mute rule written against it on a deployed store, so the
+    /// compression family keeps its exact string and its exact key prefix. And a REFRESH job's page must not
+    /// arrive under a name that says compression: an operator who mutes one condition would have muted the
+    /// other, and the two have different urgency, different remedies and different blast radius.</para>
+    ///
+    /// <para><b>One tier per name is the second reason to split.</b> This one is always Critical and
+    /// <see cref="RetentionJobStuckMetric"/> is always Warning, so each name's arm in
+    /// <c>AlertSeverity.ForMetric</c> is a faithful replay colour for every row it will ever style — the
+    /// #3635 defect (a history row wearing the colour its NAME implies rather than the tier it fired at) is
+    /// unreachable here by construction, where one mixed-tier name would have walked into it.</para>
+    /// </summary>
+    internal const string RefreshJobStuckMetric = "Refresh Job Stuck";
+
+    /// <summary>#3816: the resolution title when a refresh job runs on schedule again. Carries a recognized
+    /// resolution suffix ("Recovered") so <c>AlertMetricClassifier.IsResolution</c> styles it green, exactly
+    /// like "Compression Job Recovered".</summary>
+    internal const string RefreshJobRecoveredMetric = "Refresh Job Recovered";
+
+    /// <summary>Prefixes the refresh-job alert serverKey so it never parses as a server_id — and so a job id
+    /// that was a refresh policy on one deployment and a compression policy on another cannot inherit the
+    /// other family's open alert row.</summary>
+    private const string RefreshKeyPrefix = "refreshjob:";
+
+    /// <summary>#3816: the metric name a dead or hung RETENTION policy fires under. See
+    /// <see cref="RefreshJobStuckMetric"/> for why this is an addition rather than a widening, and the
+    /// evaluator's family table for why this one is the Warning of the three.</summary>
+    internal const string RetentionJobStuckMetric = "Retention Job Stuck";
+
+    /// <summary>#3816: the resolution title when a retention job runs on schedule again.</summary>
+    internal const string RetentionJobRecoveredMetric = "Retention Job Recovered";
+
+    /// <summary>Prefixes the retention-job alert serverKey. Deliberately NOT
+    /// <c>RetentionHoldKeyPrefix</c> ("retentionhold:"): a dead retention job and a HELD one are different
+    /// conditions with different remedies — the hold is the coverage gate working and clears with a backfill,
+    /// this is the scheduler having abandoned an ARMED policy — and sharing a key would let one resolve the
+    /// other's alert row.</summary>
+    private const string RetentionKeyPrefix = "retentionjob:";
+
+    /* #3816: the total_failures arm's baselines. The DELTA is what this arm judges, and nothing in the
+       product persisted a per-pass copy of these counters where the evaluator could reach it, so the
+       previous pass's value is held in memory here — one long per policy job, on an hourly cadence. The
+       first pass after a service start therefore establishes a BASELINE and cannot fire: a non-measurement
+       neither fires nor resolves (the checkpointer arm's NoPrevious discipline). The alternative — reading
+       the previous collect.store_metrics sample back out — is a second store read per hour to re-learn a
+       number this process had in its hand an hour ago, and it would still be a non-measurement on the first
+       pass after a restart. */
+    private readonly ConcurrentDictionary<string, long> _policyJobFailureBaseline = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobFailureAlert = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #3816: the metric name the <c>total_failures</c> arm fires under — a policy job that FAILED since the
+    /// previous hourly sample and whose last run reports <c>Failed</c>.
+    ///
+    /// <para><b>A third name, because it is a third condition and not a tier of the other two.</b> A job that
+    /// fails and retries is alive: the scheduler is running it, <c>next_start</c> is finite, and the stuck
+    /// arms are correctly silent. It is also invisible everywhere else — #2136's cadence read filters to
+    /// <c>last_run_status = 'Success'</c> (the check gets quieter as the job gets sicker, as the issue puts
+    /// it), #2813 judges a PAUSED policy, and <c>total_failures</c> has ridden the V56 telemetry since then
+    /// with nothing alerting on it. Fired at INFORMATION (no severity override, the declared INFO arm in
+    /// <c>AlertSeverity.ForMetric</c> — the #3443/#3783 idiom), because the useful response is to read the
+    /// PostgreSQL log, not to wake anybody: a failing job that then stops being run at all arrives as one of
+    /// the two Critical/Warning names above.</para>
+    /// </summary>
+    internal const string PolicyJobFailingMetric = "Store Job Failing";
+
+    /// <summary>Prefixes the failure-arm alert serverKey.</summary>
+    private const string PolicyJobFailingKeyPrefix = "jobfailing:";
 
     /* Store Job Over Cadence edge state (#2136). FLEET-level like disk pressure, MULTI-keyed by job_id like
        the compression machine, but a STANDING condition (the AG Sync Fell Behind idiom): active flag +
@@ -4328,20 +4406,25 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// The isolating entry point the worker's hourly compression-job health sweep calls — the fleet-level twin
-    /// of <see cref="EvaluateDiskPressureAsync"/>. Wraps <see cref="ApplyCompressionJobsStuckAsync"/> in the SAME
-    /// failure isolation the sibling store-alerts use, so a throwing seam — the pre-deliver mute check, or the
-    /// caller-supplied re-arm delegate — can never propagate out of the (otherwise un-guarded) collection sweep
-    /// loop and stop collection for the whole fleet. Cancellation still propagates.
+    /// The isolating entry point the worker's hourly store background-job health sweep calls — the
+    /// fleet-level twin of <see cref="EvaluateDiskPressureAsync"/>. Wraps
+    /// <see cref="ApplyPolicyJobsStuckAsync"/> in the SAME failure isolation the sibling store-alerts use, so
+    /// a throwing seam — the pre-deliver mute check, or the caller-supplied re-arm delegate — can never
+    /// propagate out of the (otherwise un-guarded) collection sweep loop and stop collection for the whole
+    /// fleet. Cancellation still propagates.
+    ///
+    /// <para>#3816 changed the parameter from the stuck LIST to the whole <see cref="StorePolicyJobHealth"/>
+    /// reading, because two of the four things this pass now does are about the jobs that are FINE: the
+    /// unconditional census line, and the failure arm over every job's counters.</para>
     /// </summary>
-    public async Task EvaluateCompressionJobsAsync(
-        IReadOnlyList<StuckCompressionJob> stuckJobs,
+    public async Task EvaluatePolicyJobsAsync(
+        StorePolicyJobHealth reading,
         Func<long, Task<bool>> rearmAsync,
         CancellationToken cancellationToken)
     {
         try
         {
-            await ApplyCompressionJobsStuckAsync(stuckJobs, rearmAsync, cancellationToken);
+            await ApplyPolicyJobsStuckAsync(reading, rearmAsync, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -4349,16 +4432,16 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            /* NOT counted by #3013's swallowed-read counter: the stuck-job list is a parameter; the read that
+            /* NOT counted by #3013's swallowed-read counter: the reading is a parameter; the read that
                produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError("Store policy-job health self-alert failed: {Message}", ex.Message);
         }
     }
 
     /// <summary>
     /// The isolating entry point for the #2136 Store Job Over Cadence check — rides the worker's hourly
     /// compression-job health sweep (same connection, same Timescale gate). Same failure isolation as
-    /// <see cref="EvaluateCompressionJobsAsync"/>; cancellation still propagates.
+    /// <see cref="EvaluatePolicyJobsAsync"/>; cancellation still propagates.
     /// </summary>
     public async Task EvaluateStoreJobCadenceAsync(
         IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
@@ -4904,25 +4987,35 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// Edge-applies the fleet-level compression-job self-heal machine (#1581) from the set of currently-stuck
-    /// compression jobs the worker detected. Per job, in one check:
+    /// Edge-applies the fleet-level policy-job self-heal machine (#1581, widened to every family by #3816)
+    /// from the jobs the worker's read flagged. Per job, in one check:
     /// <list type="bullet">
     /// <item><b>First detection</b> — re-arm it ONCE (<paramref name="rearmAsync"/> → <c>alter_job</c>), then
-    /// FIRE a CRITICAL "self-healed" alert. If the re-arm itself fails (usually a permission problem the service
-    /// cannot fix), go straight to Escalated and FIRE an "auto-re-arm FAILED" alert instead — so we neither loop
-    /// alter_job nor stay silent.</item>
-    /// <item><b>Re-hang</b> (still stuck after a prior self-heal) — ESCALATE: FIRE a CRITICAL "re-hung after
+    /// FIRE its family's "self-healed" alert. If the re-arm itself fails (usually a permission problem the
+    /// service cannot fix), go straight to Escalated and FIRE an "auto-re-arm FAILED" alert instead — so we
+    /// neither loop alter_job nor stay silent.</item>
+    /// <item><b>Re-hang</b> (still stuck after a prior self-heal) — ESCALATE: FIRE a "re-hung after
     /// self-heal" alert and STOP re-arming (looping alter_job on a job that re-hangs is a product-bug signal for
     /// a human).</item>
-    /// <item><b>Already escalated</b> — never re-arm; re-fire the CRITICAL only on the alert cooldown.</item>
+    /// <item><b>Already escalated</b> — never re-arm; re-fire only on the alert cooldown.</item>
     /// </list>
-    /// A job that is no longer stuck has RECOVERED: its state is dropped and one "Compression Job Recovered"
-    /// resolution row is written (the sibling conditions' edge shape). Gated on the master alerts switch.
-    /// Re-arm happens at most ONCE per job per check (only on the first-detection transition). Internal so it
-    /// pins directly with a recording deliverer, a controllable clock, and a fake re-arm delegate.
+    /// A job that is no longer stuck has RECOVERED: its state is dropped and one "… Recovered" resolution row
+    /// is written under the family it fired as (the sibling conditions' edge shape). Gated on the master
+    /// alerts switch. Re-arm happens at most ONCE per job per check (only on the first-detection transition).
+    /// Internal so it pins directly with a recording deliverer, a controllable clock, and a fake re-arm
+    /// delegate.
+    ///
+    /// <para><b>#3816 added three things to this machine and changed none of #1581's transitions.</b> The
+    /// band (<c>PolicyJobBand</c>) decides the metric name, key prefix, severity and prose per family, so a
+    /// dead rollup refresh does not arrive wearing compression's sentence and a mute on one condition is not
+    /// a mute on the other; a job that is HELD rather than dead is refused a re-arm by a second gate here as
+    /// well as by the reader; every pass writes one unconditional summary line; and the
+    /// <c>total_failures</c> arm reports a job that fails WITHOUT ever going <c>-infinity</c>, which no
+    /// surface in the product reported before. The state machine, the confirm-read it trusts and the
+    /// version-gated re-arm are all unchanged.</para>
     ///
     /// <para><b>What this machine trusts, and what it cost when the trust was misplaced (#3575).</b> This takes
-    /// <paramref name="stuckJobs"/> as settled fact: first sight re-arms and pages Critical, absence an hour
+    /// the reading's stuck list as settled fact: first sight re-arms and pages, absence an hour
     /// later posts Recovered. So one false row in the list is not one false message but three — the page, the
     /// idempotent re-arm it narrates, and the recovery of a job that was never unwell — on the alert family
     /// that reports the store's own health. A production store produced exactly that set from a healthy job:
@@ -4930,7 +5023,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>job_stats</c> view assembles that status from <c>pg_stat_activity</c> and <c>next_start</c> from the
     /// job-stat row, and for a few milliseconds at either edge of every run the two disagree in exactly the
     /// dead-job shape; the check's sample landed 53 ms into a 63 ms run that succeeded. The fix is upstream
-    /// of here and deliberately so: <c>TimescaleSupport.ReadStuckCompressionJobsAsync</c> now confirms a
+    /// of here and deliberately so: <c>TimescaleSupport.ReadStuckPolicyJobsAsync</c> now confirms a
     /// <c>-infinity</c> trip with a second read five seconds later before a job reaches this list, and the
     /// worker pins its samples to <c>:30</c> past the minute, off the policies' <c>:MM:00</c> run instants.
     /// This method keeps its single-sample semantics — first sight IS first sight — because the input is now
@@ -4947,7 +5040,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and end marks by a SIGKILL, a crash-restart or a failover — which the scheduler holds in a CRASH
     /// BACKOFF of at least five minutes and, for a compression policy with the default one-hour
     /// <c>retry_period</c>, about an hour (±13 % jitter), and then re-runs by itself. Rows of that kind arrive
-    /// here with <see cref="StuckCompressionJob.SchedulerRetries"/> set, and this machine treats them
+    /// here with <see cref="StuckPolicyJob.SchedulerRetries"/> set, and this machine treats them
     /// differently on the evidence of a 2.28.1 rig: re-arming a job in crash backoff does not shorten the
     /// wait, it RESETS it — <c>alter_job</c> refreshes the scheduler's job list and every crash row's backoff
     /// is recomputed from that instant (the un-re-armed sibling crash row moved too), and the re-arm overwrites
@@ -4962,61 +5055,110 @@ internal sealed class DarlingSelfAlertEvaluator
     /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
     /// exactly — an unknown version is treated as old, because on an old store the re-arm is the rescue.</para>
     /// </summary>
-    internal async Task ApplyCompressionJobsStuckAsync(
-        IReadOnlyList<StuckCompressionJob> stuckJobs,
+    internal async Task ApplyPolicyJobsStuckAsync(
+        StorePolicyJobHealth reading,
         Func<long, Task<bool>> rearmAsync,
         CancellationToken cancellationToken)
     {
+        if (reading is null)
+        {
+            throw new ArgumentNullException(nameof(reading));
+        }
+
+        var census = PolicyJobCensus.Of(reading);
+
         if (!_settings.AlertsEnabled)
         {
+            /* #3756: the summary is unconditional, and "alerts are off" is the one thing it has to say
+               differently — a pass that read twelve jobs and deliberately judged none of them must not read
+               like a pass that judged twelve and found nothing wrong. */
+            LogPolicyJobSummary(census, rearmed: 0, fired: 0, alertsEnabled: false);
             return;
         }
 
         var now = _utcNow();
         var stillStuck = new HashSet<string>(StringComparer.Ordinal);
+        var rearmed = 0;
+        var fired = 0;
 
-        foreach (var job in stuckJobs)
+        foreach (var job in reading.Stuck)
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
             stillStuck.Add(key);
 
-            var label = string.IsNullOrEmpty(job.HypertableName)
-                ? $"compression job {key}"
-                : $"compression job {key} on {job.HypertableName}";
+            /* A family this vocabulary has no sentence for is NOT paged under another family's name (#3816).
+               Unreachable from StuckPolicyJobsSql as written — every proc name it admits bands — so reaching
+               this is a widening that outran the band table, which is a product defect and says so. Skipping
+               is the conservative half of that: an operator who gets "Retention Job Stuck" about a reorder
+               policy has been told something false, and a WARNING in the log about an unbanded job is
+               findable and harmless. The census still counts it. */
+            if (job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
+            {
+                _logger?.LogWarning(
+                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for — not re-armed, not alerted. The detection was widened past the band table; report it (#3816)",
+                    key,
+                    string.IsNullOrEmpty(job.HypertableName) ? "" : " on " + job.HypertableName,
+                    job.Reason);
+                continue;
+            }
 
-            if (!_compressionJobState.TryGetValue(key, out var state))
+            var band = PolicyJobBand.For(job.Family);
+            var label = string.IsNullOrEmpty(job.HypertableName)
+                ? $"{band.Noun} {key}"
+                : $"{band.Noun} {key} on {job.HypertableName}";
+
+            /* THE SECOND GATE (#3816, guarding #1680/#1877). TimescaleSupport.ClassifyStuckPolicyJobs already
+               dropped every HELD row, so this cannot fire today — and it is here because the action on the
+               other side of it is DESTRUCTIVE. A held retention policy is paused on purpose until its tier's
+               rollups cover raw, the history it holds exists nowhere else, and alter_job(next_start => now())
+               on one drops exactly the chunks the coverage gate exists to protect. A regression upstream of
+               here — a reader that stops projecting j.scheduled, an upstream view that starts reporting a real
+               next_start for a paused job — must not be able to reach a re-arm. It gets a WARNING naming the
+               job instead. */
+            if (!job.Scheduled)
+            {
+                _logger?.LogWarning(
+                    "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
+                    label);
+                continue;
+            }
+
+            if (!_policyJobState.TryGetValue(key, out var episode))
             {
                 if (job.SchedulerRetries)
                 {
-                    /* #3591: a crash-backoff row on a TimescaleDB that re-runs it by itself. Re-arming would
-                       reset that backoff and erase the evidence (see the method doc); paging would narrate a
-                       self-recovering condition as a rescue. Remember it, say so in the log, and give the
-                       scheduler one check cadence to do what it does. */
-                    _compressionJobState[key] = CompressionJobHealth.AwaitingSchedulerRetry;
+                    /* #3591 (and the #3629 measurement behind it): a crash-backoff row on a TimescaleDB whose
+                       scheduler re-runs it by itself. Re-arming would RESET that backoff rather than shorten
+                       it and would erase the evidence; paging would narrate a self-recovering condition as a
+                       rescue. Remember it, say so in the log, and give the scheduler one check cadence.
+                       Inherited UNCHANGED by every family #3816 added, and that is the point: the scheduler's
+                       crash arm is proc-agnostic, so the argument that made this right for compression is the
+                       same argument for a refresh or a retention job. */
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a compression policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
                         label, job.Reason);
                     continue;
                 }
 
                 /* First detection this episode: re-arm ONCE, then alert on the outcome. */
-                bool rearmed = await rearmAsync(job.JobId);
-                _lastCompressionJobAlert[key] = now;
-                if (rearmed)
+                bool jobWasRearmed = await rearmAsync(job.JobId);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
+                if (jobWasRearmed)
                 {
-                    _compressionJobState[key] = CompressionJobHealth.ReArmed;
+                    rearmed++;
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.ReArmed, job.Family);
                     await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
-                            "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
-                            "uncompressed data grows without bound until the disk fills and collection stops for the WHOLE " +
-                            "fleet, and a headless service has no dashboard to warn you. If it re-hangs the service will " +
+                            $"(alter_job next_start => now). {band.Consequence} If it re-hangs the service will " +
                             "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health. " +
                             "(A next_start of -infinity is permanent only below TimescaleDB 2.26.4; from 2.26.4 on, upstream " +
                             "#9360, the scheduler recovers it by itself and the service leaves such rows to it — if this store " +
                             "is on 2.26.4 or later, its extension version could not be read on this pass.)",
-                        severity: AlertSeverityLevel.Critical,
+                        severity: band.Severity,
                         shortMessage: $"{label} was stuck — auto-re-armed",
                         /* #1881: job.Reason is elapsed minutes when a run HUNG and a scheduler state with no
                            duration at all when next_start is -infinity, so the stored number meant minutes on
@@ -5029,30 +5171,31 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     /* The re-arm failed — usually the store login does not own the job. Treat as escalated so we
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
-                    _compressionJobState[key] = CompressionJobHealth.Escalated;
+                    _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                     await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
-                            "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
-                            "so the store will grow without bound until the disk fills. Re-arm it manually as the store owner " +
+                            "alter_job failed, usually because the store login does not own the job. " +
+                            $"{band.Stalled} Re-arm it manually as the store owner " +
                             "(SELECT alter_job(<job_id>, next_start => now())), or grant ownership, then investigate why it hung.",
-                        severity: AlertSeverityLevel.Critical,
+                        severity: band.Severity,
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
                 }
             }
-            else if (state == CompressionJobHealth.AwaitingSchedulerRetry)
+            else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
                    landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
                    backoff once more). Escalate: page once now, re-fire on the cooldown, never re-arm. */
-                _compressionJobState[key] = CompressionJobHealth.Escalated;
-                _lastCompressionJobAlert[key] = now;
+                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
                 await FireAsync(
-                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                    StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
                         "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
@@ -5060,26 +5203,27 @@ internal sealed class DarlingSelfAlertEvaluator
                         "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
                         "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
                         "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
-                        "shortening it. Compression stays paused for this hypertable until the scheduler's retry succeeds.",
-                    severity: AlertSeverityLevel.Critical,
+                        $"shortening it. {band.Stalled}",
+                    severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
             }
-            else if (state == CompressionJobHealth.ReArmed)
+            else if (episode.State == PolicyJobHealth.ReArmed)
             {
                 /* Still stuck after last check's self-heal = a RE-HANG. Escalate and STOP re-arming (looping
                    alter_job on a job that re-hangs just churns — it is a product-bug signal for a human). */
-                _compressionJobState[key] = CompressionJobHealth.Escalated;
-                _lastCompressionJobAlert[key] = now;
+                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
+                _lastPolicyJobAlert[key] = now;
+                fired++;
                 await FireAsync(
-                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                    StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
-                        "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
-                        "background worker is failing to make progress. Investigate the PostgreSQL/TimescaleDB logs and the " +
-                        "background-worker settings; compression stays halted until it is fixed.",
-                    severity: AlertSeverityLevel.Critical,
+                        "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the background " +
+                        $"worker behind this policy is not making progress. {band.Stalled} Investigate the " +
+                        "PostgreSQL/TimescaleDB logs and the background-worker settings.",
+                    severity: band.Severity,
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -5087,15 +5231,16 @@ internal sealed class DarlingSelfAlertEvaluator
             else
             {
                 /* Already escalated: never re-arm again; keep paging on the cooldown while it stays stuck. */
-                if (CooldownElapsed(_lastCompressionJobAlert, key, now))
+                if (CooldownElapsed(_lastPolicyJobAlert, key, now))
                 {
-                    _lastCompressionJobAlert[key] = now;
+                    _lastPolicyJobAlert[key] = now;
+                    fired++;
                     await FireAsync(
-                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
+                        StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
-                        detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
+                        detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
-                        severity: AlertSeverityLevel.Critical,
+                        severity: band.Severity,
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
@@ -5106,31 +5251,285 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
            one resolution row (the sibling conditions' edge shape). ToList() so the removal does not mutate the
            collection under enumeration. */
-        foreach (var key in _compressionJobState.Keys.ToList())
+        foreach (var key in _policyJobState.Keys.ToList())
         {
             if (stillStuck.Contains(key))
             {
                 continue;
             }
 
-            _compressionJobState.TryRemove(key, out var was);
-            _lastCompressionJobAlert.TryRemove(key, out _);
-            if (was == CompressionJobHealth.AwaitingSchedulerRetry)
+            _policyJobState.TryRemove(key, out var was);
+            _lastPolicyJobAlert.TryRemove(key, out _);
+
+            /* #3816: the resolution must be addressed to the metric name and key its FIRING used, so the
+               episode remembers the family. Deriving the family from this pass's rows instead would be
+               unanswerable in the one case that matters — the job is not in this pass's stuck list, which is
+               why we are here at all — and a resolution under the wrong metric name resolves nothing and
+               leaves the real alert row open. */
+            var band = PolicyJobBand.For(was.Family);
+            if (was.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: the scheduler's own retry cleared it and nothing was paged, so there is nothing to
                    resolve — a lone "Recovered" with no preceding alert would be the very message shape #3575
                    removed. The log carries the outcome instead. */
                 _logger?.LogInformation(
-                    "TimescaleDB compression job {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
+                    "TimescaleDB {Noun} {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
+                    band.Noun,
                     key);
                 continue;
             }
 
             await RecordResolutionAsync(new AlertResolution(
-                StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
-                "Compression Job Recovered",
-                $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
+                StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
+                band.RecoveredMetric,
+                $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
         }
+
+        await ApplyPolicyJobFailuresAsync(reading.Jobs, now, cancellationToken);
+        LogPolicyJobSummary(census, rearmed, fired, alertsEnabled: true);
+    }
+
+    /// <summary>
+    /// The <c>total_failures</c> arm (#3816): a policy job whose failure count GREW since the previous hourly
+    /// sample and whose last run reports <c>Failed</c>, fired at INFORMATION under
+    /// <see cref="PolicyJobFailingMetric"/> with its family's text.
+    ///
+    /// <para><b>Both halves are required, and each alone is wrong.</b> A grown count alone fires on a job that
+    /// failed once and then succeeded — a retry that worked is the scheduler doing its job. A
+    /// <c>last_run_status = 'Failed'</c> alone re-fires hourly about ONE failure forever, because the column
+    /// keeps saying Failed until the next run: it is a state, not an event. The conjunction reads "it failed
+    /// again since we last looked, and it is still failing", which is the only form that is both an event and
+    /// a condition.</para>
+    ///
+    /// <para><b>The first pass after a start establishes the baseline and cannot fire.</b>
+    /// <c>total_failures</c> is cumulative since the job was created, so treating an absent baseline as 0
+    /// would page about every failure in the store's history the first time the service looked. A
+    /// non-measurement neither fires nor resolves — the checkpointer arm's <c>NoPrevious</c> discipline.</para>
+    ///
+    /// <para><b>A HELD policy is skipped here too.</b> Its counters are frozen because it is not being run, so
+    /// it cannot produce a delta; and if one ever did, the sentence to say about it belongs to the hold, not
+    /// to this arm.</para>
+    ///
+    /// <para>Event-shaped, so there is no standing state and no resolution row: what is reported is "N more
+    /// failures since the previous sample", which is true when it is said and is not a condition that later
+    /// clears. The alert cooldown still gates the re-fire, so a job failing every few minutes cannot outrun
+    /// the channel.</para>
+    /// </summary>
+    private async Task ApplyPolicyJobFailuresAsync(
+        IReadOnlyList<PolicyJobRunReading> jobs, DateTime now, CancellationToken cancellationToken)
+    {
+        /* #3464: the master switch, consulted before the first store write like every sibling apply — the
+           baseline below is still advanced so re-enabling alerts does not replay a quiet hour as new failures. */
+        if (!_settings.AlertsEnabled)
+        {
+            foreach (var job in jobs)
+            {
+                _policyJobFailureBaseline[job.JobId.ToString(CultureInfo.InvariantCulture)] = job.TotalFailures;
+            }
+            return;
+        }
+
+        foreach (var job in jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            var hadBaseline = _policyJobFailureBaseline.TryGetValue(key, out var previous);
+            _policyJobFailureBaseline[key] = job.TotalFailures;
+
+            if (job.Held
+                || !hadBaseline
+                || job.TotalFailures <= previous
+                || job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
+            {
+                continue;
+            }
+
+            if (!string.Equals(job.LastRunStatus, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!CooldownElapsed(_lastPolicyJobFailureAlert, key, now))
+            {
+                continue;
+            }
+
+            _lastPolicyJobFailureAlert[key] = now;
+            var band = PolicyJobBand.For(job.Family);
+            var label = string.IsNullOrEmpty(job.RelationName)
+                ? $"{band.Noun} {key}"
+                : $"{band.Noun} {key} on {job.RelationName}";
+            var grew = job.TotalFailures - previous;
+
+            await FireAsync(
+                StoreKey(PolicyJobFailingKeyPrefix + key), _storeLabel, PolicyJobFailingMetric,
+                $"{grew} new failure(s), {job.TotalFailures} total", "at least one new failure",
+                detail: $"TimescaleDB {label} recorded {grew} more failed run(s) since the previous hourly sample " +
+                    $"({job.TotalFailures} failures total since the policy was created) and its last run reports Failed. " +
+                    $"{band.Consequence} The job is still SCHEDULED — the scheduler is running it and it is failing — " +
+                    "which is why neither the dead-job arm (next_start = -infinity) nor the #2136 cadence check (which " +
+                    "reads only SUCCESSFUL runs, so it gets quieter as a job gets sicker) reports it. The cause is in the " +
+                    "PostgreSQL log around the job's last_run_started_at; the counter series is collect.store_metrics " +
+                    "(object_kind = 'background_job', total_failures). Information rather than a page: a job that fails " +
+                    "and retries is alive, and a job the scheduler gives up on arrives under its family's own stuck alert.",
+                /* No severity override: the DECLARED INFO arm in AlertSeverity.ForMetric decides, the
+                   #3443/#3783 idiom. The value IS a measurement — how many more failures — so unlike the
+                   stuck family this metric is deliberately not state-only. */
+                severity: null,
+                shortMessage: $"{label} failed {grew} more time(s) since the last sample",
+                numericCurrentValue: grew,
+                numericThresholdValue: 1,
+                cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The one unconditional INFORMATION line every store policy-job evaluation writes (#3816, #3756's
+    /// discipline): what was read, per family, and what happened to it.
+    ///
+    /// <para><b>Why unconditional.</b> Before this, a healthy pass of this check was indistinguishable from a
+    /// pass that never ran — the only evidence it produced was an alert, so "no alert" meant either "nothing
+    /// is wrong" or "the connection open threw, was swallowed at Debug, and nothing has been checked for
+    /// days". #3815's re-probe and #3812's retention re-evaluation each write their own line on this same
+    /// tick for exactly that reason; this is its third tenant saying so too.</para>
+    ///
+    /// <para><b>HELD is reported and never acted on</b>, which is the number that makes the coverage gate
+    /// legible on a healthy store: a reader who sees "retention 5, 4 held" knows the gate is holding four
+    /// tiers and that nothing in this pass touched them.</para>
+    ///
+    /// <para><paramref name="fired"/> counts fires ATTEMPTED, not delivered — the mute check and the
+    /// per-metric cooldown live downstream inside <c>FireAsync</c>, and a muted alert is still recorded. It is
+    /// the count that says what this pass DECIDED, which is what a reader comparing it to the dead/held
+    /// numbers wants.</para>
+    /// </summary>
+    private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
+        => _logger?.LogInformation(
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
+            census.Total,
+            census.Compression,
+            census.Refresh,
+            census.Retention,
+            census.Other == 0 ? "" : ", other " + census.Other.ToString(CultureInfo.InvariantCulture),
+            census.Dead,
+            census.Hung,
+            census.Held,
+            rearmed,
+            fired,
+            alertsEnabled ? "" : " — alerts are DISABLED, so nothing was judged this pass");
+
+    /// <summary>
+    /// What one pass of <c>TimescaleSupport.StuckPolicyJobsSql</c> read, per family, and what the classifier
+    /// made of it (#3816) — the summary line's whole content.
+    ///
+    /// <para>Counted from the pass's OWN census rows rather than from the stuck list, so the two numbers a
+    /// reader compares ("12 read, 1 dead") come from one statement and one instant.
+    /// <see cref="Dead"/> and <see cref="Hung"/> come from the stuck list's ARM, because which arm fired is
+    /// the classifier's answer and not a column: the same <c>-infinity</c> row is a dead job or a run-instant
+    /// edge depending on a second read five seconds later, and only the reader knows which.</para>
+    /// </summary>
+    internal readonly record struct PolicyJobCensus(
+        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung)
+    {
+        /// <summary>Counts one pass. A reading with no census rows (the read failed) counts zeroes, which is
+        /// how the summary line says "nothing was read" rather than "a store with no jobs".</summary>
+        internal static PolicyJobCensus Of(StorePolicyJobHealth reading)
+        {
+            var jobs = reading.Jobs ?? Array.Empty<PolicyJobRunReading>();
+            var stuck = reading.Stuck ?? Array.Empty<StuckPolicyJob>();
+
+            return new PolicyJobCensus(
+                jobs.Count,
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Compression),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Refresh),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Retention),
+                jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Other),
+                jobs.Count(j => j.Held),
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound));
+        }
+    }
+
+    /// <summary>Which state a policy job's episode is in, and the family it fired under (#3816). The family
+    /// is remembered because the RECOVERY has to address the metric name and key the firing used, and by then
+    /// the job is (by definition) absent from the pass's rows.</summary>
+    private readonly record struct PolicyJobEpisode(
+        PolicyJobHealth State, TimescaleSupport.StorePolicyJobFamily Family);
+
+    /// <summary>
+    /// One family's band (#3816): the persisted metric identity it fires under, its key prefix and resolution
+    /// title, its severity, the noun its label is built from, and the two sentences that say what a stall of
+    /// THIS family costs.
+    ///
+    /// <para><b>Why severity differs by family, stated as the choice it is.</b></para>
+    /// <list type="bullet">
+    /// <item><b>Refresh — CRITICAL, and the worst of the three.</b> The rollup stops advancing, so every
+    /// reader of that view is served silently STALE answers (the only one of the three whose consequence is a
+    /// wrong answer rather than a cost), the raw tier it summarizes keeps filling, and #1680/#1877's coverage
+    /// gate then holds that tier's retention. One dead job, three consequences, and the one an operator meets
+    /// first is a retention hold whose named remedy (<c>--backfill-rollups</c>) fixes the symptom and leaves
+    /// the cause running.</item>
+    /// <item><b>Compression — CRITICAL, unchanged.</b> #1581's judgement byte for byte: an uncompressed
+    /// archival tier grows without bound until the disk fills and collection stops for the whole fleet.</item>
+    /// <item><b>Retention — WARNING.</b> The store keeps history it was told to drop. That is disk and
+    /// nothing else: no reader gets a wrong answer, nothing is lost, and it is the SLOWEST growth of the
+    /// three because the tier it stops draining is the compressed one. It is a this-week fact, not a tonight
+    /// fact. It does not escalate to Critical by persisting either — an unhealed retention stall does not
+    /// become more urgent, it becomes disk, and <see cref="DiskPressureMetric"/> owns that and pages for
+    /// it.</item>
+    /// </list>
+    /// </summary>
+    private readonly record struct PolicyJobBand(
+        string Metric,
+        string RecoveredMetric,
+        string KeyPrefix,
+        AlertSeverityLevel Severity,
+        string Noun,
+        string Consequence,
+        string Stalled)
+    {
+        internal static PolicyJobBand For(TimescaleSupport.StorePolicyJobFamily family) => family switch
+        {
+            TimescaleSupport.StorePolicyJobFamily.Refresh => new PolicyJobBand(
+                RefreshJobStuckMetric,
+                RefreshJobRecoveredMetric,
+                RefreshKeyPrefix,
+                AlertSeverityLevel.Critical,
+                "refresh job",
+                "A rollup has stopped materializing, so every reader of that view is served silently stale " +
+                "answers, the raw tier it summarizes keeps filling, and the #1680/#1877 coverage gate will " +
+                "HOLD that tier's retention policy for as long as the rollup is short — the retention hold an " +
+                "operator sees first is this job's SYMPTOM, and --backfill-rollups clears the symptom while " +
+                "leaving this cause in place to do it again.",
+                "The rollup stays where it stopped until the refresh runs."),
+
+            TimescaleSupport.StorePolicyJobFamily.Retention => new PolicyJobBand(
+                RetentionJobStuckMetric,
+                RetentionJobRecoveredMetric,
+                RetentionKeyPrefix,
+                AlertSeverityLevel.Warning,
+                "retention job",
+                "The archival tier is stalled: this policy is ARMED and the scheduler has stopped running it, " +
+                "so the tier keeps every chunk it was configured to drop and grows for as long as that lasts. " +
+                "This is NOT the #2813 Retention Held condition — that one is a policy the rollup-coverage " +
+                "gate paused on purpose, which reports scheduled = false and clears with a backfill. This one " +
+                "is scheduled and abandoned, and no backfill affects it.",
+                "The tier drops nothing until the job runs."),
+
+            /* Compression is the default arm deliberately: it is #1581's family, its text and severity are
+               unchanged, and a family added to the enum later that reached here would at worst wear the
+               oldest and most conservative of the three sentences. StorePolicyJobFamily.Other never reaches
+               this method — both call sites skip it with a WARNING rather than page under a name that does
+               not fit. */
+            _ => new PolicyJobBand(
+                CompressionJobMetric,
+                "Compression Job Recovered",
+                CompressionKeyPrefix,
+                AlertSeverityLevel.Critical,
+                "compression job",
+                "A stuck compression policy halts the store's archival tier, so uncompressed data grows " +
+                "without bound until the disk fills and collection stops for the WHOLE fleet, and a headless " +
+                "service has no dashboard to warn you.",
+                "Compression stays halted for this relation until the job runs."),
+        };
     }
 
     /// <summary>Drops all edge state for a server removed from the monitored set (reconcile), so a later

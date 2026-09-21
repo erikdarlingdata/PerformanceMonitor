@@ -125,6 +125,13 @@ public static class AlertFamily
            monitor's store, so self-monitor, not reports: they are entered and left and write a resolution. */
         ["Store TOAST Slack"] = SelfMonitor,
         ["Store Checkpointer Pressure"] = SelfMonitor,
+        /* #3816: the store's background-job self-heal covers every policy family, and each family pages
+           under its own name so a mute or a route on one is not silently a mute on the others. Additions
+           beside "Compression Job Stuck", which keeps its exact string — a metric name is the identity every
+           history row, mute rule and route is keyed on, so renaming it would orphan all three. */
+        ["Refresh Job Stuck"] = SelfMonitor,
+        ["Retention Job Stuck"] = SelfMonitor,
+        ["Store Job Failing"] = SelfMonitor,
 
         /* ---- reports: the three daily documents ---- */
         ["Collector Cost Digest"] = Reports,

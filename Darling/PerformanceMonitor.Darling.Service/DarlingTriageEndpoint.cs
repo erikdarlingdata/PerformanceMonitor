@@ -114,6 +114,10 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
+        /* #3816: the other two policy families' recovery edges. The total_failures arm has none — it reports
+           an EVENT ("N more failures since the previous sample"), not a condition that clears. */
+        (DarlingSelfAlertEvaluator.RefreshJobRecoveredMetric, DarlingSelfAlertEvaluator.RefreshJobStuckMetric),
+        (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
     };
@@ -248,6 +252,14 @@ internal static class DarlingTriageEndpoint
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
+            /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —
+               get_store_metrics answers all three (the objects[] background_job rows carry each job's
+               last_run_duration_ms, schedule_interval_ms, total_runs and total_failures, which is the series
+               the failure alert's own detail text points at), and collector cost is what drives the volume
+               they are all downstream of. */
+            [DarlingSelfAlertEvaluator.RefreshJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.RetentionJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.PolicyJobFailingMetric] = StoreSections(),
 
             /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION
                rather than the store's volume, so get_store_metrics answers nothing about it. The rule list is

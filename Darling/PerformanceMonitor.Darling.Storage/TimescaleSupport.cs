@@ -7539,7 +7539,7 @@ ORDER BY i.indexname";
     /// every start — and the text form stays because the line an operator reads names the cadence the policy
     /// LEFT.</para>
     ///
-    /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckCompressionJobsAsync"/> is
+    /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckPolicyJobsAsync"/> is
     /// (<c>policy_compression</c> plus the 2.18+ <c>columnstore</c> rebrand). Retention, continuous-aggregate
     /// refresh, reorder and every other job type are deliberately untouched: their cadences are separate
     /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
@@ -7956,7 +7956,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// exactly five minutes because its 10-second probe policy capped the retry term at 50 s; the five-minute
     /// floor is the whole backoff only when the retry term is smaller than it.) So on 2.26.4+ the row this
     /// product's dead-job arm fires on is a self-recovering condition, not a permanent one, and the alert's
-    /// sentence has to say which — <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// sentence has to say which — <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
     /// does, by version.</para>
     ///
     /// <para>The version is read from <c>pg_extension.extversion</c> by <see cref="ReadTimescaleVersionAsync"/>
@@ -8038,11 +8038,11 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// un-sticks a job whose <c>next_start</c> has become <c>-infinity</c> (the scheduler will never re-fire
     /// it otherwise — the field-incident root cause, on TimescaleDB below 2.26.4; see
     /// <see cref="TimescaleNextStartSanitizedFrom"/> for what the same row is above it, and
-    /// <see cref="StuckCompressionJob.SchedulerRetries"/> for why this statement must NOT be run against it
+    /// <see cref="StuckPolicyJob.SchedulerRetries"/> for why this statement must NOT be run against it
     /// there — measured, it resets the scheduler's crash backoff rather than shortening it, #3591). The job_id is ALWAYS bound as <c>$1</c>, never
     /// interpolated (the discipline is uniform with DarlingRetention's parameterized paths); <c>now()</c> is
     /// SQL, not a value. It is cast <c>$1::integer</c> because TimescaleDB's <c>alter_job</c> takes
-    /// <c>job_id integer</c>, but <see cref="StuckCompressionJob.JobId"/> is a <c>long</c> that Npgsql sends as
+    /// <c>job_id integer</c>, but <see cref="StuckPolicyJob.JobId"/> is a <c>long</c> that Npgsql sends as
     /// <c>bigint</c>; Postgres does NOT down-cast bigint→integer during function resolution, so an un-cast bind
     /// fails with <c>42883: function alter_job(bigint, ...) does not exist</c> (a real defect the gated-live
     /// test caught — a TimescaleDB job_id never exceeds int4, so the cast is always safe).
@@ -8083,7 +8083,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     }
 
     /// <summary>
-    /// How long <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// How long <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
     /// waits before it RE-READS a job whose <c>-infinity</c> arm tripped, and requires the trip to persist
     /// (#3575). Only taken when that arm trips; a pass with nothing to confirm costs nothing.
     ///
@@ -8105,7 +8105,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// statement's MVCC snapshot while <c>pg_stat_activity</c> is read live from shared memory, so one SELECT
     /// can pair a pre-<c>mark_end</c> row (<c>-infinity</c>) with a post-exit activity view (no backend, so
     /// <c>Scheduled</c>). Both edges were captured on a PG18 + TimescaleDB 2.28.1 rig by polling
-    /// <see cref="StuckCompressionJobsSql"/> in a tight loop across a 10-second-cadence policy: every run
+    /// <see cref="StuckPolicyJobsSql"/> in a tight loop across a 10-second-cadence policy: every run
     /// showed ~3 ms of <c>-infinity + Scheduled</c> before the first <c>Running</c> sample and one more such
     /// sample after the last, in a run ~7.5 ms long end to end. On a Windows store — where the production
     /// page came from — backend process creation is far slower than a Linux fork, so the start edge is a
@@ -8137,7 +8137,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// worker's serial sweep loop (#2327's concern), so the delay is bounded, cancellable, and paid only on
     /// the rare pass where the arm tripped at all.</para>
     /// </summary>
-    public static readonly TimeSpan StuckCompressionConfirmDelay = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan StuckPolicyJobConfirmDelay = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// The compression-job health check's wall-clock phase (#3575): how many seconds past a minute boundary
@@ -8182,7 +8182,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <para>The first check after a restart is deliberately NOT phased — it runs on the first sweep pass,
     /// because a restart is when an operator is reading the log and wants the store's job health now — so
     /// that single sample keeps the pre-#3575 odds (24 minutes × ~0.1 s of edge in 3,600 s, under 0.1 %),
-    /// and <see cref="StuckCompressionConfirmDelay"/> covers it the same way it covers every other sample.
+    /// and <see cref="StuckPolicyJobConfirmDelay"/> covers it the same way it covers every other sample.
     /// The phase is the hardening; the confirm-read is the fix.</para>
     /// </summary>
     public const int CompressionCheckPhaseSeconds = 30;
@@ -8202,6 +8202,122 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     }
 
     /// <summary>
+    /// Which family of TimescaleDB policy job a row of <see cref="StuckPolicyJobsSql"/> belongs to (#3816) —
+    /// the grain the self-heal bands on, because the three have different consequences, different remedies
+    /// and therefore different alert text and severity.
+    ///
+    /// <para>This is a vocabulary over <c>proc_name</c> and nothing else. It does NOT decide scope: which
+    /// jobs are read at all is the statement's WHERE, and the two must agree — <see cref="ClassifyPolicyJobFamily"/>
+    /// answers <see cref="Other"/> for a proc name the statement could not have returned, which is a state a
+    /// future widening reaches before anyone writes its sentence.</para>
+    /// </summary>
+    public enum StorePolicyJobFamily
+    {
+        /// <summary><c>policy_compression</c> and the 2.18+ columnstore rebrand, on a raw hypertable or on a
+        /// continuous aggregate (#3581). #1581's original and only family: the store's archival tier.</summary>
+        Compression,
+
+        /// <summary><c>policy_refresh_continuous_aggregate</c> on a <c>collect</c> aggregate — the job that
+        /// materializes a rollup. Dead, the rollup silently stops advancing, every reader of the view gets
+        /// stale answers, and #1680/#1877's coverage gate holds that tier's retention because the consumer no
+        /// longer covers what raw holds (#3812's measured holds, #3816's cause).</summary>
+        Refresh,
+
+        /// <summary><c>policy_retention</c> on a <c>collect</c> hypertable or aggregate — the job that drops
+        /// aged chunks. Dead, the tier keeps everything it was told to drop.</summary>
+        Retention,
+
+        /// <summary>A proc name this vocabulary does not know. Unreachable from
+        /// <see cref="StuckPolicyJobsSql"/> as written; it exists so a widened WHERE, or an upstream proc
+        /// rename, lands on a band with neutral text instead of silently wearing another family's
+        /// sentence.</summary>
+        Other,
+    }
+
+    /// <summary>The TimescaleDB policy proc behind a retention job — what
+    /// <c>timescaledb_information.jobs.proc_name</c> reports, and the exact spelling
+    /// <see cref="StuckPolicyJobsSql"/>, <see cref="RetentionHoldReadSql"/> and the converge statements all
+    /// match on. Named (like <see cref="RefreshPolicyProcName"/>) because <c>LIKE '%retention%'</c> also
+    /// catches TimescaleDB's own <c>policy_job_stat_history_retention</c>, whose subject is the extension's
+    /// bookkeeping rather than this store's archival tier.</summary>
+    public const string RetentionPolicyProcName = "policy_retention";
+
+    /// <summary>
+    /// Which family a <c>proc_name</c> names (#3816). Exact match for the two families
+    /// <see cref="StuckPolicyJobsSql"/> lists by name; the same tolerant substring test as that statement's
+    /// compression arm for compression, so the classification cannot disagree with the scope; and
+    /// <see cref="StorePolicyJobFamily.Other"/> for everything else, including <c>null</c>.
+    ///
+    /// <para>Pure and total, so it pins directly — and the pin that matters is the AGREEMENT one: every
+    /// proc name the statement admits must classify to something other than <see cref="StorePolicyJobFamily.Other"/>,
+    /// and the extension's own jobs must not classify as a family whose text would then be spoken about
+    /// them.</para>
+    /// </summary>
+    public static StorePolicyJobFamily ClassifyPolicyJobFamily(string? procName)
+    {
+        if (string.IsNullOrEmpty(procName))
+        {
+            return StorePolicyJobFamily.Other;
+        }
+
+        if (procName.Equals(RefreshPolicyProcName, StringComparison.Ordinal))
+        {
+            return StorePolicyJobFamily.Refresh;
+        }
+
+        if (procName.Equals(RetentionPolicyProcName, StringComparison.Ordinal))
+        {
+            return StorePolicyJobFamily.Retention;
+        }
+
+        /* The compression arm's own predicate, in C#: the statement matches LIKE '%compression%' OR
+           '%columnstore%' and nothing about that is case-sensitive in PostgreSQL's collation for these
+           ASCII names, so OrdinalIgnoreCase is the faithful mirror. Written as the same two tests rather
+           than as a list of proc names because the second one deliberately matches nothing today (measured
+           on 2.28.1: add_columnstore_policy records proc_name = 'policy_compression'). */
+        if (procName.Contains("compression", StringComparison.OrdinalIgnoreCase)
+            || procName.Contains("columnstore", StringComparison.OrdinalIgnoreCase))
+        {
+            return StorePolicyJobFamily.Compression;
+        }
+
+        return StorePolicyJobFamily.Other;
+    }
+
+    /// <summary>
+    /// Whether a policy job is HELD — deliberately not scheduled — rather than dead or hung (#3816, guarding
+    /// #1680/#1877). THE discrimination this widening turns on, and the one whose failure mode is destructive
+    /// rather than noisy.
+    ///
+    /// <para><b>Why a held policy is not a dead one, and what conflating them would destroy.</b>
+    /// <see cref="EnsureRetentionPoliciesAsync"/> creates every retention policy PAUSED
+    /// (<see cref="PauseJobSql"/>) and the rollup-coverage gate keeps it paused until that tier's consumer
+    /// covers everything raw holds; #3812's hourly re-evaluation is what arms it. So <c>scheduled = false</c>
+    /// on a retention policy is the product working correctly, and the history it is holding exists nowhere
+    /// else. A self-heal that "revives dead jobs" and treated a hold as one would call
+    /// <c>alter_job(next_start => now())</c> on it — dropping, in one run, exactly the chunks the gate exists
+    /// to protect. The issue names this as the caveat that must be honored; this is where it is honored.</para>
+    ///
+    /// <para><b>The view already makes it structurally impossible, and this guard still exists.</b> Measured
+    /// on 2.28.1 (<c>pg_get_viewdef('timescaledb_information.job_stats')</c>, read live):
+    /// <c>next_start</c> is <c>CASE WHEN j.scheduled THEN js.next_start ELSE NULL END</c> and
+    /// <c>job_status</c> is <c>CASE … WHEN j.scheduled = false THEN 'Paused' …</c>. So a held policy reads
+    /// <c>next_start IS NULL</c> — which makes <c>(js.next_start = '-infinity')</c> NULL, not true, and the
+    /// reader maps a NULL to <c>false</c> — and reads <c>Paused</c>, never <c>Running</c>. Both arms are
+    /// therefore already unreachable for it through that view. The guard is here anyway because that
+    /// immunity is TimescaleDB's view definition rather than this product's decision: it is one upstream
+    /// refactor away from changing, the raw <c>_timescaledb_internal.bgw_job_stat</c> row DOES keep a real
+    /// <c>next_start</c> for a paused job, and the cost of being wrong is deleted history. Two independent
+    /// gates for one destructive action, neither of them load-bearing alone.</para>
+    ///
+    /// <para>Both inputs are tested, not just the flag: <c>scheduled = false</c> is the catalog's statement of
+    /// intent and <c>'Paused'</c> is the view's rendering of the same fact, and a row that says either is not
+    /// a job the scheduler has abandoned.</para>
+    /// </summary>
+    public static bool IsPolicyJobHeld(bool scheduled, string? jobStatus)
+        => !scheduled || string.Equals(jobStatus, "Paused", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
     /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — on TimescaleDB
@@ -8214,7 +8330,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
-    /// <see cref="ClassifyCompressionJob"/> is the same decision naming WHICH arm fired, for the caller that
+    /// <see cref="ClassifyPolicyJob"/> is the same decision naming WHICH arm fired, for the caller that
     /// has to treat the two arms differently.
     ///
     /// <para><b><c>-infinity</c> is ALSO the engine's mid-run marker</b>, measured live on TimescaleDB
@@ -8234,12 +8350,12 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <c>-infinity</c> AND <c>Scheduled</c> — this arm, on a healthy job, for a few milliseconds an hour.
     /// A production store paged on exactly that: the alert stamp sat 53 ms inside a 63 ms run that
     /// succeeded. This predicate stays pure and single-shot on purpose; the caller closes the race by
-    /// re-reading after <see cref="StuckCompressionConfirmDelay"/> and requiring the <c>-infinity</c> arm
-    /// to persist (<see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>),
+    /// re-reading after <see cref="StuckPolicyJobConfirmDelay"/> and requiring the <c>-infinity</c> arm
+    /// to persist (<see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>),
     /// and the worker keeps its samples off the jobs' run instant (<see cref="NextCompressionCheckUtc"/>).</para>
     ///
     /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
-    /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
+    /// not as "started in year 1" (#1760). <see cref="StuckPolicyJobsSql"/> already NULLIFs TimescaleDB's
     /// <c>-infinity</c> never-ran sentinel, so this is the second line of defence: the sentinel maps to
     /// MinValue through Npgsql, and any future caller reading the column un-guarded would otherwise compute a
     /// ~739,000-day elapsed that clears every bound and flag a healthy job on its very first run.</para>
@@ -8251,25 +8367,25 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// row is still reported, still re-armed once, still paged, because the arm is also the backstop for the
     /// older 2.x stores the compatibility target admits and for whatever the next upstream regression is — but
     /// the SENTENCE differs, and this overload without a version says the old one. Production goes through
-    /// <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
+    /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/>
     /// with the version <see cref="ReadTimescaleVersionAsync"/> read; the version-less form is the pre-#3591
     /// pins' entry point and the "unknown version" case, which are the same text.</para>
     /// </summary>
-    public static bool IsCompressionJobStuck(
+    public static bool IsPolicyJobStuck(
         bool nextStartIsNegativeInfinity,
         string? jobStatus,
         DateTime? lastRunStartedAtUtc,
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
-        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason)
-            != StuckCompressionJobArm.None;
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason)
+            != StuckPolicyJobArm.None;
 
     /// <summary>
-    /// <see cref="IsCompressionJobStuck"/> with the store's TimescaleDB version, so the <c>-infinity</c> arm's
+    /// <see cref="IsPolicyJobStuck"/> with the store's TimescaleDB version, so the <c>-infinity</c> arm's
     /// reason tells the truth for that version (#3591). <c>null</c> is "unknown, assume old".
     /// </summary>
-    public static bool IsCompressionJobStuck(
+    public static bool IsPolicyJobStuck(
         bool nextStartIsNegativeInfinity,
         string? jobStatus,
         DateTime? lastRunStartedAtUtc,
@@ -8277,25 +8393,25 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         DateTime nowUtc,
         Version? timescaleVersion,
         out string reason)
-        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion, out reason)
-            != StuckCompressionJobArm.None;
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion, out reason)
+            != StuckPolicyJobArm.None;
 
     /// <summary>
-    /// <see cref="IsCompressionJobStuck"/> with the arm named (#3575): the confirm-read applies ONLY to
-    /// <see cref="StuckCompressionJobArm.NextStartNegativeInfinity"/>, because that is the arm whose inputs
-    /// race; <see cref="StuckCompressionJobArm.RunningPastBound"/> is judged on six hours of elapsed time and
+    /// <see cref="IsPolicyJobStuck"/> with the arm named (#3575): the confirm-read applies ONLY to
+    /// <see cref="StuckPolicyJobArm.NextStartNegativeInfinity"/>, because that is the arm whose inputs
+    /// race; <see cref="StuckPolicyJobArm.RunningPastBound"/> is judged on six hours of elapsed time and
     /// a second read five seconds later could not change it. Same decision, same reason text — this is the
     /// implementation and the boolean is its projection, so the two cannot drift. Version-less: the
     /// <c>-infinity</c> reason is the pre-2.26.4 text (#3591); see the overload below.
     /// </summary>
-    public static StuckCompressionJobArm ClassifyCompressionJob(
+    public static StuckPolicyJobArm ClassifyPolicyJob(
         bool nextStartIsNegativeInfinity,
         string? jobStatus,
         DateTime? lastRunStartedAtUtc,
         TimeSpan? scheduleInterval,
         DateTime nowUtc,
         out string reason)
-        => ClassifyCompressionJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason);
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion: null, out reason);
 
     /// <summary>
     /// The <c>-infinity</c> arm's reason on a TimescaleDB below <see cref="TimescaleNextStartSanitizedFrom"/>,
@@ -8315,7 +8431,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         "next_start is -infinity — a crashed run left the job in the scheduler's crash backoff, which the scheduler clears on its own (TimescaleDB 2.26.4+, upstream #9360)";
 
     /// <summary>
-    /// <see cref="ClassifyCompressionJob(bool, string?, DateTime?, TimeSpan?, DateTime, out string)"/> with the
+    /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, out string)"/> with the
     /// store's TimescaleDB version (#3591). The <c>-infinity</c> arm fires on exactly the same inputs whatever
     /// the version — the confirm-read, the re-arm, the alert key and the severity all see one arm — and only
     /// its <paramref name="reason"/> changes: <see cref="NextStartNegativeInfinityCrashBackoffReason"/> when
@@ -8323,7 +8439,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// <see cref="NextStartNegativeInfinityPermanentReason"/> below it and for <c>null</c>. The stuck-Running
     /// arm does not read the version; nothing about a hung run changed upstream.
     /// </summary>
-    public static StuckCompressionJobArm ClassifyCompressionJob(
+    public static StuckPolicyJobArm ClassifyPolicyJob(
         bool nextStartIsNegativeInfinity,
         string? jobStatus,
         DateTime? lastRunStartedAtUtc,
@@ -8339,7 +8455,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
             reason = SchedulerRecoversNegativeInfinity(timescaleVersion)
                 ? NextStartNegativeInfinityCrashBackoffReason
                 : NextStartNegativeInfinityPermanentReason;
-            return StuckCompressionJobArm.NextStartNegativeInfinity;
+            return StuckPolicyJobArm.NextStartNegativeInfinity;
         }
 
         if (isRunning
@@ -8354,12 +8470,12 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     CultureInfo.InvariantCulture,
                     "stuck in the Running state for {0:F0} minutes (over the {1:F0}-minute bound) — the run hung and never finished",
                     elapsed.TotalMinutes, bound.TotalMinutes);
-                return StuckCompressionJobArm.RunningPastBound;
+                return StuckPolicyJobArm.RunningPastBound;
             }
         }
 
         reason = "";
-        return StuckCompressionJobArm.None;
+        return StuckPolicyJobArm.None;
     }
 
     /// <summary>
@@ -8387,8 +8503,8 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// already says <c>-infinity</c> while no backend yet says <c>Running</c>, and at the end the backend can
     /// be gone while the snapshot still holds the pre-<c>mark_end</c> row. No rewrite of this SELECT closes
     /// that — the skew is between a catalog snapshot and live shared memory inside TimescaleDB's own view —
-    /// which is why <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
-    /// executes it TWICE, <see cref="StuckCompressionConfirmDelay"/> apart, when that arm trips. The text is
+    /// which is why <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// executes it TWICE, <see cref="StuckPolicyJobConfirmDelay"/> apart, when that arm trips. The text is
     /// unchanged from #1760; what changed is how many times it is asked.</para>
     ///
     /// <para><b>What a confirmed <c>next_start_neg_infinity</c> row IS depends on the store's TimescaleDB
@@ -8400,42 +8516,110 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// discriminator between the two, because both are a <c>mark_start</c> whose <c>mark_end</c> never came.
     /// The discriminator is <c>pg_extension.extversion</c>, read separately by
     /// <see cref="ReadTimescaleVersionAsync"/> on the pass where the arm trips, and applied to the verdict's
-    /// text and re-arm by <see cref="ClassifyStuckCompressionJobs"/>.</para>
+    /// text and re-arm by <see cref="ClassifyStuckPolicyJobs"/>.</para>
+    ///
+    /// <para><b>Renamed from <c>StuckCompressionJobsSql</c> and widened past compression (#3816), which is
+    /// the whole content of that issue.</b> The failure mode is not compression-specific:
+    /// <c>next_start = -infinity</c> is how the scheduler retires ANY job it has given up on, and a dead
+    /// <c>policy_refresh_continuous_aggregate</c> is the upstream cause of #3812's retention holds — a rollup
+    /// stops materializing, the coverage gate refuses to arm that tier's retention, and the operator is told to
+    /// run <c>--backfill-rollups</c>, which fixes the symptom and leaves the dead job in place to cause it
+    /// again. The <c>-infinity</c> NULLIF handling, the stuck-<c>Running</c> bound and the confirm-read apply
+    /// unchanged; what changed is WHICH jobs reach them, and that the row now carries <c>proc_name</c> (so the
+    /// evaluator bands per family), <c>j.scheduled</c> (so a HELD policy can never be read as a DEAD one) and
+    /// the two failure counters #3816's fourth arm judges.
+    ///
+    /// <para><b>The WHERE has two arms with deliberately different scopes, and the asymmetry is
+    /// load-bearing.</b> The compression arm is the pre-#3816 predicate byte for byte — UNSCOPED, so a
+    /// compression policy on a hypertable this product did not create stays watched exactly as it has been
+    /// since #1581; scoping it would silently switch off coverage a deployed store has today. The new arm is
+    /// scoped to <c>j.hypertable_schema = 'collect'</c> because its alert TEXT asserts what only this
+    /// product's own policies make true — the refresh sentence names the coverage gate and the raw tier
+    /// behind it, the retention sentence names <c>--backfill-rollups</c> — and both are wrong advice about a
+    /// policy this product never created, the same judgement <see cref="RetentionHoldReadSql"/> makes with the
+    /// same two predicates.</para>
+    ///
+    /// <para><b>Scoping on <c>j.hypertable_schema</c> and NOT <c>js.hypertable_schema</c> is the difference
+    /// between reading every aggregate policy and reading none of them</b> (measured on 2.28.1;
+    /// <c>pg_get_viewdef</c> read live). <c>jobs</c> reports a policy on a continuous aggregate under the
+    /// aggregate's USER VIEW identity (<c>COALESCE(ca.user_view_schema, ht.schema_name)</c>), while
+    /// <c>job_stats</c> joins the raw catalog and reports the MATERIALIZATION's
+    /// (<c>_timescaledb_internal</c> / <c>_materialized_hypertable_3</c>). On the rig, every one of the five
+    /// policies on a CAGG — refresh, aggregate compression (#3581) and aggregate retention — read
+    /// <c>collect</c> through <c>j.</c> and <c>_timescaledb_internal</c> through <c>js.</c>. The projected
+    /// <c>hypertable_name</c> is <c>j.</c>'s for the same reason: it is the name the alert must say and the
+    /// one the operator can find.</para>
+    ///
+    /// <para><b>The new arm matches proc names EXACTLY while the compression arm keeps its tolerant LIKE, and
+    /// that is not inconsistency.</b> <c>LIKE '%retention%'</c> would also match
+    /// <c>policy_job_stat_history_retention</c> — TimescaleDB's own job-history trimmer, whose proc name
+    /// contains the word and whose subject is the extension's bookkeeping, not this store's archival tier.
+    /// The compression arm's LIKE is tolerant on purpose (#1581: <c>policy_compression</c> is the long-stable
+    /// name and <c>columnstore</c> the 2.18+ rebrand; measured on 2.28.1,
+    /// <c>CALL add_columnstore_policy(...)</c> still records <c>proc_name = 'policy_compression'</c>, so the
+    /// second pattern is future-proofing that matches nothing today).</para>
+    ///
+    /// <para><b>What the scope excludes is the reason it exists, measured rather than reasoned about.</b> On a
+    /// VIRGIN 2.28.1 container with no network, the extension's own <c>policy_telemetry</c> job (job_id 1,
+    /// no hypertable) sat at a PERSISTENT <c>next_start = -infinity</c> with
+    /// <c>bgw_job_stat.consecutive_crashes = 1</c> — the exact confirmed dead-job shape, stable across
+    /// minutes, on a store where nothing is wrong with anything this product owns. An unscoped widening
+    /// therefore pages about TimescaleDB's phone-home on every air-gapped store, forever. Both extension jobs
+    /// are excluded twice over: they name no hypertable, so <c>j.hypertable_schema</c> is NULL, and neither
+    /// proc name is in the list.</para>
+    ///
+    /// <para><b><c>policy_reorder</c> and user-defined actions are read by neither arm</b>, deliberately:
+    /// this product creates none (the rig grew one by hand to confirm it is enumerated and then excluded), so
+    /// there is no tier of ours for a dead one to stall and no sentence this evaluator could honestly say
+    /// about it. A family this product starts creating joins the list, the band and the text together.</para>
     /// </summary>
-    public const string StuckCompressionJobsSql = @"
+    public const string StuckPolicyJobsSql = @"
 SELECT
     js.job_id,
     (js.next_start = '-infinity'::timestamptz)  AS next_start_neg_infinity,
     js.job_status,
     NULLIF(js.last_run_started_at, '-infinity'::timestamptz) AS last_run_started_at,
     EXTRACT(EPOCH FROM j.schedule_interval)     AS schedule_interval_seconds,
-    j.hypertable_name
+    j.hypertable_name,
+    j.proc_name,
+    j.scheduled,
+    js.last_run_status,
+    js.total_failures
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs      AS j USING (job_id)
 WHERE j.proc_name LIKE '%compression%'
-   OR j.proc_name LIKE '%columnstore%'";
+   OR j.proc_name LIKE '%columnstore%'
+   OR (j.hypertable_schema = 'collect'
+       AND j.proc_name IN ('policy_refresh_continuous_aggregate', 'policy_retention'))";
 
     /// <summary>
-    /// Reads every COMPRESSION-policy background job (<c>proc_name</c> is <c>policy_compression</c>, or the
-    /// 2.18+ columnstore rebrand's name — the same tolerant LIKE the compression test uses) and returns the
-    /// ones the pure <see cref="IsCompressionJobStuck"/> predicate flags as stuck. The <c>-infinity</c> tests
-    /// run IN SQL (see <see cref="StuckCompressionJobsSql"/>); the stuck-Running bound is computed in C# from
-    /// the raw fields. Scoped to compression jobs ONLY — retention, continuous-aggregate refresh, reorder, and
-    /// every other job type are untouched. Failure-isolated: a store hiccup, or the views being absent (a
-    /// plain-PostgreSQL store — the caller also gates on the extension), yields an empty list and a Debug line,
-    /// never a throw.
+    /// Reads every POLICY background job this product owns — compression (raw and aggregate), and, scoped to
+    /// the <c>collect</c> schema, continuous-aggregate refresh and retention (#3816; see
+    /// <see cref="StuckPolicyJobsSql"/> for which arm scopes and why) — and returns both the ones the pure
+    /// <see cref="IsPolicyJobStuck"/> predicate flags as stuck AND the census of everything it looked at.
+    /// The <c>-infinity</c> tests run IN SQL; the stuck-Running bound is computed in C# from the raw fields.
+    /// Failure-isolated: a store hiccup, or the views being absent (a plain-PostgreSQL store — the caller also
+    /// gates on the extension), yields <see cref="StorePolicyJobHealth.Empty"/> and a Debug line, never a
+    /// throw.
+    ///
+    /// <para><b>A HELD policy is not a stuck one and never reaches the returned list</b> —
+    /// <see cref="ClassifyStuckPolicyJobs"/> drops it, <see cref="IsPolicyJobHeld"/> says why, and the census
+    /// counts it so the summary line can report a hold without anything acting on it. That is the one
+    /// discrimination in this widening whose failure mode is destructive rather than noisy: #1680/#1877
+    /// deliberately leave a retention policy <c>scheduled = false</c> until its tier's rollups cover raw, and
+    /// re-arming one drops the only copy of the history the gate exists to protect.</para>
     ///
     /// <para><b>The <c>-infinity</c> arm is CONFIRMED before it is reported (#3575).</b> When, and only when,
-    /// the first read flags a job on that arm, this waits <see cref="StuckCompressionConfirmDelay"/>, runs
-    /// <see cref="StuckCompressionJobsSql"/> once more, and reports the job only if the same arm trips
+    /// the first read flags a job on that arm, this waits <see cref="StuckPolicyJobConfirmDelay"/>, runs
+    /// <see cref="StuckPolicyJobsSql"/> once more, and reports the job only if the same arm trips
     /// again. A run-instant edge — the view pairing the scheduler's already-committed <c>-infinity</c> with a
     /// worker that is not yet, or no longer, visible as <c>Running</c> — is over in milliseconds and clears;
     /// a row the scheduler has genuinely abandoned (TimescaleDB below 2.26.4), or a crashed run sitting out its
     /// crash backoff (the only persistent <c>-infinity</c> from 2.26.4 on, #3591 — reported with
-    /// <see cref="StuckCompressionJob.SchedulerRetries"/> set so the evaluator neither re-arms nor pages it on
+    /// <see cref="StuckPolicyJob.SchedulerRetries"/> set so the evaluator neither re-arms nor pages it on
     /// first sight), reads the same on both passes and is reported with the latency it always had plus five seconds. One
     /// confirm per pass, not per job: the delay is taken once however many jobs tripped. The
-    /// <see cref="StuckCompressionJobArm.RunningPastBound"/> arm is reported from the first read as before —
+    /// <see cref="StuckPolicyJobArm.RunningPastBound"/> arm is reported from the first read as before —
     /// a six-hour elapsed bound has nothing to gain from a second look five seconds later.</para>
     ///
     /// <para><b>A confirm read that FAILS confirms nothing.</b> Its <c>-infinity</c> trips are dropped for
@@ -8451,7 +8635,7 @@ WHERE j.proc_name LIKE '%compression%'
     /// confirm only makes that settle sooner: the mid-run marker it used to have to wait out is now judged
     /// twice and cleared inside one call instead of surfacing as a flagged poll.</para>
     /// </summary>
-    public static Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
+    public static Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
         NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -8459,8 +8643,8 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(connection));
         }
 
-        return ReadStuckCompressionJobsAsync(
-            ct => ReadCompressionJobStatRowsAsync(connection, ct),
+        return ReadStuckPolicyJobsAsync(
+            ct => ReadPolicyJobStatRowsAsync(connection, ct),
             Task.Delay,
             nowUtc,
             logger,
@@ -8469,7 +8653,7 @@ WHERE j.proc_name LIKE '%compression%'
     }
 
     /// <summary>
-    /// The seam <see cref="ReadStuckCompressionJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+    /// The seam <see cref="ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
     /// is built on, with the two things a test needs to control injected: the read (so a transient edge and
     /// a persistent dead row can each be scripted as a pair of result sets, and a failing confirm as a throw)
     /// and the delay (so the pin can assert it is taken exactly when the <c>-infinity</c> arm tripped and
@@ -8482,8 +8666,8 @@ WHERE j.proc_name LIKE '%compression%'
     /// the sentence is the conservative pre-2.26.4 one. Read before the confirm delay, on the same connection
     /// the first read used, so the two reads that decide the page are not pushed further apart.</para>
     /// </summary>
-    internal static async Task<IReadOnlyList<StuckCompressionJob>> ReadStuckCompressionJobsAsync(
-        Func<CancellationToken, Task<IReadOnlyList<CompressionJobStatRow>>> readRows,
+    internal static async Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
+        Func<CancellationToken, Task<IReadOnlyList<PolicyJobStatRow>>> readRows,
         Func<TimeSpan, CancellationToken, Task> delay,
         DateTime nowUtc,
         ILogger? logger,
@@ -8502,12 +8686,19 @@ WHERE j.proc_name LIKE '%compression%'
 
         try
         {
-            var first = ClassifyStuckCompressionJobs(await readRows(cancellationToken), nowUtc);
-            if (!first.Any(f => f.Arm == StuckCompressionJobArm.NextStartNegativeInfinity))
+            var rows = await readRows(cancellationToken);
+
+            /* #3816: the census is the FIRST read's rows, whatever the confirm does with the -infinity arm.
+               It is taken here, before any classification, because it is a statement about what the store
+               was asked and answered — not about what was wrong. */
+            var census = rows.Select(r => r.ToReading()).ToList();
+
+            var first = ClassifyStuckPolicyJobs(rows, nowUtc);
+            if (!first.Any(f => f.Arm == StuckPolicyJobArm.NextStartNegativeInfinity))
             {
                 /* Nothing on the racing arm: no delay, no second read, no version read. The common hourly
                    pass costs exactly what it did before #3575. */
-                return first.Select(f => f.ToJob()).ToList();
+                return new StorePolicyJobHealth(first.Select(f => f.ToJob()).ToList(), census);
             }
 
             /* #3591: the sentence the confirmed row will carry depends on whether this store's scheduler
@@ -8527,9 +8718,9 @@ WHERE j.proc_name LIKE '%compression%'
                 }
             }
 
-            await delay(StuckCompressionConfirmDelay, cancellationToken);
+            await delay(StuckPolicyJobConfirmDelay, cancellationToken);
 
-            IReadOnlyList<CompressionJobStatRow>? confirm;
+            IReadOnlyList<PolicyJobStatRow>? confirm;
             try
             {
                 confirm = await readRows(cancellationToken);
@@ -8541,19 +8732,22 @@ WHERE j.proc_name LIKE '%compression%'
                 confirm = null;
                 logger?.LogWarning(
                     "Compression-job health check: {Count} job(s) read next_start = -infinity while not Running, but the confirm read {Delay:F0} s later failed — not judged this pass, re-checked next hour (#3575): {Message}",
-                    first.Count(f => f.Arm == StuckCompressionJobArm.NextStartNegativeInfinity),
-                    StuckCompressionConfirmDelay.TotalSeconds,
+                    first.Count(f => f.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
+                    StuckPolicyJobConfirmDelay.TotalSeconds,
                     ex.Message);
             }
 
-            return ConfirmStuckCompressionJobs(first, confirm, nowUtc, logger, timescaleVersion);
+            return new StorePolicyJobHealth(
+                ConfirmStuckPolicyJobs(first, confirm, nowUtc, logger, timescaleVersion), census);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* The views are absent (a plain-PG store or the extension was removed) or the store hiccuped —
-               no signal this check. The caller already gates on the extension; this is belt-and-suspenders. */
-            logger?.LogDebug("Compression-job health check: could not read job stats: {Message}", ex.Message);
-            return Array.Empty<StuckCompressionJob>();
+               no signal this check. The caller already gates on the extension; this is belt-and-suspenders.
+               #3816: Empty rather than an empty stuck list, so the summary line says "could not read" by
+               having no census rather than claiming a store with no jobs. */
+            logger?.LogDebug("Store policy-job health check: could not read job stats: {Message}", ex.Message);
+            return StorePolicyJobHealth.Empty;
         }
     }
 
@@ -8561,9 +8755,9 @@ WHERE j.proc_name LIKE '%compression%'
     /// The pure merge of a first pass with its confirm pass (#3575), separated so the decision table pins
     /// without a clock or a store:
     /// <list type="bullet">
-    /// <item><see cref="StuckCompressionJobArm.RunningPastBound"/> from the first pass — reported, untouched by
+    /// <item><see cref="StuckPolicyJobArm.RunningPastBound"/> from the first pass — reported, untouched by
     /// the confirm.</item>
-    /// <item><see cref="StuckCompressionJobArm.NextStartNegativeInfinity"/> from the first pass, and the SAME arm
+    /// <item><see cref="StuckPolicyJobArm.NextStartNegativeInfinity"/> from the first pass, and the SAME arm
     /// on the confirm pass — reported, carrying the confirm pass's reason (the two are identical today; the
     /// later read is the one that stood).</item>
     /// <item>That arm on the first pass but not on the confirm — the run-instant edge; cleared, and logged at
@@ -8581,9 +8775,9 @@ WHERE j.proc_name LIKE '%compression%'
     /// first pass is classified without it on purpose — the arm is version-independent, and the first pass
     /// only decides whether there is anything to confirm.</para>
     /// </summary>
-    internal static IReadOnlyList<StuckCompressionJob> ConfirmStuckCompressionJobs(
-        IReadOnlyList<ClassifiedCompressionJob> first,
-        IReadOnlyList<CompressionJobStatRow>? confirm,
+    internal static IReadOnlyList<StuckPolicyJob> ConfirmStuckPolicyJobs(
+        IReadOnlyList<ClassifiedPolicyJob> first,
+        IReadOnlyList<PolicyJobStatRow>? confirm,
         DateTime nowUtc,
         ILogger? logger,
         Version? timescaleVersion = null)
@@ -8593,22 +8787,22 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(first));
         }
 
-        var result = new List<StuckCompressionJob>(first.Count);
+        var result = new List<StuckPolicyJob>(first.Count);
         var confirmed = confirm is null
             ? null
-            : ClassifyStuckCompressionJobs(confirm, nowUtc, timescaleVersion)
-                .Where(c => c.Arm == StuckCompressionJobArm.NextStartNegativeInfinity)
+            : ClassifyStuckPolicyJobs(confirm, nowUtc, timescaleVersion)
+                .Where(c => c.Arm == StuckPolicyJobArm.NextStartNegativeInfinity)
                 .ToDictionary(c => c.Row.JobId);
 
         foreach (var flagged in first)
         {
             switch (flagged.Arm)
             {
-                case StuckCompressionJobArm.RunningPastBound:
+                case StuckPolicyJobArm.RunningPastBound:
                     result.Add(flagged.ToJob());
                     break;
 
-                case StuckCompressionJobArm.NextStartNegativeInfinity:
+                case StuckPolicyJobArm.NextStartNegativeInfinity:
                     if (confirmed is null)
                     {
                         break;
@@ -8624,7 +8818,7 @@ WHERE j.proc_name LIKE '%compression%'
                             "Compression-job health check: job {JobId}{Hypertable} read next_start = -infinity while not Running, and {Delay:F0} s later it was scheduled normally — the run-instant edge of TimescaleDB's job_stats view, not a stuck job; nothing re-armed, nothing alerted (#3575)",
                             flagged.Row.JobId,
                             string.IsNullOrEmpty(flagged.Row.HypertableName) ? "" : " on " + flagged.Row.HypertableName,
-                            StuckCompressionConfirmDelay.TotalSeconds);
+                            StuckPolicyJobConfirmDelay.TotalSeconds);
                     }
 
                     break;
@@ -8638,25 +8832,37 @@ WHERE j.proc_name LIKE '%compression%'
     /// One pass of the pure predicate over a result set: every row it flags, with the arm that fired. Rows
     /// the predicate clears are not returned. <paramref name="timescaleVersion"/> (#3591) phrases the
     /// <c>-infinity</c> arm's reason; <c>null</c> is the pre-2.26.4 text.
+    ///
+    /// <para><b>A HELD row is skipped before the predicate ever sees it (#3816).</b> This is the first of the
+    /// two gates that keep the self-heal off a deliberately paused retention policy — see
+    /// <see cref="IsPolicyJobHeld"/> for the measurement that says the view already makes it unreachable and
+    /// why one gate is nevertheless not enough when being wrong deletes history. It is a <c>continue</c>
+    /// rather than a classification because a hold is not a degree of stuck: it is the product working, and
+    /// the only thing that should happen to it is being counted (which the census does, from the same rows).</para>
     /// </summary>
-    internal static List<ClassifiedCompressionJob> ClassifyStuckCompressionJobs(
-        IReadOnlyList<CompressionJobStatRow> rows, DateTime nowUtc, Version? timescaleVersion = null)
+    internal static List<ClassifiedPolicyJob> ClassifyStuckPolicyJobs(
+        IReadOnlyList<PolicyJobStatRow> rows, DateTime nowUtc, Version? timescaleVersion = null)
     {
         if (rows is null)
         {
             throw new ArgumentNullException(nameof(rows));
         }
 
-        var flagged = new List<ClassifiedCompressionJob>();
+        var flagged = new List<ClassifiedPolicyJob>();
         foreach (var row in rows)
         {
-            var arm = ClassifyCompressionJob(
-                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
-            if (arm != StuckCompressionJobArm.None)
+            if (row.Held)
             {
-                flagged.Add(new ClassifiedCompressionJob(
+                continue;
+            }
+
+            var arm = ClassifyPolicyJob(
+                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
+            if (arm != StuckPolicyJobArm.None)
+            {
+                flagged.Add(new ClassifiedPolicyJob(
                     row, arm, reason,
-                    SchedulerRetries: arm == StuckCompressionJobArm.NextStartNegativeInfinity && SchedulerRecoversNegativeInfinity(timescaleVersion)));
+                    SchedulerRetries: arm == StuckPolicyJobArm.NextStartNegativeInfinity && SchedulerRecoversNegativeInfinity(timescaleVersion)));
             }
         }
 
@@ -8664,16 +8870,16 @@ WHERE j.proc_name LIKE '%compression%'
     }
 
     /// <summary>
-    /// One execution of <see cref="StuckCompressionJobsSql"/>, mapped row for row and NOT failure-isolated:
+    /// One execution of <see cref="StuckPolicyJobsSql"/>, mapped row for row and NOT failure-isolated:
     /// the isolation belongs to the caller, which has to tell a failed FIRST read (no signal, Debug) from a
     /// failed CONFIRM read (a deferred judgement, Warning). Both <c>-infinity</c> tests already ran in SQL;
     /// the #1760 sentinel arrives here as a NULL.
     /// </summary>
-    private static async Task<IReadOnlyList<CompressionJobStatRow>> ReadCompressionJobStatRowsAsync(
+    private static async Task<IReadOnlyList<PolicyJobStatRow>> ReadPolicyJobStatRowsAsync(
         NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        var rows = new List<CompressionJobStatRow>();
-        using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+        var rows = new List<PolicyJobStatRow>();
+        using var command = new NpgsqlCommand(StuckPolicyJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -8689,7 +8895,18 @@ WHERE j.proc_name LIKE '%compression%'
                 : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture));
             string? hypertable = reader.IsDBNull(5) ? null : reader.GetString(5);
 
-            rows.Add(new CompressionJobStatRow(jobId, negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, hypertable));
+            /* #3816. proc_name bands the row; j.scheduled is the held-vs-dead discriminator's own input
+               rather than an inference from job_status; last_run_status and total_failures feed the failure
+               arm. scheduled is NOT NULL in the catalog, so an IsDBNull there would be a view change, and
+               the conservative read of "no answer" is the one that cannot cause a re-arm: false = held. */
+            string? procName = reader.IsDBNull(6) ? null : reader.GetString(6);
+            bool scheduled = !reader.IsDBNull(7) && reader.GetBoolean(7);
+            string? lastRunStatus = reader.IsDBNull(8) ? null : reader.GetString(8);
+            long totalFailures = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture);
+
+            rows.Add(new PolicyJobStatRow(
+                jobId, negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, hypertable,
+                procName, scheduled, lastRunStatus, totalFailures));
         }
 
         return rows;
@@ -8721,7 +8938,7 @@ WHERE js.last_run_status = 'Success'";
     /// <summary>
     /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
     /// Store Job Over Cadence self-alert judges. Tolerant like
-    /// <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
+    /// <see cref="ReadStuckPolicyJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
     /// an exception. See <see cref="JobCadenceReadSql"/> for the statement and its decisions.
     /// </summary>
     public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
@@ -9208,7 +9425,7 @@ WHERE j.proc_name = 'policy_retention'
     /// was half a day.</para>
     ///
     /// <para><c>last_run_started_at</c> is <c>NULLIF</c>'d against <c>-infinity</c> for the SAME reason
-    /// <see cref="StuckCompressionJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
+    /// <see cref="StuckPolicyJobsSql"/> does it (#1760): TimescaleDB stores <b>-infinity</b>, not NULL, as
     /// the never-ran sentinel, Npgsql maps that to <see cref="DateTime.MinValue"/>, and <c>job_status</c> comes
     /// from an INDEPENDENT source (<c>pg_stat_activity</c>) than the start time — so a policy's very FIRST run
     /// reads <c>Running</c> while its start is still the sentinel. Un-guarded, this observability path would
@@ -9259,7 +9476,7 @@ WHERE j.proc_name LIKE '%compression%'
 
     /// <summary>
     /// Reads <see cref="CompressionActivitySql"/>. Failure-isolated to an empty list the same way
-    /// <see cref="ReadStuckCompressionJobsAsync"/> is — observability must never be able to break the sweep
+    /// <see cref="ReadStuckPolicyJobsAsync"/> is — observability must never be able to break the sweep
     /// that carries it.
     /// </summary>
     public static async Task<IReadOnlyList<CompressionActivity>> ReadCompressionActivityAsync(
@@ -9574,7 +9791,7 @@ WHERE j.proc_name LIKE '%compression%'
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not re-arm compression job {JobId} via alter_job (often a permission issue — the store login must own the job): {Message}",
+                "Could not re-arm policy job {JobId} via alter_job (often a permission issue — the store login must own the job): {Message}",
                 jobId, ex.Message);
             return false;
         }
@@ -9582,7 +9799,7 @@ WHERE j.proc_name LIKE '%compression%'
 }
 
 /// <summary>
-/// A COMPRESSION-policy background job that <see cref="TimescaleSupport.ReadStuckCompressionJobsAsync"/> flagged
+/// A COMPRESSION-policy background job that <see cref="TimescaleSupport.ReadStuckPolicyJobsAsync"/> flagged
 /// as stuck (#1581): its immutable <c>job_id</c>, the hypertable it compresses (for a friendlier alert label —
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 ///
@@ -9598,17 +9815,87 @@ WHERE j.proc_name LIKE '%compression%'
 /// "Recovered" before it had run. On the fleet's hourly policies (default <c>retry_period</c> one hour) that is a
 /// retry pushed out by up to an hour and two untrue messages. <c>false</c> — the pre-2.26.4 row, an unknown
 /// version, or the stuck-Running arm — keeps #1581's re-arm-once semantics exactly.</para>
+///
+/// <para><b><see cref="Family"/> and <see cref="Scheduled"/> arrive with #3816</b>, both defaulted so every
+/// pre-#3816 construction — the pins, and the compression family itself — keeps its exact previous meaning.
+/// <see cref="Family"/> is what the evaluator bands on: one dead job needs three different sentences, three
+/// different severities and three different metric names depending on which tier it stalls.
+/// <see cref="Scheduled"/> is <c>true</c> by construction, because
+/// <see cref="TimescaleSupport.ClassifyStuckPolicyJobs"/> drops a held row before it can become one of these
+/// — it is carried anyway as the SECOND of the two gates that keep <c>alter_job</c> off a held retention
+/// policy (see <see cref="TimescaleSupport.IsPolicyJobHeld"/> for why one gate is not enough for a
+/// destructive action).</para>
+///
+/// <para><see cref="Arm"/> (also #3816) is which arm the classifier fired, carried so the evaluator's
+/// per-pass summary can say "1 dead, 0 stuck" without re-deriving it from the reason PROSE — matching on a
+/// paraphrase is the drift this file keeps warning about. It defaults to
+/// <see cref="StuckPolicyJobArm.None"/>, which is the honest answer for a hand-built row that states no arm:
+/// the census counts such a row as neither dead nor hung rather than guessing.</para>
 /// </summary>
-public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason, bool SchedulerRetries = false);
+public sealed record StuckPolicyJob(
+    long JobId,
+    string? HypertableName,
+    string Reason,
+    bool SchedulerRetries = false,
+    TimescaleSupport.StorePolicyJobFamily Family = TimescaleSupport.StorePolicyJobFamily.Compression,
+    bool Scheduled = true,
+    StuckPolicyJobArm Arm = StuckPolicyJobArm.None);
 
 /// <summary>
-/// WHICH arm of <see cref="TimescaleSupport.IsCompressionJobStuck"/> fired (#3575), from
-/// <see cref="TimescaleSupport.ClassifyCompressionJob"/>. Exists because the two arms need different
+/// One row of <see cref="TimescaleSupport.StuckPolicyJobsSql"/> as the CENSUS and the failure arm consume it
+/// (#3816) — every job the statement returned, flagged or not, which is the population the two things the
+/// stuck list cannot answer are about:
+/// <list type="bullet">
+/// <item>the unconditional per-pass summary (#3756's discipline): how many jobs were read, per family, and
+/// how many were held — a tick that says "12 jobs read, 0 dead" is a tick that can be verified to have
+/// happened, which "no alert" never was;</item>
+/// <item>the <c>total_failures</c> arm: a job that FAILS repeatedly without ever going <c>-infinity</c> is
+/// invisible to both stuck arms, to #2136's cadence read (which filters to
+/// <c>last_run_status = 'Success'</c>) and to #2813's hold check (which judges a PAUSED policy). Its
+/// counters are recorded hourly by <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/> and nothing has
+/// ever alerted on them.</item>
+/// </list>
+/// <see cref="RelationName"/> is <c>j.hypertable_name</c> — for a continuous aggregate's policy that is the
+/// USER VIEW's name, not the materialization's (see <see cref="TimescaleSupport.StuckPolicyJobsSql"/>).
+/// </summary>
+public sealed record PolicyJobRunReading(
+    long JobId,
+    TimescaleSupport.StorePolicyJobFamily Family,
+    string? RelationName,
+    bool Held,
+    string? LastRunStatus,
+    long TotalFailures);
+
+/// <summary>
+/// One pass of <see cref="TimescaleSupport.ReadStuckPolicyJobsAsync(NpgsqlConnection, DateTime, ILogger, CancellationToken)"/>
+/// (#3816): the jobs the predicate FLAGGED, and every job it looked at.
+///
+/// <para><b>Why one record rather than two reads.</b> The census and the failure arm need the rows the stuck
+/// list is a subset of, and the rows are already in hand — asking the store a second question for them would
+/// double an hourly catalog read to re-derive what the first read had. <see cref="Jobs"/> is the FIRST read's
+/// result set even when a confirm read was taken: the confirm exists to ratify the <c>-infinity</c> arm, not
+/// to re-census the store, and the two reads are five seconds apart.</para>
+///
+/// <para>A pass that could not read at all yields <see cref="Empty"/> — no stuck jobs AND no census, which is
+/// the honest shape: "nothing was flagged" and "nothing was read" must not look alike to the summary line.</para>
+/// </summary>
+public sealed record StorePolicyJobHealth(
+    IReadOnlyList<StuckPolicyJob> Stuck,
+    IReadOnlyList<PolicyJobRunReading> Jobs)
+{
+    /// <summary>The unreadable pass: nothing flagged, nothing censused.</summary>
+    public static StorePolicyJobHealth Empty { get; } =
+        new(Array.Empty<StuckPolicyJob>(), Array.Empty<PolicyJobRunReading>());
+}
+
+/// <summary>
+/// WHICH arm of <see cref="TimescaleSupport.IsPolicyJobStuck"/> fired (#3575), from
+/// <see cref="TimescaleSupport.ClassifyPolicyJob"/>. Exists because the two arms need different
 /// treatment downstream: <see cref="NextStartNegativeInfinity"/> is judged on two inputs that TimescaleDB's
 /// view reads from independent sources and is therefore CONFIRMED by a second read before it is reported;
 /// <see cref="RunningPastBound"/> is judged on hours of elapsed time and is reported from the first read.
 /// </summary>
-public enum StuckCompressionJobArm
+public enum StuckPolicyJobArm
 {
     /// <summary>Healthy — neither arm fired.</summary>
     None,
@@ -9623,29 +9910,61 @@ public enum StuckCompressionJobArm
 }
 
 /// <summary>
-/// One row of <see cref="TimescaleSupport.StuckCompressionJobsSql"/> as the predicate consumes it (#3575):
+/// One row of <see cref="TimescaleSupport.StuckPolicyJobsSql"/> as the predicate consumes it (#3575):
 /// the two <c>-infinity</c> tests already applied in SQL, the #1760 sentinel already NULLIFed. Internal because
 /// it is the seam the confirm-read pins through, not a product surface; the product's result type is
-/// <see cref="StuckCompressionJob"/>.
+/// <see cref="StuckPolicyJob"/>.
+///
+/// <para>The last four members arrive with #3816 and are all DEFAULTED, so the row shapes the confirm-read
+/// pins construct by name keep compiling and keep meaning what they meant: an armed compression job with no
+/// failure history. <see cref="ProcName"/> bands the row, <see cref="Scheduled"/> is the held-vs-dead
+/// discriminator's input, and the last two feed the failure arm.</para>
 /// </summary>
-internal sealed record CompressionJobStatRow(
+internal sealed record PolicyJobStatRow(
     long JobId,
     bool NextStartIsNegativeInfinity,
     string? JobStatus,
     DateTime? LastRunStartedAtUtc,
     TimeSpan? ScheduleInterval,
-    string? HypertableName);
+    string? HypertableName,
+    string? ProcName = null,
+    bool Scheduled = true,
+    string? LastRunStatus = null,
+    long TotalFailures = 0)
+{
+    /// <summary>This row's family (#3816), from <see cref="TimescaleSupport.ClassifyPolicyJobFamily"/>. A row
+    /// built by a pre-#3816 pin carries no <c>proc_name</c> and therefore reads
+    /// <see cref="TimescaleSupport.StorePolicyJobFamily.Other"/> — which is why the DEFAULT on
+    /// <see cref="StuckPolicyJob.Family"/> is Compression and this property is applied only where a real read
+    /// supplied the name.</summary>
+    public TimescaleSupport.StorePolicyJobFamily Family =>
+        ProcName is null
+            ? TimescaleSupport.StorePolicyJobFamily.Compression
+            : TimescaleSupport.ClassifyPolicyJobFamily(ProcName);
+
+    /// <summary>Whether this row is a deliberately paused policy rather than an abandoned job —
+    /// <see cref="TimescaleSupport.IsPolicyJobHeld"/> over this row's two inputs.</summary>
+    public bool Held => TimescaleSupport.IsPolicyJobHeld(Scheduled, JobStatus);
+
+    /// <summary>This row as the census and the failure arm consume it.</summary>
+    public PolicyJobRunReading ToReading() =>
+        new(JobId, Family, HypertableName, Held, LastRunStatus, TotalFailures);
+}
 
 /// <summary>
-/// A <see cref="CompressionJobStatRow"/> the predicate flagged, with the arm that fired and its reason —
-/// the unit <see cref="TimescaleSupport.ConfirmStuckCompressionJobs"/> merges two passes of (#3575).
-/// <see cref="SchedulerRetries"/> is <see cref="StuckCompressionJob.SchedulerRetries"/>, decided where the arm
+/// A <see cref="PolicyJobStatRow"/> the predicate flagged, with the arm that fired and its reason —
+/// the unit <see cref="TimescaleSupport.ConfirmStuckPolicyJobs"/> merges two passes of (#3575).
+/// <see cref="SchedulerRetries"/> is <see cref="StuckPolicyJob.SchedulerRetries"/>, decided where the arm
 /// was (#3591): the <c>-infinity</c> arm on a store whose scheduler has upstream #9360.
 /// </summary>
-internal sealed record ClassifiedCompressionJob(CompressionJobStatRow Row, StuckCompressionJobArm Arm, string Reason, bool SchedulerRetries = false)
+internal sealed record ClassifiedPolicyJob(PolicyJobStatRow Row, StuckPolicyJobArm Arm, string Reason, bool SchedulerRetries = false)
 {
-    /// <summary>The product-facing shape of this flag.</summary>
-    public StuckCompressionJob ToJob() => new(Row.JobId, Row.HypertableName, Reason, SchedulerRetries);
+    /// <summary>The product-facing shape of this flag, carrying the row's family and its armed state
+    /// (#3816). <c>Scheduled</c> is always <c>true</c> here — a held row never becomes a
+    /// <see cref="ClassifiedPolicyJob"/> — and is projected rather than hard-coded so the evaluator's
+    /// second gate is reading the catalog's answer and not this method's assumption.</summary>
+    public StuckPolicyJob ToJob() =>
+        new(Row.JobId, Row.HypertableName, Reason, SchedulerRetries, Row.Family, Row.Scheduled, Arm);
 }
 
 /// <summary>

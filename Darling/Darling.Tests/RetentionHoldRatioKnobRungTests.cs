@@ -398,7 +398,8 @@ public sealed class RetentionHoldRatioKnobRungTests
 
         /* To the end of ClearRetentionHoldAsync, which is the next member and the other half of the
            subject — the resolution message is where the threshold is stated back to the operator. */
-        const string end = "/// Edge-applies the fleet-level compression-job self-heal machine";
+        /* #3816 renamed the member this anchor names: the self-heal machine covers every policy family now. */
+        const string end = "/// Edge-applies the fleet-level policy-job self-heal machine";
         var to = source.IndexOf(end, from, StringComparison.Ordinal);
         Assert.True(to > from, "the end of ClearRetentionHoldAsync was not found, so this pin would read the rest of the file");
 
