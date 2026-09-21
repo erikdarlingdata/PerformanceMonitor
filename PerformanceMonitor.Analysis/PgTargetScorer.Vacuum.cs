@@ -186,28 +186,79 @@ public static partial class PgTargetScorer
 
     /* ── PG_XMIN_HOLD ── */
 
+    /// <summary>Metadata key: the LATEST capture's winning age — the horizon as it stands now, and the fact's
+    /// <see cref="Fact.Value"/>. The GRADED age is <see cref="XminHorizonFloorAgeKey"/>: what the horizon stayed
+    /// at or above for the whole held run.</summary>
     public const string XminAgeKey = "xmin_age";
-    /// <summary>Metadata key: the holder kind, encoded by <see cref="PgTargetAdvice.HolderSourceCode"/> because
-    /// metadata is doubles; the fact's <see cref="Fact.ObjectName"/> carries <c>source:holder</c> as text.</summary>
+    /// <summary>Metadata key: the DOMINANT holder kind across the held run — the source that won at least
+    /// <see cref="XminHolderDominanceShare"/> of the run's captures — encoded by
+    /// <see cref="PgTargetAdvice.HolderSourceCode"/> because metadata is doubles. 0 ("unknown") when no source
+    /// reached that share: with holders of several KINDS taking turns there is no kind to name, and every
+    /// consumer that keys on one (the idle-in-transaction leaf, the slot-xmin amplifier, this family's remedy
+    /// arms) must close rather than pick. The fact's <see cref="Fact.ObjectName"/> carries <c>source:holder</c>
+    /// as text, and only when ONE holder dominated (<see cref="XminHolderAttributedKey"/>).</summary>
     public const string XminHolderSourceKey = "holder_source";
-    /// <summary>Metadata key: distinct collections in the window that recorded ANY holder — the identity
-    /// arm's denominator (the alert's <c>observations_total</c>).</summary>
+    /// <summary>Metadata key: the kind that won the LATEST capture, encoded the same way. Attribution detail,
+    /// never a gate: under alternation the latest winner is one of several and naming it as THE holder is the
+    /// defect #3691 step 40 removed.</summary>
+    public const string XminLatestHolderSourceKey = "latest_holder_source";
+    /// <summary>Metadata key: distinct collections in the window that recorded ANY holder — the persistence
+    /// denominator (the alert's <c>observations_total</c>). The collector writes nothing when the horizon is
+    /// unheld, so a capture with rows is a capture where something held it.</summary>
     public const string XminObservationsTotalKey = "observations_total";
-    /// <summary>Metadata key: collections in which THIS (source, holder) was the winner.</summary>
-    public const string XminObservationsHeldKey = "observations_held";
-    /// <summary>Metadata key: collections whose winning age sat at or above the shared warning bar, holder
-    /// ignored — the horizon arm's numerator, carried so the reader sees it even though v1 cannot grade the
-    /// arm (its denominator, <c>collection_log</c> captures, is outside the analysis read's table set).</summary>
-    public const string XminObservationsAboveThresholdKey = "observations_above_threshold";
+    /// <summary>Metadata key: the longest run of CONSECUTIVE captures whose winning age sat at or above the
+    /// shared warning bar, holder ignored — the horizon's persistence, and the graded numerator. This is the
+    /// count v1 carried as <c>observations_above_threshold</c> and declined to grade.</summary>
+    public const string XminHeldCapturesKey = "held_captures";
+    /// <summary>Metadata key: <see cref="XminHeldCapturesKey"/> over <see cref="XminObservationsTotalKey"/> — a
+    /// fraction of holder-bearing captures, NOT of the collector's capture log (that denominator lives in
+    /// <c>collection_log</c>, which an analysis read may not name; #3642).</summary>
     public const string XminHeldFractionKey = "held_fraction";
-    /// <summary>Metadata key: 1 when the identity arm held (majority of holder-bearing collections, at least
-    /// the minimum observations, age at or above the bar) — the alert's chronic-holder shape.</summary>
-    public const string XminIdentityArmKey = "identity_arm";
+    /// <summary>Metadata key: the LOWEST winning age inside the held run — what the horizon stayed at or above
+    /// for every capture of it, and therefore the age the severity ramp reads. A floor is the honest number for
+    /// a persistence claim; the peaks are moments.</summary>
+    public const string XminHorizonFloorAgeKey = "horizon_floor_age";
+    /// <summary>Metadata key: the highest winning age inside the held run.</summary>
+    public const string XminHorizonRunPeakAgeKey = "horizon_run_peak_age";
+    /// <summary>Metadata key: 1 when the horizon's persistence arm held (a run of at least the minimum
+    /// observations, a majority of the window's holder-bearing captures, the run's floor at or above the age
+    /// bar). Named for what it grades: the horizon, not an identity.</summary>
+    public const string XminPersistenceArmKey = "persistence_arm";
+    /// <summary>Metadata key: distinct (source, holder) pairs that won a capture of the held run. 5 is the
+    /// lane-36 shape — five equally-old transactions taking turns on one pinned horizon.</summary>
+    public const string XminDistinctHoldersKey = "distinct_holders";
+    /// <summary>Metadata keys: the share of the held run's captures won by each holder KIND. The four are
+    /// disjoint and cover the collector's whole source vocabulary (both slot branches fold into the slot
+    /// share), so they sum to 1 over any run the collector wrote.</summary>
+    public const string XminWinnerBackendShareKey = "winner_source_backend_share";
+    public const string XminWinnerSlotShareKey = "winner_source_slot_share";
+    public const string XminWinnerStandbyShareKey = "winner_source_standby_share";
+    public const string XminWinnerPreparedShareKey = "winner_source_prepared_share";
+    /// <summary>Metadata key: captures of the held run won by the modal (source, holder) pair.</summary>
+    public const string XminModalHolderCapturesKey = "modal_holder_captures";
+    /// <summary>Metadata key: that pair's share of the held run.</summary>
+    public const string XminModalHolderShareKey = "modal_holder_share";
+    /// <summary>Metadata key: the modal SOURCE's share of the held run.</summary>
+    public const string XminDominantSourceShareKey = "dominant_source_share";
+    /// <summary>Metadata key: 1 when one holder's share reached <see cref="XminHolderDominanceShare"/> and the
+    /// fact therefore names it; 0 when holders alternated and the fact names none.</summary>
+    public const string XminHolderAttributedKey = "holder_attributed";
+    /// <summary>Metadata key: the highest winning age anywhere in the window, held run or not.</summary>
     public const string XminPeakWinningAgeKey = "peak_winning_age";
     public const string XminMinutesSinceLastHolderKey = "minutes_since_last_holder";
     /// <summary>Metadata key: the server's <c>autovacuum_freeze_max_age</c> when the wraparound read supplied
     /// one — the engine-defined critical bar for a held horizon (below).</summary>
     public const string XminFreezeMaxAgeKey = "freeze_max_age";
+
+    /// <summary>
+    /// The share of a held run's captures one holder (or one holder KIND) must win before the fact names it.
+    /// <para>unmeasured: chosen, not measured — a majority is the weakest claim that can still be called
+    /// dominance, and it is the same half the alert evaluator's persistence fraction uses for its own arm.
+    /// Calibrate against <c>pg_xmin_horizon</c>'s winner distribution before the next release.</para>
+    /// <para>It gates ATTRIBUTION only — never the grade. A horizon held by five holders in turn scores
+    /// exactly what one holder's would; all this decides is whether the fact says a name.</para>
+    /// </summary>
+    public const double XminHolderDominanceShare = 0.5;
 
     /// <summary>
     /// Layer-1 base severity for the vacuum family. One arm per key; an unknown key under this source is 0.
@@ -337,36 +388,50 @@ public static partial class PgTargetScorer
     }
 
     /// <summary>
-    /// The alert's IDENTITY arm, on the shared bars: this (source, holder) won a majority of the collections
-    /// that recorded any holder, over at least the minimum observations, with the horizon held at least the
-    /// warning age back. Base 0.5 at the bar — the alert's Warning — ramping to 1.0 where the held age reaches
-    /// the server's own <c>autovacuum_freeze_max_age</c>: a horizon pinned THAT far back means the forced
-    /// anti-wraparound vacuum the engine starts at that age cannot advance <c>relfrozenxid</c> either (VACUUM
-    /// freezes only what is older than the horizon), which is the §3.3 chain into <c>PG_WRAPAROUND_TREND</c>
-    /// stated as a bar. When the wraparound read supplied no setting the ramp has no top and the base stays
-    /// flat at 0.5 rather than borrowing a number.
+    /// The HORIZON's persistence, on the shared bars: the winning age — whoever won — stayed at or above the
+    /// warning age for a run of consecutive captures at least the minimum-observations long, and that run is a
+    /// majority of the window's holder-bearing captures. Base 0.5 at the bar — the alert's Warning — ramping to
+    /// 1.0 where the held age reaches the server's own <c>autovacuum_freeze_max_age</c>: a horizon pinned THAT
+    /// far back means the forced anti-wraparound vacuum the engine starts at that age cannot advance
+    /// <c>relfrozenxid</c> either (VACUUM freezes only what is older than the horizon), which is the §3.3 chain
+    /// into <c>PG_WRAPAROUND_TREND</c> stated as a bar. When the wraparound read supplied no setting the ramp
+    /// has no top and the base stays flat at 0.5 rather than borrowing a number.
     ///
-    /// <para>A holder the arm does NOT hold for — one long query, or a window too young for five
-    /// observations — scores 0 and stays visible as context, exactly the shape the alert declines to page.
-    /// The HORIZON arm (rotating holders) is not graded in v1: its honest denominator is the collector's
-    /// SUCCESS captures in <c>collection_log</c>, which is not a table the analysis read may name; the
-    /// numerator rides in the metadata so the reader can see the parade even though it is not scored.</para>
+    /// <para><b>Why not the identity (#3691 step 40).</b> v1 applied these same three gates to one (source,
+    /// holder) pair's win count — the alert evaluator's identity arm. A real stock storm held a 4.3 M-xid
+    /// horizon for twenty-five minutes while five equally-old transactions alternated as the winner, so no
+    /// identity was ever seen twice and the fact graded <b>0</b> on a horizon that was pinned the whole time.
+    /// The bars, their lineage and their values are unchanged; what they are applied to is the horizon's age
+    /// across consecutive captures, which is the thing being held. The holder is attributed separately (shares
+    /// per kind, the distinct-holder count, the modal holder when one dominates) and attribution never touches
+    /// the grade. A single persistent holder therefore grades exactly as it did in v1 — its run IS the
+    /// horizon's run — which is pinned.</para>
+    ///
+    /// <para>The ramp reads the run's FLOOR (<see cref="XminHorizonFloorAgeKey"/>): the age the horizon stayed
+    /// at or above for every capture of the run, not the moment it was worst. Absent (a planted fact, or a
+    /// window with no run at all) it falls back to the latest winning age, which is what a one-capture claim
+    /// can honestly say.</para>
+    ///
+    /// <para>A horizon the arm does NOT hold for — one long query, a run too short, a window too young —
+    /// scores 0 and stays visible as context, exactly the shape the alert declines to page.</para>
     /// </summary>
     private static double ScoreXminHold(Fact fact)
     {
-        var age = (long)fact.Metadata.GetValueOrDefault(XminAgeKey, fact.Value);
+        var latestAge = (long)fact.Metadata.GetValueOrDefault(XminAgeKey, fact.Value);
+        var floorAge = (long)fact.Metadata.GetValueOrDefault(XminHorizonFloorAgeKey, latestAge);
         var total = fact.Metadata.GetValueOrDefault(XminObservationsTotalKey);
-        var held = fact.Metadata.GetValueOrDefault(XminObservationsHeldKey);
+        var heldCaptures = fact.Metadata.GetValueOrDefault(XminHeldCapturesKey);
 
-        /* engine-defined: the three gates are the shared PostgresOutagePredictorThresholds symbols the alert's
-           identity arm applies (age bar, majority fraction, minimum observations). */
-        var identityArm = age >= PostgresOutagePredictorThresholds.XminAgeWarningThreshold
-            && total >= PostgresOutagePredictorThresholds.XminMinimumObservations
+        /* engine-defined: the three gates are the shared PostgresOutagePredictorThresholds symbols the alert
+           applies (age bar, majority fraction, minimum observations) — same symbols, same values, now read
+           against the horizon's consecutive-capture run instead of one holder's win count. */
+        var persistenceArm = floorAge >= PostgresOutagePredictorThresholds.XminAgeWarningThreshold
+            && heldCaptures >= PostgresOutagePredictorThresholds.XminMinimumObservations
             && total > 0
-            && held / total >= PostgresOutagePredictorThresholds.XminPersistenceFraction;
+            && heldCaptures / total >= PostgresOutagePredictorThresholds.XminPersistenceFraction;
 
-        fact.Metadata[XminIdentityArmKey] = identityArm ? 1 : 0;
-        if (!identityArm)
+        fact.Metadata[XminPersistenceArmKey] = persistenceArm ? 1 : 0;
+        if (!persistenceArm)
             return 0.0;
 
         /* engine-defined: concerning = the shared xmin warning age; critical = the server's own
@@ -375,7 +440,7 @@ public static partial class PgTargetScorer
         if (freezeMaxAge <= PostgresOutagePredictorThresholds.XminAgeWarningThreshold)
             return 0.5;
 
-        return FactScorer.ApplyThresholdFormula(age, PostgresOutagePredictorThresholds.XminAgeWarningThreshold, freezeMaxAge);
+        return FactScorer.ApplyThresholdFormula(floorAge, PostgresOutagePredictorThresholds.XminAgeWarningThreshold, freezeMaxAge);
     }
 
     /// <summary>

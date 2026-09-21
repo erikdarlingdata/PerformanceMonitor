@@ -514,8 +514,15 @@ public sealed class PgTargetBloatTests
             [PgTargetScorer.XminAgeKey] = age,
             [PgTargetScorer.XminHolderSourceKey] = 1,
             [PgTargetScorer.XminObservationsTotalKey] = total,
-            [PgTargetScorer.XminObservationsHeldKey] = held,
-            [PgTargetScorer.XminObservationsAboveThresholdKey] = total,
+            /* #3691 step 40: persistence is the HORIZON's run of consecutive above-bar captures (held) and its
+               floor age, with one session holding all of it — the same shape this file planted before, in the
+               vocabulary that grades it. */
+            [PgTargetScorer.XminHeldCapturesKey] = held,
+            [PgTargetScorer.XminHorizonFloorAgeKey] = age,
+            [PgTargetScorer.XminModalHolderCapturesKey] = held,
+            [PgTargetScorer.XminModalHolderShareKey] = 1.0,
+            [PgTargetScorer.XminDominantSourceShareKey] = 1.0,
+            [PgTargetScorer.XminHolderAttributedKey] = 1,
             [PgTargetScorer.XminMinutesSinceLastHolderKey] = 0,
         },
     };

@@ -105,8 +105,10 @@ public sealed class PgTargetVacuumLiveTests
             }
 
             /* ── pg_xmin_horizon, every minute over the last 41 minutes: session 4242 wins 31 (60,000,000 back,
-               above the 50,000,000 bar), a replication slot wins 10 in the middle (70,000,000) — the identity
-               arm holds for the session (31/41), and the latest winner is the session. */
+               above the 50,000,000 bar), a replication slot wins 10 in the middle (70,000,000). The HORIZON is
+               above the bar in every one of the 41 captures — one held run of 41, floor 60,000,000, peak
+               70,000,000 (#3691 lane 40: persistence is the horizon's, not a holder's) — and the session is the
+               modal holder at 31/41 = 0.756 ≥ 0.5, so the card is attributed to it; the latest winner is the session. */
             for (var minute = 40; minute >= 0; minute--)
             {
                 var at = windowEnd.AddMinutes(-minute);
@@ -168,8 +170,13 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal(60_000_000, hold.Value);
             Assert.Equal(PgTargetAdvice.HolderSourceCode("session"), hold.Metadata[PgTargetScorer.XminHolderSourceKey]);
             Assert.Equal(41, hold.Metadata[PgTargetScorer.XminObservationsTotalKey]);
-            Assert.Equal(31, hold.Metadata[PgTargetScorer.XminObservationsHeldKey]);
-            Assert.Equal(41, hold.Metadata[PgTargetScorer.XminObservationsAboveThresholdKey]);
+            Assert.Equal(41, hold.Metadata[PgTargetScorer.XminHeldCapturesKey]);
+            Assert.Equal(1.0, hold.Metadata[PgTargetScorer.XminHeldFractionKey], precision: 6);
+            Assert.Equal(60_000_000, hold.Metadata[PgTargetScorer.XminHorizonFloorAgeKey]);
+            Assert.Equal(70_000_000, hold.Metadata[PgTargetScorer.XminHorizonRunPeakAgeKey]);
+            Assert.Equal(2, hold.Metadata[PgTargetScorer.XminDistinctHoldersKey]);
+            Assert.Equal(31.0 / 41, hold.Metadata[PgTargetScorer.XminModalHolderShareKey], precision: 6);
+            Assert.Equal(1, hold.Metadata[PgTargetScorer.XminHolderAttributedKey]);
             Assert.Equal(70_000_000, hold.Metadata[PgTargetScorer.XminPeakWinningAgeKey]);
             Assert.Equal(200_000_000, hold.Metadata[PgTargetScorer.XminFreezeMaxAgeKey]);
             Assert.Equal(0, hold.Metadata[PgTargetScorer.XminMinutesSinceLastHolderKey], precision: 3);
