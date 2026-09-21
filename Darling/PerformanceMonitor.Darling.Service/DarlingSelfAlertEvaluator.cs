@@ -767,6 +767,104 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
     private readonly Func<double> _retentionHoldCriticalRatio;
 
+    /* -------- the store's own TOAST slack and checkpointer (#3783) -------- */
+
+    /* Store TOAST Slack edge state (#3783). FLEET-level (the dimensions are the store's own tables), MULTI-keyed
+       by dimension table name (two today: query_text_dim, query_plan_dim), STANDING like Retention Held:
+       active flag + a DAILY re-fire while a dimension's TOAST file stays under-utilised past the floor, one
+       "Store TOAST Slack Cleared" resolution when the reclaim lands (or the file drops under the floor). */
+    private readonly ConcurrentDictionary<string, bool> _activeToastSlack = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastToastSlackAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #3783 TOAST-slack metric name. A WEBHOOK AUTOMATION KEY like its siblings — a const, stable
+    /// across releases. Fired with NO severity override, so <c>AlertSeverity.ForMetric</c>'s declared INFO arm
+    /// styles it: the condition is a report about disk the operator may choose to reclaim in a maintenance
+    /// window, not a condition the on-call must act on tonight, and INFO is the one tier the rendering layer
+    /// has for that (the Collector Cost Digest reasoning). Classified as a percent by the value it carries.</summary>
+    internal const string ToastSlackMetric = "Store TOAST Slack";
+
+    /// <summary>The resolution title when a dimension's TOAST utilisation is back over the bar or its file is
+    /// under the floor. "Cleared" so <c>AlertMetricClassifier.IsResolution</c> styles it green (the Retention
+    /// Hold Cleared spelling).</summary>
+    internal const string ToastSlackClearedMetric = "Store TOAST Slack Cleared";
+
+    /// <summary>Prefixes the fleet-level TOAST-slack alert serverKey so it never parses as a server_id.</summary>
+    private const string ToastSlackKeyPrefix = "toastslack:";
+
+    /// <summary>
+    /// Under this utilisation a dimension's TOAST file is SLACK (#3783): 50 %. The measured case was 40 %
+    /// (154 GB holding ~61 GB of live chunks on one production store class, ~93 GB of slack left by the V54
+    /// text→gz conversion plus ~755 k rows a day cycling through row-capped deletes); its near-twin on the same
+    /// build sat at ~64 % and was NOT the finding. Half is the line between "a file with the ordinary breathing
+    /// room a churning table keeps" and "a file more empty than full", and it is also the point at which a
+    /// VACUUM FULL rebuild — which copies the LIVE data into a fresh file — costs less disk than the slack it
+    /// returns, so the reclaim pays for its own working space.
+    ///
+    /// <para><b>Why a constant and not a <c>config_alert_settings</c> knob.</b> A knob needs a migration rung,
+    /// and the rule is one un-landed rung at a time; V137 is the rung this condition rides on and it added
+    /// the columns, not a threshold. The Retention Held tiers are the worked example of the knob being added
+    /// later (#3297, V119) once a store had a reason to tune it; this pair follows the same road when one
+    /// does. Paired with <see cref="ToastSlackFileFloorBytes"/> so a small dimension is never a finding.</para>
+    /// </summary>
+    internal const double ToastSlackUtilisationBarPercent = 50.0;
+
+    /// <summary>
+    /// The file-size floor under which slack is not reported however low the utilisation (#3783): 10 GiB — the
+    /// issue's "10 GB", in the binary unit the tool's byte prose uses. A 2 GB dimension at 30 % is 1.4 GB of
+    /// slack, which is real and not worth an ACCESS EXCLUSIVE lock on the store's plan dimension to recover;
+    /// the finding this exists for was ~93 GB. Ten is well under the smallest production plan dimension seen
+    /// (67 GB) and well over any store a maintenance-window reclaim would not be worth scheduling for. Not a
+    /// knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    /// </summary>
+    internal const long ToastSlackFileFloorBytes = 10L << 30;
+
+    /// <summary>
+    /// How long the slack condition waits before re-stating itself while a file stays slack — its OWN daily
+    /// interval, the <see cref="StaleMuteRefire"/> reasoning exactly: the fact is a file's utilisation, which
+    /// moves on a scale of DAYS (slack accumulates with the delete cycle and is returned only by a VACUUM FULL
+    /// the operator schedules), so the shared 5-to-120-minute cooldown would say the same sentence about the
+    /// same file every sweep. Daily keeps an INFO reminder livable without a mute, which is what leaves the
+    /// mute a real choice; it dominates the cooldown's two-hour ceiling under every setting.
+    /// </summary>
+    internal static readonly TimeSpan ToastSlackRefire = TimeSpan.FromDays(1);
+
+    /* Store Checkpointer Pressure edge state (#3783). FLEET-level (one store, one checkpointer), a single fixed
+       key, STANDING like Store Job Over Cadence: active flag + shared-cooldown re-fire while each new hourly
+       interval keeps breaching, one "Store Checkpointer Pressure Recovered" resolution when an interval comes
+       back clean. The shared cooldown rather than a daily interval, deliberately: every breaching hour is a NEW
+       hour of fsync storms the store's readers sat inside, not a restatement of a standing fact. */
+    private readonly ConcurrentDictionary<string, bool> _activeCheckpointerPressure = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastCheckpointerPressureAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
+    /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
+    /// levers (#3802's WAL sizing, landed as the v12 managed-conf block; #3745's refresh slicing) are
+    /// configuration the maintainer weighs, not a page. The value it carries is the interval's sync-phase
+    /// milliseconds.</summary>
+    internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
+
+    /// <summary>The resolution title when an interval reads clean again. "Recovered" for the classifier.</summary>
+    internal const string CheckpointerPressureRecoveredMetric = "Store Checkpointer Pressure Recovered";
+
+    /// <summary>The fixed key for the fleet-level checkpointer edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string CheckpointerKey = "checkpointer";
+
+    /// <summary>
+    /// Sync-phase milliseconds inside one sweep interval past which the checkpointer is PRESSURE (#3783):
+    /// 10,000. The MCP host's read deadline is the bound this is derived from — a checkpoint whose fsync phase
+    /// runs past ten seconds is one whose I/O stall can outlast a read the deadline kills, which is exactly
+    /// what happened: three unattributed read kills on a production store in one day all sat inside sync
+    /// phases of 25.2 s and 14.0 s. Judged on the interval's TOTAL sync milliseconds rather than a single
+    /// checkpoint's, because the series stores the cumulative counter and not per-checkpoint durations; on
+    /// the hourly cadence with the default five-minute <c>checkpoint_timeout</c> that is at most twelve timed
+    /// checkpoints' sync phases summed, so a total over ten seconds means at least one of them was long or
+    /// all of them were slow, and either is the finding. The second arm, <c>checkpoints_requested &gt; 0</c>,
+    /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
+    /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    /// </summary>
+    internal const long CheckpointSyncBarMs = 10_000;
+
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
     /// The Critical tier is FIXED at 100: a job outrunning its own cadence compounds refresh lag.</summary>
@@ -4547,6 +4645,262 @@ internal sealed class DarlingSelfAlertEvaluator
             "Retention Hold Cleared",
             /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
             $"{_storeLabel}: {label} {why}"), cancellationToken);
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #3783 Store TOAST Slack check — rides the worker's hourly store
+    /// self-metrics tick, right after the sweep that wrote the rows it reads, the way the collector-cost
+    /// check does. Reads the latest-per-object rows through the SAME reader <c>get_store_metrics</c> uses, so
+    /// the percentage the alert judged is the one the tool shows. Same failure isolation as
+    /// <see cref="EvaluateCollectorCostAsync"/>: a failed read logs, counts as a swallowed read (#3013) and
+    /// skips the tick; cancellation propagates. Master-gated up front so master-off reads nothing.
+    /// </summary>
+    public async Task EvaluateToastSlackAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        List<Mcp.DarlingStoreMetricsReader.StoreMetricRow> latest;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            latest = await Mcp.DarlingStoreMetricsReader.GetLatestAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store TOAST slack evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store TOAST slack self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyToastSlackAsync(latest, cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store TOAST Slack condition (#3783) from the latest dimension rows: a payload
+    /// dimension whose TOAST file is over <see cref="ToastSlackFileFloorBytes"/> and whose MEASURED utilisation
+    /// is under <see cref="ToastSlackUtilisationBarPercent"/> is holding slack that ordinary VACUUM returns to
+    /// the table and never to the OS — ~93 GB of it on the store that motivated this — and only
+    /// <c>--recompress-plan-dim --vacuum-full</c> compacts it. A STANDING condition (the Retention Held idiom):
+    /// fire once on breach, re-fire only after <see cref="ToastSlackRefire"/> while it persists, one "Store TOAST
+    /// Slack Cleared" resolution when the utilisation is back over the bar or the file is under the floor.
+    /// INFORMATIONAL: fired with no severity override so the declared INFO arm styles it — this is a
+    /// maintenance-window decision for the maintainer, and the detail says so in those words. Keyed per
+    /// dimension table, so the two dims track and clear independently.
+    ///
+    /// <para><b>The arm is DORMANT wherever live bytes are not measured, and that is pinned rather than
+    /// hoped.</b> <see cref="Mcp.DarlingStoreMetricsReader.ToastFacts.IsSlack"/> is false on a NULL utilisation,
+    /// and the utilisation is NULL wherever <c>toast_live_bytes</c> is — which on the shipped store is every
+    /// row, because <c>pg_freespacemap</c> is available and not installed and the rung ruled the install the
+    /// maintainer's dependency decision. A NULL is "unmeasured", never "fine": it neither fires nor RESOLVES a
+    /// standing alert (a store that lost the extension would otherwise announce a reclaim that never ran), so
+    /// an unmeasured row leaves the standing state exactly as it found it — the agent-status discipline every
+    /// sibling follows. The day the maintainer runs <c>CREATE EXTENSION pg_freespacemap</c>, the next sweep
+    /// fills the column and this arm judges real numbers with no further change.</para>
+    ///
+    /// <para><b>This check never acts.</b> It cannot and must not run the reclaim: <c>VACUUM FULL</c> takes an
+    /// ACCESS EXCLUSIVE lock on the store's largest table for the whole rebuild and needs free disk for a
+    /// full copy of the live data — the issue is explicit that it runs at the maintainer's word in a
+    /// maintenance window. This makes the need visible instead of silent. Gated on the master alerts switch.
+    /// Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyToastSlackAsync(
+        IReadOnlyList<Mcp.DarlingStoreMetricsReader.StoreMetricRow> latest, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        foreach (var row in latest)
+        {
+            var facts = Mcp.DarlingStoreMetricsReader.ToastFacts.For(row);
+            if (facts is null)
+            {
+                continue;
+            }
+
+            var key = row.ObjectName;
+
+            /* Unmeasured is unmeasured: no fire, no resolve, standing state untouched. */
+            if (facts.UtilisationPercent is not double pct || facts.ToastBytes is not long file)
+            {
+                continue;
+            }
+
+            if (Mcp.DarlingStoreMetricsReader.ToastFacts.IsSlack(file, pct))
+            {
+                _activeToastSlack[key] = true;
+                if (!_lastToastSlackAlert.TryGetValue(key, out var last) || now - last >= ToastSlackRefire)
+                {
+                    _lastToastSlackAlert[key] = now;
+                    var live = facts.ToastLiveBytes ?? 0;
+                    var slack = Math.Max(file - live, 0);
+                    await FireAsync(
+                        StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
+                        $"{pct.ToString("0.0", CultureInfo.InvariantCulture)}% of {FormatGb(file)} TOAST file live",
+                        $"{ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% over {FormatGb(ToastSlackFileFloorBytes)}",
+                        detail: $"Store dimension {key}'s TOAST file — where the plan XML / statement text actually lives — is " +
+                            $"{FormatGb(file)} on disk and holds {FormatGb(live)} of live data " +
+                            $"({pct.ToString("0.0", CultureInfo.InvariantCulture)}%); {FormatGb(slack)} is free space INSIDE the file. " +
+                            "That slack is what a cycling delete pattern leaves behind: ordinary VACUUM (and autovacuum) returns " +
+                            "those pages to the table for reuse but never to the operating system, so the file sits at its " +
+                            "high-water mark until it is rebuilt, and pg_total_relation_size keeps reporting it as store size. " +
+                            "The reclaim is the existing operator verb --recompress-plan-dim --vacuum-full, run at the " +
+                            "maintainer's word in a maintenance window: VACUUM FULL takes an ACCESS EXCLUSIVE lock on the " +
+                            "dimension for the whole rebuild (every write that references it waits) and needs free disk for a " +
+                            "full copy of the live data while it runs. The service never runs it by itself; this alert re-states " +
+                            "itself once a day while the file stays slack and clears when the rebuild lands. The series is " +
+                            "collect.store_metrics (object_kind = 'dimension', toast_bytes / toast_live_bytes) and " +
+                            "get_store_metrics publishes toast_utilisation_pct per dimension.",
+                        /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
+                        severity: null,
+                        shortMessage: $"{key} TOAST file at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% — --recompress-plan-dim --vacuum-full reclaims the slack; maintenance window",
+                        numericCurrentValue: pct,
+                        numericThresholdValue: ToastSlackUtilisationBarPercent,
+                        cancellationToken);
+                }
+            }
+            else if (_activeToastSlack.TryRemove(key, out var was) && was)
+            {
+                var why = file <= ToastSlackFileFloorBytes
+                    ? $"TOAST file is {FormatGb(file)}, under the {FormatGb(ToastSlackFileFloorBytes)} floor"
+                    : $"TOAST file is back at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% live, over the {ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% bar";
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
+                    ToastSlackClearedMetric,
+                    /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+                    $"{_storeLabel}: {key} {why}"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #3783 Store Checkpointer Pressure check — rides the same hourly
+    /// store self-metrics tick as <see cref="EvaluateToastSlackAsync"/>, right after the sweep wrote the newest
+    /// checkpointer row, and differences it against the one before through the SAME reader
+    /// <c>get_store_metrics</c> publishes from. Same failure isolation and master gate.
+    /// </summary>
+    public async Task EvaluateCheckpointerPressureAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            reading = await Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store checkpointer pressure evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store checkpointer pressure self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyCheckpointerPressureAsync(reading, cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
+    /// checkpointer interval: the sync (fsync) phase held more than <see cref="CheckpointSyncBarMs"/> inside the
+    /// interval, OR at least one checkpoint was REQUESTED — forced by WAL volume reaching <c>max_wal_size</c>
+    /// rather than by the clock. Three unattributed read kills on a production store in one day all sat inside
+    /// checkpoint sync phases of 25.2 s and 14.0 s with nothing recording that the checkpointer had been there;
+    /// this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
+    /// breach, re-fire on the shared alert cooldown while each new interval keeps breaching, one "Store
+    /// Checkpointer Pressure Recovered" resolution when an interval reads clean. INFORMATIONAL, fired with no
+    /// severity override: the two levers are configuration — #3802's WAL sizing (<c>max_wal_size</c> /
+    /// <c>checkpoint_completion_target</c>, landed for the managed store as the v12 postgresql.conf block) and
+    /// #3745's refresh slicing (smaller aggregate refreshes write less WAL per tick) — which the maintainer
+    /// weighs against the store's disk, not a page.
+    ///
+    /// <para><b>Only an Observed interval is judged.</b> <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent"/>
+    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract) and <c>Reset</c> (the counters went
+    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) carry no measurement, and a
+    /// non-measurement neither fires nor resolves: the standing state is left as found, the agent-status
+    /// discipline. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer
+    /// and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyCheckpointerPressureAsync(
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
+    {
+        if (reading is null)
+        {
+            throw new ArgumentNullException(nameof(reading));
+        }
+
+        if (!_settings.AlertsEnabled || reading.Status != Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var syncMs = reading.SyncMs ?? 0;
+        var writeMs = reading.WriteMs ?? 0;
+        var requested = reading.Requested ?? 0;
+        var intervalSeconds = reading.IntervalSeconds ?? 0;
+        var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
+
+        if (reading.IsPressure)
+        {
+            _activeCheckpointerPressure[CheckpointerKey] = true;
+            if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
+            {
+                _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                var syncSeconds = (syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+                var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+                var arms = (syncMs > CheckpointSyncBarMs, requested > 0) switch
+                {
+                    (true, true) => $"sync {syncSeconds}s and {requested} WAL-forced checkpoint(s)",
+                    (true, false) => $"sync {syncSeconds}s",
+                    _ => $"{requested} WAL-forced checkpoint(s)",
+                };
+                await FireAsync(
+                    StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
+                    $"{arms} in {intervalMinutes} min",
+                    $"sync > {(CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture)}s or any requested checkpoint",
+                    detail: $"The store's own checkpointer spent {syncSeconds}s in its sync (fsync) phase and {writeSeconds}s in its write " +
+                        $"phase over the {intervalMinutes} minutes between the last two self-metrics sweeps, and {requested} of its " +
+                        "checkpoints in that interval were REQUESTED — forced by WAL volume reaching max_wal_size rather than " +
+                        "by checkpoint_timeout. " +
+                        (syncMs > CheckpointSyncBarMs
+                            ? "A sync phase that long is an I/O stall every reader on the store shares: on one production store, " +
+                              "three read kills in a day that nothing else explained all sat inside 25.2 s and 14.0 s sync " +
+                              "phases, and the MCP host's read deadline is the 10 s this line is drawn at. "
+                            : "A requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size " +
+                              "allows, so the checkpointer ran early and the next one is closer — checkpoint pressure compounds. ") +
+                        "The levers are configuration, not code: WAL sizing (#3802 — max_wal_size and " +
+                        "checkpoint_completion_target; the managed store gained them as the v12 postgresql.conf block, a " +
+                        "bring-your-own store sets them itself) and refresh slicing (#3745 — smaller continuous-aggregate " +
+                        "refreshes write less WAL per tick). The interval series is collect.store_metrics (object_kind = " +
+                        "'checkpointer'; the stored columns are the server's cumulative counters, and get_store_metrics' " +
+                        "checkpointer block publishes the per-interval differences). This alert re-fires on the alert " +
+                        "cooldown while each new interval breaches and recovers when one reads clean.",
+                    /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
+                    severity: null,
+                    shortMessage: $"store checkpointer: {arms} in the last {intervalMinutes} min — WAL sizing (#3802) and refresh slicing (#3745) are the levers",
+                    numericCurrentValue: syncMs,
+                    numericThresholdValue: CheckpointSyncBarMs,
+                    cancellationToken);
+            }
+        }
+        else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
+        {
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
+                CheckpointerPressureRecoveredMetric,
+                /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+                $"{_storeLabel}: checkpointer sync phase {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s and " +
+                $"{requested} requested checkpoint(s) in the last {intervalMinutes} min — under the line again"), cancellationToken);
+        }
     }
 
     /// <summary>

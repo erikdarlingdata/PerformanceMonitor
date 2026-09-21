@@ -47,9 +47,11 @@ FROM per_collection";
     /// <c>pg_statement_mean_ms</c> bucket — the z-score shape, graded by the shared deviation ramp (registered in
     /// <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c> by the v3 plumbing). Folds onto <c>PG_PLAN_REGRESSION</c>.
     ///
-    /// <para><b>Server-wide, by the coordinator's v3 ruling — and named as such.</b> The baseline seam keys one series
-    /// per (server, metric) with no per-statement dimension (the arm's doc in <c>PgTargetBaselineProvider.Plans.cs</c>
-    /// records the decision), so this anomaly says the SERVER's statements got slower per call than this hour usually
+    /// <para><b>Server-wide, by the coordinator's v3 ruling — and named as such.</b> When lane 27 wrote this the
+    /// baseline seam keyed one series per (server, metric) with no per-statement dimension; the KEYED seam exists
+    /// since #3810 (<c>ResolveKeyedBaselineQuery</c>, one member of a population), and switching this anomaly to a
+    /// per-<c>queryid</c> series is lane 27's follow-up, not made here (the arm's doc in
+    /// <c>PgTargetBaselineProvider.Plans.cs</c> records the decision). So this anomaly says the SERVER's statements got slower per call than this hour usually
     /// sees, not that one statement did. It is the statistical corroborator of the per-statement flip
     /// <c>PG_PLAN_REGRESSION</c> names, and the fact family's amplifier reads its verdict; on its own it is as likely
     /// a heavier parameter mix, a colder cache or one new expensive statement as a plan change, and the advice says so.

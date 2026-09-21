@@ -363,8 +363,10 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The one seam a derived provider overrides (#3542): which SQL computes <paramref name="metricName"/>'s
-    /// buckets. The base answers from <see cref="GetBaselineQuery"/> — the SQL Server store tables and CAGGs.
+    /// The first of the three seams a derived provider overrides (#3542; it was "the one seam" until #3691 added
+    /// <see cref="ReadServerClockAsync"/> for the local clock and <see cref="ResolveKeyedBaselineQuery"/> for one
+    /// member of a population — <c>PgTargetClockTests</c> counts the three): which SQL computes
+    /// <paramref name="metricName"/>'s buckets. The base answers from <see cref="GetBaselineQuery"/> — the SQL Server store tables and CAGGs.
     /// <see cref="PgTargetBaselineProvider"/> answers from its own <c>clean</c> CTEs over the PostgreSQL raw
     /// hypertables and inherits everything else here unchanged: the hour×dow cache, the parameter binding,
     /// the eight-column robust reader, the timeout classification (<see cref="IsCommandTimeout"/> — ONE

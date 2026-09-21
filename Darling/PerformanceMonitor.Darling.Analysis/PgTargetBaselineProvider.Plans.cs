@@ -17,10 +17,12 @@ public sealed partial class PgTargetBaselineProvider
     /// cumulative columns — <c>PgTargetFactCollector.Queries.cs</c>'s discipline) and so already reset-aware.
     ///
     /// <para><b>THE DECISION LANE 27 OWNED FIRST, taken: (a) the server-wide series.</b>
-    /// <c>PgBaselineProvider.GetBaselineAsync</c> keys one series on (<c>server_id</c>, metric) and has no per-statement
-    /// dimension, so a per-<c>queryid</c> baseline needed either a key dimension on the shared seam (a shared-file
-    /// change, reported to the coordinator as an out-of-lane item, never made inside the lane) or ONE series for the
-    /// whole server. The coordinator's ruling for v3 is the server-wide mean — honest but blunt: the anomaly it feeds
+    /// When this arm was written <c>PgBaselineProvider.GetBaselineAsync</c> keyed one series on (<c>server_id</c>, metric)
+    /// with no per-statement dimension, so a per-<c>queryid</c> baseline needed either a key dimension on the shared
+    /// seam (a shared-file change, reported to the coordinator as an out-of-lane item, never made inside the lane) or
+    /// ONE series for the whole server. The keyed seam exists since #3810 (<c>ResolveKeyedBaselineQuery</c>, the third
+    /// seam); switching this anomaly to a per-<c>queryid</c> series is lane 27's follow-up and this arm still serves
+    /// the server-wide mean. The coordinator's ruling for v3 is the server-wide mean — honest but blunt: the anomaly it feeds
     /// says "this server's statements got slower per call than this hour usually sees", not "this statement did".
     /// The per-statement flip is <c>PG_PLAN_REGRESSION</c>'s (the collector, with its own bars); the anomaly is the
     /// server-level corroborator that folds onto it (<c>PgTargetFactKeys.AnomalyToFamilies</c>). A heavier parameter

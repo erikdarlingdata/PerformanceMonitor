@@ -378,9 +378,15 @@ public static class PgTargetFactKeys
     /// sensitivity (no plan cache to force, so the remedy is the statement's shape, never a forced plan). Lane 27.</summary>
     public const string ParameterSensitivity = "PG_PARAMETER_SENSITIVITY";
     /// <summary>A <c>plan_json</c> Seq Scan over a large relation under a selective predicate
-    /// (<c>pg_predicate_stats</c>' evaluation count and selectivity beside it) — EVIDENCE ONLY: predicate, rows,
-    /// selectivity, estimate error. Never a <c>CREATE INDEX</c> statement anywhere in the fact or its advice (D8,
-    /// the standing no-missing-index-folklore rule; the maintainer's decision on #3691 gates the lane). Lane 30.</summary>
+    /// (<c>pg_predicate_stats</c>' evaluation count and selectivity beside it) — EVIDENCE FIRST: predicate, rows,
+    /// selectivity, estimate error, from the measured-slow plan. The index-evidence discipline the maintainer set on
+    /// 2026-09-20 (refining the earlier "never <c>CREATE INDEX</c>" line, which was a misattribution — see #3805):
+    /// the analysis STARTS from the plan and the predicate; a candidate index is CORROBORATION, never the driver, and
+    /// may be stated WITH its cost only where <c>pg_qualstats</c> named the columns; any impact figure is labelled for
+    /// what it is (one operator's estimate, never a % or a promise) and any sample count as sampled; and every
+    /// suggestion says that a new index can cause regressions elsewhere (plan changes on other statements, write
+    /// cost, storage) and must be tested. Index evidence stays an advisory band — one card per relation, questions
+    /// first, statement last — and never a defining characteristic of the engine. Lane 30.</summary>
     public const string SeqScanAdvisory = "PG_SEQ_SCAN_ADVISORY";
     /// <summary>A statement's mean execution ms against its own baseline (<c>pg_statement_mean_ms</c>) — z-score
     /// shape; folds onto <see cref="PlanRegression"/>, the regular fact that names the plan flip behind the
@@ -526,7 +532,10 @@ public static class PgTargetFactKeys
     /// onto <see cref="BlockingChain"/> — more sessions blocked than this hour usually sees is the statistical
     /// reading of the chain the regular fact names. v3: <see cref="AnomalyPlanRegression"/> folds onto
     /// <see cref="PlanRegression"/> (the deviation is the statistical reading of the plan flip the regular fact
-    /// names) and <see cref="AnomalyCpuBurn"/> onto <see cref="CpuBurnCores"/>.</para>
+    /// names) and <see cref="AnomalyCpuBurn"/> onto <see cref="CpuBurnCores"/> AND <see cref="CpuDecomposition"/>
+    /// (the third between-waves batch of #3691, on lane 36's measurement): the cores fact is a base-0 context fact
+    /// by design, so a fold onto it alone could never land — the decomposition is the family's positive-base
+    /// parent, and its own compute-bound amplifier already reads the burn anomaly's verdict.</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string[]> AnomalyToFamilies =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -539,7 +548,7 @@ public static class PgTargetFactKeys
             [AnomalyWalVolume] = [CheckpointPressure],
             [AnomalyBlocking] = [BlockingChain],
             [AnomalyPlanRegression] = [PlanRegression],
-            [AnomalyCpuBurn] = [CpuBurnCores],
+            [AnomalyCpuBurn] = [CpuBurnCores, CpuDecomposition],
         };
 
     /// <summary>The metadata prefix the wait-profile detector stamps its top contributors under —

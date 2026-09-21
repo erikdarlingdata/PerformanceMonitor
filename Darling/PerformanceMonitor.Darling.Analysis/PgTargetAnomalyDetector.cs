@@ -23,7 +23,11 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// behind the same <see cref="IAnomalyDetector"/> seam. Same posture throughout: one baseline-data gate ahead of
 /// every detector, each detector fenced in its own try so one metric's failure costs the pass that metric and
 /// nothing else, and every anomaly fact keyed <c>ANOMALY_PG_*</c> (<see cref="PgTargetFactKeys"/>) so the shared
-/// scorer routes it to the PostgreSQL ramps rather than the SQL Server literals (#3584).
+/// scorer routes it to the PostgreSQL ramps rather than the SQL Server literals (#3584). <b>The gate is whole-pass and
+/// one-tabled, by design:</b> <see cref="HasBaselineDataSql"/> asks whether <c>pg_database_stats</c> has rows in the
+/// 30 days before the window — the coverage witness of the #3542 D-list, the one universal one-minute series — and
+/// a target whose database-stats collector fails gets no anomaly of ANY family, however healthy its other tables,
+/// stated here so a reader of an anomaly-less pass looks at that collector first (lane 35's ask).
 ///
 /// <para><b>The five detectors (lane 9, #3542 step 9; design §2b).</b> Three z-score families through the shared
 /// <see cref="AnomalyGate"/> — transactions per second (<see cref="PgTargetFactKeys.AnomalyTps"/>), session count

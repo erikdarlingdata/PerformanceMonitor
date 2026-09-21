@@ -271,7 +271,7 @@ public sealed class PgTargetBloatTests
         var lookup = facts.ToDictionary(f => f.Key, StringComparer.Ordinal);
 
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.BloatTrend, lookup)!;
-        Assert.Equal("public.orders in appdb grew 500 MB of estimated bloat (500% of the earlier estimate) across 14 hourly samples spanning 13.3 days", block.Headline);
+        Assert.Equal("public.orders in appdb grew 500 MB of estimated bloat (500% of the earlier estimate) across 14 samples spanning 13.3 days", block.Headline);
         Assert.Contains("moved from 100 MB to 600 MB", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The heap measures 1 GB", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("1,250,000 dead tuples against 5,000,000 live", block.Investigation, StringComparison.Ordinal);

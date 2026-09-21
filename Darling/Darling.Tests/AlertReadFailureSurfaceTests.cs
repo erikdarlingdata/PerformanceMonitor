@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 10, 12),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 12),
     };
 
     /// <summary>
@@ -954,9 +954,15 @@ public sealed class AlertReadFailureSurfaceTests
     /// TENTH since #3712: the analysis singles digest read — the third daily document's span read over the
     /// digest-routed ledger rows — counted on the rollup's exact reasoning: its swallowed failure skips the
     /// day's tick without consuming the interval, and a fault folded into "no singles today" would convert an
-    /// unreadable store into a permanently quiet document.</para>
+    /// unreadable store into a permanently quiet document. And an ELEVENTH and TWELFTH since #3783: the store
+    /// TOAST-slack read (the latest-per-object rows the dimension utilisation is judged on) and the checkpointer
+    /// pair read (the two newest checkpointer rows the interval is differenced from) — each its own site with its
+    /// own clock and name, counted because both are the evidence a standing self-alert is judged on: a swallowed
+    /// read there neither fires nor RESOLVES, so a population of them would leave a real slack file or a real
+    /// fsync storm unreported for exactly as long as the store stayed unreadable, which is the quiet-is-not-clean
+    /// shape at the store's own health.</para>
     /// </summary>
-    private const int CountedSites = 34;
+    private const int CountedSites = 36;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

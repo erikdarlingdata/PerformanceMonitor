@@ -123,9 +123,16 @@ namespace PerformanceMonitor.Common
         /// declared there fails the census even when both this list and the behavior theory's
         /// InlineData rows were forgotten, the both-forgotten hole an InlineData theory structurally
         /// cannot close (#3476 review).</para>
+        ///
+        /// <para>#3783 adds the first two CONDITIONS to the list — the store's own TOAST slack and checkpointer
+        /// pressure. They are entered and left (each writes a resolution row) but are INFO by design all the
+        /// same: a maintenance-window reclaim and a WAL-sizing decision are the maintainer's to weigh, not the
+        /// on-call's to act on tonight, and a history grid that highlighted them amber would tell the operator
+        /// otherwise.</para>
         /// </summary>
         public static bool IsInformational(string? metricName) =>
-            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest";
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
+                or "Store TOAST Slack" or "Store Checkpointer Pressure";
 
         /// <summary>
         /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor

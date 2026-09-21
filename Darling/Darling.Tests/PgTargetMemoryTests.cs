@@ -355,8 +355,11 @@ public sealed class PgTargetMemoryTests
         var fromKnob = graph.GetAllEdges(PgTargetFactKeys.ConfigSharedBuffers).Single(e => e.Destination == PgTargetFactKeys.ConfigMemoryOvercommit);
         Assert.Equal("host_memory", fromKnob.Category);
 
-        /* The spill's edges are the query chain's; this file declares none from it (the amplifier carries the D5 lift). */
-        Assert.DoesNotContain(graph.GetAllEdges(PgTargetFactKeys.TempSpill), e => e.Destination == PgTargetFactKeys.ConfigMemoryOvercommit);
+        /* The spill's edges are the query chain's; the spill → sum edge lane 32 asked for lives in
+           PgTargetRelationshipGraph.Query.cs since the third between-waves batch (#3809), under the temp chain's
+           category — pinned there (PgTargetBetweenWavesV3Tests); here only that it exists and is not this file's. */
+        var fromSpill = Assert.Single(graph.GetAllEdges(PgTargetFactKeys.TempSpill), e => e.Destination == PgTargetFactKeys.ConfigMemoryOvercommit);
+        Assert.Equal("temp_spill", fromSpill.Category);
         /* Nothing leaves the sum: it is the leaf. */
         Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.ConfigMemoryOvercommit));
 
@@ -590,6 +593,10 @@ public sealed class PgTargetMemoryTests
                 Assert.True(story.GetProperty("severity").GetDouble() >= 0.5);
                 Assert.Contains("stayed under 10% for 3 consecutive samples", story.GetProperty("advice").GetProperty("headline").GetString(), StringComparison.Ordinal);
                 Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConfigMemoryOvercommit);
+                /* The spill → sum edge (#3809, the third between-waves batch) does not change this outcome: pressure
+                   outranks the spill, claims the sum first, and the spill's story cannot re-use a consumed leaf — so
+                   the sum sits in exactly ONE story path on this server. */
+                Assert.Single(findings, f => (f.GetProperty("story_path").GetString() ?? string.Empty).Contains(PgTargetFactKeys.ConfigMemoryOvercommit, StringComparison.Ordinal));
             }
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ShortServerName, 4, PgTargetSources.MemorySource, as_of: asOf);
             using (var doc = JsonDocument.Parse(factsJson))
