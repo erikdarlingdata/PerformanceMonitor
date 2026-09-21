@@ -161,6 +161,7 @@ public sealed class AlertReadFailureCounter
     private sealed class ServerCounts
     {
         public long ReadFailures;
+        public long RetriedReads;
         public long Passes;
         public LastFailure? Newest;
     }
@@ -181,6 +182,22 @@ public sealed class AlertReadFailureCounter
     private readonly ServerCounts _fleet = new ServerCounts();
 
     private long _instanceReadFailures;
+
+    /* #3848: retried reads, a SECOND population held beside the failures rather than folded into them.
+       It carries no newest-failure trio and deliberately: what it counts is a read that CROSSED the
+       alert pass's command deadline once and then answered on the single retry two seconds later, so
+       there is no failure to date or name — the condition was judged, from evidence that arrived late.
+       The three-stamps discipline above applies to counts of things that went BLIND; this one counts
+       things that did not, and a stamp on it would invite the reading that a retried read is a soft
+       failure. Its currency term is the same counting_since every other count on the block is read
+       against.
+
+       Incremented at most ONCE per read attempt-pair, whatever the outcome: a read that timed out and
+       then succeeded lands here only, and one that timed out twice lands here AND in the failure count
+       — the retry happened either way, and a retry counted only when it worked would understate the
+       write band's cost by exactly the episodes where the band was worst. See
+       DarlingAlertReadAdapter.ExecuteWithOneRetryAsync, which is the only producer. */
+    private long _instanceRetriedReads;
 
     /* Same trio, same reason, one level up: the instance-wide stamp and name are exchanged together so a
        reader cannot pair one failure's time with another's name. */
@@ -281,6 +298,59 @@ public sealed class AlertReadFailureCounter
         Interlocked.Exchange(ref bucket.Newest, newest);
         Interlocked.Increment(ref _instanceReadFailures);
         Interlocked.Increment(ref bucket.ReadFailures);
+    }
+
+    /// <summary>
+    /// Records one alerting-side store read that crossed its command deadline and was RETRIED once
+    /// (#3848) — the write bands' cost, counted rather than blinding an alert.
+    ///
+    /// <para><b>Why this is a count and not a failure.</b> Every episode this counts is one the previous
+    /// design recorded through <see cref="RecordReadFailure"/>: the read crossed the ten-second deadline,
+    /// the condition was skipped for that pass, and the next pass thirty seconds later ran into the same
+    /// write band. The retry converts most of that population into answered reads. The cost must stay
+    /// VISIBLE anyway, because it is the store's write bands showing through — a store whose compression,
+    /// aggregate-materialization and checkpoint bands stall reads for twelve seconds at a time is a fact
+    /// about the store, and a fix that made it silent would have traded one blind spot for another. So
+    /// this is the number that rises where <c>ReadFailures</c> used to, and an operator reads the pair:
+    /// retries alone is a store under write pressure with alerting intact, retries plus failures is a
+    /// store where twelve seconds was not enough.</para>
+    ///
+    /// <para><b>Counted per attempt-pair, not per success.</b> A read that timed out and then answered
+    /// increments this only; a read that timed out TWICE increments this and
+    /// <see cref="RecordReadFailure"/>. The retry happened in both cases, and a counter that only
+    /// recorded the working ones would understate the cost exactly during the episodes where the band was
+    /// worst — the confident-zero shape this whole class exists to remove.</para>
+    ///
+    /// <para><b>No stamp, no elapsed, and no newest-retry trio</b>, unlike every count above. Those exist
+    /// because a count of blind reads with nothing to date it cannot separate a healed episode from a live
+    /// one (#3010's lesson). A retried read is not blind: the condition WAS judged on real evidence that
+    /// arrived late, so there is no episode to attribute, and a trio here would invite exactly the reading
+    /// this paragraph refuses — that a retried read is a soft failure. <see cref="CountingSince"/> is its
+    /// currency term, the same one the block's other counts are read against.</para>
+    /// </summary>
+    /// <param name="serverKey">
+    /// The alert pass's server key, or null for a read that belongs to no server — the same keying
+    /// <see cref="RecordReadFailure"/> documents, so a retry and a failure on the same read land in the
+    /// same bucket.
+    /// </param>
+    /// <param name="readName">
+    /// The same short CONSTANT name the failure call site uses for that read. Not currently rendered on
+    /// any surface — the block publishes the retry COUNT and no newest-retry identity, for the reason
+    /// above — and taken anyway so the producer cannot record a retry it could not name, which is how a
+    /// future per-read breakdown becomes possible without re-instrumenting fourteen sites.
+    /// </param>
+    public void RecordRetriedRead(string? serverKey, string readName)
+    {
+        _ = readName;
+
+        var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
+
+        /* INSTANCE BEFORE BUCKET, the same way RecordReadFailure orders its two counts and for the same
+           reason: the instance total is what a reader subtracts the parts from, so it must never trail
+           them. There is no trio to publish ahead of either count here, which is why this is two
+           statements rather than four. */
+        Interlocked.Increment(ref _instanceRetriedReads);
+        Interlocked.Increment(ref bucket.RetriedReads);
     }
 
     /// <summary>
@@ -402,6 +472,32 @@ public sealed class AlertReadFailureCounter
     /// How long that newest failing read anywhere ran before it faulted, in milliseconds, or null if there
     /// has been none.
     /// </param>
+    /// <param name="ServerRetriedReads">
+    /// Reads for THIS server that crossed the alert pass's ten-second deadline once and were retried two
+    /// seconds later (#3848) — see <see cref="RecordRetriedRead"/>.
+    ///
+    /// <para>Read it beside <paramref name="ServerReadFailures"/>, because the two together are what the
+    /// retry made legible and neither says it alone. Retries rising with failures at zero is a store under
+    /// write pressure whose alerting is intact — the population that used to BE the failure count. Both
+    /// rising is a store where a second attempt twelve seconds later still found the band on, which is the
+    /// reading that wants the store's write schedule looked at rather than the reader's.</para>
+    ///
+    /// <para>Carries no newest-retry stamp, name or elapsed, unlike each count above, and that asymmetry
+    /// is deliberate rather than an omission: those three exist to date and attribute a condition that went
+    /// BLIND, and a retried read did not — it was judged on real evidence that arrived late. A trio here
+    /// would invite the reading that a retry is a soft failure.</para>
+    /// </param>
+    /// <param name="InstanceRetriedReads">
+    /// The same count across every server on this service plus any read belonging to none, the way
+    /// <paramref name="InstanceReadFailures"/> spans its own three populations.
+    ///
+    /// <para>No fleet-scoped part is reported beside it, unlike the failure total, because nothing
+    /// records a fleet-scoped retry today: the retry seam lives in the per-server alert-read adapter, and
+    /// the conditions <see cref="FleetScopedReads"/> names execute their own commands outside it. A part
+    /// that is structurally zero would be the confident-zero shape this class exists to remove — the same
+    /// reason the fleet bucket's pass denominator is written and never read. Should a fleet-scoped read
+    /// ever join the seam, its retries land in this total and a fleet part becomes worth publishing.</para>
+    /// </param>
     public sealed record Reading(
         long ServerReadFailures,
         long ServerAlertPasses,
@@ -416,7 +512,9 @@ public sealed class AlertReadFailureCounter
         long? FleetLastFailureElapsedMs,
         DateTime? InstanceLastFailureAtUtc,
         string? InstanceLastFailureRead,
-        long? InstanceLastFailureElapsedMs);
+        long? InstanceLastFailureElapsedMs,
+        long ServerRetriedReads,
+        long InstanceRetriedReads);
 
     /// <summary>
     /// Reads one server's figures. An unseen key reads as zeroes, not as an absence — the surface
@@ -456,6 +554,15 @@ public sealed class AlertReadFailureCounter
            belong to no server, so a reader who asked about one still needs them to make sense of the
            instance total standing beside their own zero. */
         var fleetFailures = Interlocked.Read(ref _fleet.ReadFailures);
+
+        /* #3848's pair, sampled BUCKET-THEN-TOTAL like the failures beside them and for the identical
+           reason: no reading subtracts these two today, but the total is the one a future fleet part would
+           be taken out of, and an order that reads correctly only while nothing subtracts it is an order
+           that breaks silently the day something does. Sampled before the trios below, so the
+           counts-before-identity rule holds for every count on the reading rather than for most of them. */
+        var serverRetries = bucket is null ? 0L : Interlocked.Read(ref bucket.RetriedReads);
+        var instanceRetries = Interlocked.Read(ref _instanceRetriedReads);
+
         var instanceFailures = Interlocked.Read(ref _instanceReadFailures);
 
         /* ONE read of each trio, so the stamp, the name and the elapsed on the returned reading always
@@ -491,7 +598,14 @@ public sealed class AlertReadFailureCounter
             FleetLastFailureElapsedMs: fleetNewest?.ElapsedMs,
             InstanceLastFailureAtUtc: Stamp(instanceNewest),
             InstanceLastFailureRead: instanceNewest?.Read,
-            InstanceLastFailureElapsedMs: instanceNewest?.ElapsedMs);
+            InstanceLastFailureElapsedMs: instanceNewest?.ElapsedMs,
+            /* #3848: the retry counts last on the record, appended rather than placed beside the failure
+               counts they are read against. Both surfaces render this block field-by-field from named
+               members, so position carries no meaning for a reader — while the record's ORDER is what a
+               positional construction elsewhere would bind to, and the two SKUs' surface pins reflect over
+               these members by name. Appended keeps every existing ordinal where it was. */
+            ServerRetriedReads: serverRetries,
+            InstanceRetriedReads: instanceRetries);
     }
 
     /// <summary>
@@ -767,7 +881,23 @@ public sealed class AlertReadFailureCounter
         + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "
         + "so an elapsed never describes an event with no stamp. It does NOT count fired "
         + "alerts that failed to DELIVER, and it makes no claim about them — that is the alert-history read's "
-        + "question, not this one. instance_read_failures spans every server on this service plus the "
+        + "question, not this one. retried_reads is the SECOND population, and on the Darling service it is "
+        + "where most of what this block used to count now lands: reads that crossed the 10 s deadline once "
+        + "and succeeded on the single retry two seconds later - the write bands' cost, counted rather than "
+        + "blinding an alert. Every one of those was a swallowed failure before #3848, so read the two "
+        + "together: retries rising with failures at zero is a store under write pressure whose alerting is "
+        + "intact, and both rising is a store where a second attempt twelve seconds later still found the "
+        + "band on - which wants the store's write schedule looked at rather than the reader's. A read that "
+        + "failed twice counts in BOTH, because the retry happened. It carries no stamp and no read name, "
+        + "deliberately: a retried read did not go blind, so there is no episode to date or attribute, and a "
+        + "stamp on it would invite reading a retry as a soft failure. counting_since is its currency term "
+        + "like every other count here. instance_retried_reads is the same figure across this whole service; "
+        + "there is no fleet part for it because nothing records a fleet-scoped retry today - the retry seam "
+        + "is in the per-server alert-read adapter, and the conditions listed below run their own commands "
+        + "outside it, so a fleet part would be a structural zero. On Lite both figures stay at zero, and "
+        + "that is a property of the SKU rather than a quiet store: Lite's alerting reads hit the local store "
+        + "with no command deadline, so there is no deadline for a read to cross and nothing to retry on. "
+        + "instance_read_failures spans every server on this service plus the "
         + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "
         + FleetScopedReads + ". "
         + "fleet_read_failures is how many of that total belong to no server, and it is what makes a "

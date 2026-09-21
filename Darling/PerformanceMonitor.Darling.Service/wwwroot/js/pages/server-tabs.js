@@ -2504,6 +2504,14 @@ const ALERT_READ_STATS = [
   { key: "alert_read_health.instance_last_failure_read", label: "Which read (service)", format: "text", small: true },
   { key: "alert_read_health.instance_last_failure_elapsed_ms", label: "Ran for (service)", format: "ms", small: true },
   { key: "alert_read_health.instance_last_failure_at", label: "Newest (service)", format: "reltime", small: true },
+  /* #3848: the second population, beside the failure counts it is read against rather than replacing
+     them. A read that crossed the 10 s deadline once and answered on the retry two seconds later is the
+     store's write bands showing through - it used to be a blind condition, and it is now a count. Read
+     the pair: retries with no failures is write pressure with alerting intact; both moving is a band that
+     was still on twelve seconds later. Neither tile has a "Newest" or "Which read" companion, unlike
+     every count above, because a retried read did not go blind - there is no episode to date. */
+  { key: "alert_read_health.retried_reads", label: "Retried reads (server)", format: "int" },
+  { key: "alert_read_health.instance_retried_reads", label: "Retried reads (service)", format: "int" },
   { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
 ];
 

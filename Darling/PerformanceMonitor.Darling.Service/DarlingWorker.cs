@@ -3937,7 +3937,11 @@ public sealed class DarlingWorker : BackgroundService
                 postgres,
                 serverId => StoreConfigProvider.ResolveSchedule("running_jobs", serverId, _scheduleOverrides).FrequencyMinutes,
                 /* #1839: the same resolution for the blocking snapshot the total-wait gate reads. */
-                serverId => StoreConfigProvider.ResolveSchedule("dmv_blocking_snapshot", serverId, _scheduleOverrides).FrequencyMinutes),
+                serverId => StoreConfigProvider.ResolveSchedule("dmv_blocking_snapshot", serverId, _scheduleOverrides).FrequencyMinutes,
+                /* #3848: the same process counter the engine takes below, so a read RETRIED inside the
+                   adapter and the same read FAILING in the engine's catch arm land in one bucket under one
+                   name. Passed explicitly for the same reason the engine's is — a test builds its own. */
+                readFailures: AlertReadFailureCounter.Shared),
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,
