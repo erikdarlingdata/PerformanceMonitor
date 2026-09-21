@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -46,10 +45,12 @@ public partial class ViewerServerTab
 
         _queryStoreClutterFilterMgr!.UpdateData(result.Databases);
 
-        /* The read already ordered worst-first (band, then the read-cost share, then plans per query). The
-           grid-view sort is the same intent expressed in the one field a DataGrid can sort on, and it is set
-           only when the user has not sorted the grid themselves. */
-        SetDefaultSortIfNone(QueryStoreClutterGrid, "Verdict", ListSortDirection.Descending);
+        /* NO default sort, unlike the grids beside this one, and that is the correct answer rather than an
+           omission. The composition orders rows worst-first by BAND, then the read-cost share, then plans per
+           query — three keys a DataGrid's single-column SortDescription cannot express. The nearest
+           single-column stand-in would be the Verdict text descending, which sorts alphabetically and puts
+           Warning above Critical: a default sort that silently reverses the ranking the rows arrived in. The
+           arrival order IS the ranking, and it is left alone until the user sorts a column themselves. */
 
         QueryStoreOverheadGrid.ItemsSource = result.Overhead.Waits;
         QueryStoreOverheadNote.Text =

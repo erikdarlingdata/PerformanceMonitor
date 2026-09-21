@@ -287,6 +287,23 @@ public sealed class QueryStoreClutterViewerSurfacesTests
     /// <summary>The text strictly BETWEEN the two anchors — the opening anchor is excluded, because the
     /// Queries group's own <c>&lt;TabItem Header="Queries"&gt;</c> would otherwise be counted as the first of
     /// its own sub-tabs and shift every index by one.</summary>
+    /// <summary>
+    /// The clutter grid takes NO default SortDescription, and that is a decision rather than an omission.
+    ///
+    /// <para>The composition orders rows worst-first by band, then the read-cost share, then plans per query.
+    /// A <c>DataGrid</c>'s default sort is one column, and the nearest single-column stand-in — the Verdict
+    /// text, descending — sorts alphabetically: Warning, Unknown, Healthy, Critical. That is the ranking
+    /// reversed at the top, on a grid whose whole job is to put the worst database first, and it would look
+    /// like a working sort. The arrival order is the ranking.</para>
+    /// </summary>
+    [Fact]
+    public void TheClutterGrid_TakesNoDefaultSort_BecauseTheArrivalOrderIsTheRanking()
+    {
+        var tab = ReadRepoFileLf(ViewerTabPath);
+        Assert.DoesNotContain("SetDefaultSortIfNone", tab, StringComparison.Ordinal);
+        Assert.Contains("Warning above Critical", tab, StringComparison.Ordinal);
+    }
+
     private static string Between(string text, string open, string close)
     {
         var start = text.IndexOf(open, StringComparison.Ordinal);
