@@ -723,8 +723,10 @@ public sealed class AlertReadFailureCounter
         + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
         + "(#3466), the analysis singles digest read behind the daily copy of the findings the corroboration "
         + "gate kept off the paging channels (#3712), the daily documents' delivery-stamp read that gates the "
-        + "digest, the rollup and the singles digest on delivered-today (#3580), and the store background-job "
-        + "health reads behind compression-job health, store-job cadence and retention holds";
+        + "digest, the rollup and the singles digest on delivered-today (#3580), the store background-job "
+        + "health reads behind compression-job health, store-job cadence and retention holds, and the two "
+        + "informational store self-alerts #3826 added — the plan dimension's TOAST slack read and the "
+        + "store checkpointer pressure read behind the WAL levers";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

@@ -247,8 +247,12 @@ public sealed class AlertReadFailureSurfaceTests
         /* Seventh since #3466: the fleet-sweep rollup read, Darling-only like the store self-alerts. Eighth
            since #3580: the daily documents' delivery-stamp read — ONE site gating both the digest and the
            rollup on delivered-today, so one name — Darling-only for the same reason. Ninth since #3712: the
-           analysis singles digest read, the third daily document's span read, Darling-only like the others. */
-        Assert.Equal(9, nullKeyReads.Count);
+           analysis singles digest read, the third daily document's span read, Darling-only like the others.
+           Tenth and eleventh since #3826: the plan dimension's TOAST slack read and the store checkpointer
+           pressure read, the two informational store self-alerts that PR added — Darling-only for the same
+           reason, and the pair that shipped un-inventoried because that PR's own build check was cancelled
+           rather than red. */
+        Assert.Equal(11, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -266,12 +270,15 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains(nullKeyReads, r => r.Contains("fleet-sweep rollup", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("delivery-stamp", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("analysis singles digest", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("TOAST slack", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("checkpointer pressure", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
            point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
-           SKU that named it without recording it would promise a reading it cannot produce. The other four
-           entries are Darling store self-alerts with no Lite equivalent. */
+           SKU that named it without recording it would promise a reading it cannot produce. The other nine
+           entries are Darling-only with no Lite equivalent — eight store self-alerts and the background-job
+           health read. */
         Assert.Equal(
             2,
             nullKeyReads.Count(r => r.Contains("mute-rule reload", StringComparison.Ordinal)));
@@ -283,6 +290,8 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("fleet-sweep rollup", inventory, StringComparison.Ordinal);
         Assert.Contains("delivery-stamp", inventory, StringComparison.Ordinal);
         Assert.Contains("analysis singles digest", inventory, StringComparison.Ordinal);
+        Assert.Contains("TOAST slack", inventory, StringComparison.Ordinal);
+        Assert.Contains("checkpointer pressure", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an
