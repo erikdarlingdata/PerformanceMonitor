@@ -39,6 +39,22 @@ public sealed record AdviceBlock(
 public static class FactAdvice
 {
     /// <summary>
+    /// The ONE caveat sentence that rides with every missing-index suggestion this engine delivers (#3805) —
+    /// the MISSING_INDEX card's investigation opens with it, both the static block and the composed one, so the
+    /// drill-down's CREATE statements never reach a reader without it. Fixed text, verbatim from the maintainer,
+    /// byte-identical to <c>McpPlanAnalysisFormatter.MissingIndexCaveat</c> in <c>PerformanceMonitor.PlanAnalysis</c>,
+    /// which every <c>analyze_*_plan</c> tool puts on its <c>missing_indexes[]</c> rows as <c>caveat</c>. Duplicated
+    /// rather than referenced because this assembly references no project (it is the shared engine every SKU
+    /// builds on), and <c>McpPlanAnalysisEnvelopeTests</c> pins the two strings equal so the duplication cannot
+    /// drift. The maintainer's position the sentence carries: a request is corroboration for a statement already
+    /// measured slow, never a diagnosis and never a finding's driver; its counters are plan-cache-bounded and its
+    /// impact is one operator's statement-scoped estimate; an index is a per-table commitment with write cost and
+    /// regression risk for other plans. <c>FactScorer</c> demotes the fact to the Information rung for the same
+    /// reason.
+    /// </summary>
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+
+    /// <summary>
     /// Looks up advice for a fact-key. Returns null if the key is unknown.
     /// </summary>
     public static AdviceBlock? GetForFactKey(string? factKey)
@@ -835,7 +851,7 @@ public static class FactAdvice
         if (Fired(facts, "PARAMETER_SENSITIVITY"))
             bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
         if (Fired(facts, "MISSING_INDEX"))
-            bits.Add("missing indexes — that finding lists the ones that would cut this work");
+            bits.Add("missing-index requests — the missing-index card lists the optimizer's suggestions from this window's top plans as corroboration, with its caveat");
         if (Fired(facts, "PLAN_WARNING"))
             bits.Add("plan warnings — check those plans for implicit conversions and spills");
         return bits.Count == 0 ? string.Empty : " Co-fired this window: " + string.Join("; ", bits) + ".";
@@ -1137,7 +1153,7 @@ public static class FactAdvice
         else
             rem.Append("Neither a plan regression nor parameter sensitivity fired this window, so the burst is most likely ad-hoc or scheduled work — the sessions active at the peak are attached; Resource Governor or moving that work off-peak is the durable fix.");
         if (Fired(facts, "MISSING_INDEX"))
-            rem.Append(" The missing-index finding also fired — adding those indexes cuts the work the spike is doing.");
+            rem.Append(" Missing-index requests co-fired — the missing-index card lists the optimizer's suggestions from this window's top plans; they corroborate this measured spike rather than diagnose it, and each carries its caveat.");
 
         return fallback with
         {
@@ -1319,7 +1335,7 @@ public static class FactAdvice
         {
             rem.Append("Two angles: cut the read volume by fixing the scans that pull more data than needed and give the buffer pool enough memory to keep hot pages cached; and check the storage itself — sustained high read latency on a quiet workload is a storage problem, not a SQL one.");
             if (Fired(facts, "MISSING_INDEX"))
-                rem.Append(" The missing-index finding fired this window — those indexes would cut the reads.");
+                rem.Append(" Missing-index requests co-fired this window — the missing-index card lists them as corroboration for the read volume, with its caveat; an index that covers a scan cuts its reads, and every write then pays for it.");
             if (Fired(facts, "PAGEIOLATCH_SH") || Fired(facts, "PAGEIOLATCH_EX"))
                 rem.Append(" PAGEIOLATCH co-fired, confirming reads are stalling on disk.");
         }
@@ -1400,7 +1416,7 @@ public static class FactAdvice
             $"PAGEIOLATCH waits are time spent waiting for a data page to be read from disk into the buffer pool (here, to {purpose} it) — the page was not cached, so SQL Server had to fetch it. Sustained PAGEIOLATCH usually means the working set does not fit in memory, so pages are evicted and re-read, or that the storage is slow.";
         var rem = new StringBuilder("Two levers: give the buffer pool more memory so hot pages stay cached, and reduce the pages read by fixing the scans that pull more data than needed.");
         if (Fired(facts, "MISSING_INDEX"))
-            rem.Append(" The missing-index finding fired — those indexes cut the pages read.");
+            rem.Append(" Missing-index requests co-fired — the missing-index card lists them as corroboration for the pages read, with its caveat.");
         if (Fired(facts, "IO_READ_LATENCY_MS"))
             rem.Append(" Read latency also fired this window, so the storage is part of the problem, not just memory.");
         if (mem.Length > 0)
@@ -1900,10 +1916,14 @@ public static class FactAdvice
             return fallback;
 
         var impact = FactMeta(facts, "MISSING_INDEX", "max_impact");
-        var inv = new StringBuilder($"{Plural(count.Value, "missing-index suggestion")} from the plans of this window's top queries");
+        /* #3805: the caveat opens the composed investigation, as it opens the static one — the composed block
+           REPLACES the static Investigation, so a caveat on the static block alone would vanish the moment the
+           fact carried metadata, which it always does. */
+        var inv = new StringBuilder(MissingIndexCaveat);
+        inv.Append($" {Plural(count.Value, "missing-index suggestion")} from the plans of this window's top queries");
         if (impact is > 0)
             inv.Append($", the strongest with an estimated {impact.Value:0.#}% improvement");
-        inv.Append(". These come from the optimizer's own missing-index data — it noticed a query would have benefited from an index that does not exist.");
+        inv.Append(". These come from the optimizer's own missing-index data — it noticed, while costing one statement, that an index it could not find would have lowered that statement's estimated cost; the top plans are the ones this window measured most expensive, which is the only sense in which a request here is traced from a measured-slow query.");
 
         var rem =
             "Treat these as candidates, not commands: the optimizer suggests a wide covering index per query and " +
@@ -2828,11 +2848,15 @@ public static class FactAdvice
         // no Apply (index + query changes are judgement calls, tested per workload).
         // ─────────────────────────────────────────────────────────────────
 
+        // #3805: the card is CORROBORATION, never a diagnosis and never the engine's headline. It opens with the
+        // one fixed caveat sentence (MissingIndexCaveat, byte-identical to the plan tools' per-row caveat) in
+        // both the static and the composed block, and FactScorer roots it at the Information rung, below every
+        // standing misconfiguration — a request never outranks a setting that is wrong today.
         t["MISSING_INDEX"] = new AdviceBlock(
             Headline:
                 "The optimizer asked for indexes that don't exist — top queries are scanning where they could seek",
             Investigation:
-                "SQL Server records a missing-index request in the query plan whenever the optimizer believes an index it couldn't find would have materially lowered a query's cost. This finding parsed the actual plans of your most expensive queries and collected those requests; the drill-down lists each one with its table, the optimizer's estimated impact %, and the suggested CREATE INDEX. Treat them as a STARTING POINT, not a prescription: the engine's suggestions are naive — it proposes one index per query in isolation, often with the key column order wrong, with wide INCLUDE lists, and with no awareness of indexes you already have or of the write cost. Weigh each by impact AND by how often the query actually runs.",
+                MissingIndexCaveat + " SQL Server records a missing-index request in the query plan whenever the optimizer believes an index it couldn't find would have materially lowered a query's cost. This finding parsed the actual plans of your most expensive queries and collected those requests; the drill-down lists each one with its table, the optimizer's estimated impact %, and the suggested CREATE INDEX. Treat them as a STARTING POINT, not a prescription: the engine's suggestions are naive — it proposes one index per query in isolation, often with the key column order wrong, with wide INCLUDE lists, and with no awareness of indexes you already have or of the write cost. Weigh each by impact AND by how often the query actually runs.",
             Remediation:
                 "Evaluate and test — there is nothing to auto-Apply, because a wrong index is worse than a missing one (every INSERT and DELETE pays to maintain it, as does any UPDATE that touches one of its columns). Consolidate overlapping suggestions into the fewest indexes that cover them, get the key-column order right (equality before inequality, then by selectivity), keep INCLUDE lists lean, and check the suggestion against your existing indexes so you don't create a near-duplicate. Validate the chosen index against the real plan on a copy of the data before it goes to production. The drill-down's CREATE statements are the raw optimizer text — refine them, don't paste them blind.");
 

@@ -55,16 +55,39 @@ public static class McpPlanAnalysisFormatter
     public const string MissingIndexImpactBasis = "estimated percent reduction of this statement's cost (showplan MissingIndexGroup/@Impact; optimizer estimate, statement-scoped, not additive)";
 
     /// <summary>
-    /// The sentence every <c>missing_indexes[]</c> row carries in place of the CREATE INDEX DDL it used to
-    /// paste (#3653 A15/A16). The DMV's suggestion is a HINT the optimizer emits for one statement's shape:
-    /// it knows nothing of the table's existing indexes (it will suggest a near-duplicate of one), of the
-    /// other statements that touch the table, of write cost, or of key order beyond equality-before-inequality.
-    /// A paste-ready statement in an agent's payload reads as a design; the column lists are the evidence and
-    /// stay as data, and the design is the operator's. The plan viewer still renders the DMV text for a human
-    /// reading a single plan; the MCP surface is the one an agent may act on unread, so it is the one that
-    /// stops handing out DDL.
+    /// The ONE caveat sentence every <c>missing_indexes[]</c> row carries, as <c>caveat</c>, beside its restored
+    /// <c>create_statement</c> (#3805). Fixed text, verbatim from the maintainer, and the SAME string on every
+    /// emitter of a missing-index suggestion on either SKU — the shared analysis engine's MISSING_INDEX advice
+    /// (<c>FactAdvice.MissingIndexCaveat</c>, a duplicated literal because <c>PerformanceMonitor.Analysis</c>
+    /// references no project; <c>McpPlanAnalysisEnvelopeTests</c> pins the two byte-identical) and, when the
+    /// PostgreSQL-target lane adopts it, its collectors. Public so they can.
+    ///
+    /// <para>What it says and why each clause is there. A missing-index request is the optimizer noticing, while
+    /// costing ONE statement, that an index it could not find would have lowered THAT statement's estimated cost.
+    /// Its <c>uses</c>-class counters (where a DMV reader exists — none does in this tree today) are
+    /// plan-cache-bounded: they reset when the cache is cleared or the instance restarts, so they are not a
+    /// lifetime figure. Its <c>impact</c> is one operator's estimated cost share, statement-scoped
+    /// (<c>impact_basis</c> beside it says exactly that). So a request is corroboration for a statement already
+    /// measured slow — it never diagnoses one, and it never drives a finding on its own. And an index is a
+    /// per-table commitment where the request was per-statement: every write pays for it, and other statements'
+    /// plans can change for the worse. <c>create_statement</c> is the parser's rendering of the request as
+    /// DDL (<see cref="ShowPlanParser"/>: key columns equality-then-inequality, then the INCLUDE list, under a
+    /// generated name) — the statement the operator TESTS, delivered with this sentence, never without it.</para>
+    ///
+    /// <para>History. #3696 (#3653 A15/A16) dropped <c>create_statement</c> from this surface and put a
+    /// "a hint, not a design" note in its place, citing a "no-missing-index-recs rule". The maintainer, on the
+    /// checklist that carried the phrase: "i never made that rule? there are several things that recommend ddl,
+    /// e.g. enabling rcsi in the analysis engine." — and then, as the spec for the restore: a suggestion is
+    /// "legitimate as corroboration when traced FROM a measured-slow query ... never a defining characteristic
+    /// of the engine and never delivered without serious caveats — including the regression risk a new index
+    /// carries." DDL recommendations are product output where the evidence supports them (the engine's RCSI
+    /// remediation is the precedent; the engine's own MISSING_INDEX finding renders this very parser statement
+    /// as <c>remediation_command</c>, so for the life of #3696 the plan tools withheld what
+    /// <c>get_analysis_findings</c> handed out). The framing moves from suppression ("hint, not a design") to
+    /// honesty ("corroboration, with caveats"); <c>impact_basis</c> — the real A15/A16 item, an unlabelled
+    /// statement-scoped percent — stays.</para>
     /// </summary>
-    public const string MissingIndexNote = "The optimizer's missing-index suggestion for this ONE statement: a hint, not a design. It ignores the table's existing indexes (it often near-duplicates one), every other statement that touches the table, and write cost. Use the column lists as evidence against the table's actual indexes and workload before creating anything.";
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
 
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
@@ -135,9 +158,14 @@ public static class McpPlanAnalysisFormatter
                     }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
-                    /* #3653 A15/A16: impact is labelled for what it is, and the paste-ready CREATE INDEX is
-                       gone from this surface — the column lists ARE the data; see MissingIndexImpactBasis and
-                       MissingIndexNote for why. */
+                    /* #3653 A15/A16: impact is labelled for what it is (MissingIndexImpactBasis). #3805: the
+                       parser's CREATE INDEX rides along as create_statement again — #3696 dropped it here on a
+                       rule that was never made (MissingIndexCaveat's history) — and every row carries the ONE
+                       fixed caveat sentence, so the statement is never delivered without it: the column lists
+                       are the evidence, the statement is the optimizer's per-statement suggestion, the caveat
+                       is how to weigh it. The parser leaves CreateStatement empty for a group with no key
+                       column, a shape showplan does not produce; the row then carries "" exactly as it did
+                       before #3696, and as the drill-down collectors' missing_indexes[] rows do. */
                     missing_indexes = s.MissingIndexes.Select(idx => new
                     {
                         table = $"{idx.Schema}.{idx.Table}",
@@ -147,7 +175,8 @@ public static class McpPlanAnalysisFormatter
                         equality_columns = idx.EqualityColumns,
                         inequality_columns = idx.InequalityColumns,
                         include_columns = idx.IncludeColumns,
-                        note = MissingIndexNote,
+                        create_statement = idx.CreateStatement,
+                        caveat = MissingIndexCaveat,
                     }),
                     parameters = s.Parameters.Select(p => new
                     {

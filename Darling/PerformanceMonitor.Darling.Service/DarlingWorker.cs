@@ -121,8 +121,27 @@ public sealed class DarlingWorker : BackgroundService
        schedule (#3035), and a check scheduled from the instant of its previous fire slips a few seconds
        every hour and eventually samples one of those :00 instants — which is where a production store's
        false page came from. TimescaleSupport.NextCompressionCheckUtc snaps each due time to :30 past its
-       minute, so this interval sets how OFTEN and that phase sets WHEN in the minute. */
+       minute, so this interval sets how OFTEN and that phase sets WHEN in the minute.
+
+       The retention re-evaluation (#3812) RIDES this tick rather than owning a second one: same store, same
+       domain (TimescaleDB background jobs), same cadence class — a held retention policy costs disk by the
+       day, so hourly is far tighter than the "next restart" it replaces and far looser than the 30 s alert
+       loop needs to be. It runs AFTER the compression read inside the tick, and that order is #3575's, not
+       taste: the compression read must sample at :30 past its minute, and twenty coverage probes ahead of it
+       on a large store would slide that sample toward the :00 instant the policies start on. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
+
+    /* The whole-pass budget for the hourly retention re-evaluation (#3812), the #2327 shape: this pass is
+       AWAITED on the serial sweep loop, so its worst case stalls per-server dispatch and every fleet-level
+       check behind it. Each statement inside TimescaleSupport.EnsureRetentionPoliciesAsync carries the 300 s
+       bulk-setup deadline that is right for a first conversion and wrong for a loop — twenty policies at up
+       to five statements each is a theoretical hundred-plus statements, and on a store that answers slowly
+       without failing that is hours of loop block behind one pass. One linked budget for the WHOLE pass bounds
+       it to the same ~5 minutes the store self-metrics sweep accepted for the same reason. On a healthy store
+       the pass is seconds: the coverage probe is a chunk-pruned min() per relation (685 ms cold on the largest
+       store, #2874) and everything else is a catalog row. A pass cut short leaves its unjudged policies exactly
+       as they were and says so; the next hour re-judges them. */
+    private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
        series exists to forecast weeks out, and the compression tier only changes state once a day per
@@ -487,7 +506,9 @@ public sealed class DarlingWorker : BackgroundService
        first sample is deliberately left unpinned — a restart is when an operator is reading the log and wants
        the store's job health now — and the confirm-read inside ReadStuckCompressionJobsAsync covers it like
        every other sample. Fleet-level (one shared store), so it is a single field, not per-server; only
-       consulted when _timescaleAvailable. */
+       consulted when _timescaleAvailable. Since #3812 the same due time also fires the hourly retention
+       re-evaluation (ReevaluateRetentionPoliciesAsync), AFTER the compression read so the :30 sample is not
+       pushed by the pass ahead of it — one stamp, two failure-isolated halves. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
@@ -1488,8 +1509,14 @@ public sealed class DarlingWorker : BackgroundService
                    per aggregate, and a no-op on every start after the first. */
                 await TimescaleSupport.EnsureAggregateCompressionAsync(timescaleConnection, _logger, stoppingToken);
 
-                // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
-                // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).
+                /* AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
+                   history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958). The
+                   START-PATH pass: it creates what is missing, converges horizons and judges every policy's
+                   coverage gate, and writes one WARNING per held policy plus the "Retention evaluation at
+                   startup:" tally. KEPT as-is under #3812, which ADDED the hourly re-evaluation on the
+                   compression tick (ReevaluateRetentionPoliciesAsync) rather than moving this; a fresh store
+                   still gets its policies before the first collection lands, and a restart is still when an
+                   operator is reading the log. */
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
@@ -2274,6 +2301,34 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
                 await EvaluateCompressionJobHealthAsync(stoppingToken);
+
+                /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line the
+                   only thing that armed a held retention policy was the start-path ensure above, so "the gate
+                   releases the hold by itself once the backfill covers raw" was true only after a restart — a
+                   store on a stable build sat held indefinitely after a backfill that had worked, with the
+                   Retention Held alert still firing and reading like the backfill had failed. Same tick as the
+                   compression check (the constant's comment says why this cadence and why this order), each
+                   half failure-isolated inside its own method with its own catch, so a retention pass that
+                   throws or runs out its budget cannot skip the compression read and a compression fault
+                   cannot skip the retention pass. The Retention Held self-alert rides INSIDE the compression
+                   method and therefore reads the flags as they stood before this pass: a policy armed here
+                   shows as held on this tick's alert read and resolves on the next hour's, one tick of lag on
+                   the resolution edge that is stated rather than traded for #3575's phase. The first pass
+                   after startup fires within seconds of the start-path ensure (this stamp seeds at MinValue);
+                   that pass is deliberately not skipped — its "Retention re-evaluation:" line is the proof
+                   the hourly path is wired on this store, visible in the same log window an operator reads
+                   after a restart, and it costs twenty catalog rows and twenty chunk-pruned min() reads.
+
+                   THE HOURLY STORE-MAINTENANCE TICK, named. This guard is the home for every "we decided this
+                   at startup and never re-decided it" defect on the store side: #3812 is its first tenant, and
+                   #3815 (TimescaleDB availability probed only at startup), #3816 (job self-heal covers
+                   compression only) and #3817 (store-object convergence only at startup) are queued as further
+                   tenants — not built here. The contract a tenant signs: its own method, its own catch-all,
+                   awaited as its own statement in this block AFTER the compression read (the #3575 phase
+                   argument on s_compressionCheckInterval), in the order it appears; a new tenant is one more
+                   await line below this one. No delegate list yet, deliberately — two tenants do not justify
+                   the indirection, and a list would hide the order the phase argument depends on. */
+                await ReevaluateRetentionPoliciesAsync(stoppingToken);
             }
 
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
@@ -2335,6 +2390,22 @@ public sealed class DarlingWorker : BackgroundService
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                    }
+
+                    /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
+                       the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
+                       evaluator says why) and the checkpointer's last interval, differenced from the newest
+                       two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
+                       the alert judges the hour the sweep measured rather than the one before it. Both
+                       master-gated inside and failure-isolated inside; the outer catch is the belt. */
+                    try
+                    {
+                        await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
+                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
                     }
 
                     /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
@@ -4361,7 +4432,9 @@ public sealed class DarlingWorker : BackgroundService
                         standing.CpuPercent, standing.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
                     lastCounted = new DarlingPgCpuUtilizationReader.CpuSample(
                         standing.SampleTimeUtc, standing.CpuPercent, standing.AcuUtilizationPercent,
-                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu);
+                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu,
+                        /* The gate's own reads carry no memory (LatestCpuSql selects none); stated, not defaulted. */
+                        Memory: null);
                 }
             }
 
@@ -5883,6 +5956,70 @@ LIMIT 1";
             _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// The #3812 hourly retention re-evaluation (fleet-level, Timescale-only, on the compression tick): run
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
+    /// as the <see cref="TimescaleSupport.RetentionSweepPass.Periodic"/> pass on a connection from the worker's
+    /// pool. The start-path pass's <c>timescaleConnection</c> is scoped to the setup block and disposed after
+    /// it, which is why this cannot simply reuse it and why the method exists at all rather than a second line
+    /// beside the startup call.
+    ///
+    /// <para><b>What the pass does is the start path's, exactly.</b> Create what is missing (paused), converge
+    /// horizons, measure every policy's coverage, arm the Covered ones and hold the Short ones. Every step is
+    /// idempotent and was tested as such before it was scheduled (the method's own summary says how). What
+    /// differs is what it SAYS: a hold that was already a hold is Debug here, a policy ARMED this pass is
+    /// Information, a policy RE-HELD this pass is Warning, and the one line every pass writes whatever it found
+    /// is <c>Retention re-evaluation: N policies held, M armed this pass, K unchanged</c> — the #3756
+    /// discipline, so an operator can see the gate was re-judged without a restart marker.</para>
+    ///
+    /// <para><b>Failure-isolated at the worker level, with three distinct outcomes that read differently.</b>
+    /// The pass completed — its own tally line, inside the method. The pass would not open a connection or
+    /// threw outside its per-policy isolation — the WARNING below, naming the elapsed and the message. The pass
+    /// ran out its <see cref="s_retentionReevaluationBudget"/> — a different WARNING, because a store that
+    /// cannot answer twenty catalog reads and twenty chunk-pruned <c>min()</c> probes in five minutes is the
+    /// finding, not the retention. Shutdown cancellation is quiet: the next start's own pass re-judges every
+    /// policy, so a pass cut short by stopping the service has nothing to report. Not counted by #3013's
+    /// swallowed-read counter: this is a maintenance ACTION, not an alert read whose failure would leave a
+    /// condition unjudged — the Retention Held alert's own read is inside the compression method and counts
+    /// there.</para>
+    ///
+    /// <para>The budget is ONE linked token for the WHOLE pass (#2327's shape), not a per-statement deadline:
+    /// the sweep's statements carry <c>TimescaleSupport</c>'s 300 s bulk-setup bound each, which is right for
+    /// a first conversion and, multiplied by a hundred statements on a slow store, wrong for something awaited
+    /// on the serial sweep loop. A cancellation from that budget propagates out of the sweep's per-policy
+    /// isolation by design (<c>when (ex is not OperationCanceledException)</c>), so the policies it had not
+    /// reached keep their state and the WARNING here is the pass's line for the hour.</para>
+    /// </summary>
+    private async Task ReevaluateRetentionPoliciesAsync(CancellationToken cancellationToken)
+    {
+        var passClock = Stopwatch.StartNew();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_retentionReevaluationBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await TimescaleSupport.EnsureRetentionPoliciesAsync(
+                connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown — quiet and expected. The next start's own pass re-judges every policy. */
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - the policies it had not reached keep the state they were in and are re-judged next hour (and at the next start). A store that cannot answer twenty catalog reads and twenty chunk-pruned min() probes inside that budget is the finding here, not the retention.",
+                (long)s_retentionReevaluationBudget.TotalSeconds, passClock.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
+                passClock.ElapsedMilliseconds, ex.Message);
         }
     }
 
@@ -7792,6 +7929,99 @@ LIMIT 1";
             + "cycle; the collector retries every cycle and starts collecting on the first one after the "
             + $"{noun} exists.";
     }
+
+    /// <summary>
+    /// The object a 42P01 / 42883 names, as its bare last segment (#3818): <c>relation
+    /// "public.pg_stat_statements_info" does not exist</c> yields <c>pg_stat_statements_info</c>;
+    /// <c>function aurora_stat_statements(boolean) does not exist</c> yields <c>aurora_stat_statements</c>.
+    /// Null when the message has neither shape - a non-English <c>lc_messages</c>, or a message this did not
+    /// anticipate - which keeps the caller on the arm it would have taken before this existed rather than
+    /// guessing. The relation and function fields Npgsql exposes are NOT consulted: PostgreSQL fills them for
+    /// constraint and datatype errors, not for a name it could not resolve.
+    /// </summary>
+    internal static string? MissingObjectNamedBy(PostgresException ex)
+    {
+        var text = ex.MessageText ?? string.Empty;
+
+        var relation = System.Text.RegularExpressions.Regex.Match(
+            text, "^relation \"(?<name>[^\"]+)\" does not exist", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        var function = System.Text.RegularExpressions.Regex.Match(
+            text, "^function (?<name>[^\\s(]+)\\(", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        var qualified = relation.Success ? relation.Groups["name"].Value
+            : function.Success ? function.Groups["name"].Value
+            : null;
+
+        if (qualified is null)
+        {
+            return null;
+        }
+
+        var lastDot = qualified.LastIndexOf('.');
+        return lastDot >= 0 ? qualified[(lastDot + 1)..] : qualified;
+    }
+
+    /// <summary>
+    /// The declared companion (<see cref="PgExtensionDependency.Companions"/>) a missing-object fault names,
+    /// with the extension it belongs to - or null when the fault names the extension's base object, an
+    /// undeclared object, or nothing this can read (#3818). Ordinal on the bare name, both sides lowercase
+    /// by declaration and by PostgreSQL's own folding.
+    /// </summary>
+    internal static (PgExtensionDependency Extension, PgExtensionCompanionObject Companion)? MissingCompanionOf(
+        PostgresException ex, IReadOnlyList<PgExtensionDependency> required)
+    {
+        var missing = MissingObjectNamedBy(ex);
+        if (missing is null)
+        {
+            return null;
+        }
+
+        foreach (var extension in required)
+        {
+            foreach (var companion in extension.Companions)
+            {
+                if (string.Equals(companion.ObjectName, missing, StringComparison.Ordinal))
+                {
+                    return (extension, companion);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The sentence a missing COMPANION object carries (#3818): the raw error, the object the server actually
+    /// named, the fact that the extension IS present (its base object resolved - see the ordering property on
+    /// <see cref="PgExtensionDependency.Companions"/>), the two states that produce this, and the remedy for
+    /// each. Neither of them is <c>CREATE EXTENSION</c>, which is why this is not
+    /// <see cref="ExtensionMissingExplanation"/>: on the fleet that motivated it the extension was installed,
+    /// preloaded and readable on every one of the 23 failing clusters, and the stored sentence said it was
+    /// not installed. <c>ALTER EXTENSION ... UPDATE</c> is a statement - no <c>shared_preload_libraries</c>
+    /// change, no restart, no parameter group - so the preload paragraph the base sentence carries is
+    /// deliberately absent here; sending someone to schedule a reboot for an update script is the same
+    /// wrong-remedy defect the base sentence exists to prevent.
+    /// </summary>
+    private static string CompanionMissingExplanation(
+        PostgresException ex, PgExtensionDependency extension, PgExtensionCompanionObject companion, string? connectedDatabase)
+    {
+        var where = string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the connected database"
+            : $"in database '{connectedDatabase}'";
+
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
+            + $"which is NOT the {extension.ExtensionName} extension's base object: that resolved, so the "
+            + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
+            + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
+            + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
+            + "upgraded in place or restored keeps the version the extension was created at until someone "
+            + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
+            + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
+            + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
+            + "schema it was created in; check pg_extension.extversion and extnamespace). This is "
+            + "NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather than an "
+            + "error so it does not fill the log every cycle; the collector retries every cycle.";
+    }
     /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>PERMISSIONS is the non-fatal-degradation bucket for the cases whose absent thing the code
@@ -7863,6 +8093,19 @@ LIMIT 1";
                error's shape. Undeclared sources keep the arm below: a version-gated relation, or an
                extension-owned object nothing declares, still presents as 42P01/42883, and for those the
                generic sentence is the honest one. */
+            /* #3818, the exception to #3240's inference, checked FIRST because it is the narrower claim: when the
+               object the server could not find is a COMPANION the collector declared beside its base object,
+               the extension is present - the base object resolved before the companion was looked up - and
+               "not installed" would be false. The remedy is ALTER EXTENSION ... UPDATE, not CREATE EXTENSION,
+               and the status is the general non-fatal-degradation bucket rather than EXTENSION_MISSING,
+               because that status word says the extension is missing and every health surface reads it as an
+               optional module left uninstalled - a legitimate resting state. A previously productive collector
+               dark on a version-gated companion is not resting. The text is where the truth goes, as it is on
+               the generic arm below. */
+            CollectorTargetFault.ObjectMissing when MissingCompanionOf(ex, RequiredExtensionsOf(collectorName)) is { } found =>
+                (CollectorRuntimePrecondition.DegradedStatus,
+                    CompanionMissingExplanation(ex, found.Extension, found.Companion, connectedDatabase)),
+
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
                     ExtensionMissingExplanation(ex, required, connectedDatabase)),

@@ -177,10 +177,16 @@ public sealed class QueryStoreHealthStoreTests
         Assert.True(QueryStoreHealthCollector.Instance.AppliesTo(new CollectorTargetInfo { SqlMajorVersion = 11, IsAzureManagedInstance = true }));
     }
 
-    /// <summary>WITHIN the view, every selected column exists from 2016 on — no per-column gates;
-    /// pinned so a gated column cannot be added without revisiting this claim.</summary>
+    /// <summary>The claim this pin used to make — "every selected column exists from 2016 on, no per-column
+    /// gates" — was revisited by V137 (#3796), exactly as it asked: the payload is now twelve columns, the
+    /// original ten ungated and the two capture modes appended last, and ONE of them
+    /// (<c>wait_stats_capture_mode</c>, 2017+) is gated by <c>QueryStoreHealthCollector.HasWaitStatsCaptureMode</c>
+    /// in the <c>DatabaseConfigCollector</c> idiom. The gate itself is pinned in
+    /// <c>Lite.Tests/QueryStoreHealthCollectorDefinitionTests</c> and the rung in
+    /// <c>QsCaptureModeRouteKnobToastRungTests</c>; what stays here is the order, so a reorder cannot slip past
+    /// the positional COPY writer.</summary>
     [Fact]
-    public void ThePayloadIsUngatedAndOrdered()
+    public void ThePayloadIsOrdered_WithTheOneGatedColumnLast()
     {
         var columns = QueryStoreHealthCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
@@ -189,7 +195,13 @@ public sealed class QueryStoreHealthStoreTests
             "database_name", "actual_state", "desired_state", "readonly_reason",
             "current_storage_size_mb", "max_storage_size_mb", "size_based_cleanup_mode",
             "stale_query_threshold_days", "max_plans_per_query", "interval_length_minutes",
+            "query_capture_mode", "wait_stats_capture_mode",
         }, columns);
+
+        /* The gated column is the LAST one, so a 2016 target's ten-ordinal reader and a 2017+ target's eleven
+           differ only at the tail and every earlier ordinal reads the same on both. */
+        Assert.False(QueryStoreHealthCollector.HasWaitStatsCaptureMode(new CollectorTargetInfo { SqlMajorVersion = 13 }));
+        Assert.True(QueryStoreHealthCollector.HasWaitStatsCaptureMode(new CollectorTargetInfo { SqlMajorVersion = 14 }));
     }
 
     /* ---------------- helpers ---------------- */

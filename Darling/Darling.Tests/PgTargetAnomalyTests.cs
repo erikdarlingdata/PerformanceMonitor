@@ -569,7 +569,10 @@ public sealed class PgTargetAnomalyTests
         Assert.Equal(1.0, extreme.BaseSeverity, precision: 9);
         Assert.Equal(1.6, extreme.Severity, precision: 9);
         Assert.True(extreme.Severity > 1.49, "the extremity escape did not release the PostgreSQL session spike from the tuning-class cap");
-        Assert.Equal(3, extreme.AmplifierResults.Count);
+        /* Four arms since the third between-waves batch of #3691 (TPS, capacity anomaly, CPU-burn anomaly, the measured
+           capacity fact); the burn arm is declared and unmatched here — no ANOMALY_PG_CPU_BURN in this set — so the
+           two-corroborator result is unchanged. The stock pair (TPS + burn → 1.6) is pinned in PgTargetBetweenWavesV3Tests. */
+        Assert.Equal(4, extreme.AmplifierResults.Count);
         Assert.Equal(2, extreme.AmplifierResults.Count(r => r.Matched));
 
         /* Alone: released from the cap, but base maxes at 1.0 — nothing to page on. */
@@ -652,9 +655,11 @@ public sealed class PgTargetAnomalyTests
 
         var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.Empty((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyDeadlockRate])!);
-        Assert.Equal(3, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyTps])!).Cast<object>().Count());
-        /* The wait profile: the three load siblings, the measured CPU confirmer, and the named-wait corroborator. */
-        Assert.Equal(5, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyWaitProfile])!).Cast<object>().Count());
+        /* TPS: the two load siblings, the CPU-burn anomaly (the stock confirmer, since the third between-waves batch of
+           #3691) and the measured capacity confirmer — four. */
+        Assert.Equal(4, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyTps])!).Cast<object>().Count());
+        /* The wait profile: the four load siblings (incl. the burn), the measured CPU confirmer, and the named-wait corroborator. */
+        Assert.Equal(6, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [PgTargetFactKeys.AnomalyWaitProfile])!).Cast<object>().Count());
     }
 
     /* ───────────────────────── the CPU family and the load confirmer ───────────────────────── */

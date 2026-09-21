@@ -200,11 +200,14 @@ public sealed class PgTargetTempTests
         Assert.Equal($"{PgTargetFactKeys.TempSpill} → {PgTargetFactKeys.ConfigWorkMem}", story.StoryPath);
     }
 
+    /// <summary>The spill's edges: the <c>work_mem</c> knob (lane 6) and, since the third between-waves batch of #3691
+    /// (#3809), the memory composition check — pinned in <c>PgTargetBetweenWavesV3Tests</c>. The <c>Single</c> this
+    /// test held became "the work_mem edge is one of them", deliberately: the knob edge's own behaviour is unchanged.</summary>
     [Fact]
     public void TheEdge_FiresOnlyWhenTheKnobFired_AndNoEdgeLeavesTheKnob()
     {
         var graph = new PgTargetRelationshipGraph();
-        var edge = Assert.Single(graph.GetAllEdges(PgTargetFactKeys.TempSpill));
+        var edge = Assert.Single(graph.GetAllEdges(PgTargetFactKeys.TempSpill), e => e.Destination == PgTargetFactKeys.ConfigWorkMem);
         Assert.Equal(PgTargetFactKeys.ConfigWorkMem, edge.Destination);
         Assert.Empty(graph.GetAllEdges(PgTargetFactKeys.ConfigWorkMem));
 

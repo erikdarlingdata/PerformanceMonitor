@@ -382,8 +382,15 @@ not obvious:
   clause reads as a list rather than as prose.
 - **`GROUP BY` / `ORDER BY` put each term on its own indented line**, so adding one is a
   one-line diff.
-- **Never suggest missing-index DMV recommendations.** `sys.dm_db_missing_index_*` output
-  is not used in this project and changes proposing it will not be accepted.
+- **Missing-index requests are corroboration, never a finding's driver.** The optimizer's
+  request (a plan's `MissingIndexGroup`; `sys.dm_db_missing_index_*` is read nowhere in this
+  project today) is weak evidence: its counters are plan-cache-bounded and its `impact` is one
+  operator's statement-scoped estimate. It is legitimate only when traced from a statement
+  already measured slow, and it is never delivered without the shared caveat sentence
+  (`McpPlanAnalysisFormatter.MissingIndexCaveat`, byte-identical on every emitter), which
+  names the regression risk a new index carries. A change that roots a finding on a request,
+  or that surfaces a suggested `CREATE INDEX` without the caveat, will not be accepted; a
+  change that drops the statement to "protect" the reader is the #3696 mistake (#3805).
 - **No full-text search.**
 
 Collector queries specifically:

@@ -214,7 +214,7 @@ public sealed class PgTargetVacuumLiveTests
                 Assert.DoesNotContain(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() is PgTargetFactKeys.WraparoundTrend or PgTargetFactKeys.XminHold);
 
                 var advice = chain.GetProperty("advice");
-                Assert.Contains("public.hot in appdb carries 5,250 dead tuples, 5× its own autovacuum trigger line, for 4 consecutive hourly samples", advice.GetProperty("headline").GetString(), StringComparison.Ordinal);
+                Assert.Contains("public.hot in appdb carries 5,250 dead tuples, 5× its own autovacuum trigger line, for 4 consecutive samples", advice.GetProperty("headline").GetString(), StringComparison.Ordinal);
                 Assert.Contains("rose at 1,083 per hour", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("autovacuum ran on the table 2 times", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("PG_XMIN_HOLD co-fired", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
@@ -234,9 +234,9 @@ public sealed class PgTargetVacuumLiveTests
             using (var doc = JsonDocument.Parse(factsJson))
             {
                 var root = doc.RootElement;
-                /* total_facts is the pass's whole set (the registry metadata fact + these three); shown is the
-                   source-filtered count. */
-                Assert.Equal(4, root.GetProperty("total_facts").GetInt32());
+                /* total_facts is the pass's whole set (the registry metadata fact + these three + the memory family's stock
+                   honesty arm, PG_HOST_MEMORY_PRESSURE unavailable, lane 32); shown is the source-filtered count. */
+                Assert.Equal(5, root.GetProperty("total_facts").GetInt32());
                 Assert.Equal(3, root.GetProperty("shown").GetInt32());
                 var keys = root.GetProperty("facts").EnumerateArray().Select(f => f.GetProperty("key").GetString()).ToList();
                 Assert.Contains(PgTargetFactKeys.AutovacuumBacklog, keys);
@@ -375,7 +375,7 @@ public sealed class PgTargetVacuumLiveTests
                 var advice = chain.GetProperty("advice");
                 /* The tool anchors its six hours at NOW, so the first planted sample (a minute before now − 6 h) falls
                    outside it: six samples in the tool's window, seven in the collector context above. */
-                Assert.Equal("public.frozen in appdb carries 4,200 dead tuples, 4× its own autovacuum trigger line, for 6 consecutive hourly samples", advice.GetProperty("headline").GetString());
+                Assert.Equal("public.frozen in appdb carries 4,200 dead tuples, 4× its own autovacuum trigger line, for 6 consecutive samples", advice.GetProperty("headline").GetString());
                 Assert.Contains("ALTER TABLE public.frozen SET (autovacuum_enabled = true);", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
 
                 var tools = chain.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
@@ -384,12 +384,14 @@ public sealed class PgTargetVacuumLiveTests
                 Assert.All(tools, t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));
             }
 
-            /* The facts read: the registry fact plus these two under pg_vacuum — the quiet table is nowhere. */
+            /* The facts read: the registry fact plus these two under pg_vacuum, plus the memory family's stock honesty arm
+               (PG_HOST_MEMORY_PRESSURE unavailable, lane 32 — a stock target has no host-memory source) — the quiet table
+               is nowhere. */
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 6, PgTargetSources.VacuumSource);
             using (var doc = JsonDocument.Parse(factsJson))
             {
                 var root = doc.RootElement;
-                Assert.Equal(3, root.GetProperty("total_facts").GetInt32());
+                Assert.Equal(4, root.GetProperty("total_facts").GetInt32());
                 Assert.Equal(2, root.GetProperty("shown").GetInt32());
                 var shown = root.GetProperty("facts").EnumerateArray().ToList();
                 var card = Assert.Single(shown, f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigAutovacuumDisabled);

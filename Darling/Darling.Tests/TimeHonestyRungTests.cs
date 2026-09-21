@@ -193,7 +193,10 @@ public sealed class TimeHonestyRungTests
     }
 
     /// <summary>The Lite twin is schema v63, and its ladder block carries both columns — a cross-SKU pin read off
-    /// the Lite source, because this assembly cannot reference the WPF-hosted Lite project.</summary>
+    /// the Lite source, because this assembly cannot reference the WPF-hosted Lite project. "Is v63" became "is
+    /// AT LEAST v63" when v64 (#3796 / Darling V137, the Query Store capture modes) landed on top of it: the
+    /// invariant that outlives the handoff is that the v63 block exists and carries its two columns, and the
+    /// current-version literal is the newest Lite rung's to pin (<c>QsCaptureModeRouteKnobToastRungTests</c>).</summary>
     [Fact]
     public void TheLiteTwinIsSchemaV63_AndCarriesBothColumns()
     {
@@ -201,7 +204,9 @@ public sealed class TimeHonestyRungTests
         Assert.Equal(CollectorTargetEngine.SqlServer, ServerPropertiesCollector.Instance.TargetEngine);
 
         var lite = RepoFile.ReadRepoFile("Lite", "Database", "DuckDbInitializer.cs");
-        Assert.Contains("internal const int CurrentSchemaVersion = 63;", lite, StringComparison.Ordinal);
+        var declaration = System.Text.RegularExpressions.Regex.Match(lite, @"internal const int CurrentSchemaVersion = (\d+);");
+        Assert.True(declaration.Success, "DuckDbInitializer no longer declares CurrentSchemaVersion in the pinned shape");
+        Assert.True(int.Parse(declaration.Groups[1].Value, CultureInfo.InvariantCulture) >= 63, "Lite's schema version fell below the v63 twin");
         var block = lite[lite.IndexOf("if (fromVersion < 63)", StringComparison.Ordinal)..];
         Assert.Contains("(\"cpu_utilization_stats\", \"sample_time_utc\", \"TIMESTAMP\")", block, StringComparison.Ordinal);
         Assert.Contains("(\"server_properties\", \"time_zone_id\", \"VARCHAR\")", block, StringComparison.Ordinal);

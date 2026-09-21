@@ -2929,6 +2929,11 @@ const QS_HEALTH_COLUMNS = [
   { key: "pct_of_cap", label: "% of cap", format: "num1" },
   { key: "size_based_cleanup_mode", label: "Cleanup" },
   { key: "stale_query_threshold_days", label: "Stale (days)", format: "int" },
+  /* V137 (#3796): the payload's two trailing fields. Formatless on purpose: the renderer prints a null as the
+     page's "—", which is the right cell for a pre-rung row (or, for wait stats, a 2016 engine) — an absence,
+     never OFF. ALL is the plan-churn factory the tool's description names; the verdict is #3797's, not this tile's. */
+  { key: "query_capture_mode", label: "Capture mode" },
+  { key: "wait_stats_capture_mode", label: "Wait stats capture" },
 ];
 
 const TRACE_FLAG_COLUMNS = [
@@ -3826,6 +3831,10 @@ const PG_DATABASE_COLUMNS = [
   { key: "counters_were_reset", label: "Reset", format: "bool" },
   { key: "reset_note", label: "Reset Note", wrap: true },
   { key: "sample_count", label: "Samples", format: "int" },
+  /* The one LEVEL in the row (V133): the window's peak of connected backends for this database, never
+     differenced. Empty on a pre-V133 history rather than 0 — not sampled is not idle. Per-database peaks land
+     at different instants, so there is deliberately no total tile for them above. */
+  { key: "peak_numbackends", label: "Peak Backends", format: "int" },
 ];
 
 /* bloat_pct_estimate and bloat_bytes_estimate are NULL on a suppressed row, which renders as an empty cell

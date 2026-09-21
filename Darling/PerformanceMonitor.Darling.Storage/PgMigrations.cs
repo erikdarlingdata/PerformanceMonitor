@@ -216,6 +216,7 @@ public static class PgMigrations
         new Migration(134, "time-honesty", V134Sql),
         new Migration(135, "lrq-exclusion-knob", V135Sql),
         new Migration(136, "pg-database-size-and-host-memory", V136Sql),
+        new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
     };
 
     /// <summary>
@@ -1477,6 +1478,192 @@ ALTER TABLE collect.pg_cpu_utilization
     ADD COLUMN IF NOT EXISTS memory_buffers_bytes bigint,
     ADD COLUMN IF NOT EXISTS memory_active_bytes bigint,
     ADD COLUMN IF NOT EXISTS configured_memory_bytes bigint;";
+
+    /// <summary>
+    /// V137 — four column sets on three EXISTING tables, one rung, because they unblock four follow-up
+    /// lanes at once and the ladder rule is one un-landed rung at a time: (a) the two Query Store capture
+    /// modes on <c>collect.query_store_health</c> (#3796); (b) the store-backed twin of the #3712
+    /// uncorroborated-finding route knob on <c>config.config_alert_settings</c>; (c) the plan dimension's
+    /// TOAST bytes on <c>collect.store_metrics</c> (#3783); (d) the store's own checkpointer phases, three
+    /// more columns on <c>collect.store_metrics</c> (#3783, with #3802 and #3745 as the levers they inform).
+    /// Eight nullable columns, no DEFAULT, no backfill, no new table, no new hypertable
+    /// (<c>TimescaleSupport.HypertableCount</c> stays 72 — the V136 doc says what a 73rd would cost the
+    /// compression grid), one passthrough refreshed. Pinned by <c>QsCaptureModeRouteKnobToastRungTests</c>; the
+    /// Lite twin is schema v64 (<c>DuckDbInitializer</c>), for (a) only — Lite stores <c>query_store_health</c>
+    /// through the shared collector, stores no <c>store_metrics</c>, and keeps its alert settings in
+    /// settings.json rather than a table.
+    ///
+    /// <para><b>(a) <c>query_capture_mode</c> and <c>wait_stats_capture_mode</c> — the option that names a
+    /// plan-churn factory (#3796).</b> <c>QueryStoreHealthCollector</c> read every column of
+    /// <c>sys.database_query_store_options</c> that says whether Query Store WORKS and none that says what it
+    /// CAPTURES. Measured on one production store class: ~755 k new distinct plans a day into the plan
+    /// dimension from 42 servers, and one database taking 92–96 % of the <c>query_store</c> collector's
+    /// per-database fan-out on the largest store — the signature of <c>QUERY_CAPTURE_MODE = ALL</c> on an
+    /// ad-hoc workload, which the health row could not confirm or rule out because it never asked, while
+    /// the fleet's other three knobs (200 plans / 21 days / 8 GB) are uniform. Both columns are the DMV's
+    /// <c>*_desc</c> spelling verbatim (<c>ALL</c> / <c>AUTO</c> / <c>CUSTOM</c> / <c>NONE</c>; <c>ON</c> / <c>OFF</c>),
+    /// <c>text</c> because the collector declares them <c>Varchar</c> and the generator renders <c>Varchar</c>
+    /// as <c>text</c> (the type here is the generator's rendering of the declaration, which is what
+    /// <c>PgSchemaGeneratorTests</c> holds every collector rung to). <c>query_capture_mode_desc</c> shipped
+    /// with the view in 2016 and is always selected; <c>wait_stats_capture_mode_desc</c> is 2017+ (v14), and
+    /// on a 2016 engine a body that names it fails to compile for the whole database, so the collector
+    /// gates that ONE column (<c>QueryStoreHealthCollector.HasWaitStatsCaptureMode</c>, the
+    /// <c>DatabaseConfigCollector</c> idiom) and writes NULL there — a NULL a reader must publish as
+    /// "engine predates the option", never as <c>OFF</c>. NULL on every pre-rung row means "never asked". The
+    /// reader is the Query Store clutter view (#3797): churn × <c>ALL</c> is "switch to AUTO", churn ×
+    /// <c>AUTO</c> points at the workload; it lands in its own lane, as do the <c>get_query_store_health</c>
+    /// fields and the Viewer grid columns.</para>
+    ///
+    /// <para><b>(b) <c>analysis_uncorroborated_route</c> — the store-backed half of a knob #3732 shipped
+    /// file-level (#3712).</b> <c>FindingRouting.Classify</c> sends a notify-worthy but UNCORROBORATED finding
+    /// (one fact in its chain, no matched co-fire) to the daily digest instead of a page, and the ONE knob
+    /// that governs it, <c>analysis.uncorroboratedRoute</c> in darling.json, was fenced to the file because two
+    /// rungs were in flight when it landed (<c>AnalysisConfig.UncorroboratedRoute</c> says so, and
+    /// <c>StoreConfigProvider.LoadViewAsync</c> CARRIES the file value across the wholesale
+    /// <c>config.Analysis</c> swap on every reload for exactly that reason). This column is the store's
+    /// half, spelled the way the knob is already spelled everywhere the product persists it: Lite's
+    /// settings.json key IS <c>analysis_uncorroborated_route</c> (<c>App.AnalysisUncorroboratedRoute</c>), and both
+    /// SKUs' MCP surfaces publish <c>analysis.uncorroborated_route</c>. It is a TRI-STATE, which is why it is
+    /// nullable with no DEFAULT where every numeric knob on this
+    /// row ships one: NULL means "not set in the store — the file-level knob, or its shipped default
+    /// <c>digest</c>, governs", and that is what every existing store reads the morning after the upgrade,
+    /// so nothing changes until an operator writes a value. The precedence the code half (its own lane)
+    /// implements is <b>store non-NULL wins over file</b>: <c>DarlingAlertSettings.UncorroboratedFindingRoute</c>
+    /// reads this column first and falls to <c>analysis.uncorroboratedRoute</c> only on NULL, the reload
+    /// carry becomes a column read, <c>get_alert_settings</c> publishes the effective route and WHICH source
+    /// it came from, and <c>update_alert_settings</c> gains the field it refuses today. Until that lands the
+    /// column is written by nothing and read by nothing, and the rung says so.</para>
+    ///
+    /// <para><b>Why (b) carries a CHECK when the knob rungs on this row deliberately do not.</b> V119, V120,
+    /// V122, V124 and V126 refused a CHECK because a NUMBER has a clamp: the write tool bounds it and
+    /// <c>DarlingAlertSettings</c> clamps it on read, so any stored value maps to a valid one. A route has no
+    /// clamp. <c>FindingRouting.TryParseRoute</c> reads anything that is neither <c>digest</c> nor <c>page</c> as
+    /// "no opinion" and falls to the default — so a misspelled <c>pgae</c> written straight into the row would
+    /// not error, it would silently turn an operator's decision to PAGE back into the digest, which is the
+    /// one failure this knob exists to make impossible. The CHECK makes that a write error at the store,
+    /// the V62 <c>plan_xml_compression</c> precedent (an enumeration on <c>config_service</c>, CHECK mirroring the
+    /// provider's normalization). <c>IS NULL OR IN ('digest', 'page')</c>, lower-case wire spellings
+    /// (<c>FindingRouting.DigestText</c> / <c>PageText</c>; the parser is case-insensitive but the store holds
+    /// the canonical form, which is what the write tool normalizes to). Added inside V62's <c>DO</c> guard
+    /// because <c>ADD CONSTRAINT</c> has no <c>IF NOT EXISTS</c>, and the rung must be re-runnable on a store
+    /// that already carries it.</para>
+    ///
+    /// <para><b>(c) <c>toast_bytes</c> and <c>toast_live_bytes</c> — the plan dimension's file-slack question
+    /// (#3783).</b> On one production store class <c>query_plan_dim</c>'s TOAST file was 154 GB holding ~61 GB
+    /// of live chunks — 40 % utilisation, ~93 GB of slack left by the V54 text→gz conversion plus ~755 k
+    /// rows a day cycling through row-capped deletes — and the store self-metrics could not say so, because
+    /// the dimension row stores <c>pg_total_relation_size</c> (heap + indexes + TOAST) and nothing about how
+    /// full the TOAST file is. Ordinary <c>VACUUM</c> returns those pages to the table, never to the OS; only
+    /// <c>--recompress-plan-dim --vacuum-full</c> (#2076) compacts the file, and an operator should learn that
+    /// from a stored series rather than from a size pass. Both columns are filled only on
+    /// <c>object_kind = 'dimension'</c> rows (<c>StoreSelfMetrics.DimensionInsertSql</c>) and NULL on every
+    /// other kind, the table's own per-kind convention. <c>toast_bytes</c> is
+    /// <c>pg_relation_size(reltoastrelid)</c> — the TOAST relation's main fork, the file whose slack #3783
+    /// measured — written from this rung on; NULL where the table has no TOAST relation.</para>
+    ///
+    /// <para><b><c>toast_live_bytes</c> exists and is written NULL, deliberately, and the reason is a
+    /// measurement.</b> The bundled store has neither <c>pgstattuple</c> nor <c>pg_freespacemap</c>
+    /// installed (both are contrib modules the TimescaleDB image SHIPS and does not CREATE), and every
+    /// extension-free read was tried on a rig — TimescaleDB 2.28.1 / PostgreSQL 18, 215 MB of 9.6 KB TOASTed
+    /// values in the plan dimension's shape, half deleted, ordinary <c>VACUUM</c>, <c>pgstattuple</c> as the
+    /// oracle (47.9 % live). The tuple-share proxy, <c>n_live_tup / (n_live_tup + n_dead_tup) × file</c>, read
+    /// <b>100 %</b>: after <c>VACUUM</c> the dead tuples are gone and the file keeps the pages, which is the
+    /// #3783 case exactly, so that number is a lie and is not stored. The chunk-count estimate,
+    /// <c>n_live_tup(toast) × 1996</c>, read 48.9 % — honest to within one partial chunk per value on 9.6 KB
+    /// values, but the error is value-size-dependent (a dimension whose values barely cross the TOAST
+    /// threshold overstates by up to half), and <c>n_live_tup</c> is a statistics figure that is exact only
+    /// after a vacuum. <c>pg_freespacemap</c>'s <c>file − sum(avail)</c> read 48.5 % — an honest byte
+    /// measurement — but it needs <c>CREATE EXTENSION pg_freespacemap</c>, which is a product-wide dependency
+    /// decision this rung does not make. So the column is created now (no second rung when the maintainer
+    /// decides) and written NULL until then; a reader that finds it NULL beside a non-NULL <c>toast_bytes</c>
+    /// must say "utilisation not measured", never compute one from the total.</para>
+    ///
+    /// <para><b>(d) <c>checkpoint_write_ms</c>, <c>checkpoint_sync_ms</c> and <c>checkpoints_requested</c> — the
+    /// store's own checkpointer, as a series (#3783; the levers are #3802's and #3745's).</b> Three unattributed
+    /// read kills on a production store in one day all sat inside checkpoint SYNC phases of 25.2 s and 14.0 s —
+    /// the fsync storm a checkpoint's end is — and nothing in the store recorded that the checkpointer had
+    /// been there. These columns are for a <c>checkpointer</c> row (<c>object_kind = 'checkpointer'</c>,
+    /// <c>object_name = 'pg_stat_checkpointer'</c>) the store self-metrics inventory writes once per run,
+    /// carrying DELTAS since its previous run: milliseconds the checkpointer spent in the write phase, in the
+    /// sync phase, and how many REQUESTED (WAL-forced, not timed) checkpoints ran — the count that says the
+    /// store outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
+    /// <c>pg_stat_checkpointer</c> on PostgreSQL 17+ (<c>write_time</c>, <c>sync_time</c>, <c>num_requested</c>) and
+    /// <c>pg_stat_bgwriter</c> before it (<c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>,
+    /// <c>checkpoints_req</c>); the bundled store is 18, and the WRITER guards the version, not this rung.
+    /// The existing columns cannot carry these honestly — <c>total_bytes</c> is a size, <c>row_count</c> a count
+    /// of rows, and the <c>job_history</c> kind already bent one column's name once (the sweep doc says which
+    /// and why a dedicated column was the clean follow-up) — so they are NEW columns by ruling, on the table
+    /// whose rows already join on one <c>metric_time</c> per run so the checkpointer's phases can be read
+    /// beside the same run's sizes and job durations. <b>Filled by the inventory from #3783's code half; NULL
+    /// until then.</b> The delta needs the previous run's cumulative (a read of the last checkpointer row, or
+    /// an in-process baseline the first run has to seed), which is a writer with state and not a line beside
+    /// the TOAST read, so this rung creates the columns and writes nothing into them; on every other kind's
+    /// row they are NULL by the table's per-kind convention, exactly like (c)'s pair.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> on all eight, matching every column-adding rung. Only
+    /// <c>query_store_health</c> is a hypertable (compressed on the fleet, one-day chunks); a nullable,
+    /// default-less <c>ADD COLUMN</c> is catalog-only there — the V127/V128/V132/V133/V134 shape, verified live
+    /// on 2.28.1 each time and again for this rung against a store stopped at 136. <c>store_metrics</c> and
+    /// <c>config_alert_settings</c> are plain tables (the first must stay one: it measures the hypertables).
+    /// The passthrough view is refreshed for the V14 reason — Postgres freezes a view's <c>SELECT *</c> column
+    /// list at CREATE, and <c>v_query_store_health</c> is what <c>get_query_store_health</c> and the Viewer's
+    /// grid read; neither <c>store_metrics</c> nor <c>config_alert_settings</c> has a <c>v_</c> passthrough
+    /// (<c>PgSchemaGenerator.AllPassthroughViews</c> agrees), so their ALTERs stand alone. A fresh store gets
+    /// the two collector columns from the generated CREATE TABLE at V1 (the collector definition carries
+    /// them, appended LAST so the positional COPY writer and an upgraded store's ALTER agree on where they
+    /// sit) and the ALTER no-ops; the V101 rule applies, so V76's CREATE text carries them too. No GRANT on
+    /// (b): <c>config_alert_settings</c> carries table-level grants with no column carve. No reload beacon of
+    /// its own: V17's statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any
+    /// write to that row.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It adds no reader, tool field, Viewer column or
+    /// alert for any of the eight. It does not read the 2019+ <c>capture_policy_*</c> knobs behind
+    /// <c>CUSTOM</c>. It does not change the route knob's precedence today (NULL everywhere = the file
+    /// governs, exactly as before). It does not install an extension. It does not compute a utilisation. It
+    /// does not write the checkpointer row.</para>
+    /// </summary>
+    private const string V137Sql = @"
+ALTER TABLE collect.query_store_health
+    ADD COLUMN IF NOT EXISTS query_capture_mode text,
+    ADD COLUMN IF NOT EXISTS wait_stats_capture_mode text;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V137 column list forever — the V14 lesson, restated by V80, V81, V127, V128, V132 and V134. Appending
+   is the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_query_store_health AS SELECT * FROM collect.query_store_health;
+
+/* config_alert_settings has no v_ passthrough (V17), so this ALTER stands alone. Nullable on purpose and
+   nothing fills it: NULL is a value here (not set in the store; the file-level knob governs), which is what
+   every existing store reads the morning after the upgrade. */
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS analysis_uncorroborated_route text;
+
+/* The CHECK the numeric knobs on this row do without: a route has no clamp, and an unrecognised
+   spelling would read as the shipped route rather than as an error. V62's guard, because ADD CONSTRAINT
+   has no IF NOT EXISTS. */
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'config_alert_settings_analysis_uncorroborated_route_check'
+    ) THEN
+        ALTER TABLE config.config_alert_settings
+            ADD CONSTRAINT config_alert_settings_analysis_uncorroborated_route_check
+            CHECK (analysis_uncorroborated_route IS NULL OR analysis_uncorroborated_route IN ('digest', 'page'));
+    END IF;
+END $$;
+
+/* store_metrics is a plain table with no v_ passthrough (V53), so this ALTER stands alone too. The first two
+   are filled only on object_kind = 'dimension' rows; toast_live_bytes is written NULL until the maintainer
+   decides how live bytes are measured (the rung doc carries the rig numbers). The last three belong to the
+   object_kind = 'checkpointer' row #3783's code half will write — deltas since the previous run of the
+   checkpointer's write-phase ms, sync-phase ms and requested-checkpoint count — and are NULL until then. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS toast_bytes bigint,
+    ADD COLUMN IF NOT EXISTS toast_live_bytes bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_write_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_sync_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoints_requested bigint;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -4899,6 +5086,14 @@ DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_
     /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
     /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
     /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
+    ///
+    /// <para><b>The two columns after <c>interval_length_minutes</c> are V137's (#3796), and they are here for
+    /// the V101 rule.</b> A fresh store builds the table from the generated schema at V1 (this CREATE then
+    /// no-ops, <c>IF NOT EXISTS</c>); a store that climbed through V76 before V137 existed has the
+    /// ten-payload-column table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung
+    /// to be the generator's output column for column, and the generator emits the collector's CURRENT
+    /// columns — so this text carries <c>query_capture_mode</c> and <c>wait_stats_capture_mode</c> for the
+    /// fresh population, and V137's ALTER carries them for the existing one. Neither is redundant.</para>
     /// </summary>
     private const string V76Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_health (
@@ -4915,7 +5110,9 @@ CREATE TABLE IF NOT EXISTS collect.query_store_health (
     size_based_cleanup_mode text,
     stale_query_threshold_days bigint,
     max_plans_per_query bigint,
-    interval_length_minutes bigint
+    interval_length_minutes bigint,
+    query_capture_mode text,
+    wait_stats_capture_mode text
 );
 
 CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON collect.query_store_health(server_id, capture_time);

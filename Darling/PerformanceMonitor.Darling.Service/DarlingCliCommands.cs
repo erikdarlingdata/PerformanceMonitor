@@ -5550,7 +5550,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 return 1;
             }
 
-            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the next service start.");
+            output.WriteLine("Every rollup already covers its own source. Any retention policy still held will arm itself on the service's next hourly retention re-evaluation (or its next start, whichever comes first).");
             return 0;
         }
 
@@ -5767,16 +5767,19 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
         output.WriteLine("DONE. Every rollup now covers its own source, which is what each retention policy's arming gate measures.");
         output.WriteLine();
-        output.WriteLine("NEXT: restart the PerformanceMonitor Darling service. The arming gate checks coverage at");
-        output.WriteLine("startup and releases the held retention policies by itself — there is no arming step here and");
-        output.WriteLine("nothing to run by hand. The startup log line reading");
-        output.WriteLine("  'N/N retention policies in place, N armed, 0 held paused pending backfill'");
-        output.WriteLine("is the confirmation; the first purge then reclaims the raw tables in one pass.");
+        output.WriteLine("NEXT: nothing, unless you are in a hurry. The running service re-judges every held retention policy");
+        output.WriteLine("on its hourly store-maintenance tick (and at every start) and releases the ones this coverage now");
+        output.WriteLine("satisfies by itself — there is no arming step here and nothing to run by hand. The service log line");
+        output.WriteLine("  'Retention re-evaluation: 0 policies held, N armed this pass, K unchanged'");
+        output.WriteLine("on the next hour is the confirmation; the first purge then reclaims the raw tables in one pass, and");
+        output.WriteLine("the Retention Held alert resolves on the hour after that. To arm immediately instead, restart the");
+        output.WriteLine("PerformanceMonitor Darling service: the same gate runs on the start path.");
         output.WriteLine();
-        output.WriteLine($"Do not delay the restart. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
+        output.WriteLine($"Do not let it wait a day. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
         output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
-        output.WriteLine("(roughly daily). Restarting now is what lets the raw policies arm off that coverage first. If");
-        output.WriteLine("the trim wins the race nothing is lost — raw is still held — and re-running this verb rebuilds it.");
+        output.WriteLine("(roughly daily). The hourly re-evaluation, or a restart now, is what lets the raw policies arm off");
+        output.WriteLine("that coverage first. If the trim wins the race nothing is lost — raw is still held — and re-running");
+        output.WriteLine("this verb rebuilds it.");
         return 0;
     }
 

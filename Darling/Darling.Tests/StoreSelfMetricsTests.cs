@@ -407,10 +407,13 @@ public sealed class StoreSelfMetricsTests
             (StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.UnenumeratedInsertSql),
             (StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.UnenumeratedInsertSql),
             (StoreSelfMetrics.JobHistoryObjectKind, StoreSelfMetrics.JobHistoryInsertSql),
+            /* #3783: the checkpointer row, both statements (17+ and the pre-17 bgwriter shape) under ONE kind. */
+            (StoreSelfMetrics.CheckpointerObjectKind, StoreSelfMetrics.CheckpointerInsertSql),
             (StoreSelfMetrics.StoreObjectKind, StoreSelfMetrics.StoreInsertSql),
         };
 
         Assert.Equal(kinds.Length, kinds.Select(k => k.Kind).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains($"'{StoreSelfMetrics.CheckpointerObjectKind}'", StoreSelfMetrics.CheckpointerBgwriterInsertSql, StringComparison.Ordinal);
         Assert.All(kinds, k => Assert.Contains($"'{k.Kind}'", k.Sql, StringComparison.Ordinal));
 
         /* The three pre-#3582 spellings the shipped stores already hold 400 days of. */
@@ -427,6 +430,10 @@ public sealed class StoreSelfMetricsTests
     [InlineData(nameof(StoreSelfMetrics.UnenumeratedInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.UnenumeratedPlainInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.JobHistoryInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.ExtensionInstalledSql))]
+    [InlineData(nameof(StoreSelfMetrics.ToastLiveBytesUpdateSql))]
     [InlineData(nameof(StoreSelfMetrics.StoreInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.RetentionDeleteSql))]
     public void SweepSql_IsPostgresDialect_PositionalParams_NoBareNow(string sqlName)
@@ -505,7 +512,16 @@ SELECT
     count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.OtherObjectKind}'),
     count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.SystemObjectKind}'),
     count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.JobHistoryObjectKind}'),
-    (SELECT count(*) FROM timescaledb_information.continuous_aggregates)
+    (SELECT count(*) FROM timescaledb_information.continuous_aggregates),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
+                     AND object_name = '{StoreSelfMetrics.CheckpointerObjectName}'
+                     AND checkpoint_write_ms IS NOT NULL AND checkpoint_sync_ms IS NOT NULL AND checkpoints_requested IS NOT NULL
+                     AND total_bytes IS NULL AND toast_bytes IS NULL),
+    count(*) FILTER (WHERE object_kind <> '{StoreSelfMetrics.CheckpointerObjectKind}'
+                     AND (checkpoint_write_ms IS NOT NULL OR checkpoint_sync_ms IS NOT NULL OR checkpoints_requested IS NOT NULL)),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.DimensionObjectKind}' AND toast_bytes IS NOT NULL),
+    count(*) FILTER (WHERE object_kind = '{StoreSelfMetrics.DimensionObjectKind}' AND toast_live_bytes IS NOT NULL),
+    (SELECT count(*) FROM pg_extension WHERE extname = '{StoreSelfMetrics.FreespacemapExtensionName}')
 FROM collect.store_metrics", connection);
         await using var reader = await kinds.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
@@ -526,6 +542,16 @@ FROM collect.store_metrics", connection);
         Assert.Equal(1, reader.GetInt64(8));
         Assert.Equal(1, reader.GetInt64(9));
         Assert.Equal(1, reader.GetInt64(10));
+
+        /* #3783: exactly one checkpointer row, under the one name, all three counters non-NULL and every other
+           column NULL; no other kind's row carries a checkpointer column; both dimension rows carry a TOAST size;
+           and toast_live_bytes is filled EXACTLY when the scratch store carries pg_freespacemap (the fresh scratch
+           store does not, so this is the dormant NULL the fenced UPDATE must leave alone). */
+        Assert.Equal(1, reader.GetInt64(12));
+        Assert.Equal(0, reader.GetInt64(13));
+        Assert.Equal(2, reader.GetInt64(14));
+        var extensionInstalled = reader.GetInt64(16);
+        Assert.Equal(extensionInstalled > 0 ? 2 : 0, reader.GetInt64(15));
         await reader.CloseAsync();
 
         /* And the READ path carries the new fields end to end (the review catch: written but never read
@@ -571,6 +597,67 @@ FROM collect.store_metrics", connection);
             Assert.NotNull(owner.NewestRowAt);
             Assert.True(owner.NewestRowAt <= owner.ObservedAt);
         }
+
+        /* #3783: the TOAST pair rides the latest read on the dimension rows and nowhere else, and the reader's
+           facts say 'not measured' on this extension-less scratch store rather than inventing a percentage. */
+        var dims = latest.Where(r => r.ObjectKind == StoreSelfMetrics.DimensionObjectKind).ToList();
+        Assert.Equal(2, dims.Count);
+        Assert.All(dims, d => Assert.NotNull(d.ToastBytes));
+        Assert.All(latest.Where(r => r.ObjectKind != StoreSelfMetrics.DimensionObjectKind), r => Assert.Null(r.ToastBytes));
+        if (extensionInstalled == 0)
+        {
+            Assert.All(dims, d =>
+            {
+                Assert.Null(d.ToastLiveBytes);
+                var facts = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ToastFacts.For(d);
+                Assert.NotNull(facts);
+                Assert.Null(facts!.UtilisationPercent);
+                /* A fresh scratch store's dimensions hold no rows, so their TOAST files are ZERO bytes and the
+                   note says so; a file with bytes in it takes the 'not measured' arm that names the extension. */
+                if (d.ToastBytes == 0)
+                {
+                    Assert.Contains("empty", facts.Note, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.Contains("not measured", facts.Note, StringComparison.Ordinal);
+                    Assert.Contains(StoreSelfMetrics.FreespacemapExtensionName, facts.Note, StringComparison.Ordinal);
+                }
+            });
+        }
+
+        /* #3783: the checkpointer, through the real pair read. One sweep = one row = NoPrevious with the raw
+           counters carried; a second sweep two seconds later = an Observed interval whose deltas are non-negative
+           and whose span is the two stamps' difference, not an assumed hour. The interval's requested count is
+           exactly the checkpoints this test forces in between, which is what makes the delta a MEASUREMENT of the
+           store rather than a difference of two numbers that happened to be there. */
+        var first = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.NoPrevious, first.Status);
+        Assert.NotNull(first.CumulativeWriteMs);
+        Assert.NotNull(first.CumulativeSyncMs);
+        Assert.NotNull(first.CumulativeRequested);
+        Assert.Null(first.SyncMs);
+
+        /* CHECKPOINT is a REQUESTED checkpoint (num_requested increments; the write/sync phases add real ms). The
+           scratch connection is the database owner, and CHECKPOINT needs superuser or pg_checkpoint (15+): the dev
+           fixture's role is superuser, so this is the one write to the server's own counters the test makes. */
+        await using (var checkpoint = new NpgsqlCommand("CHECKPOINT", connection) { CommandTimeout = 60 })
+        {
+            await checkpoint.ExecuteNonQueryAsync(ct);
+        }
+
+        var secondSweepAt = DateTime.UtcNow.AddSeconds(2);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, ct);
+
+        var second = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, second.Status);
+        Assert.Equal(DateTime.SpecifyKind(first.ObservedAt!.Value, DateTimeKind.Utc), second.PreviousAt);
+        Assert.True(second.IntervalSeconds is > 0, $"interval {second.IntervalSeconds} must be the two stamps' span");
+        Assert.True(second.WriteMs is >= 0);
+        Assert.True(second.SyncMs is >= 0);
+        Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
+        Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
+        Assert.True(second.IsPressure, "one WAL-forced checkpoint in the interval IS the pressure arm");
     }
 
     /* ---------------- #2136 synthetic scale test ---------------- */

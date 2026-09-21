@@ -30,10 +30,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// plain-PostgreSQL store this arm is skipped silently because the timescaledb_information views it reads
 /// do not exist there);</item>
 /// <item>one row per payload dimension table (<c>object_kind = 'dimension'</c>): total bytes
-/// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives) and the
-/// exact row count. The dims are the store's dominant payloads (measured: query_plan_dim alone was 101 GB
-/// of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they are deliberately
-/// PLAIN tables (see <see cref="PayloadDimensions.CreateDimTable"/>);</item>
+/// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives), the
+/// exact row count and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
+/// <c>toast_live_bytes</c> that is NULL unless the store happens to carry <c>pg_freespacemap</c> — see
+/// <see cref="DimensionInsertSql"/> and <see cref="ToastLiveBytesUpdateSql"/>. The dims are the store's dominant payloads (measured: query_plan_dim
+/// alone was 101 GB of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they
+/// are deliberately PLAIN tables (see <see cref="PayloadDimensions.CreateDimTable"/>);</item>
 /// <item>one row per continuous aggregate (<c>object_kind = 'continuous_aggregate'</c>, #3582): the same
 /// three facts as a hypertable row, taken from the aggregate's MATERIALIZATION hypertable and reported
 /// under the aggregate's user-facing view name. TimescaleDB-only, like the hypertable arm. These rows
@@ -58,6 +60,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// managed-mode self-proof: the MCP host reads as the least-privilege <c>mcp</c> role, which that filter
 /// shows NOTHING, so the tool's own count is zero by construction on every managed store and only this
 /// row can make <c>recording</c> a measurement there;</item>
+/// <item>one row carrying the store's OWN checkpointer counters (<c>object_kind = 'checkpointer'</c>,
+/// #3783): the CUMULATIVE write-phase and sync-phase milliseconds and the cumulative count of REQUESTED
+/// (WAL-forced) checkpoints, from <c>pg_stat_checkpointer</c> on PostgreSQL 17+ and <c>pg_stat_bgwriter</c>
+/// before it. Every store shape. The row exists because three unattributed read kills on a production store
+/// in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s and nothing in the store recorded
+/// that the checkpointer had been there; the per-interval figures the MCP surface and the self-alert judge
+/// are DIFFERENCES between consecutive rows, computed at read time — see <see cref="CheckpointerInsertSql"/>
+/// for why the counters are stored raw;</item>
 /// <item>one summary row (<c>object_kind = 'store'</c>): <c>pg_database_size</c> plus the enabled-server
 /// count (the fleet reader's <c>WHERE is_enabled</c> registry predicate), so the per-server ingest rate —
 /// daily growth divided by servers, the number onboarding N primaries multiplies — is derivable from the
@@ -78,7 +88,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// its start to <c>metric_time</c> — NOT a run's duration. That last one is the single overload that bends
 /// a column's name, and it is taken rather than a migration rung because the store has no timestamp
 /// column besides <c>metric_time</c>, a rung was not free when this landed, and the MCP reader decodes it
-/// back into an absolute instant before anyone reads it; a dedicated column is the clean follow-up.</para>
+/// back into an absolute instant before anyone reads it; a dedicated column is the clean follow-up. On a
+/// <c>checkpointer</c> row (V137, #3783) the three columns named for it — <c>checkpoint_write_ms</c>,
+/// <c>checkpoint_sync_ms</c>, <c>checkpoints_requested</c> — hold the server's CUMULATIVE counters as the
+/// sweep read them, NOT the interval's delta; every other kind leaves them NULL, and the two TOAST columns
+/// are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
+/// collector table in this store follows (the columns are raw counters; the read differences them), and
+/// <see cref="CheckpointerInsertSql"/> says why it was chosen over an in-process baseline here.</para>
 ///
 /// <para>Retention is ONE bounded DELETE inside the same sweep — deliberately no policy machinery.
 /// <c>collect.store_metrics</c> is a PLAIN table and must stay one: it is not in the collector catalog, so
@@ -283,23 +299,235 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <c>pg_class.reltuples</c>: it is an hourly index-only scan over the digest PK, and the dim heap is
     /// small — the bytes live in TOAST, which <c>pg_total_relation_size</c> counts and a scan never
     /// touches. $1 metric_time.
+    ///
+    /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
+    /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing
+    /// about how FULL its TOAST file is, and on one production store class the plan dimension's TOAST file
+    /// sat at 154 GB for ~61 GB of live chunks — 40 % utilisation, ~93 GB of slack left by the V54 text→gz
+    /// conversion plus ~755 k rows a day cycling through row-capped deletes, which ordinary <c>VACUUM</c>
+    /// returns to the table and never to the OS. <c>toast_bytes</c> is <c>pg_relation_size(reltoastrelid)</c>:
+    /// the TOAST relation's main fork, the file whose slack that read measured, taken through
+    /// <c>NULLIF(reltoastrelid, 0)</c> so a table with no TOAST relation stores NULL rather than erroring
+    /// (both dims have one — every table with a TOAST-able column gets one at CREATE — but the read says
+    /// so rather than assuming it). Its index (<c>pg_toast_NNN_index</c>) is deliberately NOT included: the
+    /// utilisation question is about the heap file's pages, and the index is already inside
+    /// <c>total_bytes</c>.</para>
+    ///
+    /// <para><b><c>toast_live_bytes</c> is written <c>NULL</c> here, on purpose, because every extension-free
+    /// read of it was measured and found wanting</b> (rig: TimescaleDB 2.28.1 / PostgreSQL 18, 215 MB of
+    /// 9.6 KB TOASTed values, half deleted, ordinary <c>VACUUM</c>; <c>pgstattuple</c> as the oracle, 47.9 %
+    /// live). <c>n_live_tup / (n_live_tup + n_dead_tup) × file</c> reads 100 % after a vacuum — the #3783 shape
+    /// exactly — and is a lie. <c>n_live_tup(toast) × 1996</c> (chunk count × <c>TOAST_MAX_CHUNK_SIZE</c>) reads
+    /// 48.9 %, honest on 9.6 KB values but overstating by up to one partial chunk per value, so a dimension
+    /// whose values barely cross the TOAST threshold reads up to half again too high, and <c>n_live_tup</c>
+    /// is exact only just after a vacuum. <c>pg_freespacemap</c>'s <c>file − sum(avail)</c> reads 48.5 % — a
+    /// real byte measurement — but <c>CREATE EXTENSION pg_freespacemap</c> is a product dependency the
+    /// maintainer decides, not this sweep. The column exists so that decision needs no rung; until it is
+    /// made, a reader that finds NULL beside a non-NULL <c>toast_bytes</c> says "not measured" and computes
+    /// nothing from the total. The literal <c>NULL::bigint</c> is typed so the UNION's column list resolves
+    /// on every PostgreSQL major the store runs on. This INSERT never consults the extension; the one
+    /// statement that does is <see cref="ToastLiveBytesUpdateSql"/>, run afterwards ONLY where the sweep has
+    /// just found <c>pg_freespacemap</c> installed (#3783's code half), so the maintainer's single
+    /// <c>CREATE EXTENSION</c> lights the utilisation surface without another release.</para>
     /// </summary>
     public const string DimensionInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, total_bytes, row_count)
+    (metric_time, object_name, object_kind, total_bytes, row_count, toast_bytes, toast_live_bytes)
 SELECT
     $1,
     '{PayloadDimensions.QueryTextDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryTextDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable})
+    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable}),
+    pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass), 0)),
+    NULL::bigint
 UNION ALL
 SELECT
     $1,
     '{PayloadDimensions.QueryPlanDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryPlanDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable})";
+    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable}),
+    pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass), 0)),
+    NULL::bigint";
+
+    /// <summary>
+    /// The contrib module whose presence lets the sweep measure <c>toast_live_bytes</c> honestly (#3783).
+    /// Named ONCE: the probe (<see cref="ExtensionInstalledSql"/>'s $1) and the sentence the MCP reader
+    /// prints when the column is NULL both spell it, and a retyped copy that drifted would make the probe
+    /// answer "not installed" forever on a store that had installed it — the honest-empty trap on the one
+    /// instrument the maintainer was told would light the surface.
+    /// </summary>
+    public const string FreespacemapExtensionName = "pg_freespacemap";
+
+    /// <summary>
+    /// Whether an extension is INSTALLED in this database — one row when it is, zero rows when it is not
+    /// (#3783). <c>pg_extension</c> rather than <c>pg_available_extensions</c> on purpose: the bundled
+    /// TimescaleDB image SHIPS <c>pg_freespacemap</c> (it is in <c>pg_available_extensions</c> on every
+    /// store) and does not CREATE it, and it is the CREATE that puts <c>pg_freespace()</c> in the catalog.
+    /// A statement that names a function the catalog does not have fails at analysis, not at the branch
+    /// that would call it — PostgreSQL resolves function names before a single row is evaluated, so a
+    /// <c>CASE WHEN EXISTS (...) THEN pg_freespace(...) END</c> inside <see cref="DimensionInsertSql"/>
+    /// would have failed the WHOLE dimension arm on every store without the extension. Hence a separate
+    /// probe and a separate statement. $1 the extension name (<see cref="FreespacemapExtensionName"/>).
+    /// </summary>
+    public const string ExtensionInstalledSql = @"
+SELECT 1
+FROM pg_extension
+WHERE extname = $1";
+
+    /// <summary>
+    /// Fills <c>toast_live_bytes</c> on the dimension rows the sweep has JUST written, from the free-space
+    /// map (#3783) — run only after <see cref="ExtensionInstalledSql"/> found <see cref="FreespacemapExtensionName"/>
+    /// installed, so on the shipped store this statement never executes and the column stays the NULL
+    /// <see cref="DimensionInsertSql"/> wrote. The moment the maintainer runs
+    /// <c>CREATE EXTENSION IF NOT EXISTS pg_freespacemap</c> on the store, the next hourly sweep fills it, and
+    /// <c>get_store_metrics</c>' <c>toast_utilisation_pct</c> and the dormant slack self-alert light up
+    /// without a release. That fencing is the whole design: the product does not take the dependency; it
+    /// measures the moment the operator does.
+    ///
+    /// <para><b>The instrument, and what it measured.</b> <c>pg_freespace(reltoastrelid)</c> returns one
+    /// row per page of the TOAST relation's main fork with the free-space map's record of that page's
+    /// available bytes; <c>toast_bytes − sum(avail)</c> is the live figure. On the rig that decided the
+    /// column (TimescaleDB 2.28.1 / PostgreSQL 18, 215 MB of 9.6 KB TOASTed values, half deleted, ordinary
+    /// <c>VACUUM</c>, <c>pgstattuple</c> as the oracle at 47.9 %) it read 48.5 % — an honest byte
+    /// measurement, +1.2 % — where the extension-free proxies read 100 % (tuple share) and 48.9 % (chunk
+    /// count × 1996); the same shape reproduced at 48.4 % on the rig that wrote this statement, and the live
+    /// test executes it against the migrated plan dimension. The +1.2 % has two known sources, both
+    /// overstating LIVE: the FSM records each page's free space in 32-byte buckets and reports the bucket
+    /// floor, and a page whose deletes no VACUUM has yet visited still carries its pre-delete record. Neither
+    /// can understate slack, which is the direction the alert judges.</para>
+    ///
+    /// <para><b>Why it subtracts from the row's own <c>toast_bytes</c> and not from a fresh
+    /// <c>pg_relation_size</c>.</b> The utilisation the reader publishes is <c>live / toast_bytes</c>; taking
+    /// both from the same recorded size makes the quotient internally consistent even though the FSM is
+    /// read a statement later than the file was sized. <c>greatest(…, 0)</c> is the honesty guard for the
+    /// one ordering the arithmetic cannot rule out — a file truncated by a concurrent VACUUM between the two
+    /// statements, leaving an <c>avail</c> sum taken over fewer pages than the size counted — so the column
+    /// can never store a negative live figure. <c>reltoastrelid &lt;&gt; 0</c> guards the function call:
+    /// <c>pg_freespace(0)</c> RAISES rather than returning no rows (the planner applies that filter on the
+    /// <c>pg_class</c> scan BEFORE the lateral function scan — verified with EXPLAIN on 18), and a dimension
+    /// without a TOAST relation already stored NULL <c>toast_bytes</c>, which the outer predicate leaves alone.
+    /// <c>coalesce(sum(avail), 0)</c> because a zero-page TOAST file has no FSM rows and its live figure is a
+    /// real zero, not a missing reading; the file's own size is zero there too and the reader publishes no
+    /// percentage of nothing.</para>
+    ///
+    /// <para><b>Cost, stated rather than assumed.</b> The function walks the free-space map, which is
+    /// ~1/8000 of the heap (one byte per page), and materialises one row per page for the aggregate: on the
+    /// 215 MB rig that is ~26,000 rows and single-digit milliseconds; on the 154 GB TOAST file the issue
+    /// measured it would be ~20 million rows, which this sweep has not measured and estimates at tens of
+    /// seconds inside its 300 s budget. That estimate is the one number a maintainer should check on a
+    /// store of that size BEFORE installing the extension there — the fencing means the check can be made
+    /// on a copy, and the column stays NULL until it is. Table names are the <see cref="PayloadDimensions"/>
+    /// constants. $1 metric_time — the SAME stamp the dimension INSERT carried, so exactly this run's two
+    /// rows are updated and no older sweep's.</para>
+    /// </summary>
+    public const string ToastLiveBytesUpdateSql = $@"
+UPDATE collect.store_metrics AS m
+SET    toast_live_bytes = greatest(m.toast_bytes - f.free_bytes, 0)
+FROM (
+    SELECT
+        d.dim_name,
+        (SELECT coalesce(sum(fs.avail), 0)::bigint
+           FROM pg_class AS c
+           CROSS JOIN LATERAL pg_freespace(c.reltoastrelid) AS fs
+          WHERE c.oid = ('collect.' || d.dim_name)::regclass
+          AND   c.reltoastrelid <> 0) AS free_bytes
+    FROM (VALUES ('{PayloadDimensions.QueryTextDimTable}'), ('{PayloadDimensions.QueryPlanDimTable}')) AS d(dim_name)
+) AS f
+WHERE m.metric_time = $1
+AND   m.object_kind = '{DimensionObjectKind}'
+AND   m.object_name = f.dim_name
+AND   m.toast_bytes IS NOT NULL";
+
+    /// <summary>The <c>object_kind</c> of the store's own checkpointer row (#3783). See
+    /// <see cref="HypertableObjectKind"/> for why it is a const; the MCP reader and the self-alert both
+    /// filter on it, and a drifted spelling would read as "no checkpointer row yet" forever.</summary>
+    public const string CheckpointerObjectKind = "checkpointer";
+
+    /// <summary>The <c>object_name</c> of the one <see cref="CheckpointerObjectKind"/> row — the 17+ view's
+    /// name on EVERY major, including the ones that still serve the counters from <c>pg_stat_bgwriter</c>
+    /// (#3783). One name, so a store that crosses a major upgrade keeps one series: the row is named for
+    /// the process it measures, not for the catalog view the sweep happened to read it from.</summary>
+    public const string CheckpointerObjectName = "pg_stat_checkpointer";
+
+    /// <summary>The first PostgreSQL major on which the checkpointer's counters live in their own view,
+    /// <c>pg_stat_checkpointer</c> (17). Below it the same three counters are columns of
+    /// <c>pg_stat_bgwriter</c> under their old names; <see cref="SweepAsync"/> picks the statement by the
+    /// connection's reported major, because a statement naming a view the catalog lacks fails at analysis
+    /// (the <see cref="ExtensionInstalledSql"/> reasoning) and cannot be made conditional inside SQL.</summary>
+    public const int CheckpointerViewMajorVersion = 17;
+
+    /// <summary>
+    /// The store's own checkpointer row (#3783), PostgreSQL 17+ — every store shape, one row per sweep,
+    /// carrying the CUMULATIVE counters: milliseconds the checkpointer has spent in the write phase and in
+    /// the sync (fsync) phase since the statistics were last reset, and how many REQUESTED checkpoints it has
+    /// run — the ones forced by WAL volume reaching <c>max_wal_size</c> rather than by
+    /// <c>checkpoint_timeout</c>, the count that says the store outran its WAL sizing (#3802's lever, the v12
+    /// managed-conf block) rather than merely reaching the clock. <c>write_time</c> / <c>sync_time</c> are
+    /// <c>double precision</c> milliseconds in the view and are rounded to the column's <c>bigint</c>.
+    ///
+    /// <para><b>Why the row stores the raw counters and the READ computes the interval, when the rung doc
+    /// spoke of deltas.</b> The figure an operator wants IS the delta — "how many seconds of fsync did the
+    /// last hour hold" — and V137's column doc described that figure. A delta needs the previous cumulative,
+    /// and there are two honest places to keep it. An in-process baseline writes deltas and loses one hour
+    /// on every service restart (the first sweep after start has nothing to subtract from), cannot tell the
+    /// reader whether a NULL row was that restart or a counter reset, and needs the interval it spanned
+    /// persisted somewhere — which on this table means bending another column's name, the shape the
+    /// <c>job_history</c> kind already took once and the rung ruled against repeating. Storing the counter
+    /// keeps the row STATELESS (a restart costs nothing: the previous row is on disk), makes a reset
+    /// detectable from the rows alone (the newest counter reads BELOW the previous one), and yields the
+    /// interval from the two rows' own <c>metric_time</c> stamps with no column borrowed. It is also the
+    /// convention every <c>pg_stat_*</c>-sourced collector table in this store already follows: the stored
+    /// column is the raw counter and <c>get_pg_database_stats</c>' "windowed difference clamped per
+    /// interval" is computed by the MCP read — an operator who <c>SUM()</c>s a stored counter gets a
+    /// nonsense total on either table, and the class summary's per-kind paragraph says so for this one.
+    /// <c>DarlingStoreMetricsReader.CheckpointerReading</c> is the one place the difference is taken, for
+    /// the tool and the self-alert alike.</para>
+    ///
+    /// <para><b>What a reader must do with the pair.</b> Delta = newest − previous on each of the three; the
+    /// interval is the two stamps' difference (an hour on a healthy sweep, longer across a skipped tick,
+    /// and the reader publishes the measured span rather than assuming the cadence). Any of the three going
+    /// BACKWARDS means <c>pg_stat_reset_shared('checkpointer')</c> (<c>'bgwriter'</c> before 17) or a
+    /// cluster restart without statistics persistence ran between the two sweeps: the interval is then
+    /// unmeasurable and every delta is NULL with that reason — the #3705 discontinuity idiom, never a
+    /// negative or a clamped zero. The one shape that cannot be detected from the rows is a reset followed,
+    /// inside the same interval, by MORE activity than the whole prior lifetime had accumulated; that reads
+    /// as a small positive delta. On a checkpointer whose counters run since cluster start it is not a
+    /// realistic hour, and it is stated rather than guarded against.</para>
+    ///
+    /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
+    /// </summary>
+    public const string CheckpointerInsertSql = $@"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested)
+SELECT
+    $1,
+    '{CheckpointerObjectName}',
+    '{CheckpointerObjectKind}',
+    round(c.write_time)::bigint,
+    round(c.sync_time)::bigint,
+    c.num_requested
+FROM pg_stat_checkpointer AS c";
+
+    /// <summary>
+    /// <see cref="CheckpointerInsertSql"/> for PostgreSQL below <see cref="CheckpointerViewMajorVersion"/>
+    /// (#3783): the same three cumulative counters under the names <c>pg_stat_bgwriter</c> carried them
+    /// through 16 — <c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>, <c>checkpoints_req</c> — written
+    /// under the SAME object name and kind so the series is one series. The bundled store is 18 and never
+    /// runs this arm; a bring-your-own store on 14–16 does. Same row shape, same reader. $1 metric_time.
+    /// </summary>
+    public const string CheckpointerBgwriterInsertSql = $@"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested)
+SELECT
+    $1,
+    '{CheckpointerObjectName}',
+    '{CheckpointerObjectKind}',
+    round(b.checkpoint_write_time)::bigint,
+    round(b.checkpoint_sync_time)::bigint,
+    b.checkpoints_req
+FROM pg_stat_bgwriter AS b";
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>
@@ -725,7 +953,8 @@ SELECT
     /// axis is different, and the axis is what made <c>pg_database_size</c> unbounded. The tied group is
     /// one sweep's output — <see cref="TimescaleSupport.HypertableCount"/> hypertable rows (70 today), one
     /// row per continuous aggregate, one row per Timescale background job, two dimension rows, three named
-    /// plain-table rows, the two catch-all rows, the owner's <c>job_history</c> row and this one — so it
+    /// plain-table rows, the two catch-all rows, the owner's <c>job_history</c> row, the checkpointer row and
+    /// this one — so it
     /// tracks the COLLECTOR CATALOG, a product constant that moves only when a migration rung adds a
     /// hypertable or an aggregate, and every
     /// element is a narrow row on a plain table. <c>pg_database_size</c> tracked the store's file count,
@@ -757,10 +986,13 @@ WHERE metric_time < $1";
     /// <summary>
     /// One self-metrics run: the hypertable, continuous-aggregate, background-job and owner
     /// <c>job_history</c> rows (only when <paramref name="timescaleAvailable"/> — the worker's cached
-    /// <see cref="TimescaleSupport"/> detection), the dimension rows, the named plain-table rows, the two
+    /// <see cref="TimescaleSupport"/> detection), the dimension rows (and, only where the store carries
+    /// <see cref="FreespacemapExtensionName"/>, their <c>toast_live_bytes</c>), the checkpointer row (the
+    /// statement chosen by the connection's PostgreSQL major), the named plain-table rows, the two
     /// catch-all rows (the TimescaleDB or plain variant, by the same flag), the store summary row, then the
     /// retention DELETE, all stamped with one <paramref name="utcNow"/>. Returns the number of metric rows
-    /// written (the caller logs it at Debug).
+    /// written (the caller logs it at Debug); the live-bytes UPDATE rewrites rows already counted and adds
+    /// nothing to it.
     ///
     /// <para><b>Order matters for the reconciliation, and it is stated rather than relied on.</b> Every
     /// sizing statement runs before <see cref="StoreInsertSql"/>'s <c>pg_database_size</c>, so the
@@ -820,6 +1052,37 @@ WHERE metric_time < $1";
         {
             dimensions.Parameters.AddWithValue(metricTime);
             written += await dimensions.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* #3783: toast_live_bytes, ONLY where the maintainer has installed pg_freespacemap. Two statements
+           rather than one because a statement naming pg_freespace() fails at analysis on a store without
+           the extension, whichever CASE arm would have reached it (the ExtensionInstalledSql paragraph). On
+           the shipped store the probe returns no row and the column stays the NULL the INSERT wrote. */
+        bool freespacemapInstalled;
+        using (var probe = new NpgsqlCommand(ExtensionInstalledSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(FreespacemapExtensionName);
+            freespacemapInstalled = await probe.ExecuteScalarAsync(cancellationToken) is not null;
+        }
+
+        if (freespacemapInstalled)
+        {
+            using var liveBytes = new NpgsqlCommand(ToastLiveBytesUpdateSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            liveBytes.Parameters.AddWithValue(metricTime);
+            await liveBytes.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* #3783: the store's own checkpointer counters, raw (the CheckpointerInsertSql paragraph says why
+           the read differences them). The view moved in 17 and a statement naming a view the catalog lacks
+           fails at analysis, so the major picks the statement here; Npgsql reports it from the server's
+           startup parameters, no round trip. Every store shape: both views exist on plain PostgreSQL. */
+        var checkpointerSql = connection.PostgreSqlVersion.Major >= CheckpointerViewMajorVersion
+            ? CheckpointerInsertSql
+            : CheckpointerBgwriterInsertSql;
+        using (var checkpointer = new NpgsqlCommand(checkpointerSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            checkpointer.Parameters.AddWithValue(metricTime);
+            written += await checkpointer.ExecuteNonQueryAsync(cancellationToken);
         }
 
         /* #3582: the product-owned plain tables the inventory knows by name. */

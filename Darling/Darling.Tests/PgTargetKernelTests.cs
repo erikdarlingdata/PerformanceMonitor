@@ -116,7 +116,9 @@ public sealed class PgTargetKernelTests
 
         Assert.Contains("pg_kernel_stats", DarlingRetentionHorizons.BaselineServingRawCollectors);
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyCpuBurn));
-        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
+        /* The fold gained the decomposition in the third between-waves batch of #3691 (lane 36's measurement): the cores
+           fact is base 0 by design, so a fold onto it alone never landed. Pinned with the reason in PgTargetBetweenWavesV3Tests. */
+        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores, PgTargetFactKeys.CpuDecomposition }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
     }
 
     [Fact]

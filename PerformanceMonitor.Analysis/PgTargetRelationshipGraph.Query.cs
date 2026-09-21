@@ -21,6 +21,21 @@ namespace PerformanceMonitor.Analysis;
 /// (<c>pg_temp_spill_statements</c>, <c>PgTargetDrillDownCollector.Queries.cs</c>) and the spill's amplifier
 /// names that a temp-writing bad actor exists, rather than through a path node.</para>
 ///
+/// <para><b>Lane 32's edge, declared here between waves: <c>PG_TEMP_SPILL → CONFIG_PG_MEMORY_OVERCOMMIT</c>.</b>
+/// The composition check (<c>shared_buffers + max_connections × work_mem …</c> against the host) names the spill as
+/// one of its two D5 co-fires — a spill says the per-backend <c>work_mem</c> term is being SPENT, not merely budgeted
+/// — and lane 32's amplifier in <c>PgTargetScorer.Memory.cs</c> already lifts the sum when the spill fires. What
+/// it could not do from its own file was open the STORY: this graph's rule is that one source node's edges live in
+/// one place, and the spill's edges are this file's, so lane 32 reported the edge as an out-of-lane item (#3809)
+/// and the third between-waves batch declares it here, beside the <c>work_mem</c> edge. The predicate reads the
+/// sum's <see cref="Fact.BaseSeverity"/> — positive only when the configured worst case exceeds this host, the
+/// scorer's verdict with its lineage — never a ratio of its own, matching the two edges into the same leaf in
+/// <c>PgTargetRelationshipGraph.HostMemory.cs</c>. Traversal picks the higher-severity destination and skips a leaf
+/// an earlier story consumed, so a spilling host whose <c>PG_HOST_MEMORY_PRESSURE</c> outranks the spill keeps the
+/// pressure → sum story and the spill walks to <c>work_mem</c> as before (the live memory e2e pins that outcome);
+/// the sum appears in a spill's path only where nothing higher has claimed it. A stock target has no sum fact at
+/// all (no host-memory source), so the edge is inert there by construction.</para>
+///
 /// <para><b>No edges OUT of a bad actor in v1, deliberately (lane 7).</b> A bad actor is a LEAF: nothing in the v1 vocabulary is
 /// downstream of "this one statement holds the time" — the regression fact that would be
 /// (<c>PG_QUERY_REGRESSION</c>, window-over-window <c>mean_exec_ms</c> step corroborated by a
@@ -62,6 +77,13 @@ public sealed partial class PgTargetRelationshipGraph
         AddEdge(PgTargetFactKeys.TempSpill, PgTargetFactKeys.ConfigWorkMem, TempCategory,
             "work_mem is the per-sort budget these temp files exceeded — the knob fired on this spill's evidence (D5)",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var knob) && knob.Severity > 0);
+
+        /* Lane 32's co-fire, as a story (#3809): the spill leads to the composition check when the configured worst
+           case exceeds this host. Base-gated on the sum's own verdict — the arithmetic is the scorer's, with its
+           lineage — and inert wherever the sum fact is absent (a stock target has no host-memory source). */
+        AddEdge(PgTargetFactKeys.TempSpill, PgTargetFactKeys.ConfigMemoryOvercommit, TempCategory,
+            "The configured memory worst case exceeds this host, and these spills say the per-backend work_mem term is being spent, not merely budgeted (D5)",
+            facts => facts.TryGetValue(PgTargetFactKeys.ConfigMemoryOvercommit, out var sum) && sum.BaseSeverity > 0);
 
         /* Lane 34: the own-normal deviation leads to the statement it names — see the class summary. Predicate reads
            the anomaly's verdict (BaseSeverity > 0, the shared deviation ramp's) and the alias resolution, never a bar. */

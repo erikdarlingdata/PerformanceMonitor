@@ -50,7 +50,7 @@ namespace PerformanceMonitor.Collectors;
 /// for an enumeration, so a definition that is per-database on a target never enumerates there;
 /// <see cref="BuildEnumerationQuery"/> returns null on Azure to say the same thing from this side, and the
 /// Azure list query is deleted rather than left unreachable, so it cannot be revived by a future edit that
-/// flips the gate. Both shapes are built from the SINGLE <see cref="PayloadBodyText"/> — the on-prem
+/// flips the gate. Both shapes are built from the SINGLE <see cref="PayloadBody"/> — the on-prem
 /// wrapper only quote-doubles it for nesting — so there is no second copy of the SELECT for the two paths
 /// to drift on.</para>
 ///
@@ -69,8 +69,28 @@ namespace PerformanceMonitor.Collectors;
 /// <c>sys.database_query_store_options</c> returns exactly one row even when Query Store is off
 /// (<c>actual_state_desc = 'OFF'</c>), so every database yields one honest row and OFF is recorded as OFF
 /// — an absent row means "not collected", never "off". The collector itself gates on 2016+ via
-/// <see cref="AppliesTo"/> (the view does not exist before v13); WITHIN the view every selected column
-/// exists from 2016 on, so there are no per-column version gates.</para>
+/// <see cref="AppliesTo"/> (the view does not exist before v13). WITHIN the view, every column the
+/// original nine ordinals select exists from 2016 on, and until V137 that was the whole payload and there
+/// were no per-column version gates. V137 (#3796) added the two capture modes, and ONE of them is gated:
+/// <c>query_capture_mode_desc</c> (<c>ALL</c> / <c>AUTO</c> / <c>CUSTOM</c> / <c>NONE</c>) shipped with the view
+/// in 2016 and is always selected; <c>wait_stats_capture_mode_desc</c> (<c>ON</c> / <c>OFF</c>) arrived in
+/// SQL Server 2017 (v14), so on a 2016 target the column does not exist and a body that names it fails to
+/// COMPILE for the whole database — not one NULL cell, no row at all for that database. The gate is
+/// <see cref="HasWaitStatsCaptureMode"/>, the <see cref="DatabaseConfigCollector"/> idiom: the SELECT
+/// carries the column only where the engine has it, the reader reads the ordinal only where the SELECT
+/// carried it, and the row stores NULL where the engine cannot say. Both shapes are built from the ONE
+/// body, so the gate applies identically on the enumeration path and the Azure per-database path.</para>
+///
+/// <para><b>Why the capture modes are on this row at all (#3796).</b> The health row stored every Query
+/// Store option except the one that names a plan-churn factory. Measured on one production store class,
+/// the plan dimension takes ~755 k NEW distinct plans a day from 42 servers, and one database dominates
+/// the <c>query_store</c> collector's per-database fan-out at 92–96 % of the run — both are exactly what
+/// <c>QUERY_CAPTURE_MODE = ALL</c> produces on an ad-hoc workload, and the row could not say whether that
+/// was the cause because it never asked; the fleet's other three knobs (200 plans / 21 days / 8 GB) are
+/// uniform, so capture mode is the remaining explanatory variable. Stored as the <c>*_desc</c> spelling
+/// verbatim, so <c>CUSTOM</c> reads as <c>CUSTOM</c> and a reader that wants the 2019+ <c>capture_policy_*</c>
+/// knobs behind it knows to ask for them — this rung does not collect those. Read by nothing yet; the
+/// clutter view (#3797) is the consumer, with churn × <c>ALL</c> as its "switch to AUTO" arm.</para>
 ///
 /// <para>Hourly rather than the config family's on-load cadence, because unlike the scoped-config knobs
 /// (which only change when an operator changes them) <c>actual_state</c>, <c>readonly_reason</c> and
@@ -97,6 +117,15 @@ public sealed class QueryStoreHealthCollector : CollectorDefinitionBase<QuerySto
         public long StaleQueryThresholdDays { get; set; }
         public long MaxPlansPerQuery { get; set; }
         public long IntervalLengthMinutes { get; set; }
+
+        /// <summary>V137 (#3796): <c>query_capture_mode_desc</c> verbatim — <c>ALL</c>, <c>AUTO</c>, <c>CUSTOM</c>
+        /// or <c>NONE</c>. 2016+, so always selected; NULL only where the engine returned NULL.</summary>
+        public string? QueryCaptureMode { get; set; }
+
+        /// <summary>V137 (#3796): <c>wait_stats_capture_mode_desc</c> verbatim — <c>ON</c> or <c>OFF</c>. 2017+ (v14):
+        /// NULL on a 2016 target, where the column does not exist and the SELECT never names it, and that
+        /// NULL means "the engine cannot say", not OFF.</summary>
+        public string? WaitStatsCaptureMode { get; set; }
     }
 
     private const string OnPremDatabaseListQueryText = @"
@@ -126,16 +155,22 @@ OPTION(RECOMPILE);";
     /// The per-database read — the ONE body both execution paths run (#3764). Written as ordinary T-SQL
     /// because that is what Azure SQL DB's per-database connection executes verbatim;
     /// <see cref="BuildPerItemQuery"/> quote-doubles the same string to nest it inside
-    /// <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select the identical nine
-    /// reader ordinals in the identical order, and the shared row loop reads them the same way. One row
-    /// always — the view answers for the database whether Query Store is on or off.
+    /// <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select the identical reader
+    /// ordinals in the identical order, and the shared row loop reads them the same way. One row always —
+    /// the view answers for the database whether Query Store is on or off.
     ///
     /// <para>The <c>DB_ID()</c> screen is the on-prem list's system-database predicate carried onto the row
     /// read — see the class remarks. On-prem the list has already excluded every database this would
     /// exclude, so it filters nothing; on an Azure logical-server registration the host's list includes
     /// master and this is what keeps master out of the payload.</para>
+    ///
+    /// <para>Since V137 (#3796) the body is BUILT rather than a constant, because its last column is
+    /// version-gated: <see cref="PayloadBody"/> appends <c>wait_stats_capture_mode</c> as the eleventh
+    /// ordinal only where <see cref="HasWaitStatsCaptureMode"/> says the engine has the column. The
+    /// ten ungated ordinals — the original nine plus <c>query_capture_mode</c>, which every 2016+ engine
+    /// has — are this text, in <see cref="ReadRowsAsync"/>'s order.</para>
     /// </summary>
-    private const string PayloadBodyText = @"
+    private const string UngatedPayloadBodyText = @"
 SELECT
     actual_state = qso.actual_state_desc,
     desired_state = qso.desired_state_desc,
@@ -145,10 +180,49 @@ SELECT
     size_based_cleanup_mode = qso.size_based_cleanup_mode_desc,
     stale_query_threshold_days = qso.stale_query_threshold_days,
     max_plans_per_query = qso.max_plans_per_query,
-    interval_length_minutes = qso.interval_length_minutes
+    interval_length_minutes = qso.interval_length_minutes,
+    query_capture_mode = qso.query_capture_mode_desc";
+
+    /// <summary>The 2017+ ordinal (#3796), appended to <see cref="UngatedPayloadBodyText"/> only where the
+    /// engine has the column; see <see cref="HasWaitStatsCaptureMode"/>.</summary>
+    private const string WaitStatsCaptureModeColumnText = @",
+    wait_stats_capture_mode = qso.wait_stats_capture_mode_desc";
+
+    private const string PayloadBodyTailText = @"
 FROM sys.database_query_store_options AS qso
 WHERE (DB_ID() > 4 OR DB_ID() = 2)
 OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// The per-database body for THIS target: the ten ungated ordinals, then <c>wait_stats_capture_mode</c>
+    /// where the engine has it. One method, called by both <see cref="BuildQuery"/> and
+    /// <see cref="BuildPerItemQuery"/>, so the two execution shapes cannot disagree about which columns
+    /// a given target is asked for.
+    /// </summary>
+    private static string PayloadBody(CollectorTargetInfo target) =>
+        UngatedPayloadBodyText
+        + (HasWaitStatsCaptureMode(target) ? WaitStatsCaptureModeColumnText : string.Empty)
+        + PayloadBodyTailText;
+
+    /// <summary>
+    /// V137 (#3796): whether <c>sys.database_query_store_options.wait_stats_capture_mode_desc</c> exists on
+    /// the target. It arrived in SQL Server 2017 (v14); both Azure flavours always have it; 0 = version
+    /// unknown = assume newest — the same reading <see cref="AppliesTo"/> gives the version, so a target
+    /// the gate admits at all is asked for the column unless its version is KNOWN to be 2016. On a 2016
+    /// target the SELECT does not name the column and <see cref="ReadRowsAsync"/> does not read the
+    /// ordinal; the row stores NULL there, which readers must publish as "engine predates the option",
+    /// never as OFF. A column that does not exist fails the batch's compile for the whole database, so
+    /// this cannot be a <c>CASE</c> inside the SELECT — the reference itself is the error.
+    /// </summary>
+    public static bool HasWaitStatsCaptureMode(CollectorTargetInfo target)
+    {
+        if (target is null)
+        {
+            throw new ArgumentNullException(nameof(target));
+        }
+
+        return target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 14 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+    }
 
     /// <summary>
     /// Query Store shipped in SQL Server 2016 (v13); sys.database_query_store_options does not exist
@@ -191,7 +265,7 @@ OPTION(RECOMPILE);";
             throw new NotSupportedException("query_store_health enumerates databases on this target; BuildEnumerationQuery drives the cycle.");
         }
 
-        return new CollectorQuery(PayloadBodyText);
+        return new CollectorQuery(PayloadBody(context.Target));
     }
 
     /// <summary>
@@ -229,7 +303,7 @@ OPTION(RECOMPILE);";
     public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
     {
         /* Double single quotes so the body survives nesting inside [db].sys.sp_executesql N'...' */
-        var escapedBody = PayloadBodyText.Replace("'", "''", StringComparison.Ordinal);
+        var escapedBody = PayloadBody(context.Target).Replace("'", "''", StringComparison.Ordinal);
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
 
         var text = $@"
@@ -241,7 +315,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 
     /// <summary>On-prem / RDS / MI: the enumerated item IS the database the per-item query ran in.</summary>
     public override ValueTask ReadItemAsync(string item, DbDataReader reader, List<Row> rows, CollectorContext context, CancellationToken cancellationToken)
-        => new(ReadRowsAsync(item, reader, rows, cancellationToken));
+        => new(ReadRowsAsync(item, reader, rows, HasWaitStatsCaptureMode(context.Target), cancellationToken));
 
     /// <summary>
     /// Azure SQL DB per-database path (#3764). The payload carries no database_name column — the on-prem
@@ -267,11 +341,18 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         }
 
         var rows = new List<Row>();
-        await ReadRowsAsync(databaseName, reader, rows, cancellationToken);
+        await ReadRowsAsync(databaseName, reader, rows, HasWaitStatsCaptureMode(context.Target), cancellationToken);
         return rows;
     }
 
-    private static async Task ReadRowsAsync(string databaseName, DbDataReader reader, List<Row> rows, CancellationToken cancellationToken)
+    /// <summary>
+    /// The one row loop both paths share. Ordinals 0–9 are always present (the ungated body); ordinal 10 is
+    /// read only when <paramref name="hasWaitStatsCaptureMode"/> says the SELECT carried it — the same
+    /// decision, from the same target, that built the body. A 2016 target's reader therefore has ten
+    /// columns and the row's <see cref="Row.WaitStatsCaptureMode"/> is NULL by construction rather than by
+    /// an out-of-range read.
+    /// </summary>
+    private static async Task ReadRowsAsync(string databaseName, DbDataReader reader, List<Row> rows, bool hasWaitStatsCaptureMode, CancellationToken cancellationToken)
     {
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -287,6 +368,8 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 StaleQueryThresholdDays = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture),
                 MaxPlansPerQuery = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture),
                 IntervalLengthMinutes = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
+                QueryCaptureMode = reader.IsDBNull(9) ? null : reader.GetString(9),
+                WaitStatsCaptureMode = hasWaitStatsCaptureMode && !reader.IsDBNull(10) ? reader.GetString(10) : null,
             });
         }
     }
@@ -303,6 +386,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         new CollectorColumn("stale_query_threshold_days", CollectorColumnType.BigInt),
         new CollectorColumn("max_plans_per_query", CollectorColumnType.BigInt),
         new CollectorColumn("interval_length_minutes", CollectorColumnType.BigInt),
+        /* V137 / Lite v64 (#3796): the two capture modes, appended LAST in this order so the positional
+           writers (Darling's binary COPY, Lite's appender) and an upgraded store's ALTER agree on where
+           they sit. Nullable on both stores; wait_stats_capture_mode is NULL by construction on a 2016
+           engine (HasWaitStatsCaptureMode). */
+        new CollectorColumn("query_capture_mode", CollectorColumnType.Varchar),
+        new CollectorColumn("wait_stats_capture_mode", CollectorColumnType.Varchar),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -317,6 +406,8 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             .Value(row.SizeBasedCleanupMode)      /* size_based_cleanup_mode VARCHAR */
             .Value(row.StaleQueryThresholdDays)   /* stale_query_threshold_days BIGINT */
             .Value(row.MaxPlansPerQuery)          /* max_plans_per_query BIGINT */
-            .Value(row.IntervalLengthMinutes);    /* interval_length_minutes BIGINT */
+            .Value(row.IntervalLengthMinutes)     /* interval_length_minutes BIGINT */
+            .Value(row.QueryCaptureMode)          /* query_capture_mode VARCHAR (V137, 2016+) */
+            .Value(row.WaitStatsCaptureMode);     /* wait_stats_capture_mode VARCHAR (V137, 2017+; NULL where the engine predates it) */
     }
 }

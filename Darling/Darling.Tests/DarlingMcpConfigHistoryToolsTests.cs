@@ -134,7 +134,11 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     }
 
     /// <summary>The read must be the same latest-snapshot shape as the scoped-config sibling, over the
-    /// passthrough view, selecting the reader's ten ordinals in the collector's payload order.</summary>
+    /// passthrough view, selecting the reader's twelve ordinals in the collector's payload order — the
+    /// original nine, then the two V137 capture modes (#3796), then the <c>capture_time</c> stamp LAST, so the
+    /// modes are ordinals 10 and 11 and the stamp is 12. The Viewer's twin read carries the same tail minus the
+    /// stamp, and Lite's carries the identical twelve, so the three readers of this row cannot disagree about
+    /// where the modes sit.</summary>
     [Fact]
     public void QueryStoreHealthSql_LatestSnapshot_SelectsPayloadOrder()
     {
@@ -143,9 +147,222 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
         Assert.Contains(
-            "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, capture_time",
+            "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time",
             sql, StringComparison.Ordinal);
+
+        var viewer = PerformanceMonitor.Darling.Viewer.ViewerDataService.QueryStoreHealthSql;
+        Assert.Contains(
+            "stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode",
+            viewer, StringComparison.Ordinal);
+
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Config.cs");
+        Assert.Contains(
+            "SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time",
+            lite, StringComparison.Ordinal);
     }
+
+    /* ---------------- #3796: the two capture modes, published trailing on both SKUs ---------------- */
+
+    private const string DarlingToolsFile = "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpConfigHistoryTools.cs";
+    private const string LiteToolsFile = "Lite/Mcp/McpConfigTools.cs";
+
+    /// <summary>The source of one tool, from its <c>[McpServerTool(Name = "…")]</c> attribute to the next tool's
+    /// (or the end of the file) — the <c>McpLatestSnapshotStampTests</c> slice, so the anchors below cannot
+    /// match a neighbouring tool's payload.</summary>
+    private static string ToolBody(string source, string toolName)
+    {
+        var marker = $"[McpServerTool(Name = \"{toolName}\")";
+        var start = source.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"no tool named {toolName} in the source");
+        var next = source.IndexOf("[McpServerTool(", start + marker.Length, StringComparison.Ordinal);
+        return next < 0 ? source[start..] : source[start..next];
+    }
+
+    /// <summary>
+    /// Both SKUs' <c>get_query_store_health</c> payloads end each database row with <c>query_capture_mode</c>
+    /// then <c>wait_stats_capture_mode</c> — TRAILING, so a client that indexed the row by position before the
+    /// rung still finds its ten fields where they were, and in the collector's order. Anchored in source rather
+    /// than executed because the Darling tool needs a live store; the live theory below executes the same
+    /// shape against Postgres, and Lite's <c>QueryStoreHealthCaptureModePublishTests</c> executes it on DuckDB.
+    /// Single-line anchors on the raw file, ordered by index: the wait-stats assignment is the LAST <c>= r.</c>
+    /// projection before the row object closes.
+    /// </summary>
+    [Theory]
+    [InlineData(DarlingToolsFile)]
+    [InlineData(LiteToolsFile)]
+    public void QueryStoreHealth_PublishesTheCaptureModes_AsTheTwoTrailingFields(string file)
+    {
+        var body = ToolBody(RepoFile.ReadRepoFile(file.Split('/')), "get_query_store_health");
+
+        var interval = body.IndexOf("interval_length_minutes = r.IntervalLengthMinutes,", StringComparison.Ordinal);
+        var capture = body.IndexOf("query_capture_mode = r.QueryCaptureMode,", StringComparison.Ordinal);
+        var waits = body.IndexOf("wait_stats_capture_mode = r.WaitStatsCaptureMode,", StringComparison.Ordinal);
+        var close = body.IndexOf("}).ToList();", StringComparison.Ordinal);
+
+        Assert.True(interval >= 0, $"{file}: the row no longer projects interval_length_minutes");
+        Assert.True(capture > interval, $"{file}: query_capture_mode must follow interval_length_minutes");
+        Assert.True(waits > capture, $"{file}: wait_stats_capture_mode must follow query_capture_mode");
+        Assert.True(close > waits, $"{file}: the row object must close after wait_stats_capture_mode");
+
+        /* Nothing is projected after the wait-stats mode: the tail between it and the close carries no further
+           `= r.` assignment, so the pair is trailing rather than merely present. */
+        var tail = body[(waits + "wait_stats_capture_mode = r.WaitStatsCaptureMode,".Length)..close];
+        Assert.DoesNotContain("= r.", tail, StringComparison.Ordinal);
+
+        /* Published as the model's nullable string, never coalesced: a `?? ""` here would erase the pre-rung /
+           2016 meaning the description spells out. */
+        Assert.DoesNotContain("r.QueryCaptureMode ??", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("r.WaitStatsCaptureMode ??", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The Darling reader propagates NULL for the two modes (the record's last two parameters are the
+    /// nullable strings) and reads the stamp at the ordinal AFTER them — the ordinals the SQL pin above fixes.</summary>
+    [Fact]
+    public void QueryStoreHealthReader_KeepsTheModesNullable_AndReadsTheStampAfterThem()
+    {
+        var parameters = typeof(Reader.QueryStoreHealthReadRow).GetConstructors().Single().GetParameters();
+        Assert.Equal("QueryCaptureMode", parameters[^2].Name);
+        Assert.Equal("WaitStatsCaptureMode", parameters[^1].Name);
+        Assert.Equal(typeof(string), parameters[^2].ParameterType);
+        Assert.Equal(typeof(string), parameters[^1].ParameterType);
+        var nullability = new NullabilityInfoContext();
+        Assert.Equal(NullabilityState.Nullable, nullability.Create(parameters[^2]).ReadState);
+        Assert.Equal(NullabilityState.Nullable, nullability.Create(parameters[^1]).ReadState);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingConfigHistoryReader.cs");
+        Assert.Contains("reader.IsDBNull(10) ? null : reader.GetString(10),", source, StringComparison.Ordinal);
+        Assert.Contains("reader.IsDBNull(11) ? null : reader.GetString(11)));", source, StringComparison.Ordinal);
+        Assert.Contains("capturedAt ??= reader.GetDateTime(12);", source, StringComparison.Ordinal);
+
+        /* The Lite twin reads the same ordinals and keeps the same nulls. */
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Config.cs");
+        Assert.Contains("QueryCaptureMode = reader.IsDBNull(10) ? null : reader.GetString(10),", lite, StringComparison.Ordinal);
+        Assert.Contains("WaitStatsCaptureMode = reader.IsDBNull(11) ? null : reader.GetString(11),", lite, StringComparison.Ordinal);
+        Assert.Contains("CaptureTime = reader.GetDateTime(12),", lite, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The tool's description carries the paragraph the issue asked for — what <c>ALL</c> / <c>AUTO</c> /
+    /// <c>CUSTOM</c> / <c>NONE</c> mean for plan churn, what <c>wait_stats_capture_mode</c> costs, what the null
+    /// means, and who consumes the fields — and says the same words on both SKUs. The Darling text is read off
+    /// the attribute; Lite's is read off its source through the same anchored regex the stamp census uses, so
+    /// a concatenated description (which that census cannot read) fails here first.
+    /// </summary>
+    [Fact]
+    public void QueryStoreHealth_Description_ExplainsTheCaptureModes_IdenticallyOnBothSkus()
+    {
+        var darling = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_query_store_health")
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        var liteBody = ToolBody(RepoFile.ReadRepoFile(LiteToolsFile.Split('/')), "get_query_store_health");
+        var liteAttribute = System.Text.RegularExpressions.Regex.Match(
+            liteBody, @"\A\[McpServerTool\(Name = ""get_query_store_health""\), Description\(""((?:[^""\\]|\\.)*)""\)\]");
+        Assert.True(liteAttribute.Success, "Lite's get_query_store_health description is not one string literal on its attribute");
+        var lite = System.Text.RegularExpressions.Regex.Unescape(liteAttribute.Groups[1].Value);
+
+        Assert.Equal(darling, lite);
+
+        foreach (var sentence in new[]
+        {
+            "query_capture_mode and wait_stats_capture_mode",
+            "the two trailing fields",
+            "CAPTURE MODE IS THE PLAN-CHURN KNOB",
+            "ALL captures every query the engine compiles, one-off ad hoc statements included",
+            "each distinct text is a new query with a new plan",
+            "AUTO skips insignificant queries",
+            "default since SQL Server 2019",
+            "CUSTOM (2019+) is AUTO with operator-set thresholds",
+            "NONE stops capturing NEW queries",
+            "wait_stats_capture_mode ON (the default) records per-plan wait statistics",
+            "OFF saves both",
+            "*_desc spelling verbatim",
+            "null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
+            "never OFF",
+            "Consumed by the Viewer's Query Store grid",
+            "get_query_store_clutter (#3797)",
+            "renders no verdict on them",
+            /* The sentences the tool already carried stay. */
+            "desired READ_WRITE with actual READ_ONLY",
+            "LATEST IS A TIME",
+        })
+        {
+            Assert.Contains(sentence, darling, StringComparison.Ordinal);
+        }
+
+        /* The instructions rows and the web catalogue row name the fields too, so a client reading either
+           index rather than the tool list learns the row grew. */
+        Assert.Contains("`get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.Contains("`get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |", RepoFile.ReadRepoFile("Lite", "Mcp", "McpInstructions.cs"), StringComparison.Ordinal);
+        Assert.Contains("[\"get_query_store_health\"] = R(CatConfig, \"Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).\"", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three grids that render this row grew the same two trailing columns: the web tile's
+    /// <c>QS_HEALTH_COLUMNS</c> ends with the two payload keys (formatless, so the renderer prints a null as
+    /// the page's dash), and both WPF Query Store grids end with <c>Capture Mode</c> then <c>Wait Stats
+    /// Capture</c>, bound to the display properties that render a null as the same glyph — and the two XAML
+    /// grids carry the identical binding sequence, the way every twinned grid in the two front ends does.
+    /// </summary>
+    [Fact]
+    public void QueryStoreHealth_EveryGrid_EndsWithTheTwoCaptureModeColumns()
+    {
+        var js = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var marker = "const QS_HEALTH_COLUMNS = [";
+        var at = js.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, "server-tabs.js no longer defines QS_HEALTH_COLUMNS");
+        var end = js.IndexOf("];", at, StringComparison.Ordinal);
+        var keys = System.Text.RegularExpressions.Regex.Matches(js[(at + marker.Length)..end], @"\{ key: ""([a-z_]+)""[^}]*\}")
+            .Select(m => (Key: m.Groups[1].Value, Spec: m.Value))
+            .ToList();
+        Assert.True(keys.Count >= 12, $"only {keys.Count} QS_HEALTH_COLUMNS entries parsed — the scan is broken");
+        Assert.Equal("query_capture_mode", keys[^2].Key);
+        Assert.Equal("wait_stats_capture_mode", keys[^1].Key);
+        Assert.DoesNotContain("format:", keys[^2].Spec, StringComparison.Ordinal);
+        Assert.DoesNotContain("format:", keys[^1].Spec, StringComparison.Ordinal);
+
+        var viewerBindings = GridBindings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml"));
+        var liteBindings = GridBindings(RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml"));
+        Assert.Equal(viewerBindings, liteBindings);
+        Assert.Equal("CaptureModeDisplay", viewerBindings[^2]);
+        Assert.Equal("WaitStatsCaptureModeDisplay", viewerBindings[^1]);
+
+        foreach (var xaml in new[] { RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml"), RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml") })
+        {
+            var grid = QueryStoreHealthGrid(xaml);
+            Assert.Contains("Tag=\"CaptureModeDisplay\"", grid, StringComparison.Ordinal);
+            Assert.Contains("<TextBlock Text=\"Capture Mode\"", grid, StringComparison.Ordinal);
+            Assert.Contains("Tag=\"WaitStatsCaptureModeDisplay\"", grid, StringComparison.Ordinal);
+            Assert.Contains("<TextBlock Text=\"Wait Stats Capture\"", grid, StringComparison.Ordinal);
+        }
+
+        /* The display properties exist on both row classes and render the null as the dash, never as "" or OFF. */
+        var viewerRow = new PerformanceMonitor.Darling.Viewer.QueryStoreHealthRow();
+        Assert.Equal("\u2014", viewerRow.CaptureModeDisplay);
+        Assert.Equal("\u2014", viewerRow.WaitStatsCaptureModeDisplay);
+        viewerRow.QueryCaptureMode = "ALL";
+        viewerRow.WaitStatsCaptureMode = "ON";
+        Assert.Equal("ALL", viewerRow.CaptureModeDisplay);
+        Assert.Equal("ON", viewerRow.WaitStatsCaptureModeDisplay);
+        var liteRow = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Config.cs");
+        Assert.Contains("public string CaptureModeDisplay => QueryCaptureMode ?? \"\u2014\";", liteRow, StringComparison.Ordinal);
+        Assert.Contains("public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? \"\u2014\";", liteRow, StringComparison.Ordinal);
+    }
+
+    /// <summary>The <c>QueryStoreHealthGrid</c> element of a server-tab XAML, from its opening tag to its closing one.</summary>
+    private static string QueryStoreHealthGrid(string xaml)
+    {
+        var start = xaml.IndexOf("x:Name=\"QueryStoreHealthGrid\"", StringComparison.Ordinal);
+        Assert.True(start >= 0, "no QueryStoreHealthGrid in the XAML");
+        var end = xaml.IndexOf("</DataGrid>", start, StringComparison.Ordinal);
+        Assert.True(end > start, "QueryStoreHealthGrid is unterminated");
+        return xaml[start..end];
+    }
+
+    /// <summary>The binding paths of the grid's columns, in declaration (= render) order.</summary>
+    private static string[] GridBindings(string xaml) =>
+        System.Text.RegularExpressions.Regex.Matches(QueryStoreHealthGrid(xaml), @"Binding=""\{Binding ([A-Za-z]+)")
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
 
     [Theory]
     [InlineData(nameof(Reader.ServerConfigSnapshotsSql))]
@@ -375,11 +592,23 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 CollectionIdGenerator.Next(), newer, ServerId, ServerName, Db, "MAXDOP", "8", null);
 
             /* Query Store health: the cap-hit shape the tool exists to surface — desired READ_WRITE,
-               actual READ_ONLY, readonly_reason 65536 (storage cap reached). */
+               actual READ_ONLY, readonly_reason 65536 (storage cap reached) — on a database whose capture
+               mode is the plan-churn factory (#3796: ALL, wait stats ON); beside it a 2016-shaped row (AUTO,
+               wait stats NULL because the engine has no such column) and a pre-rung row that never had either
+               column written, so the tool's three null/non-null combinations are all executed against the
+               real store. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                CollectionIdGenerator.Next(), newer, ServerId, ServerName, Db, "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, "AUTO", 30L, 200L, 60L, "ALL", "ON");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                CollectionIdGenerator.Next(), newer, ServerId, ServerName, "legacy2016", "READ_WRITE", "READ_WRITE", 0, 100L, 1000L, "AUTO", 30L, 200L, 60L, "AUTO", null);
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-                CollectionIdGenerator.Next(), newer, ServerId, ServerName, Db, "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, "AUTO", 30L, 200L, 60L);
+                CollectionIdGenerator.Next(), newer, ServerId, ServerName, "prerung", "READ_WRITE", "READ_WRITE", 0, 50L, 1000L, "AUTO", 30L, 200L, 60L);
 
             var serverChanges = await DarlingMcpConfigHistoryTools.GetServerConfigChanges(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(serverChanges, ServerName, "changes");
@@ -398,6 +627,31 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             JsonAssert.Contains("\"state_matches_desired\": false", qsh);
             Assert.Contains("storage cap reached", qsh, StringComparison.Ordinal);
             JsonAssert.Contains("\"pct_of_cap\": 100", qsh);
+
+            /* #3796: the two capture modes come back verbatim where the store has them, null where it does not
+               (the 2016 row's wait stats; both on the pre-rung row), and they are the LAST two keys of every
+               database object — trailing on the wire, not merely present. */
+            using (var doc = System.Text.Json.JsonDocument.Parse(qsh))
+            {
+                var databases = doc.RootElement.GetProperty("databases").EnumerateArray()
+                    .ToDictionary(d => d.GetProperty("database_name").GetString()!, d => d, StringComparer.Ordinal);
+                Assert.Equal(3, databases.Count);
+
+                Assert.Equal("ALL", databases[Db].GetProperty("query_capture_mode").GetString());
+                Assert.Equal("ON", databases[Db].GetProperty("wait_stats_capture_mode").GetString());
+                Assert.Equal("AUTO", databases["legacy2016"].GetProperty("query_capture_mode").GetString());
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, databases["legacy2016"].GetProperty("wait_stats_capture_mode").ValueKind);
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, databases["prerung"].GetProperty("query_capture_mode").ValueKind);
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, databases["prerung"].GetProperty("wait_stats_capture_mode").ValueKind);
+
+                foreach (var row in databases.Values)
+                {
+                    var keys = row.EnumerateObject().Select(p => p.Name).ToArray();
+                    Assert.Equal("query_capture_mode", keys[^2]);
+                    Assert.Equal("wait_stats_capture_mode", keys[^1]);
+                    Assert.Equal("database_name", keys[0]);
+                }
+            }
 
             bodySucceeded = true;
         }

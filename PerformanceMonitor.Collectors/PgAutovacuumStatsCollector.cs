@@ -110,7 +110,19 @@ public sealed class PgAutovacuumStatsCollector : PostgresCollectorDefinitionBase
            collector is meant to surface.
 
            autovacuum_enabled = false is kept regardless of activity: a table with autovacuum switched
-           off is a finding even while it is momentarily clean. */
+           off is a finding even while it is momentarily clean.
+
+           The flag is `NOT option_value::boolean`, not `lower(option_value) = 'false'` (#3691 lane 36's
+           measurement, fixed in the third between-waves batch). pg_options_to_table returns the reloption
+           literal AS TYPED - `WITH (autovacuum_enabled = off)` stores `off`, and PostgreSQL's own docs spell
+           it that way - so the string compare read every table switched off with `off`, `0`, `no`, `f` or
+           `n` as ENABLED: autovacuum_disabled = f on all 47 stored rows of a table with autovacuum off,
+           measured live on PostgreSQL 18, and CONFIG_PG_AUTOVACUUM_DISABLED (#3761) could never fire for the
+           docs' spelling. The cast is the exact predicate rather than a hand-written IN list because the
+           server validated the literal with parse_bool when the option was SET, and the boolean input
+           function accepts the same set (true/false, yes/no, on/off, 1/0, t/f, y/n and any unambiguous
+           prefix of the words) - so every value the catalog can hold casts, and every spelling of "off"
+           reads as off. */
         var insertActivityClause = supportsInsertThreshold ? "OR t.n_ins_since_vacuum > 0" : string.Empty;
         return $@"
 SELECT
@@ -140,7 +152,7 @@ SELECT
         current_setting('autovacuum_analyze_scale_factor')::float8)
        * GREATEST(c.reltuples, 0))::bigint                           AS analyze_threshold,
     coalesce(
-        (SELECT lower(option_value) = 'false' FROM pg_options_to_table(c.reloptions)
+        (SELECT NOT option_value::boolean FROM pg_options_to_table(c.reloptions)
          WHERE option_name = 'autovacuum_enabled'), false)           AS autovacuum_disabled,
     pg_total_relation_size(t.relid)::bigint                          AS total_bytes,
     (t.last_vacuum AT TIME ZONE 'UTC')                               AS last_vacuum,
@@ -158,7 +170,7 @@ WHERE (
         t.n_dead_tup > 0
      OR t.n_mod_since_analyze > 0
      {insertActivityClause}
-     OR coalesce((SELECT lower(option_value) = 'false' FROM pg_options_to_table(c.reloptions)
+     OR coalesce((SELECT NOT option_value::boolean FROM pg_options_to_table(c.reloptions)
                   WHERE option_name = 'autovacuum_enabled'), false)
       )
 ORDER BY t.n_dead_tup DESC";

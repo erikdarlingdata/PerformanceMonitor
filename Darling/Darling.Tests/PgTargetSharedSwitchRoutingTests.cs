@@ -172,9 +172,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
         /* wave 3 (#3691 between waves): the blocking anomaly folds onto the chain fact, declared with the stubs. */
         Assert.Equal(new[] { PgTargetFactKeys.BlockingChain }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBlocking]);
         /* v3 (#3691 plumbing): the plan-regression anomaly folds onto the regular fact that names the plan flip; the
-           CPU-burn anomaly onto the cores-busy fact — both declared with the stubs. */
+           CPU-burn anomaly onto the cores-busy fact — both declared with the stubs — and, since the third between-waves
+           batch, onto the decomposition too, the family's positive-base parent (the cores fact is base 0 by design). */
         Assert.Equal(new[] { PgTargetFactKeys.PlanRegression }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyPlanRegression]);
-        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
+        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores, PgTargetFactKeys.CpuDecomposition }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
         /* Lane 34 (ruled 2026-09-20): the own-normal share anomaly names the bad-actor ALIAS — the family's keys are
            dynamic. The map documents the relationship; the graph's alias edge is what puts the two in one incident
            (PgTargetQueriesTests pins that, and that the static entry cannot fold by itself). */
@@ -442,8 +443,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
         Assert.NotNull(pgCpuBurnAnomaly);
         Assert.Equal(PgTargetAdvice.Static(PgTargetFactKeys.AnomalyCpuBurn), pgCpuBurnAnomaly);
         Assert.DoesNotContain("Anomalous spike", pgCpuBurnAnomaly!.Headline, StringComparison.Ordinal);
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 — routed by name to ComposeMemory, ahead of the config prefix arm */
-        Assert.Null(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
+        /* v3 (#3691): lane 32 filled the memory family — both keys compose their own block (the static shape when no fact is
+           in the lookup); the sum is routed by name to ComposeMemory ahead of the config prefix arm. Moved from Null. */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit));  /* lane 32 */
+        Assert.NotNull(PgTargetAdvice.Static(PgTargetFactKeys.HostMemoryPressure));      /* lane 32 */
 
         /* ANOMALY_PG_WAIT_PROFILE must not fall into the SQL Server ANOMALY_WAIT_ composer, which would render
            "Anomalous spike in PG_WAIT_PROFILE" for it. Lane 9 filled the anomaly family, so the line moved from

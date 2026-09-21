@@ -513,10 +513,13 @@ public class FactScorer
             // Plan regression: worst per-exec cost factor vs the best plan. Concerning 2x, critical 10x.
             "PLAN_REGRESSION" => ApplyThresholdFormula(fact.Value, 2, 10),
             // WS4: plan-XML advisories (advise-only), parsed from the top collected query plans.
-            // Each scores its 0.4 advisory base only when >=1 was found (Value = count) and roots a
-            // standalone card via InferenceEngine.ConfigAdvisoryRootKeys. The specific suggested
-            // indexes / warning detail ride in the finding drill-down (Fact metadata is numeric only).
-            "MISSING_INDEX" => fact.Value > 0 ? 0.4 : 0.0,
+            // Each scores only when >=1 was found (Value = count) and roots a standalone card via
+            // InferenceEngine.ConfigAdvisoryRootKeys. The specific suggested indexes / warning detail
+            // ride in the finding drill-down (Fact metadata is numeric only). PLAN_WARNING keeps the
+            // 0.4 advisory base: a warning is an observation about a plan. MISSING_INDEX is demoted to
+            // the Information rung (#3805, MissingIndexCorroborationSeverity): a request is
+            // corroboration, and never outranks a standing misconfiguration.
+            "MISSING_INDEX" => fact.Value > 0 ? MissingIndexCorroborationSeverity : 0.0,
             "PLAN_WARNING" => fact.Value > 0 ? 0.4 : 0.0,
             _ => 0.0
         };
@@ -701,6 +704,25 @@ public class FactScorer
         // A heavy query that only runs once won't score high either.
         return tierBase * impact;
     }
+
+    /// <summary>
+    /// The MISSING_INDEX root's severity (#3805): the Information rung, the same 0.25 as
+    /// <see cref="ConfigChangeAttribution.InformationSeverity"/> and for the same reason — a card that
+    /// attributes and does not accuse. Inside both readers' INFO band (below 0.75), BELOW every standing
+    /// misconfiguration advisory (the 0.4 CONFIG_* base, the 0.3 FILE_AUTOGROWTH_PERCENT base) so a
+    /// missing-index request never sorts above a setting that is wrong today, and above 0 so the story still
+    /// roots (InferenceEngine.ConfigAdvisoryRootKeys), persists, recurs and mutes under its unchanged
+    /// story_path_hash. Until #3805 the fact scored the 0.4 advisory base beside PLAN_WARNING, level with a
+    /// bad MAXDOP. The maintainer's position that moved it: a request "corroborates a measured-slow plan; it
+    /// never drives a finding" — it is weak evidence (plan-cache-bounded counters, one operator's
+    /// statement-scoped estimate) that the engine surfaces, with its caveat, beside the measured facts, not
+    /// as a peer of them. Not a measured number — a position in an ordering, stated so the ordering is the
+    /// thing reviewed. What this deliberately does NOT do is stop the fact rooting: the graph has no edge
+    /// from a measured root (CPU_SPIKE, IO_READ_LATENCY_MS, PAGEIOLATCH_*) to MISSING_INDEX, so unrooted it
+    /// would vanish from every story and the drill-down's CREATE statements with it; giving it those edges
+    /// changes every co-firing story's path hash (every standing mute), which is a maintainer's call.
+    /// </summary>
+    public const double MissingIndexCorroborationSeverity = 0.25;
 
     // Wait-profile severity ramp (see the ANOMALY_WAIT_PROFILE arm). Floor matches the detectors'
     // DefaultRatioThreshold; these are HONEST per-second-scale starting values. UNCALIBRATED as of the

@@ -294,9 +294,10 @@ public sealed class PgTargetSampledWaitTests
         new FactScorer().ScoreAll(modestSet);
         Assert.Equal(1.49, modest.Severity, precision: 9);
 
-        /* The same five amplifiers as the Aurora profile (the CPU confirmer is inert on stock — no PG_CPU_PERCENT fact). */
+        /* The same six amplifiers as the Aurora profile (the capacity confirmer is inert on stock — no PG_CPU_PERCENT fact;
+           the CPU-burn anomaly, the load family's stock confirmer since the third between-waves batch of #3691, is not). */
         var amplifiers = typeof(PgTargetScorer).GetMethod("Amplifiers", BindingFlags.Static | BindingFlags.NonPublic)!;
-        Assert.Equal(5, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [key])!).Cast<object>().Count());
+        Assert.Equal(6, ((System.Collections.IEnumerable)amplifiers.Invoke(null, [key])!).Cast<object>().Count());
     }
 
     [Fact]

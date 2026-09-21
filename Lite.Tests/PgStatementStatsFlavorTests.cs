@@ -81,9 +81,12 @@ public class PgStatementStatsFlavorTests
         /* The VIEW is what Aurora must not read - its rows come from the extended function. The extension's
            one-row pg_stat_statements_info (#3653 A5, the statements epoch) sits beside the view on Aurora
            too and is read on both flavors; the word boundary is what tells the two apart, since `_` is a
-           word character and the info view's name continues past it. */
-        Assert.DoesNotMatch(new Regex(@"\bpg_stat_statements\b"), sql);
-        Assert.Contains("public.pg_stat_statements_info", sql, StringComparison.Ordinal);
+           word character and the info view's name continues past it. Since #3818 the epoch read also names
+           the extension itself - as a pg_extension.extname LITERAL, to find the schema it was created in -
+           so the pin is on a FROM of the view, which is the read Aurora must not make. */
+        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:public\.)?pg_stat_statements\b"), sql);
+        Assert.Contains("pg_stat_statements_info", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE e.extname = 'pg_stat_statements'", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -114,22 +117,108 @@ public class PgStatementStatsFlavorTests
     }
 
     /// <summary>
-    /// The statements epoch (#3653 A5) is guarded by the same major as <c>toplevel</c>: both arrived in
-    /// pg_stat_statements 1.9 (PostgreSQL 14). Below it the column is a TYPED null — an untyped one would
-    /// arrive as text and Npgsql's strict <c>GetDateTime</c> would throw — and the epoch check reads null as
-    /// "unknown", never as a change. On 14+ it is an uncorrelated scalar subquery over the one-row info view,
-    /// so the planner evaluates it once per statement, and it is schema-qualified the way the vanilla read of
-    /// the view is.
+    /// #3818. The statements epoch (#3653 A5) is gated on the RELATION'S EXISTENCE at query time, on every
+    /// major and both flavors - never on <c>postgresMajorVersion</c>, which was the first cut's guard and the
+    /// defect: <c>pg_stat_statements_info</c> is created by the EXTENSION'S 1.9 update script, and a 14+
+    /// engine upgraded in place keeps the extension at 1.8 (RDS and Aurora do not run <c>ALTER EXTENSION
+    /// ... UPDATE</c> for you), so the version guard let the whole collector fail 42P01 on this one column
+    /// on 23 of 50 clusters in an upgraded fleet while the base view was readable the entire time.
+    ///
+    /// <para>The shape is the measured one (the collector's comment records the measurement): a static
+    /// <c>FROM pg_stat_statements_info</c> raises at parse analysis whatever WHERE or CASE surrounds it, so
+    /// the relation is named only inside <c>query_to_xml</c>'s SQL text - resolved at EXECUTION - behind a
+    /// <c>to_regclass</c> test on the schema-qualified name, with the schema read from <c>pg_extension</c>
+    /// rather than assumed <c>public.</c> (the second failure mode) or left to the search_path (which read
+    /// NULL on the rig with the extension in a schema off the path).</para>
     /// </summary>
     [Theory]
-    [InlineData(true, 13, "NULL::timestamp with time zone")]
-    [InlineData(false, 13, "NULL::timestamp with time zone")]
-    [InlineData(true, 14, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
-    [InlineData(false, 14, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
-    [InlineData(false, 17, "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)")]
-    public void TheStatementsEpochColumnFollowsTheToplevelGuard(bool isAurora, int major, string expected)
+    [InlineData(true, 13)]
+    [InlineData(false, 13)]
+    [InlineData(true, 14)]
+    [InlineData(false, 14)]
+    [InlineData(true, 17)]
+    [InlineData(false, 17)]
+    public void TheStatementsEpochColumnIsGatedOnTheRelationsExistence_OnEveryMajor(bool isAurora, int major)
     {
-        Assert.Matches(new Regex($@"{Regex.Escape(expected)}\s+AS statements_stats_reset\b"), Sql(isAurora, major));
+        var sql = Sql(isAurora, major);
+
+        /* The one shape, on every major: the class-level constant, verbatim, ending the select list. */
+        Assert.Matches(
+            new Regex($@"{Regex.Escape(PgStatementStatsCollector.StatementsEpochSql)}\s+AS statements_stats_reset\b"),
+            sql);
+
+        /* No version guard left on this column: the typed-NULL arm the first cut emitted below 14 is gone,
+           because the server major says nothing about the extension's catalog version. */
+        Assert.DoesNotMatch(new Regex(@"NULL::timestamp with time zone\s+AS statements_stats_reset\b"), sql);
+
+        /* Never a static FROM of the info view - that is the read that raised 42P01 at parse analysis. */
+        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:public\.)?pg_stat_statements_info\b"), sql);
+        Assert.DoesNotContain("public.pg_stat_statements_info", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The pieces of the existence gate, each of which the rig measurement depends on: the existence test
+    /// is <c>to_regclass</c> on the name qualified with the extension's OWN schema from <c>pg_extension</c>;
+    /// the read is <c>query_to_xml</c> of SQL text (resolved at execution, so it cannot raise at parse
+    /// analysis) and only in the ELSE arm; both CASE arms are typed <c>timestamp with time zone</c> so the
+    /// column's type is the same on every path and <c>ReadAsync</c>'s <c>GetDateTime(27)</c> is unchanged.
+    /// </summary>
+    [Fact]
+    public void TheExistenceGate_ReadsTheExtensionsOwnSchema_AndResolvesTheRelationAtExecution()
+    {
+        var epoch = PgStatementStatsCollector.StatementsEpochSql;
+
+        Assert.Contains("to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::timestamp with time zone", epoch, StringComparison.Ordinal);
+        Assert.Contains("query_to_xml(format('SELECT stats_reset FROM %I.pg_stat_statements_info', n.nspname), true, false, '')", epoch, StringComparison.Ordinal);
+        Assert.Contains("FROM '<stats_reset>([^<]+)</stats_reset>')::timestamp with time zone", epoch, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.pg_extension AS e", epoch, StringComparison.Ordinal);
+        Assert.Contains("ON n.oid = e.extnamespace", epoch, StringComparison.Ordinal);
+        Assert.Contains("WHERE e.extname = 'pg_stat_statements'", epoch, StringComparison.Ordinal);
+
+        /* The ELSE arm is the only place the relation is read, and it is inside a string literal. */
+        var caseStart = epoch.IndexOf("ELSE", StringComparison.Ordinal);
+        Assert.True(caseStart > 0);
+        Assert.Contains("query_to_xml", epoch[caseStart..], StringComparison.Ordinal);
+        Assert.DoesNotContain("query_to_xml", epoch[..caseStart], StringComparison.Ordinal);
+
+        /* Uncorrelated - a scalar subquery with its own FROM and nothing from the outer row - so the planner
+           makes it an InitPlan evaluated once per statement (measured: `InitPlan 1 (returns $0)`). It opens
+           and closes as one parenthesised SELECT. */
+        Assert.StartsWith("(SELECT CASE", epoch, StringComparison.Ordinal);
+        Assert.EndsWith("WHERE e.extname = 'pg_stat_statements')", epoch, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The companion declaration the fault mapping reads (#3818): <c>pg_stat_statements_info</c> is an object
+    /// the extension gains at 1.9, declared beside the base dependency so a 42P01 naming it is recorded as
+    /// "extension present below 1.9" rather than "extension not installed". Lowercase and bare, as the
+    /// mapping compares it. The other declaring collectors have no companions - a guard that a declaration
+    /// does not appear where nothing reads a versioned object.
+    /// </summary>
+    [Fact]
+    public void TheInfoViewIsDeclaredAsACompanionTheExtensionGainsAt19()
+    {
+        var dependency = Assert.Single(PgStatementStatsCollector.Instance.RequiredPgExtensions);
+
+        Assert.Equal("pg_stat_statements", dependency.ExtensionName);
+        var companion = Assert.Single(dependency.Companions);
+        Assert.Equal("pg_stat_statements_info", companion.ObjectName);
+        Assert.Equal("1.9", companion.SinceExtensionVersion);
+        Assert.Equal(companion.ObjectName, companion.ObjectName.ToLowerInvariant(), StringComparer.Ordinal);
+        Assert.DoesNotContain('.', companion.ObjectName);
+
+        /* And the query text really reads it - a declared companion nothing reads would make the mapping
+           describe a fault the collector cannot produce. */
+        Assert.Contains(companion.ObjectName, Sql(isAurora: false), StringComparison.Ordinal);
+        Assert.Contains(companion.ObjectName, Sql(isAurora: true), StringComparison.Ordinal);
+
+        foreach (var other in CollectorCatalog.All.Where(c => c.Name != "pg_statement_stats"))
+        {
+            foreach (var declared in other.RequiredPgExtensions)
+            {
+                Assert.Empty(declared.Companions);
+            }
+        }
     }
 
     /// <summary>

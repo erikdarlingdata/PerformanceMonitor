@@ -163,23 +163,24 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
 
            toplevel arrived in pg_stat_statements 1.9 (PostgreSQL 14). Before that every row IS a top
            level statement - nested tracking is what 1.9 added - so `true` is the correct value on an
-           older server, not a fallback. */
+           older server, not a fallback.
+
+           The SERVER major is a PROXY here, and #3818 is the record of what the proxy misses: the column
+           belongs to the extension's VIEW, whose shape is the extension's catalog version, not the
+           engine's. A 14+ engine whose pg_stat_statements was created before the upgrade keeps the 1.8
+           view until someone runs ALTER EXTENSION pg_stat_statements UPDATE, and there `toplevel` does
+           not exist - measured on PostgreSQL 14.24 with the extension created at VERSION '1.8': 42703.
+           A column reference is resolved at parse analysis, so no SQL on the vanilla path can read a
+           column that may not be there without a probe; the proxy stays because every 14+ cluster whose
+           extension was created ON 14+ has the column, and the failing case is loud (42703 is
+           Unclassified -> ERROR), not silently wrong. Aurora's aurora_stat_statements() carries the
+           column regardless of the extension's catalog version, which is why the Aurora flavor below
+           reads it unguarded. */
         var topLevel = postgresMajorVersion >= 14 ? "toplevel" : "true";
 
-        /* #3653 A5: the statements EPOCH, appended at ordinal 27 on both flavors. pg_stat_statements_info
-           (extension 1.9, the same release as toplevel, so the same major guards both) is one row holding
-           stats_reset - the moment the statistics last started from zero. It moves on
-           pg_stat_statements_reset(), when a crash left the saved statistics unreadable, and when the
-           endpoint now reaches an instance with its own history; it does NOT move on a clean restart with
-           pg_stat_statements.save = on, which is exactly right because the counters survive that restart and
-           a subtraction across it is honest. An uncorrelated scalar subquery, so the planner evaluates it
-           once per statement, not per row; on a source below 1.9 the column is a typed NULL, which
-           ServerEpoch reads as "unknown" rather than as a change. The same view under public. as the
-           vanilla read, on both flavors: Aurora's aurora_stat_statements() is the extension's data plus
-           columns and the extension's own info view sits beside it. */
-        var statsReset = postgresMajorVersion >= 14
-            ? "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)"
-            : "NULL::timestamp with time zone";
+        /* The statements epoch (#3653 A5), ordinal 27 on both flavors: StatementsEpochSql, declared at class level
+           with the measurement behind its shape (#3818). */
+        var statsReset = StatementsEpochSql;
 
         if (!isAurora)
         {
@@ -251,6 +252,70 @@ FROM aurora_stat_statements(false)
 WHERE calls > 0";
     }
 
+    /* #3653 A5: the statements EPOCH, appended at ordinal 27 on both flavors. pg_stat_statements_info is
+       one row holding stats_reset - the moment the statistics last started from zero. It moves on
+       pg_stat_statements_reset(), when a crash left the saved statistics unreadable, and when the
+       endpoint now reaches an instance with its own history; it does NOT move on a clean restart with
+       pg_stat_statements.save = on, which is exactly right because the counters survive that restart and
+       a subtraction across it is honest. Where the view is absent the column is a typed NULL, which
+       ServerEpoch reads as "unknown" rather than as a change.
+
+       #3818: gated on the RELATION'S EXISTENCE at query time, never on a version. The first cut of this
+       read was `postgresMajorVersion >= 14 ? "(SELECT i.stats_reset FROM public.pg_stat_statements_info AS i)"`
+       on the reasoning that the view arrived in extension 1.9 alongside toplevel, "so the same major
+       guards both". That conflates the ENGINE major with the EXTENSION'S catalog version. The view is
+       created by the extension's 1.8->1.9 update script, and a 14+ engine whose database was upgraded
+       in place or restored keeps pg_stat_statements at 1.8 until ALTER EXTENSION ... UPDATE is run by
+       hand - RDS and Aurora do not run it - so on 23 of 50 clusters in one upgraded fleet the whole
+       collector failed 42P01 on this one column for 25 hours, its base view readable the entire time.
+       The hard-coded `public.` was the second failure mode: a relocatable extension lives wherever
+       CREATE EXTENSION ... SCHEMA put it.
+
+       Why this shape and not the obvious one - MEASURED, on postgres:13/14/16 containers with the
+       extension at 1.8 (PG13's ceiling; PG14 via CREATE EXTENSION ... VERSION '1.8'), 1.9 (PG14 after
+       ALTER EXTENSION UPDATE) and 1.10 (PG16, created in a schema off the search_path):
+
+         (SELECT i.stats_reset FROM pg_stat_statements_info AS i WHERE to_regclass(...) IS NOT NULL)
+           -> 42P01 at 1.8. A FROM item is resolved at parse analysis, before any WHERE runs.
+         CASE WHEN to_regclass(...) IS NULL THEN NULL ELSE (SELECT stats_reset FROM pg_stat_statements_info) END
+           -> 42P01 at 1.8. The sub-SELECT's FROM is resolved at parse analysis too; CASE short-circuits
+              EVALUATION, not name resolution.
+
+       Only a read whose relation name is resolved at EXECUTION can be conditional on the relation
+       existing, and core PostgreSQL has exactly one function that runs SQL text and returns its rows:
+       query_to_xml. So: the extension's own schema from pg_extension (exact for a relocatable
+       extension, and independent of the monitoring login's search_path - the issue's unqualified
+       to_regclass('pg_stat_statements_info') read NULL on the PG16 rig with the extension in a schema
+       off the path, which would have left the epoch dark there for a different reason), to_regclass on
+       the schema-qualified name as the existence test, and query_to_xml of the one-row read only when
+       it passed. CASE evaluates the ELSE branch only when reached, and the whole thing is an
+       uncorrelated scalar subquery - EXPLAIN shows it as InitPlan 1, evaluated once per statement, not
+       per row. Results: 1.8 -> NULL with no error on PG13 and PG14; after UPDATE to 1.9 -> filled; 1.10
+       in schema `ext` -> filled; extension not created at all -> NULL (the outer read fails first on
+       its base object, which is the fault the EXTENSION_MISSING sentence is for).
+
+       query_to_xml renders a timestamptz as ISO 8601 with a `T` and a numeric offset
+       (2026-09-20T17:54:26.803822+00:00), which the timestamptz input routine accepts; the substring
+       takes the element's text and the cast restores the type, so ordinal 27 stays `timestamp with
+       time zone` on every path and ReadAsync's GetDateTime is unchanged. With nulls=true a NULL
+       stats_reset renders as an xsi:nil element with no text, so the pattern does not match and the
+       column is NULL, which is the right answer. The inner statement is a nested statement to
+       pg_stat_statements itself - tracked only where pg_stat_statements.track = all, one row per
+       cycle, toplevel = false.
+
+       The same form on both flavors: Aurora's aurora_stat_statements() is the extension's data plus
+       columns, and the extension's own info view sits beside it wherever the extension was created. */
+    public const string StatementsEpochSql = @"(SELECT CASE
+            WHEN to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::timestamp with time zone
+            ELSE substring(
+                     query_to_xml(format('SELECT stats_reset FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text
+                     FROM '<stats_reset>([^<]+)</stats_reset>')::timestamp with time zone
+        END
+     FROM pg_catalog.pg_extension AS e
+     JOIN pg_catalog.pg_namespace AS n
+       ON n.oid = e.extnamespace
+    WHERE e.extname = 'pg_stat_statements')";
+
     public override string Name => "pg_statement_stats";
 
     public override string TargetTable => "pg_statement_stats";
@@ -274,10 +339,20 @@ WHERE calls > 0";
     /// <summary>
     /// The view this reads is the extension's, and the module has to be preloaded before a
     /// <c>CREATE EXTENSION</c> for it does anything.
+    /// <para>#3818: <c>pg_stat_statements_info</c> is declared as a COMPANION the extension gains at 1.9, so
+    /// a 42P01 naming it is recorded as what it is - the extension present below 1.9, remedy
+    /// <c>ALTER EXTENSION pg_stat_statements UPDATE</c> - and not as the extension missing. The query reads
+    /// the companion in the select list and the base object in FROM, which is the order the declaration's
+    /// inference depends on (see <see cref="PgExtensionDependency.Companions"/>). Since #3818 the read is
+    /// gated on the relation's existence and cannot raise that 42P01 itself; the declaration stands for the
+    /// stored sentence's sake and for the next companion.</para>
     /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
-        new PgExtensionDependency("pg_stat_statements", PgExtensionInstallKind.SharedPreloadLibraries),
+        new PgExtensionDependency("pg_stat_statements", PgExtensionInstallKind.SharedPreloadLibraries)
+        {
+            Companions = new[] { new PgExtensionCompanionObject("pg_stat_statements_info", "1.9") },
+        },
     };
 
     public override CollectorQuery BuildQuery(CollectorContext context)

@@ -1161,14 +1161,14 @@ public sealed class McpPayloadContractCensusTests
     [
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
-        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
-            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite)"),
+        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
+            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
-        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
-            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window"),
+        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier)"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
@@ -1385,6 +1385,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
         ("DarlingMcpDataTools.cs", "initializer", 1),
+        ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
         ("McpQueryTools.cs", "envelope", 1),
@@ -1393,6 +1394,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Tool)[] WindowFloorTools =
     [
         ("DarlingMcpDataTools.cs", "get_query_store_top"),
+        ("DarlingMcpQueryStoreClutterTools.cs", "get_query_store_clutter"),
         ("DarlingMcpTrendTools.cs", "get_procedure_duration_trend"),
         ("DarlingMcpTrendTools.cs", "get_query_duration_trend"),
         ("DarlingMcpTrendTools.cs", "get_query_store_duration_trend"),
@@ -1611,7 +1613,7 @@ public sealed class McpPayloadContractCensusTests
 
         /* And by reflection on the SKU this project can load: the Darling five really do publish the clause in
            the attribute an MCP client reads, ahead of the discontinuities sentence they end with. */
-        var darling = new[] { typeof(DarlingMcpTrendTools), typeof(DarlingMcpDataTools) }
+        var darling = new[] { typeof(DarlingMcpTrendTools), typeof(DarlingMcpDataTools), typeof(DarlingMcpQueryStoreClutterTools) }
             .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Static))
             .Select(m => (Name: m.GetCustomAttribute<McpServerToolAttribute>()?.Name, Method: m))
             .Where(x => x.Name is not null)
