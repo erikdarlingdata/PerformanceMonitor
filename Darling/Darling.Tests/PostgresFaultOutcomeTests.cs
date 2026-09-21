@@ -34,6 +34,10 @@ public class PostgresFaultOutcomeTests
     /* A collector that does NOT opt into the lock-timeout yield, so 55P03 stays an error for it. */
     private const string PlainCollector = "pg_wait_stats";
 
+    /* The 42P01 the companion arm is written for, spelled once because #3830's pins assert whole
+       sentences and the message is the first clause of every one of them. */
+    private const string CompanionMissingMessage = "relation \"public.pg_stat_statements_info\" does not exist";
+
     /* The two origins whose sentences the pins in this class read. Constructed rather than classified,
        because these pins ask what a given origin RENDERS - what a given fault classifies AS is
        PostgresCancelOriginTests' question, and running the classifier here would make a rendering pin fail
@@ -360,16 +364,19 @@ public class PostgresFaultOutcomeTests
     /* ---- #3818: a missing COMPANION object is not the extension missing. ---- */
 
     /// <summary>
-    /// #3818, the case that issue is about. On 23 of 50 clusters in an upgraded fleet <c>pg_stat_statements</c>
-    /// was installed, preloaded and readable at catalog version 1.8, and the collector's read of
-    /// <c>pg_stat_statements_info</c> - created by the 1.9 update script - failed 42P01 every cycle for 25 hours.
+    /// #3818, the case that issue is about, and the sentence a fault carries when NOTHING has read the
+    /// catalog. On 23 of 50 clusters in one fleet the collector's read of <c>pg_stat_statements_info</c> -
+    /// created by the 1.9 update script - failed 42P01 every cycle for 25 hours with the base view readable.
     /// The stored sentence was #3240's: "the pg_stat_statements extension this collector reads is not
     /// installed on this target", with <c>CREATE EXTENSION</c> and a <c>shared_preload_libraries</c> restart as
-    /// the remedy. All of it false: the extension was there, the base view resolved (PostgreSQL resolves FROM
-    /// before the select list and names the FIRST object it cannot find), and the remedy was one statement
-    /// with no restart. The declared companion (<see cref="PgExtensionDependency.Companions"/>) is what lets
-    /// the mapping say the true thing: the object the server named, that the extension IS present, the two
-    /// states that produce this, <c>ALTER EXTENSION ... UPDATE</c> as the remedy - and never the three lies.
+    /// the remedy, which is what the mapping says when the missing object is the extension's BASE object. The
+    /// declared companion (<see cref="PgExtensionDependency.Companions"/>) is what lets the mapping tell a
+    /// companion apart from a base object and say the two states that produce it instead.
+    ///
+    /// <para>WHICH of those two states that fleet was in is a separate question #3818 did not have an answer
+    /// to and guessed at; #3830 read <c>pg_extension_availability</c> and it was the other one. So this pin
+    /// now asserts the no-answer sentence specifically - a hedge, correct only because nothing here supplies
+    /// a row - and the four pins below assert the sentences a row produces.</para>
     /// </summary>
     [Theory]
     [InlineData("relation \"public.pg_stat_statements_info\" does not exist")]
@@ -427,6 +434,246 @@ public class PostgresFaultOutcomeTests
         Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
         Assert.Contains("CREATE EXTENSION pg_stat_statements", explanation, StringComparison.Ordinal);
         Assert.DoesNotContain("the missing object is", explanation, StringComparison.Ordinal);
+    }
+
+    /* ---- #3830: the companion remedy is the state's, and the state ARRIVES. ---- */
+
+    /// <summary>
+    /// #3830, the defect. #3818's sentence had ONE remedy - <c>ALTER EXTENSION pg_stat_statements UPDATE</c> -
+    /// and reached it by inference: the base object resolved, so the extension is present, so it must be
+    /// present at an old version. The middle step is false on Aurora, where the base object that resolved is
+    /// <c>aurora_stat_statements()</c> - not the extension's, and needing none. The 23 clusters #3818 was
+    /// filed on are exactly that population: <c>pg_extension</c> has no row at all, the extension was never
+    /// created in any database, and they were being told to UPDATE it.
+    ///
+    /// <para>The remedy now follows the <c>pg_extension</c> row the connect-time read observed. This is the
+    /// Aurora arm of the no-row case: nothing to alter, the collector not waiting on anything, and the create
+    /// named as OPTIONAL with what it buys spelled out. Asserted as the whole sentence, because the defect
+    /// was a sentence that was individually-true-sounding and wrong as a whole.</para>
+    /// </summary>
+    [Fact]
+    public void NoPgExtensionRowOnAurora_SaysTheCreateIsOptional_AndNeverOffersAlterExtension()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(null, "appdb"),
+            isAurora: true);
+
+        Assert.Equal(CollectorRuntimePrecondition.DegradedStatus, status);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
+            + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
+            + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
+            + "update. This target is Aurora, where this collector's source is aurora_stat_statements() — "
+            + "which needs no extension — so the collector is not waiting on one: running CREATE EXTENSION "
+            + "pg_stat_statements in database 'appdb' is OPTIONAL, and what it buys is pg_stat_statements_info "
+            + "and nothing else. This is NOT a missing grant, and no GRANT will change it. Recorded as a "
+            + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
+            + "retries every cycle.",
+            explanation);
+
+        /* The lie this arm exists to delete: an update of an extension that is not there. Asserted as an
+           absence as well, because the whole sentence above would still pass a reader who skimmed it. */
+        Assert.DoesNotContain("is at catalog version", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("extension IS installed", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same no-row state on a VANILLA target is a different remedy, and the difference is declared rather
+    /// than guessed: <c>PgExtensionDependency.AuroraNativeAlternative</c> says what the collector reads on
+    /// Aurora instead, and without that alternative in play the create is not optional. The preload sentence
+    /// comes back here - and only here - because <c>pg_stat_statements</c> declares
+    /// <c>SharedPreloadLibraries</c> and a <c>CREATE EXTENSION</c> before the module is loaded does nothing.
+    /// </summary>
+    [Fact]
+    public void NoPgExtensionRowOnVanilla_AsksForCreateExtension_AndSaysThePreloadComesFirst()
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(null, "appdb"),
+            isAurora: false);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
+            + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
+            + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
+            + "update. The remedy is CREATE EXTENSION pg_stat_statements in database 'appdb', and "
+            + "pg_stat_statements has to be in shared_preload_libraries before that does anything — a "
+            + "parameter-group change and a restart. This is NOT a missing grant, and no GRANT will change it. "
+            + "Recorded as a non-fatal skip rather than an error so it does not fill the log every cycle; the "
+            + "collector retries every cycle.",
+            explanation);
+
+        /* The Aurora clause must not leak onto a target that is not Aurora - it would call a required
+           install optional. */
+        Assert.DoesNotContain("OPTIONAL", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("aurora_stat_statements()", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A row BELOW the companion's version is #3818's case, and it keeps #3818's remedy - now stated as a
+    /// fact read out of the catalog, with the version named, rather than as the first of two possibilities.
+    /// Still no <c>CREATE EXTENSION</c> and still no preload restart: the extension is there.
+    /// </summary>
+    [Fact]
+    public void AVersionBelowTheCompanions_NamesTheVersionAndKeepsAlterExtensionUpdate()
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From("1.8", "appdb"),
+            isAurora: true);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
+            + "catalog version 1.8, below the 1.9 whose update script creates pg_stat_statements_info — an "
+            + "engine upgraded in place or restored keeps the version the extension was created at until "
+            + "someone runs ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb' — a statement, "
+            + "with no restart and no shared_preload_libraries change; RDS and Aurora do not run it for you. "
+            + "This is NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather "
+            + "than an error so it does not fill the log every cycle; the collector retries every cycle.",
+            explanation);
+
+        Assert.DoesNotContain("CREATE EXTENSION", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("shared_preload_libraries before", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// At or above the companion's version the update is already done, so recommending it is the same
+    /// wrong-remedy defect in its third form. 1.10 is the case that decides whether the comparison is
+    /// numeric: an ordinal string compare ranks <c>1.10</c> BELOW <c>1.9</c> and would send a fleet two
+    /// releases ahead back to run an update it ran twice.
+    /// </summary>
+    [Theory]
+    [InlineData("1.9")]
+    [InlineData("1.10")]
+    public void AVersionAtOrAboveTheCompanions_SaysNoUpdateIsOwed(string extversion)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage),
+            "pg_statement_stats",
+            "appdb",
+            PgExtensionRowObservation.From(extversion, "appdb"),
+            isAurora: true);
+
+        Assert.Equal(
+            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
+            + $"catalog version {extversion}, which already carries pg_stat_statements_info (1.9 and later), so "
+            + "no ALTER EXTENSION pg_stat_statements UPDATE is owed and it would change nothing. The object is "
+            + "installed outside the schema the query text names (a relocatable extension lives in whatever "
+            + "schema it was created in; check pg_extension.extnamespace), or the error text above names a "
+            + "reason of its own. This is NOT a missing grant, and no GRANT will change it. Recorded as a "
+            + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
+            + "retries every cycle.",
+            explanation);
+    }
+
+    /// <summary>
+    /// Three ways to have no answer, all of which must produce #3818's two-possibilities sentence rather than
+    /// a confident one: nothing was read at all; the row was read in a DIFFERENT database than the fault came
+    /// from (<c>pg_extension</c> is per database, and a per-database collector faults in databases the
+    /// connect-time read never saw); and a version string nothing can rank, which <c>extversion</c> permits
+    /// because its format is the extension author's choice.
+    ///
+    /// <para>Asserted against the sentence #3824 shipped, verbatim, so "the fallback is the old sentence" is
+    /// a pinned fact rather than a comment.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("unobserved")]
+    [InlineData("other-database")]
+    [InlineData("unrankable")]
+    public void WithNoUsableRow_TheSentenceIsTheTwoPossibilitiesOne(string shape)
+    {
+        var row = shape switch
+        {
+            "unobserved" => PgExtensionRowObservation.NotObserved,
+            "other-database" => PgExtensionRowObservation.From(null, "otherdb"),
+            _ => PgExtensionRowObservation.From("release-candidate", "appdb"),
+        };
+
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42P01", CompanionMissingMessage), "pg_statement_stats", "appdb", row, isAurora: true);
+
+        Assert.Equal(
+            DarlingWorker.PostgresFaultOutcome(
+                Pg("42P01", CompanionMissingMessage), "pg_statement_stats", "appdb").Explanation,
+            explanation);
+
+        Assert.Contains("so either the extension is present at a catalog version below 1.9", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_extension has NO row", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_extension says it is at catalog version", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The verdict is what the collector's own declaration says it is. The companion version comes off
+    /// <c>PgStatementStatsCollector</c>'s declaration rather than a literal here, so a declaration that moves
+    /// to 1.11 moves these answers with it instead of leaving a test asserting the old boundary.
+    /// </summary>
+    [Fact]
+    public void TheVerdictComesFromTheDeclaredCompanionVersion_NotALiteralHere()
+    {
+        var companion = PgStatementStatsCollector.Instance.RequiredPgExtensions[0].Companions[0];
+
+        Assert.Equal(
+            PgExtensionCompanionVerdict.Undetermined,
+            companion.VerdictFrom(PgExtensionRowObservation.NotObserved));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.NoRow,
+            companion.VerdictFrom(PgExtensionRowObservation.From(null, "appdb")));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.BelowCompanionVersion,
+            companion.VerdictFrom(PgExtensionRowObservation.From("1.8", "appdb")));
+        Assert.Equal(
+            PgExtensionCompanionVerdict.AtOrAboveCompanionVersion,
+            companion.VerdictFrom(PgExtensionRowObservation.From(companion.SinceExtensionVersion, "appdb")));
+    }
+
+    /// <summary>
+    /// The wiring #3830 stands on, pinned in source because no pure test reaches it: the row is read by the
+    /// PostgreSQL detection query, carried on the runtime, and handed to the fault mapping at the one call
+    /// site. Every one of those is an expression a call site passes rather than any logic - a revert that
+    /// dropped the argument would compile, run, and quietly go back to one remedy for three states, with the
+    /// sentence pins above still green because they call the mapping directly.
+    ///
+    /// <para>The extension the detection query names is compared against the DECLARATION rather than spelled
+    /// twice: the query is a <c>const</c> and cannot interpolate, so this is what keeps the literal and the
+    /// collector from drifting apart.</para>
+    /// </summary>
+    [Fact]
+    public void ThePgExtensionRowIsRead_CarriedOnTheRuntime_AndPassedToTheMapping()
+    {
+        var connector = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingServerConnector.cs"));
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var declared = PgStatementStatsCollector.Instance.RequiredPgExtensions[0].ExtensionName;
+
+        /* Read on the statement that was already being made: a column on the detection query, not a probe
+           of its own. */
+        Assert.Contains("SELECT e.extversion", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
+        Assert.Contains(
+            $"WHERE e.extname = '{declared}'", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
+
+        /* Built from the ROW being present, never inferred from the value being null, and carried whole. */
+        Assert.Contains("PgExtensionRowObservation.From(", connector, StringComparison.Ordinal);
+        Assert.Contains("PgStatStatementsExtension = statementsExtension,", connector, StringComparison.Ordinal);
+
+        /* And handed to the mapping, beside the flavor, at the arm that renders the sentence. */
+        Assert.Contains("runtime.PgStatStatementsExtension,", worker, StringComparison.Ordinal);
+        Assert.Contains("runtime.Target.IsAurora)", worker, StringComparison.Ordinal);
     }
 
     /// <summary>

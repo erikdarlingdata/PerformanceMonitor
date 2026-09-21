@@ -266,8 +266,11 @@ WHERE calls > 0";
        guards both". That conflates the ENGINE major with the EXTENSION'S catalog version. The view is
        created by the extension's 1.8->1.9 update script, and a 14+ engine whose database was upgraded
        in place or restored keeps pg_stat_statements at 1.8 until ALTER EXTENSION ... UPDATE is run by
-       hand - RDS and Aurora do not run it - so on 23 of 50 clusters in one upgraded fleet the whole
-       collector failed 42P01 on this one column for 25 hours, its base view readable the entire time.
+       hand - RDS and Aurora do not run it. On 23 of 50 clusters in one fleet the whole collector failed
+       42P01 on this one column for 25 hours with its base view readable the entire time; the store-side
+       read of pg_extension_availability later showed those clusters had no pg_stat_statements row in any
+       database at all (#3830), which is the OTHER way the column can be absent and the one they were in.
+       Either way the gate is the same, which is the point of gating on the relation rather than a version.
        The hard-coded `public.` was the second failure mode: a relocatable extension lives wherever
        CREATE EXTENSION ... SCHEMA put it.
 
@@ -346,12 +349,20 @@ WHERE calls > 0";
     /// inference depends on (see <see cref="PgExtensionDependency.Companions"/>). Since #3818 the read is
     /// gated on the relation's existence and cannot raise that 42P01 itself; the declaration stands for the
     /// stored sentence's sake and for the next companion.</para>
+    /// <para>#3830: <c>AuroraNativeAlternative</c> is what makes the remedy correct on the population that
+    /// motivated #3818. Those 23 clusters have no <c>pg_extension</c> row for <c>pg_stat_statements</c> at
+    /// all - the extension was never created in any database - and this collector was productive on every
+    /// one of them the whole time, because on Aurora it reads <c>aurora_stat_statements()</c>, which needs
+    /// no extension. What their missing row costs is the companion and nothing else, so the remedy there is
+    /// an OPTIONAL <c>CREATE EXTENSION</c> rather than the <c>ALTER EXTENSION ... UPDATE</c> that has
+    /// nothing to update.</para>
     /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
         new PgExtensionDependency("pg_stat_statements", PgExtensionInstallKind.SharedPreloadLibraries)
         {
             Companions = new[] { new PgExtensionCompanionObject("pg_stat_statements_info", "1.9") },
+            AuroraNativeAlternative = "aurora_stat_statements()",
         },
     };
 
