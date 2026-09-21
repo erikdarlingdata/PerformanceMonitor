@@ -53,7 +53,9 @@ public sealed class PgTargetV3PlumbingTests
 
         /* The folds: each anomaly onto the regular fact that names what it deviates from. */
         Assert.Equal(new[] { PgTargetFactKeys.PlanRegression }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyPlanRegression]);
-        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
+        /* + the decomposition since the third between-waves batch of #3691: the cores fact is base 0, so the fold needed a
+           positive-base parent to land on (pinned with the reason in PgTargetBetweenWavesV3Tests). */
+        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores, PgTargetFactKeys.CpuDecomposition }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
         foreach (var anomaly in new[] { PgTargetFactKeys.AnomalyPlanRegression, PgTargetFactKeys.AnomalyCpuBurn })
         {
             Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(anomaly));
@@ -70,11 +72,14 @@ public sealed class PgTargetV3PlumbingTests
     }
 
     /// <summary>
-    /// Inert through every shared entry point: a fact under each UNFILLED v3 source scores base 0 with no amplifier,
-    /// composes no advice (static or through <c>FactAdvice</c>), opens no edge, has no baseline, and still has next
-    /// reads (the McpSurface census requires a row the day a key is declared). The exit criterion —
-    /// <c>analyze_server</c> on the gated e2e returns the SAME payload — follows: nothing here can emit, score or
-    /// compose. Lane 27 filled the plan family's regression, sensitivity and anomaly arms: a BARE fact under those
+    /// What this test still pins, now that every v3 family is filled (renamed by the third between-waves batch, #3800:
+    /// it was "…AreInertThroughEverySharedEntryPoint_UntilTheirLanesLand", a name whose inert set had emptied). Three
+    /// contracts remain: a BARE fact under each filled key self-gates to base 0 and composes the family's own block
+    /// (never null), so a key can be declared without emitting; the plan / kernel / memory families are served by the
+    /// PostgreSQL provider and graph only (the SQL Server provider knows none of their metrics; no anomaly has an
+    /// edge); and the memory composition check is routed BY NAME ahead of the <c>CONFIG_PG_</c> prefix arms in both
+    /// root dispatchers. The inert loop that stood here is retired (see the comment in the body). Lane 27 filled the
+    /// plan family's regression, sensitivity and anomaly arms: a BARE fact under those
     /// keys (no graded metadata) still scores 0 — the family self-gates on its own keys — and its advice, edges and
     /// baseline are pinned in <c>PgTargetPlanTests</c>; lane 30 filled <c>PG_SEQ_SCAN_ADVISORY</c> in the same family
     /// (pinned in <c>PgTargetSeqScanTests</c>), so it is in the filled loop too — a bare fact carries no pair and grades 0.
@@ -83,7 +88,7 @@ public sealed class PgTargetV3PlumbingTests
     /// filled-family check below asserts the filled shape, not inertness.
     /// </summary>
     [Fact]
-    public void TheV3Families_AreInertThroughEverySharedEntryPoint_UntilTheirLanesLand()
+    public void TheV3Families_AreFilled_SelfGateOnBareFacts_AndRouteTheMemoryCheckByNameAheadOfThePrefixArms()
     {
         /* Lane 27's and lane 30's filled keys: a bare fact scores 0 (self-gated) and composes the family's static block, not null. */
         var filled = new[] { PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.SeqScanAdvisory }

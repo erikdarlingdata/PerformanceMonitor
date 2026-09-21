@@ -174,9 +174,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
         /* wave 3 (#3691 between waves): the blocking anomaly folds onto the chain fact, declared with the stubs. */
         Assert.Equal(new[] { PgTargetFactKeys.BlockingChain }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBlocking]);
         /* v3 (#3691 plumbing): the plan-regression anomaly folds onto the regular fact that names the plan flip; the
-           CPU-burn anomaly onto the cores-busy fact — both declared with the stubs. */
+           CPU-burn anomaly onto the cores-busy fact — both declared with the stubs — and, since the third between-waves
+           batch, onto the decomposition too, the family's positive-base parent (the cores fact is base 0 by design). */
         Assert.Equal(new[] { PgTargetFactKeys.PlanRegression }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyPlanRegression]);
-        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
+        Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores, PgTargetFactKeys.CpuDecomposition }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
         /* lane 38 (#3691): the growth-rate anomaly folds onto the trend fact that names the database. */
         Assert.Equal(new[] { PgTargetFactKeys.DatabaseGrowth }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyDatabaseGrowth]);
         /* The wait profile is resolved per story, never statically. */

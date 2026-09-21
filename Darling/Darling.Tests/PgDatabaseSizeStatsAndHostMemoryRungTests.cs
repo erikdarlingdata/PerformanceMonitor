@@ -281,14 +281,18 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
 
     /// <summary>
     /// The exit criterion's last clause, pinned so a consumer lane has to move this deliberately: no product read
-    /// names the new table, and the six memory columns are read by EXACTLY the consumer that was promised. The CPU
-    /// reader's three SQL constants still select what they selected before V136 (the MCP tool does not project the
-    /// columns — <c>get_analysis_facts source=pg_memory</c> is where the figures surface), and no viewer reader names
-    /// either. <b>Re-shaped deliberately for the memory half by lane 32 (#3691 §4b) into a positive census:</b> the ONLY
-    /// reader of the six columns is <c>PgTargetFactCollector.Memory.cs</c> — its host read MUST name all six — and
-    /// <c>PgTargetAdvice.Memory.cs</c> may name them in PROSE (the sentences that tell the operator what was read; a
-    /// string literal in an advice block is not a read). Every other file still may not name them: a second reader
-    /// fails here until it is named deliberately. <b>The size-table half was re-shaped the same way by lane 38 (#3691,
+    /// names the new table, and the six memory columns are read by EXACTLY the consumers that were promised. The CPU
+    /// reader's two ALERT reads still select what they selected before V136, and no viewer reader names either.
+    /// <b>Re-shaped deliberately for the memory half by lane 32 (#3691 §4b) into a positive census, and widened to a
+    /// TWO-MEMBER roster by the third between-waves batch (#3809):</b> the readers of the six columns are
+    /// <c>PgTargetFactCollector.Memory.cs</c> (its host read MUST name all six — the facts) and
+    /// <c>DarlingPgCpuUtilizationReader.HistorySql</c> (MUST name all six — the served read behind
+    /// <c>get_pg_cpu_utilization</c>, which the memory facts' tool rows point an operator at; until this batch that
+    /// tool carried no memory, so the rows sent them to a read that could not answer). <c>DarlingMcpPgCpuUtilizationTools.cs</c>
+    /// names them as the payload keys of that projection, and <c>PgTargetAdvice.Memory.cs</c> in PROSE (a string
+    /// literal in an advice block is not a read). Every other file still may not name them: a third reader fails
+    /// here until it is named deliberately.
+    /// <b>The size-table half was re-shaped the same way by lane 38 (#3691,
     /// object growth):</b> the ONLY analysis readers of <c>pg_database_size_stats</c> are the growth family's three reads —
     /// the trend read in <c>PgTargetFactCollector.Growth.cs</c>, the baseline arm in <c>PgTargetBaselineProvider.Growth.cs</c>
     /// and the window read in <c>PgTargetAnomalyDetector.Growth.cs</c> — each of which MUST name the table; the
@@ -312,7 +316,14 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
         Assert.Contains("FROM " + SizeTable, PerformanceMonitor.Darling.Analysis.PgTargetBaselineProvider.GetPgTargetBaselineQuery(PerformanceMonitor.Analysis.Baselines.MetricNames.PgDatabaseGrowthBytesPerDay)!, StringComparison.Ordinal);
         Assert.Contains("FROM " + SizeTable, PerformanceMonitor.Darling.Analysis.PgTargetAnomalyDetector.DatabaseGrowthWindowSql, StringComparison.Ordinal);
 
-        foreach (var sql in new[] { DarlingPgCpuUtilizationReader.LatestCpuSql, DarlingPgCpuUtilizationReader.SamplesSinceSql, DarlingPgCpuUtilizationReader.HistorySql })
+        /* The second promised consumer (#3809): the served read names every one of the six; the two alert-gate
+           reads name none — the High CPU gate is a sub-second alert-path read with no memory question. */
+        foreach (var column in MemoryColumns)
+        {
+            Assert.Contains(column, DarlingPgCpuUtilizationReader.HistorySql, StringComparison.Ordinal);
+        }
+
+        foreach (var sql in new[] { DarlingPgCpuUtilizationReader.LatestCpuSql, DarlingPgCpuUtilizationReader.SamplesSinceSql })
         {
             foreach (var column in MemoryColumns)
             {
@@ -357,10 +368,13 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
                 {
                     Assert.False(text.Contains(SizeTable, StringComparison.Ordinal), $"{file} names {SizeTable}: a second analysis reader of the size table landed — the only readers are the growth family's three (PgTargetFactCollector / PgTargetBaselineProvider / PgTargetAnomalyDetector .Growth.cs); name it here deliberately, or read the fact through get_analysis_facts instead. A SERVED read (an MCP tool) lowers ServerPageTabsTests.KnownUnreadable; a VIEWER read drops the ViewerCollectorCoverageTests allow-list entry");
                 }
-                if (name is "PgTargetFactCollector.Memory.cs" or "PgTargetAdvice.Memory.cs")
+                if (name is "PgTargetFactCollector.Memory.cs" or "PgTargetAdvice.Memory.cs"
+                    or "DarlingPgCpuUtilizationReader.cs" or "DarlingMcpPgCpuUtilizationTools.cs")
                 {
-                    /* Lane 32: the collector's host read is THE reader of the six columns (asserted positively above);
-                       the advice names them in prose — sentences, not a read. No other file is on this list. */
+                    /* Lane 32: the collector's host read is a reader of the six columns (asserted positively above);
+                       the advice names them in prose — sentences, not a read. The third between-waves batch (#3809):
+                       the CPU reader's served read is the second reader (asserted positively above) and the CPU tool
+                       names them as that projection's payload keys. No other file is on this list. */
                     continue;
                 }
 

@@ -634,9 +634,18 @@ public sealed class PgTargetReplicationTests
             var anomalies = await new PgTargetAnomalyDetector(postgres, baselines).DetectAnomaliesAsync(context);
             Assert.DoesNotContain(anomalies, a => a.Key == PgTargetFactKeys.AnomalyReplicationLag);
 
-            /* ── THE EXIT CRITERION: the real analyze_server, two stories. */
+            /* ── THE EXIT CRITERION: the real analyze_server, two stories.
+               Anchored on windowEnd through as_of (the third between-waves batch of #3691, the flake on the #3691 face
+               line): without it the tool's window ended at ITS wall clock, so its start sat one minute plus the
+               seconds elapsed since windowEnd was computed AFTER windowStart — and whenever the run crossed a minute
+               boundary between the two clocks, the first replication sample (windowStart + 2 min) fell outside the
+               tool's window, the lag fact read 47 samples, and the "48 samples of this standby" sentence below went
+               red on a re-run that then passed. With as_of = windowEnd the tool's window IS [windowStart, windowEnd],
+               the same rows the collector context above read, and every planted timestamp is inside it by
+               construction; the slot's inactive_since (windowEnd − 30 h) reads exactly 30 hours from the same end. */
             var service = new DarlingAnalysisService(postgres);
-            var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
+            var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            var analysis = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
             using (var doc = JsonDocument.Parse(analysis))
             {
                 var root = doc.RootElement;
@@ -675,7 +684,7 @@ public sealed class PgTargetReplicationTests
             }
 
             /* The facts read shows the family under its source, with the lineage flag on the drift-graded fact only. */
-            var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, PgTargetSources.ReplicationSource);
+            var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, PgTargetSources.ReplicationSource, as_of: asOf);
             using (var doc = JsonDocument.Parse(factsJson))
             {
                 var shown = doc.RootElement.GetProperty("facts").EnumerateArray().ToList();

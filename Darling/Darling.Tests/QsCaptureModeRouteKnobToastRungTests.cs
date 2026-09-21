@@ -31,8 +31,10 @@ namespace Darling.Tests;
 /// tri-state with a CHECK; (c) <c>toast_bytes</c> and <c>toast_live_bytes</c> on <c>collect.store_metrics</c>,
 /// the first written by the dimension-row sweep and the second written NULL until the maintainer picks the
 /// instrument; (d) <c>checkpoint_write_ms</c>, <c>checkpoint_sync_ms</c> and <c>checkpoints_requested</c> on
-/// <c>collect.store_metrics</c>, the checkpointer row's three deltas, written by nothing until #3783's code half
-/// lands the row. Eight nullable columns, no DEFAULT, no backfill, no new table, no new hypertable, one
+/// <c>collect.store_metrics</c>, the checkpointer row's three counters — written by nothing at the rung, and since
+/// #3783's code half written RAW (the server's cumulative figures) by <c>StoreSelfMetrics.CheckpointerInsertSql</c>
+/// and differenced by <c>DarlingStoreMetricsReader.CheckpointerReading</c>, the reasoning on the writer. Eight
+/// nullable columns, no DEFAULT, no backfill, no new table, no new hypertable, one
 /// passthrough refreshed. The shape is <see cref="PerfmonCounterTypeRungTests"/>'s (V132, a column on a shared
 /// collector's table plus its view) three times over, with <see cref="TimeHonestyRungTests"/>' (V134) mixed
 /// view / no-view arms.
@@ -46,7 +48,32 @@ namespace Darling.Tests;
 /// <para>The collector's gate and reader (a 2016 body has ten ordinals and never names the 2017+ column; the
 /// row stores NULL there) are <c>Lite.Tests.QueryStoreHealthCollectorDefinitionTests</c>; the DuckDB twin's
 /// climb is <c>Lite.Tests.QsCaptureModeRungTests</c>. This file is the RUNG: the ladder, the DDL, the probe,
-/// the two writers, the "nothing reads them yet" exit criterion, and the live round trip.</para>
+/// the two writers, and the live round trip.</para>
+///
+/// <para>It no longer carries the exit criterion's last clause. The rung merged (f2e1816f8) with every one of the
+/// eight columns read by nothing, and <c>NoReaderNamesAnyOfTheEightColumnsYet</c> scanned the five product
+/// projects, comments stripped, for the column names so each consumer lane would have to release the clause
+/// deliberately. It was released the same hour it was pinned, and from four directions at once: #3797's clutter
+/// reader (#3814, forty minutes behind the rung) named the <c>query_capture_mode</c> payload KEY — published
+/// <c>null</c> beside <c>capture_mode_known: false</c>, a pointer and not a read — and the census could not tell
+/// the two apart (dev red from 20215a40e, the first hit <c>DarlingMcpInstructions.cs</c>); #3821 exempted that
+/// pair by name and bought one merge; #3822 fenced the clutter view's reader and judgment files; #3796's code
+/// half (#3823) landed its readers, renamed the fact to six columns and inverted arm (a) to the positive form —
+/// three PRs editing one method body inside an hour, each rebasing over the last, with #3712 (reading and
+/// writing <c>analysis_uncorroborated_route</c> through <c>DarlingAlertSettings</c>, the MCP pair and the
+/// Settings window) and #3783 (reading the TOAST and checkpointer columns through
+/// <c>DarlingStoreMetricsReader</c>) next in the same queue. A "read by nothing" pin cannot outlive the readers
+/// it was waiting for, so it was retired whole rather than exempted, renamed or inverted one consumer at a
+/// time. The POSITIVE ownership pins — which reader names which column, and what it publishes — live in the
+/// owning lanes' tests, where they already were and are stronger than a name scan: (a)'s reader ordinals, row
+/// type, description, web catalogue and both grids in <c>DarlingMcpConfigHistoryToolsSurfaceAndSqlTests</c>
+/// and <c>Lite.Tests.QueryStoreHealthCaptureModePublishTests</c>; the clutter view's null placeholder in
+/// <c>QueryStoreClutterTests</c> and <c>QueryStoreClutterLivePostgresTests</c>; (b), (c) and (d) in #3712's and
+/// #3783's tests when they land. This rung test owns the DDL shape, the ladder, the probe, the writers and the
+/// Lite twin, not the consumer roster. One arm of that clause does survive, in
+/// <see cref="TheDimensionSweepWritesToastBytes_AndNullLiveBytes_AndNoOtherKindTouchesEither"/>: (d) has no
+/// WRITER in this rung, so the sweep names none of the three checkpointer columns — a writer pin on one file,
+/// owned by exactly one lane (#3783), which retires it when it lands the row.</para>
 /// </summary>
 public sealed class QsCaptureModeRouteKnobToastRungTests
 {
@@ -263,9 +290,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
     /// <summary>
     /// (c)'s writer: the dimension rows — and ONLY the dimension rows — fill the two columns; <c>toast_bytes</c>
     /// is the TOAST relation's main fork through <c>NULLIF(reltoastrelid, 0)</c> (NULL, never an error, for a
-    /// table without one), and <c>toast_live_bytes</c> is the typed literal NULL until the maintainer picks the
-    /// instrument. Every other kind's INSERT leaves both columns alone, so they read NULL there by the table's
-    /// own per-kind convention.
+    /// table without one), and <c>toast_live_bytes</c> is the typed literal NULL in the INSERT itself — #3783's
+    /// code half fills it from a SEPARATE, extension-fenced UPDATE (<c>StoreSelfMetrics.ToastLiveBytesUpdateSql</c>),
+    /// so this INSERT still names no extension. Every other kind's INSERT leaves both columns alone, so they
+    /// read NULL there by the table's own per-kind convention; (d)'s writer touches only its own three.
     /// </summary>
     [Fact]
     public void TheDimensionSweepWritesToastBytes_AndNullLiveBytes_AndNoOtherKindTouchesEither()
@@ -302,17 +330,28 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             }
         }
 
-        /* (d) has NO writer in this rung: the checkpointer row is #3783's code half (a delta needs the previous
-           run's cumulative, which is state, not a line beside the TOAST read). The sweep names none of the three
-           and knows no 'checkpointer' kind yet; the lane that lands the row retires this arm deliberately. */
-        var sweep = WithoutComments(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs"));
-        foreach (var column in CheckpointerColumns)
+        /* (d)'s writer landed with #3783's code half and touches ONLY its three columns; the two TOAST columns
+           stay the dimension arm's alone. The "no writer yet" arm that stood here was retired deliberately
+           when the row landed, as the rung asked; StoreToastAndCheckpointerTests pins the writer's shape. */
+        foreach (var checkpointerSql in new[] { StoreSelfMetrics.CheckpointerInsertSql, StoreSelfMetrics.CheckpointerBgwriterInsertSql })
         {
-            Assert.DoesNotContain(column, sweep, StringComparison.Ordinal);
+            foreach (var column in ToastColumns)
+            {
+                Assert.DoesNotContain(column, checkpointerSql, StringComparison.Ordinal);
+            }
+
+            foreach (var column in CheckpointerColumns)
+            {
+                Assert.Contains(column, checkpointerSql, StringComparison.Ordinal);
+            }
         }
 
-        Assert.DoesNotContain("'checkpointer'", sweep, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_stat_checkpointer", sweep, StringComparison.Ordinal);
+        /* And the live-bytes UPDATE touches only toast_live_bytes, keyed on the dimension kind. */
+        Assert.Contains("SET    toast_live_bytes", StoreSelfMetrics.ToastLiveBytesUpdateSql, StringComparison.Ordinal);
+        foreach (var column in CheckpointerColumns)
+        {
+            Assert.DoesNotContain(column, StoreSelfMetrics.ToastLiveBytesUpdateSql, StringComparison.Ordinal);
+        }
 
         /* The sweep doc carries the measurement that decided NULL, in the words the next reader will look for. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
@@ -419,138 +458,6 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         {
             Assert.DoesNotContain(table, viewer[thisArm..previousArm], StringComparison.Ordinal);
         }
-    }
-
-    /* ---- nothing reads them yet -------------------------------------------------------------------- */
-
-    /// <summary>
-    /// The exit criterion's last clause, pinned so each consumer lane has to move this deliberately: no product
-    /// read names any of the SIX columns still waiting for a consumer. The consumers are named so the lane that
-    /// lands one knows which arm to retire: the route knob's code half — <c>DarlingAlertSettings</c>,
-    /// <c>StoreConfigProvider</c>, the MCP pair, the Settings window — for (b); <c>get_store_metrics</c> /
-    /// <c>DarlingStoreMetricsReader</c> for (c) and (d). Block and line comments are stripped before the scan; SQL
-    /// string constants are code and stay in.
-    ///
-    /// <para><b>Arm (a) is RETIRED, and inverted (#3796's code half).</b> The two capture modes are read: the
-    /// <c>get_query_store_health</c> reader and tool, the web catalogue row, and the Viewer's Query Store grid read
-    /// name both columns, and this pin now asserts that they DO — the positive form, so the consumer cannot quietly
-    /// disappear while the rung doc still says it exists. The Query Store clutter view (#3797) is the next consumer
-    /// and is not required here; when it lands it simply joins the population that names them.</para>
-    ///
-    /// <para>(d)'s three names are scanned on the store-metrics surface only, not repo-wide: <c>checkpoints_requested</c>
-    /// is a <c>collect.pg_write_stats</c> column (V88, a PostgreSQL TARGET's checkpointer) read by the write-stats
-    /// family, and <c>checkpoint_write_ms</c> / <c>checkpoint_sync_ms</c> are the PG-target advice's derived names
-    /// for the same target-side figures — homonyms of the store's own, on purpose, so the two checkpointers read
-    /// alike; none of those files reads <c>store_metrics</c>.</para>
-    /// </summary>
-    [Fact]
-    public void NoReaderNamesAnyOfTheSixUnconsumedColumnsYet_AndTheCaptureModeConsumersNameBoth()
-    {
-        /* (a) retired and inverted: the #3796 consumers name both capture modes, in code, not comments. */
-        foreach (var consumer in new[]
-        {
-            new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingConfigHistoryReader.cs" },
-            new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpConfigHistoryTools.cs" },
-            new[] { "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Config.cs" },
-        })
-        {
-            var text = WithoutComments(RepoFile.ReadRepoFile(consumer));
-            foreach (var column in CaptureModeColumns)
-            {
-                Assert.True(text.Contains(column, StringComparison.Ordinal),
-                    $"{string.Join('/', consumer)} no longer names {column}: the #3796 consumer this pin's (a) arm was retired for is gone — either restore the read or re-arm (a) deliberately.");
-            }
-        }
-
-        var names = new[] { RouteColumn }.Concat(ToastColumns).ToArray();
-
-        foreach (var project in new[]
-        {
-            RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Analysis"),
-            RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"),
-            RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Storage"),
-            RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Viewer"),
-            RepoFile.PathTo("PerformanceMonitor.Analysis"),
-        })
-        {
-            foreach (var file in System.IO.Directory.EnumerateFiles(project, "*.cs", System.IO.SearchOption.AllDirectories)
-                .Where(f => !f.Contains($"{System.IO.Path.DirectorySeparatorChar}obj{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                         && !f.Contains($"{System.IO.Path.DirectorySeparatorChar}bin{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal)))
-            {
-                var text = WithoutComments(System.IO.File.ReadAllText(file));
-                var name = System.IO.Path.GetFileName(file);
-                if (name is "PgMigrations.cs" or "ViewerDataService.cs" or "StoreSelfMetrics.cs")
-                {
-                    /* The rung, its probe line and the (c) WRITER name them by construction. */
-                    continue;
-                }
-
-                /* #3821 excluded DarlingMcpQueryStoreClutterTools.cs and DarlingMcpInstructions.cs here as POINTERS to
-                   the capture-mode key; with arm (a) retired the capture modes are no longer in `names`, so that
-                   exclusion would only have loosened the scan for (b) and (c) and it is gone. The clutter tool's
-                   pointer state is still held positively below. */
-
-                foreach (var column in names)
-                {
-                    if (column == "toast_bytes" && name is "DarlingPgTableBloatReader.cs" or "DarlingMcpPgTableBloatTools.cs")
-                    {
-                        /* A HOMONYM, not a consumer: collect.pg_table_bloat_stats (V85) has carried its own
-                           toast_bytes — a PostgreSQL TARGET's table, read by get_pg_table_bloat — since long
-                           before this rung. Those two files read that column, not store_metrics'. */
-                        continue;
-                    }
-
-                    Assert.False(text.Contains(column, StringComparison.Ordinal),
-                        $"{file} names {column}: a consumer landed — retire this pin's arm for that column deliberately (and, for (b), the rung doc's 'written by nothing and read by nothing' clause).");
-                }
-            }
-        }
-
-        /* The clutter tool (#3797) is still a POINTER: it publishes the key null with capture_mode_known false beside
-           it, and no SQL of its selects either capture mode from the health table. #3796's code half wired
-           get_query_store_health and the grids, NOT this tool (a separate lane owned it in the same wave); the
-           follow-up that flips capture_mode_known reads the column here and retires THIS block deliberately. */
-        var clutterPath = System.IO.Path.Combine(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"), "Mcp", "DarlingMcpQueryStoreClutterTools.cs");
-        if (System.IO.File.Exists(clutterPath))
-        {
-            var clutter = WithoutComments(System.IO.File.ReadAllText(clutterPath));
-            Assert.Contains("query_capture_mode = (string?)null", clutter, StringComparison.Ordinal);
-            Assert.Contains("capture_mode_known = false", clutter, StringComparison.Ordinal);
-            Assert.DoesNotContain("wait_stats_capture_mode", clutter, StringComparison.Ordinal);
-            foreach (var read in System.Text.RegularExpressions.Regex.Matches(clutter, @"SELECT[\s\S]*?FROM\s+(?:collect\.)?v?_?query_store_health").Select(m => m.Value))
-            {
-                Assert.DoesNotContain("query_capture_mode", read, StringComparison.Ordinal);
-            }
-        }
-
-        /* The tool file carries no SQL: the clutter view's statements live in DarlingQueryStoreClutterReader (ConfigSql
-           selects the health row's columns by name) and its judgment in QueryStoreClutter. Those two are the files a
-           READ would land in, so they are held to naming NEITHER capture-mode column — the fence the SELECT scan above
-           cannot provide from a file without a SELECT in it (#3797 lane 6, after #3821). */
-        foreach (var file in new[] { "DarlingQueryStoreClutterReader.cs", "QueryStoreClutter.cs" })
-        {
-            var path = System.IO.Path.Combine(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service"), "Mcp", file);
-            if (!System.IO.File.Exists(path))
-            {
-                continue;
-            }
-
-            var text = WithoutComments(System.IO.File.ReadAllText(path));
-            foreach (var column in CaptureModeColumns)
-            {
-                Assert.False(text.Contains(column, StringComparison.Ordinal),
-                    $"{file} names {column}: the clutter view's READ half now reaches the column — retire the (a) arm and the tool's null placeholder deliberately.");
-            }
-        }
-
-        /* And the store-metrics MCP reader in particular publishes none of the five store_metrics columns yet. */
-        var reader = WithoutComments(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs"));
-        foreach (var column in ToastColumns.Concat(CheckpointerColumns))
-        {
-            Assert.DoesNotContain(column, reader, StringComparison.Ordinal);
-        }
-
-        Assert.DoesNotContain("'checkpointer'", reader, StringComparison.Ordinal);
     }
 
     private static string WithoutComments(string source)

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -42,11 +43,23 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <see cref="ContinuousAggregateStateSql"/> reads the catalog facts about each aggregate the series does
 /// not carry (compression enabled, which policies exist), and <see cref="LargestUnenumeratedSql"/> names
 /// the biggest relations inside the <c>other</c> row so that number is something a reader can act on.</para>
+///
+/// <para>And, since #3783, two readings that are about the store's own physical health rather than its
+/// size: <see cref="ToastFacts"/> turns a dimension row's <c>toast_bytes</c> / <c>toast_live_bytes</c> pair
+/// (V137) into a utilisation percentage and a sentence that says what it means — or why it cannot be
+/// computed — and <see cref="CheckpointerReading"/> turns the two newest <c>checkpointer</c> rows'
+/// CUMULATIVE counters into the interval's write-phase and sync-phase milliseconds and requested-checkpoint
+/// count, the differences the sweep deliberately does not store (the reasoning is on
+/// <see cref="StoreSelfMetrics.CheckpointerInsertSql"/>). Both are pure over rows already in hand and both
+/// are what the self-alert evaluator judges, so the tool and the alert cannot disagree about a number.</para>
 /// </summary>
 internal static class DarlingStoreMetricsReader
 {
     /// <summary>Latest snapshot per object — DISTINCT ON takes each (kind, name)'s newest row. No
-    /// parameters: the newest row per object is wanted regardless of window.</summary>
+    /// parameters: the newest row per object is wanted regardless of window. The two trailing TOAST columns
+    /// (V137, #3783) are non-NULL on <c>dimension</c> rows only; the checkpointer's three are deliberately
+    /// NOT projected here — they are cumulative counters that mean nothing on one row, and
+    /// <see cref="CheckpointerPairSql"/> reads the two rows a difference needs.</summary>
     public const string StoreMetricsLatestSql = @"
 SELECT DISTINCT ON (object_kind, object_name)
     object_kind,
@@ -61,7 +74,9 @@ SELECT DISTINCT ON (object_kind, object_name)
     last_run_duration_ms,
     schedule_interval_ms,
     total_runs,
-    total_failures
+    total_failures,
+    toast_bytes,
+    toast_live_bytes
 FROM collect.store_metrics
 ORDER BY object_kind, object_name, metric_time DESC";
 
@@ -85,7 +100,9 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     last_run_duration_ms,
     schedule_interval_ms,
     total_runs,
-    total_failures
+    total_failures,
+    toast_bytes,
+    toast_live_bytes
 FROM collect.store_metrics
 WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
@@ -1082,7 +1099,9 @@ LIMIT $1";
     /// <summary>One object's newest self-metrics row. The four job fields (#2136, V56) are non-null only
     /// on <c>background_job</c> rows and, since #3574, on the <c>job_history</c> row under the column
     /// mapping the <see cref="StoreSelfMetrics"/> class summary states — every other kind leaves them NULL,
-    /// as the sweep writes them.</summary>
+    /// as the sweep writes them. The two TOAST fields (V137, #3783) are non-null on <c>dimension</c> rows
+    /// only, and <c>ToastLiveBytes</c> is NULL even there unless the store carries <c>pg_freespacemap</c>
+    /// (<see cref="ToastFacts"/> says so in words).</summary>
     public sealed record StoreMetricRow(
         string ObjectKind,
         string ObjectName,
@@ -1096,9 +1115,11 @@ LIMIT $1";
         long? LastRunDurationMs = null,
         long? ScheduleIntervalMs = null,
         long? TotalRuns = null,
-        long? TotalFailures = null);
+        long? TotalFailures = null,
+        long? ToastBytes = null,
+        long? ToastLiveBytes = null);
 
-    /// <summary>One object's settled point for one day (the day's last sample). Job fields as on
+    /// <summary>One object's settled point for one day (the day's last sample). Job and TOAST fields as on
     /// <see cref="StoreMetricRow"/>.</summary>
     public sealed record StoreMetricDailyPoint(
         string ObjectKind,
@@ -1113,7 +1134,332 @@ LIMIT $1";
         long? LastRunDurationMs = null,
         long? ScheduleIntervalMs = null,
         long? TotalRuns = null,
-        long? TotalFailures = null);
+        long? TotalFailures = null,
+        long? ToastBytes = null,
+        long? ToastLiveBytes = null);
+
+    /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
+
+    /// <summary>
+    /// What a dimension row's TOAST pair means (#3783), computed once for the tool's <c>objects[]</c> and
+    /// <c>daily[]</c> and for the self-alert, so the percentage an operator reads and the one the alert judged
+    /// are the same arithmetic. <c>null</c> for every kind but <c>dimension</c>: the hypertable, aggregate,
+    /// table and catch-all rows carry no TOAST columns (the sweep leaves them NULL by the per-kind convention),
+    /// and publishing a note on them would be prose about a measurement nobody took.
+    ///
+    /// <para><b>The quotient.</b> <c>toast_live_bytes / toast_bytes × 100</c>, one decimal — a ratio of two
+    /// stored byte counts from the same sweep, not a rate, so no interval is involved and no per-second key
+    /// is published. NULL when either byte count is NULL (unmeasured is unmeasured) and when the file is
+    /// empty (a percentage of zero bytes is not a number). Never computed from <c>total_bytes</c> or from a
+    /// tuple share: the rung's measurement showed the tuple-share proxy reading 100 % on exactly the shape
+    /// this exists to catch.</para>
+    ///
+    /// <para><b>The note says one of four things</b>, in words, so a reader never has to infer why a field is
+    /// null: the row predates the column; the file is real but live bytes are not measured and what would
+    /// measure them; the file is under-utilised past the bars the self-alert judges, with the reclaim path
+    /// and its cost; or the file's utilisation, plainly. The bars are the evaluator's constants
+    /// (<see cref="DarlingSelfAlertEvaluator.ToastSlackUtilisationBarPercent"/>,
+    /// <see cref="DarlingSelfAlertEvaluator.ToastSlackFileFloorBytes"/>), read from one place so the sentence
+    /// and the alert cannot name different lines.</para>
+    /// </summary>
+    /// <param name="ToastBytes">The TOAST relation's main-fork size as the sweep recorded it.</param>
+    /// <param name="ToastLiveBytes">Bytes of that file holding live data, from the free-space map; NULL where
+    /// the store has no <c>pg_freespacemap</c>.</param>
+    /// <param name="UtilisationPercent">The quotient above, or NULL.</param>
+    /// <param name="Note">The sentence.</param>
+    public sealed record ToastFacts(
+        long? ToastBytes,
+        long? ToastLiveBytes,
+        double? UtilisationPercent,
+        string Note)
+    {
+        /// <summary>The facts for one latest row, or null for a kind that carries none.</summary>
+        public static ToastFacts? For(StoreMetricRow row)
+        {
+            if (row is null)
+            {
+                throw new ArgumentNullException(nameof(row));
+            }
+
+            return row.ObjectKind == StoreSelfMetrics.DimensionObjectKind
+                ? Compute(row.ObjectName, row.ToastBytes, row.ToastLiveBytes)
+                : null;
+        }
+
+        /// <summary>The facts for one daily point, on the same terms.</summary>
+        public static ToastFacts? For(StoreMetricDailyPoint point)
+        {
+            if (point is null)
+            {
+                throw new ArgumentNullException(nameof(point));
+            }
+
+            return point.ObjectKind == StoreSelfMetrics.DimensionObjectKind
+                ? Compute(point.ObjectName, point.ToastBytes, point.ToastLiveBytes)
+                : null;
+        }
+
+        /// <summary>The quotient, exactly as stated on the record: NULL when either side is NULL or the file
+        /// is empty; otherwise live over file, one decimal.</summary>
+        public static double? UtilisationPercentOf(long? toastBytes, long? toastLiveBytes)
+        {
+            if (toastBytes is not long file || toastLiveBytes is not long live || file <= 0)
+            {
+                return null;
+            }
+
+            return Math.Round(100.0 * live / file, 1);
+        }
+
+        /// <summary>
+        /// Whether the row is the finding the self-alert fires on (#3783): a measured utilisation under the
+        /// bar on a file over the floor. False — never "unknown" — when the utilisation is NULL: an
+        /// unmeasured file is not a finding, and that is what keeps the alert arm DORMANT on a store without
+        /// the extension.
+        /// </summary>
+        public static bool IsSlack(long? toastBytes, double? utilisationPercent) =>
+            toastBytes is long file
+            && utilisationPercent is double pct
+            && file > DarlingSelfAlertEvaluator.ToastSlackFileFloorBytes
+            && pct < DarlingSelfAlertEvaluator.ToastSlackUtilisationBarPercent;
+
+        internal static ToastFacts Compute(string dimension, long? toastBytes, long? toastLiveBytes)
+        {
+            var pct = UtilisationPercentOf(toastBytes, toastLiveBytes);
+            return new ToastFacts(toastBytes, toastLiveBytes, pct, NoteFor(dimension, toastBytes, toastLiveBytes, pct));
+        }
+
+        /// <summary>The sentence, pure so the words a reader gets are assertable.</summary>
+        internal static string NoteFor(string dimension, long? toastBytes, long? toastLiveBytes, double? pct)
+        {
+            if (toastBytes is not long file)
+            {
+                return "toast_bytes is not recorded on this row: the sweep that wrote it predates V137, or the table has no "
+                    + "TOAST relation. The next hourly sweep on a V137+ store records the file size.";
+            }
+
+            if (file == 0)
+            {
+                return "The TOAST file is empty, so there is no utilisation to state.";
+            }
+
+            if (toastLiveBytes is null || pct is not double utilisation)
+            {
+                return $"toast_utilisation_pct is not measured: the {DarlingMcpStoreMetricsTools.Gib(file)} TOAST file size is real, but the live "
+                    + $"bytes inside it need the {StoreSelfMetrics.FreespacemapExtensionName} extension, which the bundled store image "
+                    + "ships and does not install — installing it is the maintainer's call (CREATE EXTENSION IF NOT EXISTS "
+                    + $"{StoreSelfMetrics.FreespacemapExtensionName} on the store; the next hourly sweep then fills toast_live_bytes and "
+                    + "this reads as a percentage, and the slack self-alert arms itself). Nothing here is computed from "
+                    + "total_bytes or from a tuple share: after a VACUUM the dead tuples are gone and the file keeps its "
+                    + "pages, so a tuple share reads 100 % on exactly the file this column exists to judge.";
+            }
+
+            var live = toastLiveBytes.Value;
+            var slackBytes = Math.Max(file - live, 0);
+            var head = $"{utilisation.ToString("0.0", CultureInfo.InvariantCulture)} % of the {DarlingMcpStoreMetricsTools.Gib(file)} TOAST file behind "
+                + $"{dimension} holds live data ({DarlingMcpStoreMetricsTools.Gib(live)} live, {DarlingMcpStoreMetricsTools.Gib(slackBytes)} free inside the file).";
+
+            if (IsSlack(file, utilisation))
+            {
+                return head + " That is under the "
+                    + $"{DarlingSelfAlertEvaluator.ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)} % bar on a file over "
+                    + $"{DarlingMcpStoreMetricsTools.Gib(DarlingSelfAlertEvaluator.ToastSlackFileFloorBytes)}: the free pages are slack that ordinary VACUUM returns to the table "
+                    + "and never to the OS, and the store self-alert says so. --recompress-plan-dim --vacuum-full compacts the "
+                    + "file, at the maintainer's word in a maintenance window: it takes an ACCESS EXCLUSIVE lock on the "
+                    + "dimension for the rebuild and needs free disk for a full copy of the live data while it runs. This "
+                    + "tool never reclaims anything by itself.";
+            }
+
+            if (utilisation < DarlingSelfAlertEvaluator.ToastSlackUtilisationBarPercent)
+            {
+                return head + " Under the "
+                    + $"{DarlingSelfAlertEvaluator.ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)} % bar but the file is under the "
+                    + $"{DarlingMcpStoreMetricsTools.Gib(DarlingSelfAlertEvaluator.ToastSlackFileFloorBytes)} floor the self-alert judges, so the slack is real and small: no finding.";
+            }
+
+            return head;
+        }
+    }
+
+    /* ---------------- #3783: the store's own checkpointer, differenced ---------------- */
+
+    /// <summary>
+    /// The two newest <c>checkpointer</c> rows, newest first (#3783) — the pair a difference needs. The
+    /// sweep stores the server's CUMULATIVE counters (the reasoning is on
+    /// <see cref="StoreSelfMetrics.CheckpointerInsertSql"/>), so one row says nothing about any interval and
+    /// this read is the ONLY shape that can: the newest row minus the row before it, over the two stamps'
+    /// span. <c>checkpoint_write_ms IS NOT NULL</c> because the columns are nullable for every other kind's
+    /// sake and a checkpointer row the sweep wrote always carries all three; the guard costs nothing and
+    /// keeps a hypothetically half-written row from becoming the "previous" and NULLing a good delta. The
+    /// newest pair is wanted regardless of window; $1 is <see cref="CheckpointerPairRows"/>, bound rather than
+    /// written as a literal for the reason <see cref="LargestUnenumeratedSql"/> binds its cap — a terminal
+    /// literal <c>LIMIT</c> on a reader is the shape the page census inventories, and this is not a page.
+    /// </summary>
+    public const string CheckpointerPairSql = $@"
+SELECT
+    metric_time,
+    checkpoint_write_ms,
+    checkpoint_sync_ms,
+    checkpoints_requested
+FROM collect.store_metrics
+WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
+AND   checkpoint_write_ms IS NOT NULL
+ORDER BY metric_time DESC
+LIMIT $1";
+
+    /// <summary>How many checkpointer rows <see cref="CheckpointerPairSql"/> reads: two, because a difference
+    /// needs exactly the newest row and the one before it and nothing a third row could add.</summary>
+    public const int CheckpointerPairRows = 2;
+
+    /// <summary>One checkpointer row as stored: the sweep's stamp (naive UTC) and the three cumulative
+    /// counters as the server reported them at that instant.</summary>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested);
+
+    /// <summary>
+    /// Whether the pair yielded an interval (#3783). Four states rather than a nullable delta, for the reason
+    /// every other status on this surface has more than two: "the sweep has never written the row", "it has
+    /// written one and there is nothing yet to subtract", "the counters went backwards between the two" and
+    /// "here is the interval" are four different facts about the same absent-or-present number, and the
+    /// self-alert must fire on exactly one of them.
+    /// </summary>
+    public enum CheckpointerDeltaStatus
+    {
+        /// <summary>No checkpointer row in the series: a store whose sweep predates the row, or a service that
+        /// has not completed a sweep since starting on this build.</summary>
+        Absent,
+
+        /// <summary>Exactly one row. The counters are real but there is no earlier sample to difference
+        /// against; the next hourly sweep makes the first interval.</summary>
+        NoPrevious,
+
+        /// <summary>At least one counter reads LOWER on the newest row than on the one before it:
+        /// <c>pg_stat_reset_shared('checkpointer')</c> (or <c>'bgwriter'</c> before 17), or a server restart
+        /// without statistics persistence, ran between the two sweeps. The interval is unmeasurable and every
+        /// delta is NULL with this reason — the #3705 discontinuity idiom, never a negative and never a clamped
+        /// zero. The row after the next sweep will difference cleanly against the post-reset row.</summary>
+        Reset,
+
+        /// <summary>A measured interval. The one state the self-alert judges.</summary>
+        Observed,
+    }
+
+    /// <summary>
+    /// The checkpointer's last interval, differenced from the two newest rows (#3783). One value carrying the
+    /// deltas, the span they cover and the instants they cover it between, so a caller cannot take a
+    /// millisecond figure and drop the hour it belongs to. Pure, so the arithmetic the tool publishes and the
+    /// self-alert judges is unit-tested without a store.
+    /// </summary>
+    /// <param name="Status">Whether there is an interval; the delta fields are null unless <see cref="CheckpointerDeltaStatus.Observed"/>.</param>
+    /// <param name="ObservedAt">The newest row's stamp, UTC — the END of the interval. Null when Absent.</param>
+    /// <param name="PreviousAt">The row before it, UTC — the START of the interval. Null when Absent or NoPrevious.</param>
+    /// <param name="IntervalSeconds">The span, MEASURED from the two stamps rather than assumed from the sweep's cadence:
+    /// an hour on a healthy store, longer across a skipped tick. Null unless Observed.</param>
+    /// <param name="WriteMs">Milliseconds the checkpointer spent in the write phase inside the interval.</param>
+    /// <param name="SyncMs">Milliseconds it spent in the sync (fsync) phase inside the interval — the phase the
+    /// production read kills sat inside.</param>
+    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.</param>
+    /// <param name="CumulativeWriteMs">The newest row's raw counter, for a reader who wants the lifetime figure. Null when Absent.</param>
+    /// <param name="CumulativeSyncMs">Likewise.</param>
+    /// <param name="CumulativeRequested">Likewise.</param>
+    public sealed record CheckpointerReading(
+        CheckpointerDeltaStatus Status,
+        DateTime? ObservedAt,
+        DateTime? PreviousAt,
+        double? IntervalSeconds,
+        long? WriteMs,
+        long? SyncMs,
+        long? Requested,
+        long? CumulativeWriteMs,
+        long? CumulativeSyncMs,
+        long? CumulativeRequested)
+    {
+        /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
+        public static CheckpointerReading Absent { get; } =
+            new(CheckpointerDeltaStatus.Absent, null, null, null, null, null, null, null, null, null);
+
+        /// <summary>
+        /// Differences the pair. <paramref name="newest"/> null is <see cref="CheckpointerDeltaStatus.Absent"/>;
+        /// <paramref name="previous"/> null is <see cref="CheckpointerDeltaStatus.NoPrevious"/>; any counter
+        /// lower on the newest row is <see cref="CheckpointerDeltaStatus.Reset"/>; a pair whose stamps do not
+        /// advance (two rows at one instant cannot happen from one sweep, but the arithmetic must not divide
+        /// by it) is treated as no interval. Otherwise the three subtractions and the measured span.
+        /// </summary>
+        public static CheckpointerReading From(CheckpointerSample? newest, CheckpointerSample? previous)
+        {
+            if (newest is null)
+            {
+                return Absent;
+            }
+
+            var observedAt = DateTime.SpecifyKind(newest.MetricTime, DateTimeKind.Utc);
+
+            if (previous is null)
+            {
+                return new CheckpointerReading(
+                    CheckpointerDeltaStatus.NoPrevious, observedAt, null, null, null, null, null,
+                    newest.WriteMs, newest.SyncMs, newest.Requested);
+            }
+
+            var previousAt = DateTime.SpecifyKind(previous.MetricTime, DateTimeKind.Utc);
+            var span = (observedAt - previousAt).TotalSeconds;
+
+            if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || span <= 0)
+            {
+                return new CheckpointerReading(
+                    CheckpointerDeltaStatus.Reset, observedAt, previousAt, null, null, null, null,
+                    newest.WriteMs, newest.SyncMs, newest.Requested);
+            }
+
+            return new CheckpointerReading(
+                CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
+                newest.WriteMs - previous.WriteMs,
+                newest.SyncMs - previous.SyncMs,
+                newest.Requested - previous.Requested,
+                newest.WriteMs, newest.SyncMs, newest.Requested);
+        }
+
+        /// <summary>
+        /// The self-alert's condition (#3783), judged on an Observed interval only: the sync phase held more
+        /// than <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> inside the interval, OR at least one
+        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding.
+        /// </summary>
+        public bool IsPressure =>
+            Status == CheckpointerDeltaStatus.Observed
+            && ((SyncMs is long sync && sync > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
+                || (Requested is long requested && requested > 0));
+    }
+
+    /// <summary>
+    /// Reads <see cref="CheckpointerPairSql"/> and differences it. NOT failure-isolated, unlike the
+    /// qualifier reads above: this is a primary reading the tool publishes as a block and the self-alert
+    /// judges, and both callers already own the isolation — the tool's outer catch turns a throw into the
+    /// shared error envelope, and the evaluator's <c>Evaluate*</c> wrapper logs it and counts it as a swallowed
+    /// read (#3013). Swallowing here would hand both a plausible <c>Absent</c> for a store whose read timed out.
+    /// </summary>
+    public static async Task<CheckpointerReading> GetCheckpointerAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CheckpointerPairSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(CheckpointerPairRows);
+
+        CheckpointerSample? newest = null, previous = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var sample = new CheckpointerSample(reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3));
+            if (newest is null)
+            {
+                newest = sample;
+            }
+            else
+            {
+                previous = sample;
+            }
+        }
+
+        return CheckpointerReading.From(newest, previous);
+    }
 
     /// <summary>One day's whole-store growth: the byte delta from the previous day's settled point, and
     /// that delta divided by the day's enabled-server count — the number onboarding N servers multiplies.
@@ -1144,7 +1490,9 @@ LIMIT $1";
                 reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetInt64(12)));
+                reader.IsDBNull(12) ? null : reader.GetInt64(12),
+                reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
         }
 
         return rows;
@@ -1174,7 +1522,9 @@ LIMIT $1";
                 reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetInt64(12)));
+                reader.IsDBNull(12) ? null : reader.GetInt64(12),
+                reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
         }
 
         return rows;
