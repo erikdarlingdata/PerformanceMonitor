@@ -8,15 +8,15 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <PackageVersion Include="AWSSDK.PI" Version="4.0.100.13" />
-    <PackageVersion Include="AWSSDK.RDS" Version="4.0.105.2" />
+    <PackageVersion Include="AWSSDK.PI" Version="4.0.100.14" />
+    <PackageVersion Include="AWSSDK.RDS" Version="4.0.105.3" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.0.0" />
     <PackageVersion Include="CredentialManagement" Version="1.0.2" />
     <PackageVersion Include="DuckDB.NET.Bindings.Full" Version="1.5.5" />
     <PackageVersion Include="DuckDB.NET.Data" Version="1.5.5" />
     <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
-    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.0.3" />
-    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.0.3" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.0" />
+    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
