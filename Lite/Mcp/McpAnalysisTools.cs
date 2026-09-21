@@ -180,7 +180,12 @@ public sealed class McpAnalysisTools
                 findings = findings.Select(f =>
                 {
                     var advice = FactAdvice.GetForFinding(f);
-                    return new
+                    /* #3691: the config levers hanging off this chain that the greedy single-path walk could not
+                       reach get a card each, appended as side_leaves. They used to root their own one-node cards
+                       beside this one; now the walk consumes them and the root's investigation carries the sentence
+                       that points here. Attach returns THIS object untouched when there is no lever, so a finding
+                       this does not concern is byte-for-byte what it was. */
+                    return StorySideLeaves.Attach(new
                     {
                         severity = Math.Round(f.Severity, 2),
                         confidence = Math.Round(f.Confidence, 2),
@@ -232,7 +237,7 @@ public sealed class McpAnalysisTools
                             risks_of_changing = advice.Risks.RisksOfChanging.Select(r => r.Text).ToArray(),
                             risks_of_not_changing = advice.Risks.RisksOfNotChanging.Select(r => r.Text).ToArray()
                         }
-                    };
+                    }, f.SideLeafKeys, McpHelpers.JsonOptions);
                 })
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }

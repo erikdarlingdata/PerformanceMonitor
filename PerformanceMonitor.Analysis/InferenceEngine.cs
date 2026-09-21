@@ -110,7 +110,7 @@ public class InferenceEngine
            this set again. */
         var entryPoints = facts
             .Where(f => f.Severity >= MinimumSeverityThreshold
-                     || ((ConfigAdvisoryRootKeys.Contains(f.Key) || PgTargetFactKeys.IsConfigAdvisoryRoot(f.Key)) && f.Severity > 0))
+                     || (IsConfigAdvisoryRoot(f.Key) && f.Severity > 0))
             .OrderByDescending(f => f.Severity)
             .ToList();
 
@@ -125,7 +125,12 @@ public class InferenceEngine
             foreach (var node in path)
                 consumed.Add(node);
 
-            var story = BuildStory(path, factsByKey);
+            /* #3691: the config levers hanging off this path that the single-edge walk could not reach. Swept
+               AFTER the path is consumed (so the "not on the path" test is the same `consumed` lookup) and
+               BEFORE BuildStory, which carries them on the story beside the path. */
+            var sideLeafKeys = SweepSideLeaves(path, factsByKey, consumed);
+
+            var story = BuildStory(path, factsByKey, sideLeafKeys);
             stories.Add(story);
         }
 
@@ -190,9 +195,119 @@ public class InferenceEngine
     }
 
     /// <summary>
-    /// Builds an AnalysisStory from a traversal path.
+    /// Whether a fact key roots a standalone advisory card at ANY positive severity — the union of this engine's
+    /// <see cref="ConfigAdvisoryRootKeys"/> and the PostgreSQL-target arm
+    /// (<see cref="PgTargetFactKeys.IsConfigAdvisoryRoot"/>). This is the ENTRY-POINT question only: may this fact
+    /// root below the 0.5 incident line? <see cref="IsConfigAdvisoryFact"/> is the different, wider question the
+    /// side-leaf sweep asks.
     /// </summary>
-    private static AnalysisStory BuildStory(List<string> path, Dictionary<string, Fact> factsByKey)
+    private static bool IsConfigAdvisoryRoot(string key) =>
+        ConfigAdvisoryRootKeys.Contains(key) || PgTargetFactKeys.IsConfigAdvisoryRoot(key);
+
+    /// <summary>
+    /// Whether a fact is a CONFIG ADVISORY — a standing setting whose card recommends changing a knob — as opposed
+    /// to an incident fact, which reports something that happened. This is the class
+    /// <see cref="SweepSideLeaves"/> may consume, and it is deliberately WIDER than
+    /// <see cref="IsConfigAdvisoryRoot"/>.
+    ///
+    /// <para><b>Why the two differ, which is the subtle part of this change.</b> The root set answers "may this
+    /// fact root BELOW 0.5?" and its membership follows D5: a CONVENTION check (a knob at its shipped default) may
+    /// root a card on a quiet server; an EVIDENCE-gated check (<c>work_mem</c>, <c>maintenance_work_mem</c>) may
+    /// not, because it scores above zero only when its workload co-fire exists. But an evidence-gated knob that
+    /// DID get its evidence is exactly the orphan this lane exists to fix:
+    /// <c>CONFIG_PG_MAINT_WORK_MEM</c> takes the 0.4 advisory base from the stamped backlog ratio and the backlog
+    /// co-fire amplifier lifts it to 0.6 — past the ORDINARY 0.5 threshold — so it roots its own one-node card
+    /// without ever consulting the advisory-root set, which is why the defect in the face shows that key and not a
+    /// convention one. Testing membership of the root set here would have missed the reported scenario entirely.</para>
+    ///
+    /// <para><b>The test used instead, and why it is safe.</b> An advisory fact is one whose SOURCE is a
+    /// settings source — <see cref="PgTargetSources.ConfigSource"/> (<c>pg_config</c>),
+    /// <see cref="PgTargetSources.PostureSource"/> (<c>pg_posture</c>), or the SQL Server <c>config</c> /
+    /// <c>database_config</c> collectors — UNION the advisory-root set, which catches the keys whose card is an
+    /// advisory but whose fact rides a measurement source (<c>MISSING_INDEX</c> and <c>PLAN_WARNING</c> on
+    /// <c>queries</c>, <c>PLAN_CACHE_BLOAT</c> on <c>memory</c>, <c>CONFIG_PG_AUTOVACUUM_DISABLED</c> on
+    /// <c>pg_vacuum</c>). A source is the collector's own statement about what kind of thing it read, so this
+    /// cannot drift the way a hand-maintained key list does — and it cannot capture an incident by accident: no
+    /// measured symptom is emitted on a settings source (verified over every emission site).</para>
+    /// </summary>
+    private static bool IsConfigAdvisoryFact(Fact fact) =>
+        fact.Source is "config" or "database_config"
+        || fact.Source == PgTargetSources.ConfigSource
+        || fact.Source == PgTargetSources.PostureSource
+        || IsConfigAdvisoryRoot(fact.Key);
+
+    /// <summary>
+    /// Collects the CONFIG-ADVISORY facts that hang off any node on <paramref name="path"/> by an ACTIVE edge the
+    /// greedy walk did not follow, and marks them consumed so they no longer root a card of their own (#3691).
+    ///
+    /// <para><b>The defect this closes.</b> <see cref="Traverse"/> follows the SINGLE highest-severity active edge
+    /// from each node. A node mid-path can have two: the vacuum backlog reaches the wraparound trend (higher, and
+    /// the rest of the chain behind it) and also <c>CONFIG_PG_MAINT_WORK_MEM</c> — the dead-tuple memory that bounds
+    /// how much of the backlog one pass can clear, i.e. the lever that would relieve the very thing the story is
+    /// about. The walk never visits the lever, so nothing consumes it, and because a config-advisory key roots at
+    /// any positive severity (<see cref="IsConfigAdvisoryRoot"/>) it then rooted its own one-node story at 0.6 NEXT
+    /// TO the incident. The reader saw two cards where the truth is one story with a lever.</para>
+    ///
+    /// <para><b>Why only config-advisory destinations</b> (<see cref="IsConfigAdvisoryFact"/>, whose doc explains
+    /// why that test is by SOURCE and not by advisory-root membership). An incident-class side destination is a
+    /// DIFFERENT story that must keep its own root — it has its own symptom, its own advice and its own occurrence
+    /// history, and <see cref="ClusterIntoIncidents"/> is the mechanism that re-merges it into one incident without
+    /// taking its card away. A config advisory has no incident of its own: it is a standing setting whose whole
+    /// claim to a card was that nobody else had said it. Widening this to any destination would silently delete
+    /// findings, which is why the class test is the one thing in this method that must not be loosened casually.</para>
+    ///
+    /// <para><b>What it does not do.</b> It does not extend the path (the story's
+    /// <see cref="AnalysisStory.StoryPath"/> and its hash are untouched, so incident identity is stable and every
+    /// existing pin holds), it does not lift severity or confidence (context, not corroboration), and it follows no
+    /// edges OUT of a side leaf — a lever is a leaf by construction, and a walk from it would be the second path
+    /// this method exists to avoid inventing. Edge activity is read through
+    /// <see cref="RelationshipGraph.GetActiveEdges"/>, the same call the traversal makes, so the bad-actor alias
+    /// resolution and every predicate behave identically here.</para>
+    ///
+    /// <para>Returns highest severity first, ties by ordinal key, so a pass is deterministic. Empty — the common
+    /// case — leaves the story byte-identical to what it was.</para>
+    /// </summary>
+    private List<string> SweepSideLeaves(List<string> path,
+        Dictionary<string, Fact> factsByKey,
+        HashSet<string> consumed)
+    {
+        List<string>? sideLeaves = null;
+
+        foreach (var node in path)
+        {
+            foreach (var edge in _graph.GetActiveEdges(node, factsByKey))
+            {
+                var destination = edge.Destination;
+
+                /* `consumed` already holds this path (the caller marked it before calling) and every prior
+                   story's facts, so this one lookup is both "not on the path" and "not consumed" — and, as the
+                   loop adds each leaf below, "not already swept from an earlier node on this same path". */
+                if (consumed.Contains(destination))
+                    continue;
+                if (!factsByKey.TryGetValue(destination, out var fact) || fact.Severity <= 0)
+                    continue;
+                if (!IsConfigAdvisoryFact(fact))
+                    continue;
+
+                (sideLeaves ??= []).Add(destination);
+                consumed.Add(destination);
+            }
+        }
+
+        if (sideLeaves is null)
+            return [];
+
+        return sideLeaves
+            .OrderByDescending(k => factsByKey[k].Severity)
+            .ThenBy(k => k, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Builds an AnalysisStory from a traversal path and the config levers swept off it
+    /// (<paramref name="sideLeafKeys"/>, see <see cref="SweepSideLeaves"/>).
+    /// </summary>
+    private static AnalysisStory BuildStory(List<string> path, Dictionary<string, Fact> factsByKey, List<string> sideLeafKeys)
     {
         var rootFact = factsByKey.GetValueOrDefault(path[0]);
         var leafKey = path.Count > 1 ? path[^1] : null;
@@ -261,7 +376,10 @@ public class InferenceEngine
             RootFactMetadata = rootFact?.Metadata,
             // Carry the root fact's database through so findings/recommendation cards can show it.
             DatabaseName = rootFact?.DatabaseName,
-            NamedHops = namedHops
+            NamedHops = namedHops,
+            /* #3691: beside the path, not in it — FactCount above still counts the path, and the hash above is
+               computed from the path alone, so this story's identity is what it was. */
+            SideLeafKeys = sideLeafKeys
         };
     }
 

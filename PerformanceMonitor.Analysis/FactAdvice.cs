@@ -271,6 +271,7 @@ public static class FactAdvice
             if (advice is null)
                 continue;
             advice = WithNamedHops(advice, story, byKey);
+            advice = WithSideLeaves(advice, story);
             story.StoryText = SerializeForStoryText(advice);
         }
     }
@@ -299,6 +300,28 @@ public static class FactAdvice
             investigation.Append(sentence);
         }
         return advice with { Investigation = investigation.ToString() };
+    }
+
+    /// <summary>
+    /// #3691 (lane 42): appends the ONE sentence naming the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's INVESTIGATION, after the named-hop sentences and by
+    /// the same rule — the levers are where to look next, and the lever's own card (the payload's
+    /// <c>side_leaves</c>) carries its value and its remediation. Before this, the lever rooted a card of its own
+    /// beside the incident; now the walk consumes it, so the root's card is the only place that can point at it and
+    /// this sentence is that pointer. Remediation is untouched: the lever's fix is the lever's, in its own family's
+    /// words. A story with no side leaves returns the block untouched — the byte-identity arm for every chain this
+    /// does not concern, which is nearly all of them.
+    /// </summary>
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story)
+    {
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys);
+        if (sentence is null)
+            return advice;
+        var investigation = advice.Investigation ?? string.Empty;
+        return advice with
+        {
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence
+        };
     }
 
     /// <summary>Serializes an advice block's prose to the compact {h,i,r} JSON stored in StoryText.</summary>
