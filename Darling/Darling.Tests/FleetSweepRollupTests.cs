@@ -598,4 +598,63 @@ public class FleetSweepRollupTests
     {
         Assert.Equal(TimeSpan.FromDays(1), DarlingSelfAlertEvaluator.FleetSweepRollupInterval);
     }
+
+    /* ---------------- #3834: the structured rows beside the prose ---------------- */
+
+    /// <summary>
+    /// The rollup's rows, and the property that makes them additive: one item per thing that HAPPENED, under
+    /// a leading item carrying the window and its aggregates — those describe the SPAN rather than any row in
+    /// it, and a surface rendering rows alone would otherwise lose "some covered sweeps could not prove their
+    /// instruments", which is the one sentence in this document that must never be lost (quiet is not clean).
+    /// The prose is asserted unchanged on both paths at the same time, for the digest suite's reason.
+    /// </summary>
+    [Fact]
+    public async Task TheRollupFire_CarriesStructuredRows_AndLeavesTheProseIntact()
+    {
+        var runs = OneTransitionDay();
+        var fired = await FireAsync(runs, Array.Empty<FleetSweepLedgerSpanEntry>());
+
+        Assert.NotNull(fired.Context);
+        var context = fired.Context;
+
+        /* The frame first: the covered window in the structure as well as in the sentence (#2506's echo
+           discipline), with the aggregates beside it. */
+        var summary = Assert.Single(context.Details, d => d.Heading == "Rollup window");
+        var summaryFields = summary.Fields.ToDictionary(f => f.Label, f => f.Value, StringComparer.Ordinal);
+        Assert.Equal("1", summaryFields["Sweeps"]);
+        Assert.Equal("1", summaryFields["Band transitions"]);
+        Assert.Equal("0", summaryFields["Liveness incidents"]);
+        Assert.Equal("0", summaryFields["Muted sweeps"]);
+        Assert.Equal("0", summaryFields["Unreadable items"]);
+        Assert.Contains("Window start (UTC)", summaryFields.Keys);
+        Assert.Contains("Window end (UTC)", summaryFields.Keys);
+
+        /* And the transition itself, as a row whose figures the prose also prints. */
+        var transition = Assert.Single(context.Details,
+            d => d.Heading.StartsWith("Band transition: ", StringComparison.Ordinal));
+        var fields = transition.Fields.ToDictionary(f => f.Label, f => f.Value, StringComparer.Ordinal);
+        Assert.Equal("pm-server-1", fields["Server"]);
+        Assert.Equal("Healthy", fields["From"]);
+        Assert.Equal("Critical", fields["To"]);
+        Assert.Equal("deadlocks in span", fields["Reason"]);
+
+        var prose = fired.DetailText ?? string.Empty;
+        Assert.Contains("pm-server-1: Healthy -> Critical", prose, StringComparison.Ordinal);
+        Assert.Contains("deadlocks in span", prose, StringComparison.Ordinal);
+
+        /* The prose is the renderer's own output, and the delivery gate still passes it through: an essay is
+           never textually equal to a flattened field list, so ProseForDelivery cannot suppress it. */
+        var facts = DarlingSelfAlertEvaluator.ExtractRollupFacts(
+            runs, Array.Empty<FleetSweepLedgerSpanEntry>(), Names);
+        var h = new Harness();
+        Assert.Equal(
+            DarlingSelfAlertEvaluator.RenderFleetSweepRollup(
+                facts, h.Now - DarlingSelfAlertEvaluator.FleetSweepRollupInterval, h.Now).Detail,
+            fired.DetailText);
+        Assert.NotEqual(AlertDetailText.Flatten(context), fired.DetailText);
+        Assert.Equal(fired.DetailText, AlertDetailText.ProseForDelivery(fired.DetailText, context));
+
+        /* A report is not an incident: no Incidents, so no per-event splitting and no delivery filter. */
+        Assert.Null(context.Incidents);
+    }
 }
