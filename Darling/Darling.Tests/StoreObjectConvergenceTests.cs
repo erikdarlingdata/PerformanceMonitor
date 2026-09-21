@@ -760,6 +760,21 @@ public sealed class CompressionEnableGuardLiveTests
         var ct = TestContext.Current.CancellationToken;
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
+
+        /* SET the search path, never inherit it — the rule LiveCleanupBatchTests and LiveStoreCleanup both
+           document, and this test is the reason to state it a third time. TimescaleSupport.CreateHypertableSql
+           calls by_range(...) UNQUALIFIED and the TimescaleDB helpers live in public, so a session whose path
+           omits public dies "42883 function by_range(unknown, interval) does not exist" — naming the inner
+           function, because it is an argument to create_hypertable and resolves first. This passed locally
+           and failed in CI on exactly that: my rig's connection string pinned its own Search Path and CI's
+           DARLING_TEST_PG does not, which is precisely the asymmetry the existing note warns about. Npgsql
+           pools physical sessions, so the path a pooled one carries otherwise depends on when it was first
+           opened. */
+        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = ReadTimeoutSeconds })
+        {
+            await setPath.ExecuteNonQueryAsync(ct);
+        }
+
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
 
@@ -769,7 +784,16 @@ public sealed class CompressionEnableGuardLiveTests
             await ExecuteAsync(connection, $"CREATE SCHEMA IF NOT EXISTS collect", ct);
             await ExecuteAsync(connection, $"DROP TABLE IF EXISTS collect.{Table} CASCADE", ct);
             await ExecuteAsync(connection, $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id int NOT NULL, v int)", ct);
-            await ExecuteAsync(connection, $"SELECT create_hypertable('collect.{Table}', by_range('collection_time', INTERVAL '1 day'))", ct);
+            /* The LEGACY create_hypertable signature, not the by_range dimension builder the product's own
+               CreateHypertableSql uses. by_range is the 2.13+ API and it resolves through the search path
+               (the helpers live in public), so it is two portability assumptions this fixture has no reason
+               to take: CI's DARLING_TEST_PG pins no Search Path, and this test's subject is the compression
+               SETTINGS guard, not hypertable creation. The 42883 this replaces ("function by_range(unknown,
+               interval) does not exist") passed on my rig and failed in CI on exactly that asymmetry. The
+               legacy form is what every other live fixture in this suite uses and is accepted by every 2.x
+               including the 2.28.1 the rig measured on; if_not_exists keeps the fixture re-runnable after a
+               cleanup that left the table behind. */
+            await ExecuteAsync(connection, $"SELECT create_hypertable('collect.{Table}', 'collection_time', chunk_time_interval => INTERVAL '1 day', if_not_exists => true)", ct);
 
             /* NOT enabled yet: the guard must not report it converged, or the sweep would skip the one ALTER
                that actually matters and the table would never compress. */
