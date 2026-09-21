@@ -115,7 +115,22 @@ ORDER BY w.stmt_ms DESC";
     /// before its deviation is the story; a 10× jump from 0.5 % to 5 % is a statement nobody would call a bad actor.
     /// The cutoffs are the shared defaults reused by name — <see cref="AnomalyThresholds.DefaultDeviationThreshold"/>
     /// classical, <see cref="AnomalyThresholds.ModifiedZThresholdFor"/>'s default robust cutoff — unmeasured for
-    /// statement share until the next calibration read; the fact carries <c>threshold_lineage = 0</c>.</para>
+    /// statement share; the fact carries <c>threshold_lineage = 0</c>.</para>
+    ///
+    /// <para><b>What the third calibration read (2026-09-21) settled, and what it did not.</b> §D3A read the very
+    /// distribution this detector is about — a top-5 statement's share of the collection against its own
+    /// hour-of-week mean, 1,487 statement-hours over 50 Aurora PostgreSQL clusters, 28 days fenced at 2026-09-19
+    /// 16:40Z (<c>pg_statement_stats</c> died fleet-wide at 16:44Z on a schema regression, so every window ends
+    /// before it). The finding: a ratio of 3× or more happens on 0.94 % of statement-hours, and 0.40 % once the peak
+    /// magnitude floor is required as well — the instrument fires about four times in a thousand statement-hours,
+    /// which is the rate a story-level finding should have, and the absolute share in the same week is routine
+    /// (p50 0.077, p99 0.56), re-confirming why the grade is the deviation. That read places the MULTIPLE (recorded
+    /// on <see cref="AnomalyThresholds.PgRatioAnomalyThreshold"/> with the other families' verdicts) and the peak
+    /// floor's cut. It does NOT place this detector's bars: the gate is a Z-test and its cutoffs are sigmas, and no
+    /// percentile of a ratio distribution places a sigma cutoff — a 3× share and a 3σ share are different claims
+    /// about different distributions. The fact therefore still carries <c>threshold_lineage = 0</c>, and it will
+    /// until someone reads the per-statement SIGMA distribution (share minus its bucket mean over the bucket's
+    /// effective dispersion, per statement-hour) on a fleet with a live statement collector.</para>
     ///
     /// <para><b>Metadata.</b> The shared z-family set (<c>ZScoreMetadata</c>: <c>deviation_sigma</c>,
     /// <c>fire_threshold</c>, <c>baseline_*</c>, <c>confidence</c> …) plus <c>window_share</c> (the card's number),

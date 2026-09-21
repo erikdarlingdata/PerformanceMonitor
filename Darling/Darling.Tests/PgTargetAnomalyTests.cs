@@ -300,8 +300,10 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.WalVolumeWindowSql,
         /* wave 3 (#3691) lane 17 */
         PgTargetAnomalyDetector.BlockedSessionsWindowSql,
-        /* lane 27 (#3691 v3): the server-wide per-call statement mean */
+        /* lane 27 (#3691 v3): the server-wide per-call statement mean — since lane 39 the COLD FALLBACK only */
         PgTargetAnomalyDetector.StatementMeanWindowSql,
+        /* lane 39 (#3691, calibration D): the flipped statements' own per-call means — the keyed instrument */
+        PgTargetAnomalyDetector.StatementMeanKeyedWindowSql,
         /* lane 24 (#3691): the sampled wait profile's two reads */
         PgTargetAnomalyDetector.SampledWaitRateWindowSql,
         PgTargetAnomalyDetector.SampledWaitContribWindowSql,

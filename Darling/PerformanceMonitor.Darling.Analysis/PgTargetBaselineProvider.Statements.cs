@@ -14,9 +14,10 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <see cref="PgBaselineProvider.GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/> with the
 /// <c>queryid</c> as text. The seam exists for Erik's 2026-09-20 ruling: the bad-actor share is graded as deviation
 /// from the statement's OWN hour-of-week share baseline, which one series per (server, metric) cannot express.
-/// Nothing consumes these arms yet — lane 34 (the share) and lane 27's follow-up (the per-call mean) do; this file is
-/// the SQL they stand on, pinned by <c>PgBaselineProviderKeyedTests</c> and the two-armed census in
-/// <c>LocalClockBucketKeyTests</c>.
+/// Both arms are consumed now: the share by lane 34's <c>ANOMALY_PG_BAD_ACTOR_SHARE</c>, the per-call mean by lane 39's
+/// switch of <c>ANOMALY_PG_PLAN_REGRESSION</c> onto the keyed series (calibration D §D5 measured the server-wide mean
+/// to be blind to a per-statement step). This file is the SQL they stand on, pinned by
+/// <c>PgBaselineProviderKeyedTests</c> and the two-armed census in <c>LocalClockBucketKeyTests</c>.
 ///
 /// <para><b>Both arms read the collector's STORED deltas</b> (<c>delta_total_exec_time_ms</c>, <c>delta_calls</c>)
 /// and never re-difference the cumulative columns — lane 7's discipline (<c>PgTargetFactCollector.Queries.cs</c>), so
@@ -77,9 +78,10 @@ clean AS (
     /// <c>collection_time</c> (several rows when the shape ran under more than one database, user or toplevel flag —
     /// the collector's full series identity — pooled to the <c>queryid</c> grain the fact family, the text store and
     /// <c>pg_plan_capture</c> share). Lane 27's UNKEYED arm of the same name (<c>PgTargetBaselineProvider.Plans.cs</c>)
-    /// is the server-wide mean and stays exactly as it is; this is the per-statement series it said it could not
-    /// have, so <c>ANOMALY_PG_PLAN_REGRESSION</c>'s follow-up can say "THIS statement got slower per call than its own
-    /// hour usually sees" instead of "this server's statements did". A collection in which the statement made no
+    /// is the server-wide mean and stays exactly as it is — as the COLD FALLBACK, since lane 39; this is the
+    /// per-statement series it said it could not have, and <c>ANOMALY_PG_PLAN_REGRESSION</c> now says "THIS statement
+    /// got slower per call than its own hour usually sees" instead of "this server's statements did" whenever one
+    /// flipped statement has a trustworthy bucket here. A collection in which the statement made no
     /// calls is not a sample (<c>HAVING SUM(delta_calls) &gt; 0</c>) — the same rule as the server-wide arm, applied
     /// to one statement, so an idle hour contributes nothing rather than a zero that would drag the bucket down.
     /// </summary>
