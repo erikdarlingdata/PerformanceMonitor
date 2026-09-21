@@ -17,6 +17,14 @@
     <!-- The plan fetcher connects to the MONITORED SQL Server (same client the Service uses);
          Npgsql and Logging.Abstractions flow transitively from the Storage/Notifications references. -->
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <!-- #3838, same reason as the Service project: the Entra providers moved out of the core
+         Microsoft.Data.SqlClient package in 7.x and the driver locates them by the assembly being
+         PRESENT in the closure. The plan fetcher above opens its SqlConnection on the connection
+         string the Service resolved for the monitored target, and that string carries whatever auth
+         mode the target is registered with - so a service-principal target would fail its plan
+         fetch here with the provider-not-found error even after the Service was fixed. Versionless:
+         Directory.Packages.props already pins it for Lite. -->
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.11" />
   </ItemGroup>
