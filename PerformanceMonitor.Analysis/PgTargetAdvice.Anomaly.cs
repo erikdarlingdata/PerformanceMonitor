@@ -165,6 +165,10 @@ public static partial class PgTargetAdvice
                 return ComposePlanRegressionAnomaly(factsByKey);
             case PgTargetFactKeys.AnomalyCpuBurn:
                 return ComposeCpuBurnAnomaly(factsByKey);
+            /* lane 34 (#3691, ruled 2026-09-20): the bad actor's own-normal deviation composes beside its family
+               (PgTargetAdvice.Queries.cs), where the card's numbers and the queryid caveat already live. */
+            case PgTargetFactKeys.AnomalyBadActorShare:
+                return ComposeBadActorShareAnomaly(factsByKey);
 
             default:
                 return null;

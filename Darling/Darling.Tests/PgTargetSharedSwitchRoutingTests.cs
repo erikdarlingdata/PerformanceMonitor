@@ -176,6 +176,10 @@ public sealed class PgTargetSharedSwitchRoutingTests
            batch, onto the decomposition too, the family's positive-base parent (the cores fact is base 0 by design). */
         Assert.Equal(new[] { PgTargetFactKeys.PlanRegression }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyPlanRegression]);
         Assert.Equal(new[] { PgTargetFactKeys.CpuBurnCores, PgTargetFactKeys.CpuDecomposition }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyCpuBurn]);
+        /* Lane 34 (ruled 2026-09-20): the own-normal share anomaly names the bad-actor ALIAS — the family's keys are
+           dynamic. The map documents the relationship; the graph's alias edge is what puts the two in one incident
+           (PgTargetQueriesTests pins that, and that the static entry cannot fold by itself). */
+        Assert.Equal(new[] { PgTargetFactKeys.BadActorFamily }, PgTargetFactKeys.AnomalyToFamilies[PgTargetFactKeys.AnomalyBadActorShare]);
         /* The wait profile is resolved per story, never statically. */
         Assert.False(PgTargetFactKeys.AnomalyToFamilies.ContainsKey(PgTargetFactKeys.AnomalyWaitProfile));
     }

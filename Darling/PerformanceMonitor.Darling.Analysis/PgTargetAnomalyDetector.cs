@@ -263,6 +263,10 @@ LIMIT 6";
            inert until lanes 27 / 28. */
         await DetectPlanRegressionAnomalies(context, anomalies);
         await DetectCpuBurnAnomalies(context, anomalies);
+        /* lane 34 (#3691, ruled 2026-09-20): one statement's share against its OWN hour-of-week share bucket
+           (PgTargetAnomalyDetector.Queries.cs) — the bad actor's grade since the ruling; after the plan detector because
+           it reads the same table and its candidates are the queries family's own. */
+        await DetectBadActorShareAnomalies(context, anomalies);
 
         return anomalies;
     }
@@ -278,6 +282,7 @@ LIMIT 6";
     private partial Task DetectSampledWaitProfileAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectPlanRegressionAnomalies(AnalysisContext context, List<Fact> anomalies);
     private partial Task DetectCpuBurnAnomalies(AnalysisContext context, List<Fact> anomalies);
+    private partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies);
 
     /// <summary>The provider the filled detectors read buckets from; exposed for lane 9's detector bodies.</summary>
     internal PgTargetBaselineProvider Baselines => _baselineProvider;
