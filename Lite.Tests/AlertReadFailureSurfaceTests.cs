@@ -111,21 +111,27 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(14, readingMembers.Count);
+        Assert.Equal(16, readingMembers.Count);
 
-        /* Fourteen from the record plus the two composed values. The record's members are three counts and
-           three newest-failure trios plus the pass denominator and counting_since, so the set below reads
-           as four groups: this server's, the fleet-scoped conditions', the instance-wide newest, and the
-           two figures that frame them. */
-        Assert.Equal(16, rendered.Count);
+        /* Sixteen from the record plus the two composed values. The record's members are three failure
+           counts and three newest-failure trios, the pass denominator, counting_since, and #3848's two
+           retry counts — so the set below reads as five groups: this server's, the fleet-scoped
+           conditions', the instance-wide newest, the two figures that frame them, and the retry pair.
+
+           The retry pair carries no stamp, read name or elapsed, unlike each failure count, and that
+           asymmetry is asserted by this exact-set equality rather than merely stated: a trio added for it
+           would red here. It exists because those three date and attribute a condition that went BLIND,
+           and a retried read did not — it was judged on evidence that arrived late. */
+        Assert.Equal(18, rendered.Count);
         Assert.Equal(
             new[]
             {
                 "counting_since", "finding", "fleet_last_failure_at", "fleet_last_failure_elapsed_ms",
                 "fleet_last_failure_read", "fleet_read_failures", "instance_last_failure_at",
                 "instance_last_failure_elapsed_ms", "instance_last_failure_read",
-                "instance_read_failures", "last_failure_at", "last_failure_elapsed_ms",
-                "last_failure_read", "note", "server_alert_passes", "server_read_failures",
+                "instance_read_failures", "instance_retried_reads", "last_failure_at",
+                "last_failure_elapsed_ms", "last_failure_read", "note", "retried_reads",
+                "server_alert_passes", "server_read_failures",
             },
             rendered.OrderBy(f => f, StringComparer.Ordinal).ToArray());
     }
