@@ -12,6 +12,8 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -549,5 +551,267 @@ public sealed class StoreObjectConvergenceStepBehaviourTests
 
         Assert.Empty(tally.Failed);
         Assert.Empty(tally.Changed);
+    }
+}
+
+/// <summary>
+/// #3817 rider: the convergence pass issues NO DDL on a converged store, which the pass's own contract
+/// promises and which was false when the lane first landed.
+///
+/// <para><b>The measurement that produced this guard.</b>
+/// <c>ALTER TABLE ... SET (timescaledb.compress ...)</c> is idempotent in EFFECT but not in COST. On
+/// TimescaleDB 2.28.1 / PostgreSQL 17.10, with one session holding a plain <c>SELECT</c> on the hypertable,
+/// the re-issued no-op ALTER appears in <c>pg_locks</c> as <c>AccessExclusiveLock</c> with
+/// <c>granted = false</c>, and an <c>INSERT</c> arriving behind it queues its <c>RowExclusiveLock</c> behind
+/// the ALTER. One long reader plus one no-op DDL therefore blocks every writer to that table. That cost was
+/// invisible while these statements ran once per start, before any collector was writing; putting them on
+/// the hourly tick at :30 past the minute placed ~73 of them inside the window the collectors are COPYing
+/// into these tables and the heaviest hourly refresh is still open — a lock convoy at the worst minute of
+/// the hour, arriving with a change whose stated selling point was that it is cheap when nothing is
+/// missing.</para>
+///
+/// <para>The DDL-free property is measured end-to-end on the rig rather than only pinned here: with
+/// <c>log_statement = 'ddl'</c>, a converged pass emits ZERO <c>ALTER</c>/<c>CREATE</c>/<c>DROP</c>
+/// statements between two log markers, and the same instrument counts 1 for a single deliberate no-op ALTER
+/// (the positive control, without which "zero" could mean the log was not recording). The figures are in
+/// the PR body; what lives here is the shape that keeps them true.</para>
+/// </summary>
+public sealed class CompressionEnableGuardTests
+{
+    /// <summary>
+    /// The guard's read asks the two questions that together decide the ALTER, and asks them of the LONG-
+    /// STABLE view. <c>hypertable_compression_settings</c> reports the same facts more conveniently and is
+    /// 2.18+, younger than this file's 2.x floor, so the per-column
+    /// <c>compression_settings</c> view is the one the product reads — pinned because "use the nicer view"
+    /// is exactly the tidying that would silently raise the floor.
+    /// </summary>
+    [Fact]
+    public void TheGuardsRead_AsksForEnabledAndSegmentBy_FromTheLongStableView_ScopedToCollect()
+    {
+        var sql = TimescaleSupport.CompressionEnabledStateSql;
+
+        Assert.Contains("h.compression_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("timescaledb_information.compression_settings", sql, StringComparison.Ordinal);
+        Assert.Contains("cs.segmentby_column_index IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_compression_settings", sql, StringComparison.Ordinal);
+
+        /* Scoped, for the reason CompressionPolicyStateSql gives: a bring-your-own store may carry its own
+           wait_stats hypertable in another schema, and this product must not read — let alone ALTER — it. */
+        Assert.Contains("h.hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
+
+        /* It READS. A guard that could write would be the thing it exists to avoid. */
+        foreach (var verb in new[] { "ALTER", "CREATE", "DROP", "alter_job" })
+        {
+            Assert.DoesNotContain(verb, sql, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The statement and the guard's comparison read the SAME segmentby name, through one constant. A guard
+    /// that skipped the ALTER by comparing against a second spelling of this would be exactly as wrong as no
+    /// guard and silently so — the store would keep whatever segmentby it had while the log said converged.
+    /// </summary>
+    [Fact]
+    public void TheStatementAndTheComparison_ShareOneSegmentByConstant()
+    {
+        Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByColumn);
+        Assert.Contains(
+            $"timescaledb.compress_segmentby = '{TimescaleSupport.CompressionSegmentByColumn}'",
+            TimescaleSupport.EnableCompressionSql("query_stats"),
+            StringComparison.Ordinal);
+
+        /* The two halves are tied THROUGH the constant, not through a shared spelling: the statement
+           interpolates it, and the guard compares against it. Both are asserted on the SOURCE, because a
+           rendered statement cannot tell you whether the name came from the constant or from a literal that
+           happens to agree with it today — which is the whole failure mode. A file-wide count of the literal
+           would be the wrong instrument in the other direction: the aggregate path has its own segmentby
+           constant (AggregateCompressionSegmentBy, same value, different decision — it segments
+           MATERIALIZATIONS), so "exactly one" would red the moment either path was touched. */
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs");
+        /* The statement's half is read off the RAW source: the interpolation lives inside a string literal,
+           which StripCommentsAndStrings blanks by design. */
+        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByColumn}'", raw, StringComparison.Ordinal);
+        /* The guard's half is code, so it is read off the stripped source — prose about the comparison is not
+           the comparison. */
+        Assert.Contains(
+            "string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal)",
+            CSharpSourceWalker.StripCommentsAndStrings(raw),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sweep issues the ALTER for exactly the tables the read did NOT report as converged, and the
+    /// policy half stays unconditional — source-parsed, because the decision is a branch inside a loop over
+    /// a catalog the unit suite has no store for, and what regresses is the branch being written the wrong
+    /// way round.
+    ///
+    /// <para>The unconditional policy call is not an oversight and is pinned as such:
+    /// <c>add_compression_policy</c>'s <c>if_not_exists</c> returns -1 against an existing policy and takes
+    /// no exclusive lock on the hypertable, so it is idempotent in cost as well as in effect. Only the ALTER
+    /// needed guarding, and a later edit that "consistently" guarded both would stop converging policy
+    /// parameters on a store whose compression was already enabled.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweep_AltersOnlyWhatTheReadDidNotReportConverged_AndLeavesThePolicyHalfUnconditional()
+    {
+        var storage = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
+        var sweep = MethodBody(storage, "public static async Task<int> ApplyCompressionPolicyAsync(");
+        Assert.False(string.IsNullOrEmpty(sweep), "could not locate ApplyCompressionPolicyAsync — this pin cannot silently pass on a parse miss");
+
+        /* ONE read for the whole sweep, before the loop: 73 reads would trade a lock storm for a query
+           storm, and the issue asked for one. */
+        var readAt = sweep.IndexOf("await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);", StringComparison.Ordinal);
+        var loopAt = sweep.IndexOf("foreach (var schema in HypertableTables)", StringComparison.Ordinal);
+        Assert.True(readAt > 0 && loopAt > readAt, "the compression-settings read happens ONCE, before the per-table loop");
+
+        /* The branch: skip when the read says converged, ALTER otherwise. */
+        Assert.Contains("if (converged is not null && converged.Contains(schema.TargetTable))", sweep, StringComparison.Ordinal);
+        Assert.Contains("EnableCompressionSql(schema)", sweep, StringComparison.Ordinal);
+
+        /* The ALTER is inside the else; the policy is not inside either arm. Positions, because that is what
+           the property is. */
+        var elseAt = sweep.IndexOf("else", readAt, StringComparison.Ordinal);
+        var enableAt = sweep.IndexOf("EnableCompressionSql(schema)", StringComparison.Ordinal);
+        var policyAt = sweep.IndexOf("AddCompressionPolicySql(schema)", StringComparison.Ordinal);
+        Assert.True(elseAt > 0 && enableAt > elseAt, "the enable ALTER sits in the else arm of the converged test");
+        Assert.True(policyAt > enableAt, "the policy call follows the enable branch rather than sitting inside it");
+
+        /* collection_log carries the same guard: it is written by every collector cycle, so the convoy
+           applies to it as much as to the collector tables. */
+        var collectionLog = MethodBody(storage, "public static async Task<bool> EnsureCollectionLogHypertableAsync(");
+        Assert.False(string.IsNullOrEmpty(collectionLog));
+        Assert.Contains("ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);", collectionLog, StringComparison.Ordinal);
+        Assert.Contains("if (converged is null || !converged.Contains(CollectionLogTable))", collectionLog, StringComparison.Ordinal);
+
+        /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
+           because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
+           Both call sites treat null as "not converged", which is what the two conditions above encode. */
+        var guard = MethodBody(storage, "public static async Task<IReadOnlySet<string>?> ReadTablesNeedingCompressionEnableAsync(");
+        Assert.False(string.IsNullOrEmpty(guard));
+        Assert.Contains("return null;", guard, StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    private static string MethodBody(string source, string signature)
+    {
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return string.Empty;
+        }
+
+        var open = source.IndexOf('{', start);
+        if (open < 0)
+        {
+            return string.Empty;
+        }
+
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source[start..(i + 1)];
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+}
+
+/// <summary>
+/// The live half of the #3817 rider: against a real TimescaleDB, a hypertable that already carries
+/// compression with the shipped segmentby is reported converged (so the sweep skips its ALTER), one that does
+/// not is reported as needing it, and a segmentby that no longer matches is reported as needing it too — the
+/// arm that makes this a settings comparison rather than a boolean.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class CompressionEnableGuardLiveTests
+{
+    private const int ReadTimeoutSeconds = 30;
+    private const string Table = "guard3817";
+
+    [Fact]
+    public async Task TheGuard_ReportsConvergedOnlyForTablesCarryingTheShippedSettings_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the compression-enable guard test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecuteAsync(connection, $"CREATE SCHEMA IF NOT EXISTS collect", ct);
+            await ExecuteAsync(connection, $"DROP TABLE IF EXISTS collect.{Table} CASCADE", ct);
+            await ExecuteAsync(connection, $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id int NOT NULL, v int)", ct);
+            await ExecuteAsync(connection, $"SELECT create_hypertable('collect.{Table}', by_range('collection_time', INTERVAL '1 day'))", ct);
+
+            /* NOT enabled yet: the guard must not report it converged, or the sweep would skip the one ALTER
+               that actually matters and the table would never compress. */
+            var beforeEnable = await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct);
+            Assert.NotNull(beforeEnable);
+            Assert.DoesNotContain(Table, beforeEnable!);
+
+            /* Enabled with the shipped segmentby, through the shipped statement — so the test and the product
+               cannot disagree about what "the shipped settings" are. */
+            await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+            var afterEnable = await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct);
+            Assert.NotNull(afterEnable);
+            Assert.Contains(Table, afterEnable!);
+
+            /* Segmentby changed out from under the product: converged must go FALSE again, which is the whole
+               reason the guard compares settings instead of reading the boolean. */
+            await ExecuteAsync(connection, $"ALTER TABLE collect.{Table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'v')", ct);
+            var afterDrift = await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct);
+            Assert.NotNull(afterDrift);
+            Assert.DoesNotContain(Table, afterDrift!);
+
+            /* And re-applying the shipped statement converges it back. */
+            await ExecuteAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+            var afterReconverge = await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct);
+            Assert.NotNull(afterReconverge);
+            Assert.Contains(Table, afterReconverge!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS collect.{Table} CASCADE", cleanup) { CommandTimeout = ReadTimeoutSeconds };
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ReadTimeoutSeconds };
+        await command.ExecuteNonQueryAsync(ct);
     }
 }
