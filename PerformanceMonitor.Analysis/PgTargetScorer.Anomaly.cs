@@ -67,6 +67,11 @@ public static partial class PgTargetScorer
                one series (a statement's mean ms; cores busy) — registered by shape ahead of lanes 27 and 28. */
             or PgTargetFactKeys.AnomalyPlanRegression
             or PgTargetFactKeys.AnomalyCpuBurn
+            /* lane 34 (#3691, ruled 2026-09-20): one statement's window share against its OWN hour-of-week share bucket
+               (lane 33's keyed pg_statement_share arm) — a peak-AND-mean z-score on one keyed series, graded by the
+               shared deviation ramp off AnomalyGate's metadata like every z family here. The membership is the one edit
+               this lane makes to a scorer root; the detector, the card's context band and the advice are the family's. */
+            or PgTargetFactKeys.AnomalyBadActorShare
             /* #3691 lane 38: the database-growth anomaly is a peak-vs-own-baseline z-score on one series (the instance
                total's growth in bytes per day per collection) — registered by shape with the family that fills it. */
             or PgTargetFactKeys.AnomalyDatabaseGrowth;

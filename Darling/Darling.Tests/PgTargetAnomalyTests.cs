@@ -307,6 +307,8 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.SampledWaitContribWindowSql,
         /* lane 28 (#3691 v3): the CPU-burn window read, the collector's text by alias */
         PgTargetAnomalyDetector.CpuBurnWindowSql,
+        /* lane 34 (#3691, ruled 2026-09-20): the candidate statements' per-collection shares — the bad actor's own-normal read */
+        PgTargetAnomalyDetector.StatementShareWindowSql,
         /* lane 38 (#3691): the instance-growth window read over pg_database_size_stats */
         PgTargetAnomalyDetector.DatabaseGrowthWindowSql,
     ];
@@ -356,6 +358,10 @@ public sealed class PgTargetAnomalyTests
         /* Lane 24: the sampled profile reads pg_wait_sampling (and counts pg_wait_stats' collections to sit out when both wrote). */
         Assert.Contains("FROM pg_wait_sampling", PgTargetAnomalyDetector.SampledWaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("FROM pg_wait_sampling", PgTargetAnomalyDetector.SampledWaitContribWindowSql, StringComparison.Ordinal);
+        /* Lane 34: the candidate read is over the statement table alone, on the stored deltas, bounded to lane 7's candidate count. */
+        Assert.Contains("FROM pg_statement_stats", PgTargetAnomalyDetector.StatementShareWindowSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", PgTargetAnomalyDetector.StatementShareWindowSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(", PgTargetAnomalyDetector.StatementShareWindowSql, StringComparison.Ordinal);
 
         /* The window reads share the fact reads' shapes. */
         Assert.Contains("stats_reset", PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgTps)!, StringComparison.Ordinal);
@@ -373,8 +379,10 @@ public sealed class PgTargetAnomalyTests
     /// #3691 between-waves batch re-pinned this from "five") the v2 detectors in their own partials — I/O (lane
     /// 11), replication (lane 12), WAL volume (lane 15) — and, since lane 17 filled its body, the wave-3 blocking
     /// detector, and since lanes 27 and 28 filled their bodies, the two v3 detectors (plan regression; CPU burn, on the
-    /// pair gate like lane 17's), and since lane 38 the database-growth detector (pair gate too — an hourly growth series
-    /// is spiky by nature). Twelve; every exemption the between-waves batch and the v3 plumbing named is gone with its stub.
+    /// pair gate like lane 17's), since lane 34 filled the queries partial (the bad actor's own-normal
+    /// share, on the pair gate too), and since lane 38 the database-growth detector (pair gate too — an
+    /// hourly growth series is spiky by nature). Thirteen; every exemption the between-waves batch and the
+    /// v3 plumbing named is gone with its stub.
     /// </summary>
     [Fact]
     public void TheDetector_FencesEachOfTenFilledDetectors_DividesTheDeadlockRateByObservedTime_AnchorsOffTheWindow_AndStatesTheA8Residue()
@@ -393,7 +401,7 @@ public sealed class PgTargetAnomalyTests
         }
 
         /* The seven filled partials: one detector per file, the same fence and the same bucket read. */
-        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies"), ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies"), ("PgTargetAnomalyDetector.Growth.cs", "DetectDatabaseGrowthAnomalies") })
+        foreach (var (file, detector) in new[] { ("PgTargetAnomalyDetector.Io.cs", "DetectIoAnomalies"), ("PgTargetAnomalyDetector.Replication.cs", "DetectReplicationAnomalies"), ("PgTargetAnomalyDetector.Wal.cs", "DetectWalVolumeAnomalies"), ("PgTargetAnomalyDetector.Blocking.cs", "DetectBlockingAnomalies"), ("PgTargetAnomalyDetector.Plans.cs", "DetectPlanRegressionAnomalies"), ("PgTargetAnomalyDetector.Kernel.cs", "DetectCpuBurnAnomalies"), ("PgTargetAnomalyDetector.Queries.cs", "DetectBadActorShareAnomalies"), ("PgTargetAnomalyDetector.Growth.cs", "DetectDatabaseGrowthAnomalies") })
         {
             var partialCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
             Assert.Contains("private async partial Task " + detector + "(", partialCode, StringComparison.Ordinal);
@@ -415,6 +423,18 @@ public sealed class PgTargetAnomalyTests
         var kernelDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Kernel.cs"));
         Assert.Contains("baseline, peakCores, meanCores,", kernelDetector, StringComparison.Ordinal);
         Assert.DoesNotContain("=> Task.CompletedTask;", kernelDetector, StringComparison.Ordinal);
+        /* Lane 34's detector is on the pair gate as well, reads the KEYED seam (five arguments — the queryid as the key
+           ahead of the analysis time), and never grades a statement without a trustworthy own-normal: the trust check
+           precedes the gate and the absolute-fallback bar is unreachable (PositiveInfinity) — the ruling's "never the
+           old absolute grade silently". */
+        var queriesDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Queries.cs"));
+        Assert.Contains("baseline, candidate.PeakShare, candidate.MeanShare,", queriesDetector, StringComparison.Ordinal);
+        Assert.Contains("MetricNames.PgStatementShare, key, context.TimeRangeStart, context.CancellationToken", queriesDetector, StringComparison.Ordinal);
+        Assert.Contains("!baseline.IsTrustworthy", queriesDetector, StringComparison.Ordinal);
+        Assert.Contains("double.PositiveInfinity", queriesDetector, StringComparison.Ordinal);
+        Assert.True(queriesDetector.IndexOf("!baseline.IsTrustworthy", StringComparison.Ordinal) < queriesDetector.IndexOf("AnomalyGate.EvaluateZScore(", StringComparison.Ordinal));
+        Assert.Contains("PgTargetFactCollector.TopStatementCount", queriesDetector, StringComparison.Ordinal);
+        Assert.DoesNotContain("=> Task.CompletedTask;", queriesDetector, StringComparison.Ordinal);
 
         /* #3538 A7: the deadlock rate is per OBSERVED hour, never per nominal window. */
         var deadlock = code[code.IndexOf("DetectDeadlockRateAnomalies(AnalysisContext", StringComparison.Ordinal)..];
@@ -451,13 +471,15 @@ public sealed class PgTargetAnomalyTests
            between-waves batch registered the same way (blocked sessions per capture — z-score, deviation-scored),
            plus lane 24's stock sampled wait profile (the Aurora profile's ratio shape on another instrument), plus the
            two v3 anomalies the v3 plumbing registered by shape (plan regression — a statement's mean ms; CPU burn —
-           cores busy; both z-score, both deviation-scored), plus lane 38's database-growth anomaly (the instance total's
-           growth in bytes per day — z-score, deviation-scored, registered by the family that fills it). */
+           cores busy; both z-score, both deviation-scored), plus lane 34's own-normal share of ONE statement
+           (a keyed series — z-score, deviation-scored), plus lane 38's database-growth anomaly (the instance
+           total's growth in bytes per day — z-score, deviation-scored, registered by the family that fills it). */
         Assert.Equal(13, anomalyKeys.Count);
         Assert.True(PgTargetScorer.IsPgRatioAnomalyKey(PgTargetFactKeys.AnomalySampledWaitProfile));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBlocking));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyPlanRegression));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyCpuBurn));
+        Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyBadActorShare));
         Assert.True(PgTargetScorer.IsDeviationScoredAnomalyKey(PgTargetFactKeys.AnomalyDatabaseGrowth));
 
         foreach (var key in anomalyKeys)

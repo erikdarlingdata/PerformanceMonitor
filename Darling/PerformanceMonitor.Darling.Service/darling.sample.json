@@ -233,13 +233,17 @@
   // Defaults: enabled, every 30 minutes (clamped 5-360), notifications on, severity floor 1.5 (0-2) with
   // a fixed 6-hour per-finding re-notify cooldown. Omit the section (or any key) for the defaults.
   //
-  // "uncorroboratedRoute" (#3712, FILE-LEVEL like web.publicBaseUrl -- not a store column, so a store
-  // reload does not change it and the Viewer does not edit it): where a notify-worthy finding goes when it
-  // is a LONE FACT -- one fact in its chain and no matched co-fire check. "digest" (the default) keeps it off
-  // email / Teams / Slack / PagerDuty / the generic webhook; it is still persisted, visible on the web and
-  // MCP surfaces the instant it fires, recorded in the alert history with notification_type 'digest' and the
-  // reason, and counted in the daily Analysis Singles Digest. "page" restores the pre-#3712 behaviour where
-  // every finding at or above notifySeverity pages. A CORROBORATED finding pages under either value.
+  // "uncorroboratedRoute" (#3712): where a notify-worthy finding goes when it is a LONE FACT -- one fact in
+  // its chain and no matched co-fire check. "digest" (the default) keeps it off email / Teams / Slack /
+  // PagerDuty / the generic webhook; it is still persisted, visible on the web and MCP surfaces the instant it
+  // fires, recorded in the alert history with notification_type 'digest' and the reason, and counted in the
+  // daily Analysis Singles Digest. "page" restores the pre-#3712 behaviour where every finding at or above
+  // notifySeverity pages. A CORROBORATED finding pages under either value. This key is the FILE half of a
+  // two-home knob (V137): the store's config_alert_settings.analysis_uncorroborated_route column -- set in the
+  // Viewer's Settings > Automated Analysis or through update_alert_settings, live within one collection sweep
+  // -- WINS over this value when it holds a route; only a NULL column (every store after the upgrade; the seed
+  // never copies this value in) defers to this key, which is read once at service start. Clearing the column
+  // (the combo's third item, or update_alert_settings with null) hands the decision back here.
   "analysis": {
     "enabled": true,
     "intervalMinutes": 30,

@@ -785,6 +785,12 @@ public partial class SettingsWindow : Window
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #3712 (V137): the route knob's store half, a tri-state -- the combo's Tag is the stored wire spelling
+           ('digest' / 'page') or empty for NULL ("use the service's darling.json value"), which is what every store
+           reads after the upgrade and what a store nobody has touched here prefills as. Parsed through the same
+           FindingRouting.TryParseRoute the service applies, so a row value the service would ignore (impossible under
+           the CHECK) lands on the NULL item rather than on a wrong route. */
+        SelectAnalysisUncorroboratedRoute(r.AnalysisUncorroboratedRoute);
         /* #3466 (V124): the fleet sweep's own switch and cadence, prefilled beside Automated Analysis —
            the other scheduled whole-fleet evaluation — and deliberately OUTSIDE the master-toggle
            enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
@@ -842,6 +848,10 @@ public partial class SettingsWindow : Window
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
+            /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
+               governs"). No validation arm: the combo can only produce the three states the CHECK admits, and
+               the bind normalises the spelling. */
+            AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = AlertExcludedDatabasesBox.Text
                 .Split(',')
@@ -1065,6 +1075,12 @@ public partial class SettingsWindow : Window
         AlertPerEventMaxBox.Text = "5";
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
+        /* #3712 (V137): "defaults" for the route knob is the NULL item -- the store column cleared, the service's
+           darling.json value (shipped 'digest') governing -- not 'digest' pinned into the store. A Restore Defaults
+           that wrote 'digest' would silently move the decision off the file for every operator who pressed it,
+           which is the provenance shift the MCP writer warns about; the honest default is the row's own
+           (AlertSettingsRow.Defaults() holds null here for the same reason). */
+        SelectAnalysisUncorroboratedRoute(null);
         /* #3466 (V124): from the shared constant rather than a literal, so a moved default cannot
            leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
         FleetSweepEnabledCheckBox.IsChecked = true;
@@ -1148,6 +1164,35 @@ public partial class SettingsWindow : Window
         AlertPreviewText.Text = parts.Count > 0
             ? $"Will alert when: {string.Join(", ", parts)}"
             : "No alerts enabled";
+    }
+
+    /// <summary>#3712 (V137): selects the route combo's item for a stored value — the item whose Tag is the
+    /// parsed route's wire spelling, or the empty-Tag item for NULL and for anything <see cref="FindingRouting.TryParseRoute"/>
+    /// reads as neither route (impossible under the V137 CHECK; on a hand-edited row the honest item is "the
+    /// file governs", which is what the service resolves such a value to as well).</summary>
+    private void SelectAnalysisUncorroboratedRoute(string? stored)
+    {
+        var tag = FindingRouting.TryParseRoute(stored) is { } route ? FindingRouting.RouteText(route) : "";
+        foreach (ComboBoxItem item in AnalysisUncorroboratedRouteBox.Items)
+        {
+            if (string.Equals(item.Tag as string, tag, StringComparison.Ordinal))
+            {
+                AnalysisUncorroboratedRouteBox.SelectedItem = item;
+                return;
+            }
+        }
+
+        /* Unreachable while the XAML carries the three items; if one is ever removed, land on the NULL item
+           rather than leave the combo unselected and the save writing whatever a null Tag maps to. */
+        AnalysisUncorroboratedRouteBox.SelectedIndex = AnalysisUncorroboratedRouteBox.Items.Count - 1;
+    }
+
+    /// <summary>#3712 (V137): the route combo's selection as the value the row stores — the item's Tag, with the
+    /// empty Tag (and no selection at all) mapping to null, "the file governs".</summary>
+    private string? SelectedAnalysisUncorroboratedRoute()
+    {
+        var tag = (AnalysisUncorroboratedRouteBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        return string.IsNullOrEmpty(tag) ? null : tag;
     }
 
     private void UpdateAlertControlStates()

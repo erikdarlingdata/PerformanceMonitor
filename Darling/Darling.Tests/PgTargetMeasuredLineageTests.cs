@@ -80,7 +80,9 @@ public sealed class PgTargetMeasuredLineageTests
     {
         ("PgTargetScorer.Waits.cs", new[] { "WaitSampledMinimumSamples", "WaitCoFireBoost" }),
         ("PgTargetScorer.Temp.cs", new[] { "TempCauseBoost" }),
-        ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost" }),
+        /* Lane 34 (#3691, ruled 2026-09-20): the context band an admitted bad actor lands in and the lift the own-normal
+           anomaly gives the statement it names — severity levels, not bars; no fleet distribution places them. */
+        ("PgTargetScorer.Queries.cs", new[] { "BadActorCoFireBoost", "BadActorContextBand", "BadActorOwnNormalBoost" }),
         /* Lane 18 (#3691) added the offered-vs-delivered co-fire boost — a boost, unmeasured like its siblings. */
         ("PgTargetScorer.Sessions.cs", new[] { "ConnectionSaturationCoFireBoost", "IdleInTransactionRecurrenceCaptures", "IdleInTransactionRecurrenceBoost", "OfferedVsDeliveredBoost" }),
         /* Lane 24 (#3691): the stock SAMPLED profile's bar — the calibration read Aurora's exact deltas, not pg_wait_sampling. */
@@ -162,19 +164,29 @@ public sealed class PgTargetMeasuredLineageTests
     }
 
     /// <summary>The flag agrees with the comments file by file: a scorer whose every graded bar is now measured or
-    /// engine-defined stamps 1 and never 0; the wait scorer stamps by POPULATION (Aurora's measured deltas vs the
+    /// engine-defined stamps 1 and never 0; the queries scorer (lane 34) stamps 1 on the exit its measured busy floor
+    /// decides and 0 on the exit its chosen context band decides — both, by design, and each beside its marker; the wait scorer stamps by POPULATION (Aurora's measured deltas vs the
     /// stock sampled estimate) on both its exits, now that the standout bars are measured too, and never a bare 0;
     /// the checkpoint and buffer scorers (not flipped — not applicable on Aurora / not measured) and the ratio-anomaly
     /// scorer (its ramp spans are chosen) still stamp 0 and never 1.</summary>
     [Fact]
     public void TheMetadataFlag_AgreesWithTheCommentsFileByFile()
     {
-        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Queries.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs" })
+        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs" })
         {
             var source = string.Join("\n", Source(file));
             Assert.Contains("[\"threshold_lineage\"] = 1;", source, StringComparison.Ordinal);
             Assert.DoesNotContain("[\"threshold_lineage\"] = 0;", source, StringComparison.Ordinal);
         }
+
+        /* Lane 34 (ruled 2026-09-20): the queries scorer has TWO exits — the measured busy floor zeroes a fact (1), the
+           chosen context band grades an admitted one (0) — exactly one stamp of each, the 1 before the 0 (the gate is
+           read first), and the share bars decide nothing any more (no ApplyThresholdFormula on them). */
+        var queries = string.Join("\n", Source("PgTargetScorer.Queries.cs"));
+        Assert.Single(Regex.Matches(queries, Regex.Escape("[\"threshold_lineage\"] = 1;")));
+        Assert.Single(Regex.Matches(queries, Regex.Escape("[\"threshold_lineage\"] = 0;")));
+        Assert.True(queries.IndexOf("[\"threshold_lineage\"] = 1;", StringComparison.Ordinal) < queries.IndexOf("[\"threshold_lineage\"] = 0;", StringComparison.Ordinal));
+        Assert.DoesNotContain("ApplyThresholdFormula", CSharpSourceWalker.StripCommentsAndStrings(queries), StringComparison.Ordinal);
 
         var waits = string.Join("\n", Source("PgTargetScorer.Waits.cs"));
         /* Both exits — the yielded rollup and the fraction ramp — stamp the population verdict; a bare 0 on the yield

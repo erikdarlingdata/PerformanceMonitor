@@ -653,6 +653,27 @@
                     <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
+                <!-- #3712 (V137): where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no
+                     matched co-fire check. A three-way combo, not a checkbox like Lite's, because the store column is
+                     a TRI-STATE: Digest and Page write the column and WIN over the service's darling.json value from
+                     its next reload beacon (no restart); the third item writes NULL, which hands the decision back
+                     to darling.json's analysis.uncorroboratedRoute — what every store holds after the V137 upgrade,
+                     so an untouched install reads here as "use the service's file value" and moves nothing. The
+                     Tag is the stored wire spelling (or empty for NULL) so the code-behind maps without a lookup
+                     table; the routing decision itself is unchanged — a corroborated finding pages under any item. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Route a lone uncorroborated finding to" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="AnalysisUncorroboratedRouteBox" Width="330" VerticalAlignment="Center"
+                              ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Analysis Singles Digest — never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
+                        <ComboBoxItem Content="Digest — recorded and shown, never paged (recommended)" Tag="digest"/>
+                        <ComboBoxItem Content="Page — every notify-worthy finding pages (pre-#3712)" Tag="page"/>
+                        <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
+                    </ComboBox>
+                </StackPanel>
+                <TextBlock Text="Digest and Page take effect in the running service within one collection sweep, no restart, and win over darling.json's analysis.uncorroboratedRoute; the third choice clears the store column so the file governs again. get_alert_settings reports which one is deciding under analysis.uncorroborated_route_source."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,2,0,0" TextWrapping="Wrap"/>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,4,0,0" TextWrapping="Wrap"/>

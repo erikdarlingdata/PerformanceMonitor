@@ -495,8 +495,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             var peerPublish = DarlingPeerDirectory.Publish(config.Peers);
             var declaredPeers = peerPublish.Snapshot;
 
-            /* #3712: the file-level analysis routing knob — the peers precedent: either host may load its config
-               first, and get_alert_settings must report the file's value from whichever did. */
+            /* #3712: the FILE half of the analysis routing knob (the store half is a settings-row column since
+               V137, read off the row by the tool itself) — the peers precedent: either host may load its config
+               first, and get_alert_settings must have the file's value from whichever did, to say what a NULL
+               store column defers to. */
             DarlingFileLevelAlertSettings.Publish(config.Analysis);
 
             if (peerPublish.Refused)
