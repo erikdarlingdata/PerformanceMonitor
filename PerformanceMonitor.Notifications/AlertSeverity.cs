@@ -99,6 +99,20 @@ internal static class AlertSeverity
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #3816: the other two policy families page under their own names, and each name has exactly ONE
+               tier at its fire site — so these arms are the faithful replay colour for every row they will
+               ever style, rather than the #3635 defect of a row wearing the colour its NAME implies. A dead
+               CAGG refresh is the worst of the three (the rollup stops advancing, its readers get silently
+               stale answers, and the coverage gate then holds that tier's retention), so CRITICAL like
+               compression. A dead retention job costs disk and nothing else — nothing is lost and no reader
+               is wrong — so WARNING, with Store Disk Pressure owning the page if it ever reaches the volume. */
+            "Refresh Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            "Retention Job Stuck" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #3816: the total_failures arm is the fourth deliberate INFO arm, on the digest's reasoning —
+               a policy job that fails and retries is alive, and the useful response is to read the
+               PostgreSQL log rather than to wake anybody. Fired with no severity override so this arm
+               decides; DECLARED so the next fall-through sweep does not promote it to WARNING. */
+            "Store Job Failing" => ("#2eaef1", "INFO", "\U0001F535"),
             /* #3443: the collector-cost DIGEST is the one metric in this map that is INFO-blue on
                purpose. It fires with no severity override precisely so this arm decides, because the
                product's only outbound channel is the alerting one and INFO is the only tier the rendering

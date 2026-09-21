@@ -275,6 +275,14 @@ public sealed class RetentionReevaluationTests
     /// The cost of the order is one tick of lag on the Retention Held alert's resolution edge, because that
     /// alert's read rides inside the compression method — stated in the worker's comment and in the alert
     /// text, and pinned on the latter in <c>DarlingSelfAlertTests</c>.</para>
+    ///
+    /// <para>#3815 moved the <c>_timescaleAvailable</c> test off the tick's outer guard and onto an inner one
+    /// so the availability re-probe could run ahead of it, which is why the anchors below are the due-time
+    /// guard and then the flag gate rather than one conjunction. Nothing about THIS pass changed: the
+    /// re-evaluation is still the last awaited statement inside the flag gate, still after the compression
+    /// read, still with nothing between the two that could skip it. The re-probe's own position — outside the
+    /// gate it corrects — is pinned in <c>TimescaleAvailabilityReprobeTests</c>, which is where the argument
+    /// for it lives.</para>
     /// </summary>
     [Fact]
     public void Worker_RunsTheReevaluation_OnTheCompressionTick_AfterTheCompressionCheck_AndKeepsTheStartupCall()
@@ -284,15 +292,20 @@ public sealed class RetentionReevaluationTests
         /* The startup call, unchanged in shape and still exactly one. */
         Assert.Equal(1, CountOf(worker, "await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);"));
 
-        /* The tick: stamp, compression check, retention pass — in that order, inside the same guard, with
-           nothing between the two awaits that could skip the second on the first's outcome. */
-        var guardAt = worker.IndexOf("if (_timescaleAvailable && DateTime.UtcNow >= _nextCompressionCheckUtc)", StringComparison.Ordinal);
+        /* The tick: due-time guard, stamp, flag gate, compression check, retention pass — in that order,
+           with nothing between the two awaits that could skip the second on the first's outcome. The flag gate
+           is searched FROM the stamp: the start-path block carries the same `if (_timescaleAvailable)` text
+           several thousand lines earlier, and a search from zero would anchor on that one and prove nothing
+           about this tick. */
+        var guardAt = worker.IndexOf("if (DateTime.UtcNow >= _nextCompressionCheckUtc)", StringComparison.Ordinal);
         var stampAt = worker.IndexOf("_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);", StringComparison.Ordinal);
+        Assert.True(guardAt > 0 && stampAt > guardAt, "the tick's guard is the due time, stamped forward inside it");
+        var flagGateAt = worker.IndexOf("if (_timescaleAvailable)", stampAt, StringComparison.Ordinal);
         var compressionAt = worker.IndexOf("await EvaluateCompressionJobHealthAsync(stoppingToken);", StringComparison.Ordinal);
         var retentionAt = worker.IndexOf("await ReevaluateRetentionPoliciesAsync(stoppingToken);", StringComparison.Ordinal);
         var nextBlockAt = worker.IndexOf("/* #2068: the store self-metrics sweep.", StringComparison.Ordinal);
-        Assert.True(guardAt > 0 && stampAt > guardAt && compressionAt > stampAt && retentionAt > compressionAt && nextBlockAt > retentionAt,
-            "the retention re-evaluation is awaited after the compression check inside the compression tick's guard");
+        Assert.True(flagGateAt > stampAt && compressionAt > flagGateAt && retentionAt > compressionAt && nextBlockAt > retentionAt,
+            "the retention re-evaluation is awaited after the compression check inside the tick's _timescaleAvailable gate");
         Assert.Equal(1, CountOf(worker, "await ReevaluateRetentionPoliciesAsync(stoppingToken);"));
 
         var between = worker[compressionAt..retentionAt];

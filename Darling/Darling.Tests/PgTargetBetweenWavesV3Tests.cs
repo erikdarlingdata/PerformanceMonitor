@@ -156,11 +156,16 @@ public sealed class PgTargetBetweenWavesV3Tests
         Assert.Contains("The first of the three seams a derived provider overrides", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("The one seam a derived provider overrides", provider, StringComparison.Ordinal);
 
+        /* Lane 37 wrote these two docs as "the keyed seam exists since #3810; switching the anomaly to per-queryid is
+           lane 27's follow-up". Lane 39 DID the switch on calibration D's evidence, so the follow-up sentence is gone
+           and the docs now say what the detector does: the keyed series is the instrument, the server-wide arm the
+           cold fallback. The pin follows the truth: #3810 still named as the seam, the keyed reading named as live. */
         foreach (var file in new[] { "PgTargetAnomalyDetector.Plans.cs", "PgTargetBaselineProvider.Plans.cs" })
         {
             var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file);
             Assert.Contains("#3810", text, StringComparison.Ordinal);
-            Assert.Contains("lane 27's follow-up", text, StringComparison.Ordinal);
+            Assert.Contains("keyed", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("lane 27's follow-up", text, StringComparison.Ordinal);
         }
 
         var detector = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");

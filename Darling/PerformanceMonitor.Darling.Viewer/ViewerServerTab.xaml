@@ -1764,6 +1764,113 @@
                             </DataGrid>
                         </Grid>
                     </TabItem>
+                    <!-- Query Store Clutter (#3797) — Darling-only, like Query Store Regressions beside it, and
+                         placed here because it answers the question the two grids above raise: which DATABASE is
+                         making the Query Store catalog expensive, and why. Every figure is composed from rows
+                         already collected (QueryStoreClutter over DarlingQueryStoreClutterReader, the same
+                         statements and the same verdict get_query_store_clutter serves) — nothing here runs a new
+                         query against the monitored server. Clutter is per DATABASE, so it is the grid; overhead is
+                         per SERVER (instance-wide QDS_* waits and one memory clerk), so it is the block below and
+                         is never attributed to a database. A readable secondary stays in the grid with its
+                         Excluded / Excluded Because columns filled: dropping the row would leave an operator
+                         unable to tell "not cluttered" from "not shown". -->
+                    <TabItem Header="Query Store Clutter">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Margin="8,4,8,4" FontSize="11"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       TextWrapping="Wrap"
+                                       Text="Which databases make this server's Query Store expensive, composed from rows already collected — no new query runs against the server. Per database: the query_store collector's read cost (how often and by how much this database was the slowest fan-out item), plan churn off the stored plan identities, and the newest options row. Verdict is the band the arms raised, with the reasons beside it; Unknown means unmeasured, never quietly healthy. Select a row for its recommendation."/>
+                            <!-- Shown only when every Query-Store-bearing database here is a readable secondary:
+                                 no per-database verdict is issued on such a server, and an empty-looking grid
+                                 without this sentence reads as a defect rather than as the architecture. -->
+                            <TextBlock Grid.Row="1" x:Name="QueryStoreClutterServerNote" Visibility="Collapsed"
+                                       Margin="8,0,8,4" FontSize="11" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <!-- The measured columns bind NUMBERS with StringFormat and TargetNullValue rather than
+                                 pre-formatted text: this grid exists to rank, so a column must sort by magnitude, and a
+                                 string column would sort 9 above 1,234 while looking like a working sort. The em-dash
+                                 comes from TargetNullValue, so an unmeasured arm reads like every other absent cell in
+                                 the Viewer without becoming a zero. -->
+                            <DataGrid Grid.Row="2" x:Name="QueryStoreClutterGrid" Style="{StaticResource DarkGrid}"
+                                      SelectionChanged="QueryStoreClutterGrid_SelectionChanged"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding Verdict}" Width="90">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Verdict" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Verdict" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding Reasons}" Width="260">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reasons" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reasons" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding Excluded}" Width="85">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Excluded" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Excluded" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExcludedReason}" Width="170">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExcludedReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Excluded Because" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Slowest On %" Binding="{Binding RunsSlowestPct, StringFormat=N1, TargetNullValue=—}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Share of Pass %" Binding="{Binding SlowestSharePct, StringFormat=N1, TargetNullValue=—}" Width="115" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Slowest ms p50" Binding="{Binding SlowestItemMsP50, StringFormat=N0, TargetNullValue=—}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="vs Other DBs" Binding="{Binding DominanceRatio, StringFormat=N2, TargetNullValue=—}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Plans/Query p95" Binding="{Binding PlansPerQueryP95, StringFormat=N0, TargetNullValue=—}" Width="115" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Plans/Query Max" Binding="{Binding PlansPerQueryMax, StringFormat=N0, TargetNullValue=—}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="New Plans/Day" Binding="{Binding NewPlansPerDay, StringFormat=N1, TargetNullValue=—}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="One-Shot Fraction" Binding="{Binding OneShotFraction, StringFormat=N3, TargetNullValue=—}" Width="125" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Plans" Binding="{Binding DistinctPlans, StringFormat=N0, TargetNullValue=—}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Binding="{Binding ActualState}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ActualState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <!-- V137 (#3796): ALL is the plan-churn factory the churn columns to the left are
+                                         usually explained by. A dash is a health capture older than the rung — the mode
+                                         was never asked for — and is never the engine's NONE. -->
+                                    <DataGridTextColumn Binding="{Binding CaptureMode}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Capture Mode" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery, StringFormat=N0, TargetNullValue=—}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays, StringFormat=N0, TargetNullValue=—}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PctOfCap, StringFormat=N1, TargetNullValue=—}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Options Captured" Binding="{Binding OptionsCaptured, StringFormat='yyyy-MM-dd HH:mm', TargetNullValue=—}" Width="140"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- The row's recommendation, whole. It is a paragraph per reason, so it gets its own
+                                 pane rather than a column nobody can read; the text is the composition's, never
+                                 re-worded here, so this pane and the MCP payload say the same thing. -->
+                            <TextBlock Grid.Row="3" x:Name="QueryStoreClutterRecommendation" Margin="8,6,8,6"
+                                       FontSize="11" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Text="Select a database above for its recommendation."/>
+                            <!-- Per SERVER, and labelled as such: QDS_* waits and the Query Store memory clerk are
+                                 instance-wide. The proxy is the NON-sleep QDS types only — the four sleep waits are
+                                 dropped at collection — which is why the excluded list is printed rather than implied. -->
+                            <Expander Grid.Row="4" Header="Query Store overhead (per server)" Margin="8,0,8,8" IsExpanded="True">
+                                <StackPanel>
+                                    <DataGrid x:Name="QueryStoreOverheadGrid" Style="{StaticResource DarkGrid}"
+                                              MaxHeight="160" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Wait Type" Binding="{Binding WaitType}" Width="260"/>
+                                            <DataGridTextColumn Header="Wait ms/hour" Binding="{Binding WaitMsPerHour, StringFormat=N1, TargetNullValue=—}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                            <DataGridTextColumn Header="Wait ms (window)" Binding="{Binding WaitMsTotal, StringFormat=N0}" Width="130" ElementStyle="{StaticResource NumericCell}"/>
+                                            <DataGridTextColumn Header="Waiting Tasks" Binding="{Binding WaitingTasks, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                            <DataGridTextColumn Header="Measured s" Binding="{Binding MeasuredSeconds, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastObserved, StringFormat='yyyy-MM-dd HH:mm'}" Width="140"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <TextBlock x:Name="QueryStoreOverheadNote" Margin="4,6,4,0" FontSize="11"
+                                               TextWrapping="Wrap"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </Expander>
+                        </Grid>
+                    </TabItem>
                     <!-- Plan Corrections (Lite ServerTab.xaml): the engine's own automatic plan correction
                          recommendations (#1952), beside the Query Store surfaces because every recommendation
                          names a Query Store query id. The per-database FORCE_LAST_GOOD_PLAN enablement half of
@@ -2841,7 +2948,7 @@
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
-                                <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery, StringFormat=N0, TargetNullValue=—}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                 <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                 <!-- V137 (#3796): the two capture modes, trailing like the store columns and the MCP payload. ALL is the
                                      plan-churn factory; a dash is a pre-rung row (or, for wait stats, a 2016 engine), never OFF. -->

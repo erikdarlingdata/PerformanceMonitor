@@ -869,6 +869,174 @@ public sealed class PgTargetBlockingTests
         }
     }
 
+    /* ───────────────────── gated: #3691 lane 41, the zero-history extremity ───────────────────── */
+
+    /// <summary>
+    /// A month in which this server never blocked, then 92 blocked sessions: the face of #3691 lane 41.
+    ///
+    /// <para><b>What used to happen.</b> The 30-day <c>pg_blocked_sessions</c> bucket for a server that never blocks
+    /// is all zeros — every logged <c>pg_blocking</c> capture a measured zero, no edge ever — so
+    /// <c>EffectiveStdDev</c> is 0, <c>IsTrustworthy</c> is false however many samples it holds, and the gate routed
+    /// the window to the absolute-fallback bar meant for a young store. <c>ANOMALY_PG_BLOCKING</c> came out
+    /// <c>baseline_low_quality = 1</c>, graded off the fallback ramp's 0.5 floor, worded "first occurrence, no
+    /// baseline yet" — against the most confident statement a baseline can make.</para>
+    ///
+    /// <para><b>What happens now.</b> The bucket is <c>IsZeroHistory</c>, the gate takes the extremity arm, and the
+    /// fact carries <c>baseline_low_quality = 0</c> / <c>baseline_zero_history = 1</c> with the sample and distinct-day
+    /// counts the claim rests on. Severity clears the face line's 0.5 and the advice takes its third shape. This is
+    /// the LIVE proof: the real baseline provider's SQL produces the zero-history bucket (not a hand-built one), the
+    /// real detector reads the real window, and the real <c>analyze_server</c> composes the card.</para>
+    /// </summary>
+    [Fact]
+    public async Task AMonthOfZeroBlocking_ThenNinetyTwoBlockedSessions_FiresAsAnExtremity_NotAsFirstOccurrence()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the zero-history blocking e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, "postgres", 18, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+            var historyStart = windowStart.AddDays(-31);
+
+            /* The coverage witness and the span gate read pg_database_stats, as the family e2e above does. */
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            /* 31 days of one-minute pg_blocking SUCCESS runs and NOT ONE EDGE: every capture looked and saw
+               nothing, which the baseline arm reads as a measured zero. This is the whole fixture — the history
+               is the absence, deliberately planted as logged captures rather than as missing rows, because a
+               capture that did not run is not a sample (the family's zero rule). */
+            await PlantZeroBlockingHistoryAsync(connection, historyStart, windowStart, ct);
+
+            /* The window: 92 distinct blocked sessions in every capture, one shallow chain each (a pool-wide
+               lock storm), so peak and mean both sit at 92. Ninety-two is the face line's number. */
+            for (var minute = 1; minute <= 240; minute++)
+            {
+                var at = windowStart.AddMinutes(minute);
+                var collectionId = CollectionIdGenerator.Next();
+                await PlantBlockedFanAsync(connection, collectionId, at, blockedSessions: 92, ct);
+                await PlantLogRunAsync(connection, "pg_blocking", at, rows: 92, ct);
+            }
+
+            /* ── the baseline the provider's own SQL builds. */
+            var baselines = new PgTargetBaselineProvider(postgres);
+            var bucket = await baselines.GetBaselineAsync(ServerId, MetricNames.PgBlockedSessions, windowStart, ct);
+            Assert.True(bucket.SampleCount >= 10, $"samples {bucket.SampleCount}");
+            Assert.True(bucket.DistinctDays >= 3, $"distinct days {bucket.DistinctDays}");
+            Assert.Equal(0, bucket.Mean);
+            Assert.Equal(0, bucket.StdDev);
+            Assert.Equal(0, bucket.Median);
+            Assert.Equal(0, bucket.Mad);
+            /* THE FLIP: the same bucket that is not trustworthy IS zero-history, and its confidence is real. */
+            Assert.False(bucket.IsTrustworthy);
+            Assert.True(bucket.IsZeroHistory);
+            Assert.True(bucket.Confidence > 0, "a month of measured zeros is quality, not the absence of it");
+
+            /* ── the detector alone, on the real window. */
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var anomalies = await new PgTargetAnomalyDetector(postgres, baselines).DetectAnomaliesAsync(context);
+            var anomaly = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyBlocking);
+            Assert.Equal(92, anomaly.Value);
+            Assert.Equal(92, anomaly.Metadata["peak_blocked_sessions"]);
+            Assert.Equal(1, anomaly.Metadata["baseline_zero_history"]);
+            Assert.Equal(0, anomaly.Metadata["baseline_low_quality"]);   /* NOT the young-store path */
+            Assert.Equal(0, anomaly.Metadata["fallback_exceedance"]);    /* no absolute bar was used */
+            Assert.Equal(AnomalyThresholds.SigmaDisplayCap, anomaly.Metadata["deviation_sigma"]);
+            Assert.Equal(bucket.SampleCount, anomaly.Metadata["baseline_samples"]);
+            Assert.Equal(bucket.DistinctDays, anomaly.Metadata["baseline_distinct_days"]);
+            Assert.True(anomaly.Metadata["confidence"] > 0);
+
+            /* Severity past the face line, off the shared deviation ramp — no new scale was invented. */
+            new FactScorer().ScoreAll([anomaly]);
+            Assert.True(anomaly.BaseSeverity > 0.5, $"92 blocked sessions against a clean month scored {anomaly.BaseSeverity}");
+
+            /* ── THE EXIT CRITERION: the real analyze_server tool, and the advice's third shape. */
+            var service = new DarlingAnalysisService(postgres);
+            var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+            var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4, as_of: asOf);
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var findings = doc.RootElement.GetProperty("findings").EnumerateArray().ToList();
+                var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.AnomalyBlocking);
+                Assert.True(card.GetProperty("severity").GetDouble() > 0.5);
+                var advice = card.GetProperty("advice");
+                Assert.Equal("Blocked sessions per capture reached 92 sessions — against a month in which this hour saw none", advice.GetProperty("headline").GetString());
+                var investigation = advice.GetProperty("investigation").GetString()!;
+                Assert.Contains("it is a measured ZERO", investigation, StringComparison.Ordinal);
+                Assert.Contains("not one of them above zero", investigation, StringComparison.Ordinal);
+                Assert.Contains("distinct day", investigation, StringComparison.Ordinal);
+                Assert.Contains("Beyond any σ", investigation, StringComparison.Ordinal);
+                /* The two older shapes must not leak into this one. */
+                Assert.DoesNotContain("first occurrence", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("too thin", investigation, StringComparison.Ordinal);
+                Assert.DoesNotContain("σ above", investigation, StringComparison.Ordinal);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>31 days of one-minute <c>pg_blocking</c> SUCCESS runs with zero rows collected and no edge rows at
+    /// all — the zero-history fixture. Set-based: ~45,000 log rows in one statement.</summary>
+    private static async Task PlantZeroBlockingHistoryAsync(NpgsqlConnection connection, DateTime historyStart, DateTime windowStart, CancellationToken ct)
+    {
+        using var log = new NpgsqlCommand(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+SELECT $4 + row_number() OVER (ORDER BY m), $1, $2, 'pg_blocking', m + INTERVAL '20 seconds', 120, 'SUCCESS', NULL, 0, 90, 30
+FROM generate_series($3::timestamp, $5::timestamp - INTERVAL '1 minute', INTERVAL '1 minute') AS s(m)", connection);
+        log.Parameters.AddWithValue(ServerId);
+        log.Parameters.AddWithValue(ServerName);
+        log.Parameters.AddWithValue(historyStart);
+        log.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        log.Parameters.AddWithValue(windowStart);
+        await log.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One capture in which <paramref name="blockedSessions"/> distinct pids all wait behind one head — the
+    /// pool-wide lock storm shape, so <c>COUNT(DISTINCT blocked_pid)</c> for the minute is exactly that count.</summary>
+    private static async Task PlantBlockedFanAsync(NpgsqlConnection connection, long collectionId, DateTime at, int blockedSessions, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_blocking_edges
+    (collection_id, collection_time, server_id, server_name, blocked_pid, blocking_pid, database_name, blocked_state,
+     blocked_query_duration_ms, blocked_xact_duration_ms, blocking_state, blocking_application_name, blocking_username,
+     blocking_query_duration_ms, blocking_xact_duration_ms, blocked_pid_count, blocking_is_idle_in_transaction, query_text_may_be_truncated)
+SELECT $1, $2, $3, $4, 8000 + g, 7999, 'appdb', 'active', 30000, 31000, 'idle in transaction', 'billing-worker', 'billing',
+       -1, 900000, 1, true, false
+FROM generate_series(1, $5) AS s(g)", connection);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(blockedSessions);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     /* ───────────────────────── builders ───────────────────────── */
 
     private static PgTargetFactCollector.PgBlockingEdgeSample Edge(int blocked, int blocking, long blockedQueryMs, bool blockingIdle = false) =>

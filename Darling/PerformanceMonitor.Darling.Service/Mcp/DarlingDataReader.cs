@@ -1354,9 +1354,10 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>26 columns since #3754 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// <para>29 columns since #3819 (16 at #2460, plus #2472's four fan-out columns, #2804's
     /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
-    /// extension_missing_count and #3754's session_missing_count) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// extension_missing_count, #3754's session_missing_count and #3819's current_status /
+    /// last_non_skip_time / last_productive_time) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1530,7 +1531,32 @@ internal static class DarlingDataReader
             -- capture-down story belongs to the self-alert - and fed with error_count to the output
             -- finding as the runs that could not read. APPENDED, like every column since #2472, because
             -- this result set is read positionally and Lite's DuckDB read mirrors the ordinals.
-            SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count
+            SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count,
+            -- #3819: the three columns that tell a collector which STOPPED producing apart from one that
+            -- never produced here. The same named skip carries opposite meanings on those two rows, and
+            -- until now the surface read both as the benign resting state -- which is how an install that
+            -- took pg_statement_stats from 85% productive to EXTENSION_MISSING on 23 of 50 clusters was
+            -- accepted by the countersign for 24 hours. APPENDED, like every column since #2472, because
+            -- this result set is read positionally and Lite's DuckDB read mirrors the ordinals.
+            --
+            -- current_status is what the collector is reporting NOW, for the finding's prose. Taken at
+            -- recency_rank = 1 rather than as a MAX over the skip rows: MAX is lexicographic, so on a
+            -- streak whose status changed it would name whichever word sorts highest instead of the one
+            -- being reported.
+            MAX(CASE WHEN recency_rank = 1 THEN status END) AS current_status,
+            -- The instant the current skip streak began AFTER: the newest run that was NOT a named skip.
+            -- The vocabulary is interpolated from CollectorRuntimePrecondition, which is where each of
+            -- those statuses is declared, so this cannot ask about three of four after a fourth is split
+            -- out. A NULL status counts as non-skip: it is not one of the declared skip words, and reading
+            -- it as one would let an unwritten status manufacture a streak.
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            -- The newest run that stored anything. Off the same rows_collected > 0 test as runs_with_rows
+            -- above, so productive means one thing on this row. Compared against last_non_skip_time it
+            -- says the productivity sits BEFORE the streak rather than inside it, which is the ORDER that
+            -- makes this a regression rather than two unrelated facts.
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1581,7 +1607,16 @@ internal static class DarlingDataReader
                     ORDER BY slowest_item_ms IS NULL,
                              slowest_item_ms DESC,
                              collection_time DESC
-                ) AS slowest_rank
+                ) AS slowest_rank,
+                -- #3819: newest run first, so current_status above can take the status the collector is
+                -- reporting NOW. status DESC only breaks an exact-timestamp tie, and breaks it identically
+                -- on DuckDB and Postgres -- the same reason the ranks above tie-break on error_message.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY collection_time DESC,
+                             status DESC
+                ) AS recency_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -1635,6 +1670,10 @@ internal static class DarlingDataReader
                 ExtensionMissingCount = reader.IsDBNull(24) ? 0 : Convert.ToInt64(reader.GetValue(24)),
                 /* Appended (#3754), for the same reason every column before it was. */
                 SessionMissingCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
+                /* Appended (#3819), for the same reason every column before it was. */
+                CurrentStatus = reader.IsDBNull(26) ? null : reader.GetString(26),
+                LastNonSkipTime = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                LastProductiveTime = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
             });
         }
 
@@ -2269,6 +2308,57 @@ internal sealed class CollectorHealth
     /// </summary>
     public long SessionMissingCount { get; set; }
 
+    /* ── Regressed from productive (#3819) ────────────────────────────────────────────────────────
+       A named skip on a collector that had been producing is a different fact from the same status on
+       one that never has. These three columns are what tells them apart; the predicate and the
+       sentence below are composed from the shared classifier so no surface can answer differently. */
+
+    /// <summary>
+    /// The status the collector is reporting NOW — its newest run's (<c>current_status</c>). Display
+    /// text for <see cref="RegressedFinding"/> and nothing else: <see cref="HealthStatus"/> reads the
+    /// window's COUNTS, never one row's word. Null on a surface that does not project it, which makes
+    /// the finding null rather than a sentence with a hole in it.
+    /// </summary>
+    public string? CurrentStatus { get; set; }
+
+    /// <summary>
+    /// The newest run whose status was NOT one of <c>CollectorRuntimePrecondition.NamedSkipStatuses</c>
+    /// (<c>last_non_skip_time</c>) — the instant the current skip streak began after. Null when every
+    /// run in the window was a skip, which is the never-produced-here case the benign band already
+    /// describes correctly.
+    /// </summary>
+    public DateTime? LastNonSkipTime { get; set; }
+
+    /// <summary>
+    /// The newest run that stored anything (<c>last_productive_time</c>) — off the same
+    /// <c>rows_collected > 0</c> test as <see cref="RunsWithRows"/>, so productive means one thing on
+    /// this row. Its ORDER against <see cref="LastNonSkipTime"/> is what makes a regression a
+    /// regression rather than two unrelated facts.
+    /// </summary>
+    public DateTime? LastProductiveTime { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and now reports a named skip every cycle (#3819) — the
+    /// distinction <see cref="HealthStatus"/> could not make on its own, because the benign skip bands
+    /// are gated on the window holding no success and a regressed collector's window holds its
+    /// productive days. Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: every surface derives it from the one shared
+    /// predicate instead of each writing the comparison out.
+    /// </summary>
+    public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
+        LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
+    /// The sentence a regressed collector carries, or null when it is not one (#3819). Composed from
+    /// the shared formatter, like <see cref="OutputFinding"/> above, so no consumer re-derives it
+    /// differently. <see cref="RowsStored"/> is the count it reports: on a regressed row that figure is
+    /// entirely pre-regression, because a named skip stores nothing.
+    /// </summary>
+    public string? RegressedFinding => RegressedFromProductive
+        ? CollectorHealthClassifier.FormatRegressedFromProductiveFinding(
+            RowsStored, LastNonSkipTime, CurrentStatus)
+        : null;
+
     /// <summary>
     /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
     /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
@@ -2458,7 +2548,21 @@ internal sealed class CollectorHealth
     internal int FrequencyMinutes =>
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
-    public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+    /// <summary>
+    /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
+    /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
+    /// answer everywhere else.
+    ///
+    /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
+    /// deliberately: that signature takes RUN-CLASS COUNTS and nothing about output or currency, a
+    /// discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
+    /// order of two instants, so feeding it in would be exactly the leak those pins refuse. The ladder
+    /// stays a function of the counts; the floor is a separate, strictly-louder decision composed on
+    /// top of it.</para>
+    /// </summary>
+    public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
+        CollectorHealthClassifier.Classify(
+            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+        RegressedFromProductive);
 }

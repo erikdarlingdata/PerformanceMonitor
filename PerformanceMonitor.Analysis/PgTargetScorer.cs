@@ -65,6 +65,9 @@ public static partial class PgTargetScorer
             PgTargetSources.PlansSource => ScorePlanFact(fact),
             PgTargetSources.KernelSource => ScoreKernelFact(fact),
             PgTargetSources.MemorySource => ScoreMemoryFact(fact),
+            /* lane 38 (#3691): the object-growth family's arm (PgTargetScorer.Growth.cs) — declared and filled by the
+               content lane in one PR, no stub in between (P3 declared none). */
+            PgTargetSources.GrowthSource => ScoreGrowthFact(fact),
             _ => 0.0,
         };
     }
@@ -106,6 +109,8 @@ public static partial class PgTargetScorer
             PgTargetFactKeys.PlanRegression or PgTargetFactKeys.ParameterSensitivity or PgTargetFactKeys.SeqScanAdvisory => PlanAmplifiers(key),
             PgTargetFactKeys.CpuBurnCores or PgTargetFactKeys.CpuDecomposition => KernelAmplifiers(key),
             PgTargetFactKeys.ConfigMemoryOvercommit or PgTargetFactKeys.HostMemoryPressure => MemoryAmplifiers(key),
+            /* lane 38 (#3691): the object-growth family's one measured key. */
+            PgTargetFactKeys.DatabaseGrowth => GrowthAmplifiers(key),
             _ when key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) => ConfigAmplifiers(key),
             _ => [],
         };
@@ -173,4 +178,9 @@ public static partial class PgTargetScorer
 
     private static partial double ScoreMemoryFact(Fact fact);
     private static partial List<AmplifierDefinition> MemoryAmplifiers(string key);
+
+    /* lane 38 (#3691) — PgTargetScorer.Growth.cs, declared and filled by the content lane (no stub existed). */
+
+    private static partial double ScoreGrowthFact(Fact fact);
+    private static partial List<AmplifierDefinition> GrowthAmplifiers(string key);
 }

@@ -13,12 +13,19 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The store reads behind <c>get_query_store_clutter</c> (#3797) — four arms over rows the collectors already
 /// write, and not one new query against a monitored server. The maintainer's design intent, verbatim spirit:
 /// <i>some sort of view of Query Store clutter; not a new query — analyse what we've already collected.</i>
+///
+/// <para><b>Here rather than in the service's <c>Mcp/</c> folder</b>, beside the <c>DarlingPg*Reader</c>
+/// family and for the reason that family moved (#2530): three surfaces answer this question — the MCP tool,
+/// the web server tab that reads it, and the WPF Viewer, which has no route to the service and runs these
+/// statements in process. The alternative is a second copy of four statements carrying a window floor, a
+/// discrete-percentile definition that has to agree with the C# beside it, and a replica gate read off one
+/// engine bit; the copy that drifts is never the one being read.</para>
 ///
 /// <para><b>Why four separate statements rather than one composite.</b> Each arm has its own honest grain
 /// and its own retention. Read cost is per DATABASE per collector RUN and lives in <c>collection_log</c>
@@ -69,7 +76,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// its primary's, its READ_ONLY is by design and never a defect, and any QS-shaped finding excludes it
 /// with the reason on the row.</para>
 /// </summary>
-internal static class DarlingQueryStoreClutterReader
+public static class DarlingQueryStoreClutterReader
 {
     /// <summary>The fan-out collector whose runs the read-cost arm reads. The clutter view is about Query
     /// Store's catalog cost, so the sibling fan-outs (<c>query_store_health</c>, <c>plan_correction</c>, …)
@@ -114,10 +121,14 @@ internal static class DarlingQueryStoreClutterReader
 
     /// <summary>The newest <c>query_store_health</c> capture per database inside the window, with the
     /// capture's own stamp so the tool can say how old "latest" is.</summary>
+    /// <param name="QueryCaptureMode">The <c>query_capture_mode_desc</c> spelling verbatim (<c>ALL</c> /
+    /// <c>AUTO</c> / <c>CUSTOM</c> / <c>NONE</c>), or null on a row captured before the V137 rung (#3796)
+    /// created the column — null means NEVER ASKED, never <c>NONE</c>.</param>
     public sealed record ConfigRow(
         int ServerId, string DatabaseName, string ActualState, string DesiredState, int ReadonlyReason,
         long CurrentStorageMb, long MaxStorageMb, string SizeBasedCleanupMode,
-        long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes, DateTime CapturedAt)
+        long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes, DateTime CapturedAt,
+        string? QueryCaptureMode)
     {
         /// <summary>The engine's readable-secondary bit — the architectural exclusion.</summary>
         public bool IsSecondaryReplica => (ReadonlyReason & SecondaryReplicaReadonlyBit) != 0;
@@ -228,11 +239,11 @@ internal static class DarlingQueryStoreClutterReader
     {
         var rows = new List<ReadCostRow>();
         await using var command = postgres.CreateCommand(ReadCostSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        DarlingMcpReadParameters.AddText(command, CollectorName);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        command.Parameters.AddWithValue(CollectorName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -362,10 +373,10 @@ internal static class DarlingQueryStoreClutterReader
     {
         var rows = new List<PlanChurnRow>();
         await using var command = postgres.CreateCommand(PlanChurnSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -397,6 +408,11 @@ internal static class DarlingQueryStoreClutterReader
     /// not, and the tool says so rather than reaching outside it. <c>DISTINCT ON</c> rather than a
     /// <c>MAX(capture_time)</c> anchor because the newest capture is per DATABASE, not per server — a
     /// database the collector could not enter on the newest cycle still has its previous row.
+    ///
+    /// <para><c>query_capture_mode</c> is the last projected column, and its position is load-bearing: the
+    /// reader maps it at ordinal 12, so anything inserted before it shifts every ordinal above. A NULL there
+    /// is a row the collector wrote before the column existed — never asked, and never the engine's
+    /// <c>NONE</c>.</para>
     /// $1 server_id array, $2/$3 window (naive UTC).
     /// </summary>
     public const string ConfigSql = """
@@ -412,7 +428,8 @@ internal static class DarlingQueryStoreClutterReader
             stale_query_threshold_days,
             max_plans_per_query,
             interval_length_minutes,
-            capture_time
+            capture_time,
+            query_capture_mode
         FROM v_query_store_health
         WHERE server_id = ANY($1::int[])
         AND   capture_time >= $2
@@ -425,10 +442,10 @@ internal static class DarlingQueryStoreClutterReader
     {
         var rows = new List<ConfigRow>();
         await using var command = postgres.CreateCommand(ConfigSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -446,7 +463,10 @@ internal static class DarlingQueryStoreClutterReader
                 reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
                 reader.IsDBNull(10) ? 0L : reader.GetInt64(10),
-                reader.GetDateTime(11)));
+                reader.GetDateTime(11),
+                /* NOT coalesced to "": an empty string would be a mode, and this column's null is the
+                   absence of a capture, which the payload has a flag for. */
+                reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
         return rows;
@@ -497,10 +517,10 @@ internal static class DarlingQueryStoreClutterReader
     {
         var rows = new List<QdsWaitRow>();
         await using var command = postgres.CreateCommand(QdsWaitsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -577,9 +597,11 @@ internal static class DarlingQueryStoreClutterReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(QueryStoreClerkSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        DarlingMcpReadParameters.AddText(command, QueryStoreMemoryClerk);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        command.Parameters.AddWithValue(QueryStoreMemoryClerk);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -616,8 +638,8 @@ internal static class DarlingQueryStoreClutterReader
     {
         var ids = new List<int>();
         await using var command = postgres.CreateCommand(EnabledSqlServerTargetsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddText(command, sqlServerEngineKind);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(sqlServerEngineKind);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -630,4 +652,15 @@ internal static class DarlingQueryStoreClutterReader
     /// <summary>Binds the server-id array every arm takes as <c>$1</c>.</summary>
     private static void AddServers(NpgsqlCommand command, int[] serverIds) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
+
+    /// <summary>
+    /// Binds a window edge as <c>Kind=Unspecified</c> — the naive-UTC discipline the whole
+    /// <c>DarlingPg*Reader</c> family in this project binds by, and the one this file has to keep. A
+    /// <c>Kind=Utc</c> value makes Npgsql infer <c>timestamptz</c>, and PostgreSQL then resolves the
+    /// comparison against these naive <c>timestamp</c> columns by converting the COLUMNS at the store
+    /// session's TimeZone: east of UTC every fresh row falls out of the window and the read returns
+    /// nothing, silently, on a store whose host is not UTC.
+    /// </summary>
+    private static void AddTimestamp(NpgsqlCommand command, DateTime value) =>
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Unspecified) });
 }

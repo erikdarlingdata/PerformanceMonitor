@@ -811,9 +811,16 @@ public sealed class PgTargetReplicationTests
                 [PgTargetScorer.XminAgeKey] = age,
                 [PgTargetScorer.XminHolderSourceKey] = PgTargetAdvice.HolderSourceCode(source),
                 [PgTargetScorer.XminObservationsTotalKey] = 241,
-                [PgTargetScorer.XminObservationsHeldKey] = 241,
-                [PgTargetScorer.XminObservationsAboveThresholdKey] = 241,
+                /* #3691 step 40: the hold grades on the HORIZON's run of consecutive above-bar captures and its
+                   floor, not on one identity's win count. One holder for the whole window is still the shape
+                   this file needs — the keys are the new vocabulary for it. */
+                [PgTargetScorer.XminHeldCapturesKey] = 241,
                 [PgTargetScorer.XminHeldFractionKey] = 1.0,
+                [PgTargetScorer.XminHorizonFloorAgeKey] = age,
+                [PgTargetScorer.XminModalHolderCapturesKey] = 241,
+                [PgTargetScorer.XminModalHolderShareKey] = 1.0,
+                [PgTargetScorer.XminDominantSourceShareKey] = 1.0,
+                [PgTargetScorer.XminHolderAttributedKey] = 1,
                 [PgTargetScorer.XminPeakWinningAgeKey] = age,
                 [PgTargetScorer.XminMinutesSinceLastHolderKey] = 0,
             },

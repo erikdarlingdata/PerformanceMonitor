@@ -19,9 +19,12 @@ namespace Darling.Tests;
 /// #3818 against a LIVE PostgreSQL TARGET - not the store: gated on <c>DARLING_TEST_PG_TARGET</c>, a superuser
 /// connection to a PostgreSQL with <c>pg_stat_statements</c> in <c>shared_preload_libraries</c>, which the
 /// live-store cluster (<c>DARLING_TEST_PG</c>, TimescaleDB preloaded) is not. Written against
-/// <c>postgres:14</c> with the extension created at <c>VERSION '1.8'</c>, which is the state of the 23 clusters
-/// the issue counted: the extension installed, preloaded, its base view readable, and no
-/// <c>pg_stat_statements_info</c> because nobody ran <c>ALTER EXTENSION ... UPDATE</c> after the engine upgrade.
+/// <c>postgres:14</c> with the extension created at <c>VERSION '1.8'</c>: the extension installed, preloaded,
+/// its base view readable, and no <c>pg_stat_statements_info</c> because nobody ran
+/// <c>ALTER EXTENSION ... UPDATE</c> after the engine upgrade. That is one of the two states in which the
+/// column is absent, and #3818 assumed it was the state of the 23 clusters it counted; #3830 read
+/// <c>pg_extension_availability</c> and found the other one - no <c>pg_extension</c> row anywhere. The rig
+/// proves the gate holds in this state; the gate is on the RELATION, so it holds in both.
 ///
 /// <para>The claims, in the order the rig proved them: at 1.8 the epoch read is NULL and does not raise -
 /// alone, and inside the collector's whole statement over a readable base view; after <c>UPDATE</c> it

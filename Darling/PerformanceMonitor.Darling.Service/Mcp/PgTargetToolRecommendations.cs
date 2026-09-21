@@ -242,6 +242,9 @@ internal static class PgTargetToolRecommendations
             new("get_pg_wait_stats", "The wait time the CPU time is decomposed against"),
         ],
         [PgTargetFactKeys.AnomalyCpuBurn] = KernelReads(),
+        /* lane 34 (#3691): the bad actor's own-normal deviation reads what its statement's card reads — the trend
+           question first (mean stepped or calls did), the statement beside the window's others, the captured plan. */
+        [PgTargetFactKeys.AnomalyBadActorShare] = BadActorReads(),
         [PgTargetFactKeys.ConfigMemoryOvercommit] =
         [
             new("get_pg_server_config", "shared_buffers, max_connections, work_mem, maintenance_work_mem and autovacuum_max_workers as set"),
@@ -254,7 +257,20 @@ internal static class PgTargetToolRecommendations
             new("get_pg_server_config", "The memory knobs the host's free-plus-cached share is measured against"),
             new("get_pg_buffer_usage", "What the shared cache holds while the host is short"),
         ],
+        /* lane 38 (#3691): the object-growth family's rows. There is no get_pg_database_size tool yet (verified by rg over
+           the Mcp folder — pg_database_size_stats has no served read; ServerPageTabsTests carries the sequencing exemption),
+           so the first read is the fact itself through get_analysis_facts, and the bloat read answers the question the
+           card asks first. */
+        [PgTargetFactKeys.DatabaseGrowth] = GrowthReads(),
+        [PgTargetFactKeys.AnomalyDatabaseGrowth] = GrowthReads(),
     };
+
+    private static List<ToolRecommendation> GrowthReads() =>
+    [
+        new("get_analysis_facts", "source=pg_growth — the trend fact itself: size at both ends of the lookback, growth per day, days-to-double, the top databases by name and the instance total"),
+        new("get_pg_table_bloat", "Whether the new bytes are live rows or dead ones — the bloat question the card asks first, and the database's tables by measured heap size"),
+        new("get_pg_autovacuum_health", "Whether autovacuum is keeping up on the tables that grew"),
+    ];
 
     private static List<ToolRecommendation> PlanReads() =>
     [
@@ -294,19 +310,20 @@ internal static class PgTargetToolRecommendations
             return WaitReads();
 
         if (key.StartsWith(PgTargetFactKeys.BadActorKeyPrefix, StringComparison.Ordinal))
-        {
-            /* The advice (PgTargetAdvice.Queries.cs) ends on "which is the first question": whether the mean STEPPED
-               (a plan change) or the calls did (a workload change). The read that answers it leads. */
-            return
-            [
-                new("get_pg_query_duration_trend", "Whether this statement's mean execution time stepped or its call count did — the first question"),
-                new("get_pg_top_queries", "This statement's deltas beside the rest of the window's top statements"),
-                new("get_pg_plans", "Captured plans for the statement, when plan capture is configured"),
-            ];
-        }
+            return BadActorReads();
 
         return null;
     }
+
+    /// <summary>The queries family's reads, for a <c>PG_BAD_ACTOR_*</c> card and (lane 34) for the own-normal anomaly
+    /// that walks into it. The advice (PgTargetAdvice.Queries.cs) ends on "which is the first question": whether the
+    /// mean STEPPED (a plan change) or the calls did (a workload change). The read that answers it leads.</summary>
+    private static List<ToolRecommendation> BadActorReads() =>
+    [
+        new("get_pg_query_duration_trend", "Whether this statement's mean execution time stepped or its call count did — the first question"),
+        new("get_pg_top_queries", "This statement's deltas beside the rest of the window's top statements"),
+        new("get_pg_plans", "Captured plans for the statement, when plan capture is configured"),
+    ];
 
     private static List<ToolRecommendation> ConfigReads() =>
     [

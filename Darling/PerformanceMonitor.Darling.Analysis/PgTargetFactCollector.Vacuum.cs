@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -199,64 +200,146 @@ WINDOW per_db AS (PARTITION BY database_name),
 ORDER BY database_name, collection_time DESC";
 
     /// <summary>
-    /// The xmin read: the latest WINNING holder in the window and how persistently that (source, holder) won.
-    /// Pattern: <c>DarlingPostgresAlertReadAdapter.XminSql</c>'s <c>latest</c> and <c>window_stats</c> CTEs —
-    /// held is counted per (source, holder), not per source (sixty different sessions each winning once is
-    /// the OPPOSITE of a chronic holder); the denominator is DISTINCT collection times that recorded any
-    /// holder (several sources are stored per collection, and the collector writes nothing when the horizon
-    /// is unheld); <c>observations_above_threshold</c> counts collections whose winning age sat at or above
-    /// the shared bar (<c>$4</c> = <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>,
-    /// bound so the condition counted here and the one graded cannot drift).
+    /// The xmin read: how persistently the HORIZON was held, and who held it, as two separate questions.
     ///
-    /// <para><b>What it deliberately does NOT read.</b> The alert's HORIZON arm divides that last count by the
-    /// collector's SUCCESS captures in <c>collection_log</c> (#3537, #3642 — every time the collector LOOKED,
-    /// including the healthy zero-row runs). That table is not a collector table, and an analysis read may
-    /// name only collector tables and the registry; so v1 grades the IDENTITY arm only and carries the horizon
-    /// numerator as metadata. The alternative — fractioning over holder-bearing collections — is exactly the
-    /// dishonest denominator #3642 removed from the MCP payload, and is not taken.</para>
+    /// <para><b>Why the shape changed (#3691 step 40).</b> v1 (#3674) measured persistence on the holder's
+    /// IDENTITY — "the same (source, holder) won N consecutive captures" — which is the alert evaluator's
+    /// identity arm, and which reads 0 on the shape a real stock storm produced: a 4.3 M-xid horizon pinned
+    /// for twenty-five minutes while FIVE equally-old transactions alternated as each capture's
+    /// <c>is_winner</c>, so no identity was ever seen twice. The horizon is the thing being held; who holds
+    /// it is attribution. So persistence is now counted on the winning <c>xmin_age</c> (any source): the
+    /// longest run of CONSECUTIVE captures whose winner sat at or above the shared bar (<c>$4</c> =
+    /// <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>, bound so the condition
+    /// counted here and the one graded cannot drift), with that run's floor and peak age; attribution —
+    /// per-source shares, the distinct holder count, the modal holder and the modal source — is computed
+    /// over the captures of that same run and carried beside it.</para>
+    ///
+    /// <para>Gaps-and-islands names the run: inside a stretch of identically-flagged captures the difference
+    /// between a global dense ordering and a per-flag dense ordering is constant, so it IS the run's key. The
+    /// longest above-bar run wins ties by recency, because the operator is being told about the horizon that
+    /// is held now.</para>
+    ///
+    /// <para>The denominator stays DISTINCT collection times that recorded any holder — several sources are
+    /// stored per collection and the collector writes nothing at all when the horizon is unheld, so a capture
+    /// with rows is a capture where something held it. The alert's own horizon arm divides by the collector's
+    /// SUCCESS captures in <c>collection_log</c> (#3537, #3642 — including the healthy zero-row runs); that is
+    /// a table this read may not name, so <c>held_fraction</c> is a fraction of holder-bearing captures and
+    /// the prose says so rather than implying coverage it cannot measure.</para>
     /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> age bar.
     /// </summary>
     public const string PgTargetXminHoldSql = @"
-WITH latest AS (
-    SELECT source, holder, detail, xmin_age, collection_time
+WITH captures AS (
+    SELECT DISTINCT ON (collection_time)
+        collection_time,
+        source,
+        holder,
+        xmin_age,
+        (xmin_age >= $4) AS above_bar
     FROM pg_xmin_horizon
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   is_winner
-    ORDER BY collection_time DESC, xmin_age DESC
+    ORDER BY collection_time, xmin_age DESC, source
+),
+flagged AS (
+    SELECT
+        c.collection_time,
+        c.source,
+        c.holder,
+        c.xmin_age,
+        c.above_bar,
+        ROW_NUMBER() OVER (ORDER BY c.collection_time)
+            - ROW_NUMBER() OVER (PARTITION BY c.above_bar ORDER BY c.collection_time) AS run_key
+    FROM captures AS c
+),
+runs AS (
+    SELECT
+        run_key,
+        COUNT(*) AS captures_in_run,
+        MIN(xmin_age) AS run_floor_age,
+        MAX(xmin_age) AS run_peak_age,
+        MAX(collection_time) AS run_end
+    FROM flagged
+    WHERE above_bar
+    GROUP BY run_key
+),
+longest AS (
+    SELECT run_key, captures_in_run, run_floor_age, run_peak_age
+    FROM runs
+    ORDER BY captures_in_run DESC, run_end DESC
+    LIMIT 1
+),
+held AS (
+    SELECT f.source, f.holder, f.collection_time
+    FROM flagged AS f
+    JOIN longest AS g ON g.run_key = f.run_key
+    WHERE f.above_bar
+),
+shares AS (
+    SELECT
+        COUNT(*) FILTER (WHERE source = 'session')::double precision / NULLIF(COUNT(*), 0) AS backend_share,
+        COUNT(*) FILTER (WHERE source IN ('replication_slot', 'replication_slot_catalog'))::double precision / NULLIF(COUNT(*), 0) AS slot_share,
+        COUNT(*) FILTER (WHERE source = 'standby_feedback')::double precision / NULLIF(COUNT(*), 0) AS standby_share,
+        COUNT(*) FILTER (WHERE source = 'prepared_transaction')::double precision / NULLIF(COUNT(*), 0) AS prepared_share,
+        (SELECT COUNT(*) FROM (SELECT DISTINCT source, holder FROM held) AS d) AS distinct_holders
+    FROM held
+),
+modal_holder AS (
+    SELECT source, holder, COUNT(*) AS wins
+    FROM held
+    GROUP BY source, holder
+    ORDER BY COUNT(*) DESC, MAX(collection_time) DESC
+    LIMIT 1
+),
+modal_source AS (
+    SELECT source, COUNT(*) AS wins
+    FROM held
+    GROUP BY source
+    ORDER BY COUNT(*) DESC, MAX(collection_time) DESC
     LIMIT 1
 ),
 window_stats AS (
     SELECT
         COUNT(DISTINCT collection_time) AS observations_total,
-        COUNT(DISTINCT collection_time) FILTER (
-            WHERE is_winner
-            AND   source = (SELECT source FROM latest)
-            AND   holder IS NOT DISTINCT FROM (SELECT holder FROM latest)
-        ) AS observations_held,
-        COUNT(DISTINCT collection_time) FILTER (
-            WHERE is_winner
-            AND   xmin_age >= $4
-        ) AS observations_above_threshold,
         MAX(xmin_age) FILTER (WHERE is_winner) AS peak_winning_age
     FROM pg_xmin_horizon
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+),
+latest AS (
+    SELECT source, holder, xmin_age, collection_time
+    FROM captures
+    ORDER BY collection_time DESC
+    LIMIT 1
 )
 SELECT
     l.source,
     l.holder,
-    l.detail,
     l.xmin_age,
     l.collection_time,
     w.observations_total,
-    w.observations_held,
-    w.observations_above_threshold,
-    w.peak_winning_age
+    w.peak_winning_age,
+    coalesce(g.captures_in_run, 0) AS held_captures,
+    g.run_floor_age,
+    g.run_peak_age,
+    coalesce(s.distinct_holders, 0) AS distinct_holders,
+    s.backend_share,
+    s.slot_share,
+    s.standby_share,
+    s.prepared_share,
+    mh.source AS modal_holder_source,
+    mh.holder AS modal_holder,
+    coalesce(mh.wins, 0) AS modal_holder_captures,
+    ms.source AS modal_source,
+    coalesce(ms.wins, 0) AS modal_source_captures
 FROM latest AS l
-CROSS JOIN window_stats AS w";
+CROSS JOIN window_stats AS w
+LEFT JOIN longest AS g ON true
+LEFT JOIN shares AS s ON true
+LEFT JOIN modal_holder AS mh ON true
+LEFT JOIN modal_source AS ms ON true";
 
     /// <summary>
     /// How many backlogged tables the read returns. The fact carries ONE — the worst by ratio, the way
@@ -280,7 +363,8 @@ CROSS JOIN window_stats AS w";
     /// <summary>
     /// <c>PG_AUTOVACUUM_BACKLOG</c> (the worst persistently-backlogged table, ratio to its OWN line and slope
     /// over the run), <c>PG_WRAPAROUND_TREND</c> (the relatively-worst database and counter, XID and MultiXact
-    /// graded separately) and <c>PG_XMIN_HOLD</c> (the latest winning holder with its persistence) —
+    /// graded separately) and <c>PG_XMIN_HOLD</c> (how persistently the HORIZON was held, with the holder
+    /// attributed separately — #3691 step 40) —
     /// filled by lane 4 of #3542. Three reads, each behind its own degrade so a missing table (a pre-V68 store, a
     /// flavour on which a collector does not run) costs only its own fact.
     ///
@@ -685,14 +769,45 @@ CROSS JOIN window_stats AS w";
             /* Zero rows is the HEALTHY state (an unheld horizon stores nothing) — no fact, never a zero. */
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
-            var source = reader.IsDBNull(0) ? null : reader.GetString(0);
-            var holder = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var xminAge = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
-            var lastSeenAt = reader.GetDateTime(4);
-            var observationsTotal = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
-            var observationsHeld = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
-            var observationsAbove = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
-            var peakWinningAge = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+            var latestSource = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var latestHolder = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var xminAge = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+            var lastSeenAt = reader.GetDateTime(3);
+            var observationsTotal = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+            var peakWinningAge = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+            var heldCaptures = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+            var runFloorAge = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+            var runPeakAge = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
+            var distinctHolders = reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9));
+            var backendShare = reader.IsDBNull(10) ? 0.0 : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture);
+            var slotShare = reader.IsDBNull(11) ? 0.0 : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
+            var standbyShare = reader.IsDBNull(12) ? 0.0 : Convert.ToDouble(reader.GetValue(12), CultureInfo.InvariantCulture);
+            var preparedShare = reader.IsDBNull(13) ? 0.0 : Convert.ToDouble(reader.GetValue(13), CultureInfo.InvariantCulture);
+            var modalHolderSource = reader.IsDBNull(14) ? null : reader.GetString(14);
+            var modalHolder = reader.IsDBNull(15) ? null : reader.GetString(15);
+            var modalHolderCaptures = reader.IsDBNull(16) ? 0L : ToInt64(reader.GetValue(16));
+            var modalSource = reader.IsDBNull(17) ? null : reader.GetString(17);
+            var modalSourceCaptures = reader.IsDBNull(18) ? 0L : ToInt64(reader.GetValue(18));
+
+            /* Attribution is a SHARE of the held run, and a share under the dominance line names nobody. Five
+               transactions taking turns is not "session:4242 held the horizon" however recently 4242 won: the
+               fact says N holders alternated, the ObjectName stays empty, and the holder_source code stays 0 so
+               every consumer that keys on a kind (the idle-in-transaction leaf, the slot-xmin amplifier, this
+               family's own remedy arms) closes rather than picking one of five at random. */
+            var modalHolderShare = heldCaptures > 0 ? (double)modalHolderCaptures / heldCaptures : 0.0;
+            var modalSourceShare = heldCaptures > 0 ? (double)modalSourceCaptures / heldCaptures : 0.0;
+            var holderAttributed = heldCaptures > 0 && modalHolderShare >= PgTargetScorer.XminHolderDominanceShare;
+            var sourceAttributed = heldCaptures > 0 && modalSourceShare >= PgTargetScorer.XminHolderDominanceShare;
+
+            /* No held run to attribute over (a transient hold, or a horizon that never reached the bar): the
+               latest capture IS the whole story, so it supplies the subject, exactly as v1 did. */
+            var noRun = heldCaptures == 0;
+            var subjectSource = noRun ? latestSource : (sourceAttributed ? modalSource : null);
+            var subjectHolder = noRun ? latestHolder : (holderAttributed ? modalHolder : null);
+            var subjectHolderSource = noRun ? latestSource : modalHolderSource;
+            var objectName = subjectHolder is { Length: > 0 }
+                ? $"{subjectHolderSource}:{subjectHolder}"
+                : subjectSource;
 
             var fact = new Fact
             {
@@ -700,17 +815,30 @@ CROSS JOIN window_stats AS w";
                 Key = PgTargetFactKeys.XminHold,
                 Value = xminAge,
                 ServerId = context.ServerId,
-                /* source:holder, the evaluator's subject shape, so the story names the same thing the alert did. */
-                ObjectName = string.IsNullOrWhiteSpace(holder) ? source : $"{source}:{holder}",
+                /* source:holder, the evaluator's subject shape, so the story names the same thing the alert did —
+                   but only when ONE holder dominated the held run. Under alternation there is no subject and the
+                   advice says "N holders alternated" instead of naming the last one to win. */
+                ObjectName = objectName,
                 Metadata =
                 {
                     [PgTargetScorer.XminAgeKey] = xminAge,
-                    [PgTargetScorer.XminHolderSourceKey] = PgTargetAdvice.HolderSourceCode(source),
+                    [PgTargetScorer.XminHolderSourceKey] = PgTargetAdvice.HolderSourceCode(subjectSource),
+                    [PgTargetScorer.XminLatestHolderSourceKey] = PgTargetAdvice.HolderSourceCode(latestSource),
                     [PgTargetScorer.XminObservationsTotalKey] = observationsTotal,
-                    [PgTargetScorer.XminObservationsHeldKey] = observationsHeld,
-                    [PgTargetScorer.XminObservationsAboveThresholdKey] = observationsAbove,
-                    [PgTargetScorer.XminHeldFractionKey] = observationsTotal > 0 ? (double)observationsHeld / observationsTotal : 0.0,
+                    [PgTargetScorer.XminHeldCapturesKey] = heldCaptures,
+                    [PgTargetScorer.XminHeldFractionKey] = observationsTotal > 0 ? (double)heldCaptures / observationsTotal : 0.0,
+                    [PgTargetScorer.XminHorizonFloorAgeKey] = runFloorAge,
+                    [PgTargetScorer.XminHorizonRunPeakAgeKey] = runPeakAge,
                     [PgTargetScorer.XminPeakWinningAgeKey] = peakWinningAge,
+                    [PgTargetScorer.XminDistinctHoldersKey] = distinctHolders,
+                    [PgTargetScorer.XminWinnerBackendShareKey] = backendShare,
+                    [PgTargetScorer.XminWinnerSlotShareKey] = slotShare,
+                    [PgTargetScorer.XminWinnerStandbyShareKey] = standbyShare,
+                    [PgTargetScorer.XminWinnerPreparedShareKey] = preparedShare,
+                    [PgTargetScorer.XminModalHolderCapturesKey] = modalHolderCaptures,
+                    [PgTargetScorer.XminModalHolderShareKey] = modalHolderShare,
+                    [PgTargetScorer.XminDominantSourceShareKey] = modalSourceShare,
+                    [PgTargetScorer.XminHolderAttributedKey] = holderAttributed ? 1 : 0,
                     [PgTargetScorer.XminMinutesSinceLastHolderKey] = (AsNaive(context.TimeRangeEnd) - lastSeenAt).TotalMinutes,
                 },
             };

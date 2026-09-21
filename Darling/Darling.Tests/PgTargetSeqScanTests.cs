@@ -371,8 +371,10 @@ public sealed class PgTargetSeqScanTests
         Assert.Empty(graph.GetActiveEdges(PgTargetFactKeys.SeqScanAdvisory, off.ToFactLookup()));
 
         /* The traversal: the scan (0.65) roots and walks to its bad actor when the actor fired UNDER it (severity order
-           roots the higher fact first and consumes it, so a bad actor over 0.65 roots its own story and the scan stands
-           alone — the SQL Server engine's rule, unchanged). */
+           roots the higher fact first and consumes it — the SQL Server engine's rule, unchanged). Since lane 34's ruling
+           (2026-09-20) a bad actor is a CONTEXT band on its share alone — 0.3 × (0.5 + 0.5 × share), under the 0.5 story
+           line — so a 0.9-share statement with no own-normal deviation no longer roots its own story: the scan walks to
+           it too, and the story is the scan's. */
         var walked = new List<Fact> { Scan(0.99, GiB, 5), BadActor(ScanQueryId, 0.12) };
         new FactScorer().ScoreAll(walked);
         Assert.InRange(walked[1].Severity, 0.01, 0.64);
@@ -380,7 +382,8 @@ public sealed class PgTargetSeqScanTests
         var story = Assert.Single(stories, s => s.Path[0] == PgTargetFactKeys.SeqScanAdvisory);
         Assert.Equal(new[] { PgTargetFactKeys.SeqScanAdvisory, PgTargetFactKeys.BadActorKey(ScanQueryId) }, story.Path);
         Assert.Equal(PgTargetSources.PlansSource, story.Category);
-        Assert.Single(new InferenceEngine(graph).BuildStories(top), s => s.Path[0] == PgTargetFactKeys.BadActorKey(ScanQueryId));
+        var topStory = Assert.Single(new InferenceEngine(graph).BuildStories(top));
+        Assert.Equal(new[] { PgTargetFactKeys.SeqScanAdvisory, PgTargetFactKeys.BadActorKey(ScanQueryId) }, topStory.Path);
 
         var file = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetRelationshipGraph.Plans.cs"));
         Assert.DoesNotContain(".Severity", file, StringComparison.Ordinal);

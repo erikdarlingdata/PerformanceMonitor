@@ -394,6 +394,9 @@ ORDER BY local_bucket, story_path_hash";
                        only, like the root metadata below. */
                     MatchedAmplifiers = story.MatchedAmplifiers,
                     DefinedAmplifiers = story.DefinedAmplifiers,
+                    /* #3691: the config levers the greedy walk skipped, so analyze_server can render their cards
+                       beside this chain. In memory only, like the two above. */
+                    SideLeafKeys = story.SideLeafKeys,
                     /* Carried in-memory only; no analysis_findings column for it. */
                     RootFactMetadata = story.RootFactMetadata
                 });

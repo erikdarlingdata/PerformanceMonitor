@@ -221,6 +221,12 @@ public static partial class PgTargetScorer
     public const string PlanCallsAfterKey = "calls_after";
     /// <summary>Distinct <c>plan_hash</c> values the statement was captured under in the window.</summary>
     public const string PlanHashCountKey = "plan_hash_count";
+
+    /// <summary>Which baseline series <c>ANOMALY_PG_PLAN_REGRESSION</c> was graded on (#3691 lane 39): <c>1</c> the
+    /// KEYED per-<c>queryid</c> per-call mean — the fact names its statement on <see cref="Fact.ObjectName"/> — or
+    /// <c>0</c> the server-wide mean, the cold fallback for a server with no trustworthy keyed bucket, which names
+    /// none. Absent reads as 0, which is what every such fact written before the switch was.</summary>
+    public const string PlanAnomalySeriesKey = "series";
     /// <summary>The skewed predicate column's <c>top_value_frequency</c> — the sensitivity fact's value, named.</summary>
     public const string PlanTopValueFrequencyKey = "top_value_frequency";
     /// <summary>The family's <c>unavailable</c> flag: the fact is emitted at 0 with exactly one <c>reason_*</c> flag
@@ -391,10 +397,10 @@ public static partial class PgTargetScorer
                     },
                     new()
                     {
-                        Description = "ANOMALY_PG_PLAN_REGRESSION fired — the server's per-call statement time moved against its own hour-of-week baseline this window",
+                        Description = "ANOMALY_PG_PLAN_REGRESSION fired — this statement's per-call time moved against its own hour-of-week baseline this window (or, on the cold fallback series, the server's did)",
                         /* unmeasured: PlanCoFireBoost, chosen, not measured — see its declaration. */
                         Boost = PlanCoFireBoost,
-                        Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyPlanRegression, out var anomaly) && anomaly.BaseSeverity > 0,
+                        Predicate = PlanRegressionAnomalyCorroborates,
                     },
                 ];
 
@@ -444,6 +450,32 @@ public static partial class PgTargetScorer
 
         return facts.TryGetValue(siblingKeyOrPrefix, out var sibling) && sibling.BaseSeverity > 0
             && string.Equals(sibling.ObjectName, self.ObjectName, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether <c>ANOMALY_PG_PLAN_REGRESSION</c> fired AND its verdict is about the statement
+    /// <c>PG_PLAN_REGRESSION</c> named — the one predicate behind the regression card's anomaly amplifier and the
+    /// anomaly's edge into it, so the two cannot disagree about what "corroborates" means.
+    ///
+    /// <para>Two series answer to the anomaly's key since #3691 lane 39 (<c>series</c> in its metadata). On the
+    /// KEYED series (1) the anomaly names ONE <c>queryid</c> on <see cref="Fact.ObjectName"/>, and corroboration
+    /// means the SAME statement: a different flipped statement's deviation, however large, is that statement's
+    /// story and lifting this card with it would put the lift under the wrong name (the rule the bad-actor alias
+    /// edge above already follows). On the COLD FALLBACK series (0) the anomaly names no statement at all — it is
+    /// the server's mean per-call time, which is all a server with no per-statement history can offer — so it
+    /// corroborates whatever statement the regular fact named, exactly as it did before the switch. A fact with no
+    /// <c>series</c> stamp reads as the fallback: that is what every ANOMALY_PG_PLAN_REGRESSION written before the
+    /// switch was, and a stored fact re-scored later must not change meaning.</para>
+    /// </summary>
+    internal static bool PlanRegressionAnomalyCorroborates(IReadOnlyDictionary<string, Fact> facts)
+    {
+        if (!facts.TryGetValue(PgTargetFactKeys.AnomalyPlanRegression, out var anomaly) || anomaly.BaseSeverity <= 0)
+            return false;
+
+        if (anomaly.Metadata.GetValueOrDefault(PlanAnomalySeriesKey) < 1.0)
+            return facts.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression) && regression.BaseSeverity > 0;
+
+        return SameStatementFired(facts, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.AnomalyPlanRegression);
     }
 
     /// <summary>Whether the Seq-Scan fact's top pair names a statement whose bad actor or plan regression FIRED — the

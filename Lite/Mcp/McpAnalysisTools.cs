@@ -17,7 +17,7 @@ public sealed class McpAnalysisTools
     /// </summary>
     internal const string FactSourceFilterDescription =
         "Filter to one source category. Accepted values (the engine's complete source registry, refused otherwise): "
-        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits. "
+        + "anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits. "
         + "Omit for all. The pg_ sources are emitted only for a PostgreSQL target.";
 
     [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. Each finding's confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain, so a lone uncorroborated symptom reads 0.20 and a fully corroborated deep chain approaches 1.0; confidence_basis says in words what each value rests on. Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note. When one or more fact families could not be read this pass (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the status prose says so; the field is absent on a clean pass, and an empty result over unread families is not an all-clear. The empty envelope also states fact_count (facts the scorer saw) and facts_scored (those graded above zero), so scored-but-nothing-fired is told apart from no-fact-emitted.")]
@@ -180,7 +180,12 @@ public sealed class McpAnalysisTools
                 findings = findings.Select(f =>
                 {
                     var advice = FactAdvice.GetForFinding(f);
-                    return new
+                    /* #3691: the config levers hanging off this chain that the greedy single-path walk could not
+                       reach get a card each, appended as side_leaves. They used to root their own one-node cards
+                       beside this one; now the walk consumes them and the root's investigation carries the sentence
+                       that points here. Attach returns THIS object untouched when there is no lever, so a finding
+                       this does not concern is byte-for-byte what it was. */
+                    return StorySideLeaves.Attach(new
                     {
                         severity = Math.Round(f.Severity, 2),
                         confidence = Math.Round(f.Confidence, 2),
@@ -232,7 +237,7 @@ public sealed class McpAnalysisTools
                             risks_of_changing = advice.Risks.RisksOfChanging.Select(r => r.Text).ToArray(),
                             risks_of_not_changing = advice.Risks.RisksOfNotChanging.Select(r => r.Text).ToArray()
                         }
-                    };
+                    }, f.SideLeafKeys, McpHelpers.JsonOptions);
                 })
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }

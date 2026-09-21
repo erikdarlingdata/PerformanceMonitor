@@ -125,6 +125,9 @@ public class AlertHistoryValueFormatTests
         "Agent Restarted",
         "Store Disk Pressure Resolved",
         "Compression Job Recovered",
+        /* #3816: the other two policy families' recoveries, written by the same BuildResolutionRecord path. */
+        "Refresh Job Recovered",
+        "Retention Job Recovered",
         "CPU Resolved",
         "Blocking Cleared",
         "Blocking Wait Cleared",

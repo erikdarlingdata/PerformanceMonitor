@@ -61,10 +61,16 @@ public sealed partial class PgTargetRelationshipGraph
             facts => PgTargetScorer.SameStatementFired(facts, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression));
 
         /* The deviation folds onto the fact that names the flip (PgTargetFactKeys.AnomalyToFamilies names the same fold
-           for the reconciler); the edge is what puts both in one story when the anomaly outranks. */
+           for the reconciler); the edge is what puts both in one story when the anomaly outranks. Since lane 39 the
+           anomaly usually names a statement itself (the keyed series), so the edge asks the SAME queryid: an edge from
+           statement A's deviation into statement B's regression would tell the operator the step it reads about was
+           the one the deviation measured, which is the wrong-name error the bad-actor alias edge above refuses. On the
+           cold fallback series the anomaly names nobody and the edge opens on the regression alone, as it did before
+           the switch — one predicate for the amplifier and the edge (PgTargetScorer.PlanRegressionAnomalyCorroborates),
+           so the lift and the story can never disagree about which statement the deviation belongs to. */
         AddEdge(PgTargetFactKeys.AnomalyPlanRegression, PgTargetFactKeys.PlanRegression, PlanCategory,
-            "PG_PLAN_REGRESSION fired — the server-wide per-call slowdown has a named statement with a captured plan flip behind it",
-            facts => facts.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression) && regression.BaseSeverity > 0);
+            "PG_PLAN_REGRESSION fired for the statement this deviation is about — the per-call slowdown has a captured plan flip behind it",
+            PgTargetScorer.PlanRegressionAnomalyCorroborates);
 
         /* lane 30: PG_SEQ_SCAN_ADVISORY → PgTargetFactKeys.BadActorFamily (the statement the scan was captured under) — under
            the regression's rule: the alias resolves to the pass's TOP bad actor, so the edge opens only when that is the

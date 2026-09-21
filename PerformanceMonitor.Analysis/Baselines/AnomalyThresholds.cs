@@ -148,8 +148,10 @@ public static class AnomalyThresholds
        (Aurora; where the quantity is engine-neutral the stock-PostgreSQL population is not yet measured). The
        session-count floors are UNMEASURED in count terms (the read was sessions over each server's ceiling). The
        second calibration read (2026-09-20, the same 50 clusters, 28 days: hour-of-week centres from the first 21,
-       ratios over the last 7) placed the ratio families' firing multiple — see PgRatioAnomalyThreshold for the
-       per-family verdicts, which differ. The detector stamps threshold_lineage = 1 on the TPS and CPU anomalies,
+       ratios over the last 7) placed the ratio families' firing multiple, and the THIRD (2026-09-21, the same
+       clusters, statement-stats windows fenced at 2026-09-19 16:40Z) placed it on the two per-statement series the
+       v3 lanes built and measured the server-wide per-call mean to be blind to a per-statement step — see
+       PgRatioAnomalyThreshold for the per-family verdicts, which differ. The detector stamps threshold_lineage = 1 on the TPS and CPU anomalies,
        whose every bar is measured (they are z-detectors and never grade on the multiple), and 0 on the session,
        deadlock-rate and wait-profile anomalies, each of which is still gated on at least one chosen number: the
        session COUNT floors; for the ratio families the heavy-tail cutoff (the SQL Server fleet's, by reference) and
@@ -284,6 +286,29 @@ public static class AnomalyThresholds
     /// the deadlock-rate fact keeps threshold_lineage = 0 (the ratio arm's multiple is unplaced there, and the
     /// scorer's saturation span is chosen).</description></item>
     /// </list>
+    /// The THIRD read (2026-09-21, the same 50 clusters, 28 days of <c>pg_statement_stats</c> FENCED at
+    /// <b>2026-09-19 16:40</b>Z — the table died on 23 of 50 clusters at 16:44Z on a schema regression, so every
+    /// cluster contributes a full window that ends before it) placed the multiple on the two PER-STATEMENT series
+    /// the v3 lanes built, and the verdict again differs by series:
+    /// <list type="bullet">
+    /// <item><description><b>Per-statement SHARE</b> of the collection's execution time against the statement's own
+    /// hour-of-week share (lane 34's <c>ANOMALY_PG_BAD_ACTOR_SHARE</c>): over 1,487 statement-hours with a centre,
+    /// top-5 statements per server, ratio p50 1.00, p99 2.53, p99.9 49, maximum 72; share at or above 3.0 = 0.94 %,
+    /// and 0.40 % with the peak magnitude floor (PgTargetScorer.BadActorShareConcerning) also required — so 3.0 sits
+    /// at ≈ p99.1 of statement-share ratios, ≈ p99.6 with the floor: well placed. Stated for the record, as TPS is:
+    /// that anomaly is a Z-detector on the shared sigma cutoffs and reads this multiple NOWHERE, so this placement
+    /// flips no flag — see PgTargetAnomalyDetector.Queries.cs for the bars it does grade
+    /// on.</description></item>
+    /// <item><description><b>Per-statement per-call MEAN ms</b> against its own hour-of-week mean, keyed
+    /// (<c>ANOMALY_PG_PLAN_REGRESSION</c> since #3691 lane 39): 1,481 statement-hours over 49 servers, ratio p50
+    /// 0.99, p99 2.0, p99.9 57, maximum 90; share at or above 3.0 = 0.74 % → 3.0 ≈ p99.3 of keyed ratios, well
+    /// placed. The level: p50 8 ms, p99 1,092 ms.</description></item>
+    /// <item><description><b>The SERVER-WIDE per-call mean</b> (the same anomaly's arm before lane 39, now its cold
+    /// fallback): 352 server-hours, ratio p99 2.05 and <b>maximum 4.4 — never at or above 3.0</b> in the measured
+    /// week (share 0.28 %), level p50 1.0 ms, p99 12 ms. Measured-INADEQUATE, and not inadequate at the margin: a
+    /// per-statement 90× step dilutes to nothing in a server's mean over every statement. This is the read that
+    /// moved the anomaly onto the keyed series and demoted this one to the no-history fallback.</description></item>
+    /// </list>
     /// Engine-neutral quantities (ratios of a server to itself), Aurora population; the stock-PostgreSQL
     /// population is not yet measured.</summary>
     public const double PgRatioAnomalyThreshold = 3.0;
@@ -350,25 +375,37 @@ public static class AnomalyThresholds
     /// the next release.</summary>
     public const double PgBlockedSessionsFallback = 10.0;                 // distinct blocked sessions in one capture
 
-    // lane 27 (#3691, v3): the server-wide per-call statement-mean z-detector's floor and fallback (PgTargetAnomalyDetector.Plans.cs).
+    // lane 27 (#3691, v3): the per-call statement-mean z-detector's floor and fallback (PgTargetAnomalyDetector.Plans.cs).
+    // Lane 39 pointed that detector at the KEYED per-queryid series and kept the server-wide one as its cold fallback;
+    // these two bars are shared by both arms (the floor on each, the fallback only on the server-wide arm, whose
+    // trusted-path sibling passes double.PositiveInfinity because the keyed arm refuses to grade without a bucket).
 
-    /// <summary>Magnitude floor for the <c>pg_statement_mean_ms</c> z-detector — the SERVER-WIDE mean execution ms per
-    /// statement call per collection (Σ <c>delta_total_exec_time_ms</c> ÷ Σ <c>delta_calls</c> over every statement),
-    /// in ms. Under ten milliseconds per call a server is fast whatever the sigma says: an OLTP mix's mean sits at
-    /// single-digit ms, and a doubling of 2 ms is a warmer cache, not a regression anyone can feel. unmeasured:
-    /// chosen, not measured — the 2026-09-19 calibration read statement SHARES and busy fractions from
-    /// pg_statement_stats, never the per-collection mean-ms series; calibrate against
-    /// SUM(delta_total_exec_time_ms) / SUM(delta_calls) per collection_time over the dogfood PostgreSQL fleet before
-    /// the next release. The detector stamps <c>threshold_lineage = 0</c>. NOT the SQL Server
+    /// <summary>Magnitude floor for the <c>pg_statement_mean_ms</c> z-detector — mean execution ms per statement call
+    /// per collection (Σ <c>delta_total_exec_time_ms</c> ÷ Σ <c>delta_calls</c>), asked of ONE statement on the keyed
+    /// arm and of every statement on the server-wide fallback, in ms. Under ten milliseconds per call a statement is
+    /// fast whatever the sigma says: an OLTP mix's calls sit at single-digit ms, and a doubling of 2 ms is a warmer
+    /// cache, not a regression anyone can feel. unmeasured: chosen, not measured — the 2026-09-19 calibration read
+    /// statement SHARES and busy fractions from pg_statement_stats, never a mean-ms series, and the 2026-09-21 read
+    /// (28 days FENCED at 2026-09-19 16:40Z, 50 Aurora PostgreSQL clusters — §D5) read the LEVELS but placed no
+    /// floor on them: keyed per-statement per-call mean p50 8 ms / p99 1,092 ms, server-wide p50 1.0 ms / p99 12 ms.
+    /// Ten milliseconds therefore sits just above the median statement's per-call cost and around the server-wide
+    /// p99, which is a different admission rate on each arm; that is the thing to calibrate — pick the percentile of
+    /// the KEYED level distribution this floor should sit at before the next release, now that the distribution
+    /// exists. The detector stamps <c>threshold_lineage = 0</c> on both arms. NOT the SQL Server
     /// <see cref="QueryDurationFloorUs"/> reused by value: that floor is a per-query Query Store total in microseconds
     /// on another engine.</summary>
-    public const double PgStatementMeanMsFloor = 10.0;                    // server-wide mean ms per statement call
+    public const double PgStatementMeanMsFloor = 10.0;                    // mean ms per statement call
 
-    /// <summary>Absolute-fallback bar for the server-wide per-call mean on an untrustworthy baseline (a young store, or
+    /// <summary>Absolute-fallback bar for the SERVER-WIDE per-call mean on an untrustworthy baseline (a young store, or
     /// a server whose 30 days hold too few busy collections to trust): a quarter of a second per call, averaged over
     /// EVERY statement the server ran in a collection, is slow on any PostgreSQL — a mix that averages 250 ms is a mix
-    /// whose ordinary calls are waiting on something. unmeasured: chosen, not measured — the same unread series as the
-    /// floor; calibrate against the upper tail of the per-collection mean before the next release.</summary>
+    /// whose ordinary calls are waiting on something. Reached on the fallback arm only: the keyed arm checks trust
+    /// BEFORE the gate and passes an unreachable bar, because handing a statement with no history of its own an
+    /// absolute grade is the silent substitution the 2026-09-20 ruling forbade. unmeasured: chosen, not measured —
+    /// the 2026-09-21 read gives the server-wide level's tail (p99 12 ms, §D5), which says 250 ms is far beyond
+    /// anything the measured population reaches and that this bar effectively never fires on that fleet; calibrate
+    /// against the upper tail of the per-collection mean before the next release rather than leaving a bar placed
+    /// above the whole distribution.</summary>
     public const double PgStatementMeanMsFallback = 250.0;                // server-wide mean ms per statement call
 
     // lane 28 (#3691, v3): the CPU-burn z-detector's floor and fallback (PgTargetAnomalyDetector.Kernel.cs).
@@ -390,4 +427,27 @@ public static class AnomalyThresholds
     /// routine exists. unmeasured: chosen, not measured — the same un-calibratable population as the floor; calibrate
     /// against a stock population's upper tail before the next release that monitors one.</summary>
     public const double PgCpuBurnCoresFallback = 4.0;                     // cores busy in one collection
+
+    // lane 38 (#3691): the database-growth z-detector's floor and fallback (PgTargetAnomalyDetector.Growth.cs).
+
+    /// <summary>Magnitude floor for the <c>pg_database_growth_bytes_per_day</c> z-detector — the instance total's
+    /// growth between consecutive hourly <c>pg_database_size_stats</c> samples, rated per DAY. Under a quarter of a
+    /// gibibyte a day a deviation is a quiet instance's ripple however many sigmas it reads: an instance whose routine
+    /// is 10 MB/day tripling to 30 MB/day is a batch job, not a growth event, and the hourly cadence puts two or three
+    /// samples into a one-to-four-hour analysis window, so the floor carries most of the grade until the bucket has
+    /// history. unmeasured: chosen, not measured — the table (V136) is one day old at this bar's birth and the
+    /// 2026-09-19 calibration ran before it existed; calibrate against the per-collection <c>total_bytes</c> difference
+    /// of <c>pg_database_size_stats</c> once it holds 14 d before the next release. The detector stamps
+    /// <c>threshold_lineage = 0</c>. NOT a SQL Server constant reused by value: the SQL Server engine has no growth
+    /// baseline at all.</summary>
+    public const double PgDatabaseGrowthFloorBytesPerDay = 256.0 * 1024.0 * 1024.0;     // 256 MiB of growth per day
+
+    /// <summary>Absolute-fallback bar for database growth on an untrustworthy baseline — a young store, or an instance
+    /// whose 30 days of hourly totals never moved (a zero-activity bucket by <c>EffectiveStdDev</c>'s contract, which is
+    /// the routine shape of a read-mostly instance and the reason this path matters here): eight times the floor, two
+    /// gibibytes a day, is a rate at which the trend fact's own 1 GiB / 10 % line is crossed inside a day on a small
+    /// instance and inside a week on a 100 GB one — growth an operator would want named whatever the baseline says.
+    /// unmeasured: chosen, not measured — the same day-old table as the floor; calibrate against the upper tail of the
+    /// per-collection growth rate before the next release.</summary>
+    public const double PgDatabaseGrowthFallbackBytesPerDay = 2.0 * 1024.0 * 1024.0 * 1024.0;  // 2 GiB of growth per day
 }

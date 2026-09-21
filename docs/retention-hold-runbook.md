@@ -104,6 +104,34 @@ None of the compression jobs participate in the coverage gate, and pausing or re
 `Retention Held` alert. A `policy_compression` job on a rollup with `scheduled = false` is not a hold — the hold
 mechanism only ever touches `policy_retention` rows.
 
+### A HELD policy and a DEAD one are different rows, and only one of them is this runbook's subject
+
+Since #3816 the service watches all four families for the failure mode #1581 was written for — `next_start =
+-infinity` while the job is not running, which is how TimescaleDB's scheduler retires a job it has given up on
+— and bands what it finds per family. That check and this runbook's condition read the same catalog and mean
+opposite things, so the discrimination is worth stating once:
+
+| | `Retention Held` (#2813) | `Retention Job Stuck` (#3816) |
+|---|---|---|
+| `jobs.scheduled` | `false` — paused by the coverage gate | `true` — armed |
+| `job_stats.next_start` | NULL (the view reports no next start for a paused job) | `-infinity` |
+| `job_stats.job_status` | `Paused` | `Scheduled` |
+| What it means | The gate is protecting history no rollup has materialized | The scheduler has abandoned an armed policy |
+| Remedy | `--backfill-rollups`; the policy arms itself within the hour | Read the PostgreSQL log around the job's `last_run_started_at`; a backfill changes nothing |
+
+**The service never re-arms a held policy**, and that is deliberate to the point of being pinned twice (once at
+the read, once at the evaluator): `alter_job(next_start => now())` on a held retention policy drops, in one
+run, exactly the chunks the gate exists to protect. If you see a `Retention Job Stuck` alert naming a policy
+you know to be held, that is a product defect worth reporting — the service will have logged a warning and
+done nothing.
+
+The other two families' dead-job alerts are worth knowing about here because one of them **causes** holds: a
+dead `policy_refresh_continuous_aggregate` job stops a rollup materializing, so the gate correctly refuses to
+arm that tier's retention, and the hold is the symptom an operator meets first. Running `--backfill-rollups`
+clears that symptom and leaves the dead refresh job in place to cause it again. If a hold keeps coming back
+after a successful backfill, look for a `Refresh Job Stuck` alert or an hourly `Store job health:` line
+reporting a dead refresh.
+
 ## Where the rest of the verbs are
 
 `--backfill-rollups` is one of about two dozen service verbs. Rather than copy a list here that would drift

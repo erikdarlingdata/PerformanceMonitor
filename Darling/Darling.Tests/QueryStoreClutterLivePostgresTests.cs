@@ -84,6 +84,8 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.Equal(PrimaryName, root.GetProperty("server").GetString());
             Assert.Equal(24, root.GetProperty("hours_back").GetInt32());
             Assert.False(root.GetProperty("server_is_replica").GetBoolean());
+            /* False because ONE database (`off`) is still on a pre-rung capture — the server-level flag is the
+               AND over the rows, not an average, so one unanswered row makes it false. */
             Assert.False(root.GetProperty("capture_mode_known").GetBoolean());
 
             /* the window floor: the raw tier's first row is six hours before the anchor, the request asked for 24 */
@@ -141,8 +143,9 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.Equal(50.0, alphaConfig.GetProperty("pct_of_cap").GetDouble());
             Assert.Equal(Stamp(anchor.AddMinutes(-30)), alphaConfig.GetProperty("captured_at").GetString());
             Assert.Equal(200, alphaConfig.GetProperty("max_plans_per_query").GetInt64());
-            Assert.Equal(JsonValueKind.Null, alphaConfig.GetProperty("query_capture_mode").ValueKind);
-            Assert.False(alphaConfig.GetProperty("capture_mode_known").GetBoolean());
+            /* The NEWEST capture's mode, not the older pre-rung NULL beside it (V137, #3796). */
+            Assert.Equal("ALL", alphaConfig.GetProperty("query_capture_mode").GetString());
+            Assert.True(alphaConfig.GetProperty("capture_mode_known").GetBoolean());
             Assert.Equal(DarlingMcpQueryStoreClutterTools.CaptureModeNote, alphaConfig.GetProperty("capture_mode_note").GetString());
             Assert.Contains("per-database schedule override", alpha.GetProperty("recommendations")[0].GetString(), StringComparison.Ordinal);
             Assert.Contains("get_query_store_top", alpha.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()));
@@ -170,6 +173,13 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.Equal(36.0, betaChurn.GetProperty("new_plans_per_day").GetDouble());
             Assert.Equal(Stamp(anchor.AddHours(-6)), betaChurn.GetProperty("first_collection").GetString());
             Assert.Equal(Stamp(anchor.AddHours(-4)), betaChurn.GetProperty("last_collection").GetString());
+            /* beta's mode is AUTO, and the churn recommendation SAYS so rather than sending the reader to
+               find it — the sentence is a function of this row's own column. */
+            Assert.Equal("AUTO", beta.GetProperty("config").GetProperty("query_capture_mode").GetString());
+            Assert.Contains(
+                "it is already AUTO",
+                beta.GetProperty("recommendations").EnumerateArray().Select(r => r.GetString()!).Single(r => r.Contains("MAX_PLANS_PER_QUERY", StringComparison.Ordinal)),
+                StringComparison.Ordinal);
 
             /* ── gamma: measured (a fan-out item once, configured, no runtime rows) and quiet ── */
             var gamma = databases[2];
@@ -183,6 +193,9 @@ public sealed class QueryStoreClutterLivePostgresTests
             Assert.Equal("Unknown", off.GetProperty("verdict").GetString());
             Assert.Equal(new[] { QueryStoreClutter.ReasonQueryStoreOff }, off.GetProperty("verdict_reasons").EnumerateArray().Select(r => r.GetString()).ToArray());
             Assert.False(off.GetProperty("excluded").GetBoolean());
+            /* The pre-rung row: a NULL mode with the flag false — never rendered as the engine's NONE. */
+            Assert.Equal(JsonValueKind.Null, off.GetProperty("config").GetProperty("query_capture_mode").ValueKind);
+            Assert.False(off.GetProperty("config").GetProperty("capture_mode_known").GetBoolean());
 
             /* ── the per-server block ── */
             var overhead = root.GetProperty("qs_overhead");
@@ -380,14 +393,20 @@ public sealed class QueryStoreClutterLivePostgresTests
 
         /* (c) two health captures on the primary: an older one 90 minutes back at 2048 MB and the newest 30
            minutes back at 4096 MB — the tool must publish the newest. off is OFF. The replica's alpha carries
-           the engine's readable-secondary bit. */
+           the engine's readable-secondary bit.
+
+           The V137 (#3796) capture mode is planted THREE ways on purpose, because the column's three states
+           are three different facts: alpha's newest capture says ALL (the plan-churn factory) while its OLDER
+           capture is a pre-rung NULL, which is also how the newest-wins rule is proved on this column and not
+           only on the storage figure; beta and gamma say AUTO; and `off` is left pre-rung NULL, which is what
+           makes the SERVER-level capture_mode_known false while every other row's is true. */
         foreach (var db in new[] { Alpha, Beta, Gamma })
         {
-            await PlantHealthAsync(c, PrimaryId, PrimaryName, db, "READ_WRITE", 0, 2048, anchor.AddMinutes(-90), ct);
-            await PlantHealthAsync(c, PrimaryId, PrimaryName, db, "READ_WRITE", 0, 4096, anchor.AddMinutes(-30), ct);
+            await PlantHealthAsync(c, PrimaryId, PrimaryName, db, "READ_WRITE", 0, 2048, anchor.AddMinutes(-90), ct, captureMode: null);
+            await PlantHealthAsync(c, PrimaryId, PrimaryName, db, "READ_WRITE", 0, 4096, anchor.AddMinutes(-30), ct, captureMode: db == Alpha ? "ALL" : "AUTO");
         }
 
-        await PlantHealthAsync(c, PrimaryId, PrimaryName, Off, "OFF", 0, 0, anchor.AddMinutes(-30), ct);
+        await PlantHealthAsync(c, PrimaryId, PrimaryName, Off, "OFF", 0, 0, anchor.AddMinutes(-30), ct, captureMode: null);
         await PlantHealthAsync(c, ReplicaId, ReplicaName, Alpha, "READ_ONLY", DarlingQueryStoreClutterReader.SecondaryReplicaReadonlyBit, 4096, anchor.AddMinutes(-30), ct);
 
         /* (d) QDS waits on the primary: QDS_LOADDB three rated rows (600 ms over 60 s), one unknowable (0, 0),
@@ -426,11 +445,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 10, 1000, 800, $2)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, serverName, db, queryId, planId,
             "0xQ" + queryId.ToString(CultureInfo.InvariantCulture), "0xP" + planId.ToString(CultureInfo.InvariantCulture), "SELECT 1");
 
-    private static Task PlantHealthAsync(NpgsqlConnection c, int serverId, string serverName, string db, string actual, int readonlyReason, long currentMb, DateTime at, CancellationToken ct) =>
+    /// <param name="captureMode">The V137 (#3796) column. NULL plants a PRE-RUNG row — the state a store
+    /// upgraded yesterday is really in — so the null path is exercised by a row that has one rather than by
+    /// a column nobody wrote to.</param>
+    private static Task PlantHealthAsync(NpgsqlConnection c, int serverId, string serverName, string db, string actual, int readonlyReason, long currentMb, DateTime at, CancellationToken ct, string? captureMode = "AUTO") =>
         DarlingMcpTestData.ExecAsync(c, ct,
-            @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
-VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, $8, 8192, 'AUTO', 21, 200, 60)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, serverName, db, actual, readonlyReason, currentMb);
+            @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode)
+VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, $8, 8192, 'AUTO', 21, 200, 60, $9)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, serverName, db, actual, readonlyReason, currentMb, captureMode);
 
     private static Task PlantWaitAsync(NpgsqlConnection c, int serverId, string serverName, string waitType, DateTime at, long deltaMs, long deltaTasks, int? intervalSeconds, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(c, ct,

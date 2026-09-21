@@ -132,7 +132,9 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static bool IsInformational(string? metricName) =>
             metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
-                or "Store TOAST Slack" or "Store Checkpointer Pressure";
+                or "Store TOAST Slack" or "Store Checkpointer Pressure"
+                /* #3816: a policy job that fails and retries is alive — INFO at its fire site, INFO here. */
+                or "Store Job Failing";
 
         /// <summary>
         /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor
@@ -316,7 +318,17 @@ namespace PerformanceMonitor.Common
                     or "Collection Stopped"
                     or "Compression Job Stuck"
                     or "Store Runtime Upgrade"
-                    or "Web TLS Certificate Expiring" => true,
+                    or "Web TLS Certificate Expiring"
+
+                    /* #3816, the same split as "Compression Job Stuck" one family over: a refresh or
+                       retention policy's stuck reason is elapsed minutes when a run HUNG and a scheduler
+                       state with no duration at all when next_start is -infinity, and both fire sites pass
+                       the 0 sentinel for each numeric column. "Store Job Failing" is deliberately NOT here —
+                       its current value is how many MORE failures were recorded since the previous sample,
+                       which is a real measurement, and a genuine 0 there cannot occur because the arm does
+                       not fire without a positive delta. */
+                    or "Refresh Job Stuck"
+                    or "Retention Job Stuck" => true,
                 _ => false,
             };
         }

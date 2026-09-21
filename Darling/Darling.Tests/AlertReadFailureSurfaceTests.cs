@@ -244,6 +244,27 @@ public sealed class AlertReadFailureSurfaceTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
+        /* #3848's retry counts are deliberately OUTSIDE the trio rule above, and the exclusion is asserted
+           rather than achieved by the suffix filter happening to miss them. The rule exists because a count
+           of BLIND reads with nothing to date it cannot separate a healed episode from a live one (#3010);
+           a retried read did not go blind — the condition was judged on evidence that arrived late — so
+           there is no episode to attribute and a trio would invite reading a retry as a soft failure. Both
+           directions: the pair exists, and neither has a stamp, name or elapsed companion. */
+        var retries = reading
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.Name)
+            .Where(n => n.EndsWith("RetriedReads", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(new[] { "InstanceRetriedReads", "ServerRetriedReads" }, retries.ToArray());
+
+        foreach (var scope in new[] { "Retried", "InstanceRetried", "ServerRetried" })
+        {
+            Assert.Null(reading.GetProperty(scope + "LastAtUtc"));
+            Assert.Null(reading.GetProperty(scope + "ReadsLastAtUtc"));
+        }
+
         var trios = new Dictionary<string, (string At, string Read, string Elapsed)>(StringComparer.Ordinal)
         {
             ["FleetReadFailures"] =
@@ -979,7 +1000,9 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
-        ["Compression-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
+           every policy family, so "Compression-job health" would have named a third of what it isolates. */
+        ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
@@ -1676,9 +1699,9 @@ public sealed class AlertReadFailureSurfaceTests
            looked adjacent and their single restart looked sufficient. */
         Assert.Equal(new[] { 1 }, Scan(
             """
-            var a = await ReadStuckCompressionJobsAsync(c, log, ct);
+            var a = await ReadStuckPolicyJobsAsync(c, log, ct);
             readClock.Restart();
-            await _selfAlerts!.EvaluateCompressionJobsAsync(a, ct);
+            await _selfAlerts!.EvaluatePolicyJobsAsync(a, ct);
             var b = await ReadJobCadenceReadingsAsync(c, log, ct);
             readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(b, ct);
@@ -2249,7 +2272,8 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(14, readingMembers.Count);
+        /* Sixteen since #3848 added the retry pair (ServerRetriedReads / InstanceRetriedReads). */
+        Assert.Equal(16, readingMembers.Count);
 
         foreach (var member in readingMembers)
         {
@@ -2308,8 +2332,12 @@ public sealed class AlertReadFailureSurfaceTests
             .ToList();
 
         /* Both directions, so an extractor that stopped matching cannot report clean. */
-        Assert.Equal(14, payloadFields.Count);
+        /* Sixteen since #3848: retried_reads and instance_retried_reads, both of which the panel renders
+           as their own tiles beside the failure counts they are read against. */
+        Assert.Equal(16, payloadFields.Count);
         Assert.Contains("last_failure_elapsed_ms", payloadFields);
+        Assert.Contains("retried_reads", payloadFields);
+        Assert.Contains("instance_retried_reads", payloadFields);
         Assert.Contains("fleet_last_failure_read", payloadFields);
         Assert.Contains("instance_last_failure_read", payloadFields);
 

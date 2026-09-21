@@ -138,6 +138,26 @@ public class AnalysisStory
     /// whose hops names anything (that story's text is byte-identical to what it was).
     /// </summary>
     public List<NamedHop> NamedHops { get; set; } = [];
+
+    /// <summary>
+    /// Config-advisory facts that hang off a node ON this story's path by an ACTIVE edge the greedy walk did not
+    /// follow — the lever beside the incident (#3691). The traversal takes the single highest-severity edge from
+    /// each node, so a mid-path node with two active edges reaches only one of them; before this list, the config
+    /// leaf it skipped was left un-consumed and then rooted its OWN one-node card at its advisory severity, beside
+    /// the incident it belongs to. Two cards where the truth is one story with a lever. The engine now sweeps those
+    /// destinations onto the story and marks them consumed, so they no longer root alone.
+    ///
+    /// <para>They ride BESIDE the path, never in it: <see cref="Path"/>, <see cref="StoryPath"/>,
+    /// <see cref="StoryPathHash"/>, <see cref="LeafFactKey"/> and <see cref="FactCount"/> are what they were, so the
+    /// incident identity (the hash every mute, occurrence count and fingerprint keys on) is byte-identical and no
+    /// existing story pin moves. A side leaf does not lift <see cref="Severity"/> or <see cref="Confidence"/> either
+    /// — it is context, not corroboration; amplifying is the graph's business and lives in the scorer. Highest
+    /// severity first, ties by ordinal key, so a pass is deterministic. Ephemeral like
+    /// <see cref="RootFactMetadata"/>: the payload's <c>side_leaves</c> array is what a reader sees, and the ONE
+    /// sentence <c>FactAdvice.PopulateStoryText</c> appends is what persists. Empty for every story with no skipped
+    /// config destination, which is nearly all of them.</para>
+    /// </summary>
+    public List<string> SideLeafKeys { get; set; } = [];
 }
 
 /// <summary>
@@ -183,6 +203,17 @@ public class AnalysisFinding
     /// <summary>The root fact's defined amplifier count, carried in from
     /// <see cref="AnalysisStory.DefinedAmplifiers"/> (#3712). Ephemeral, not persisted.</summary>
     public int DefinedAmplifiers { get; set; }
+
+    /// <summary>
+    /// The config levers hanging off this finding's chain, carried in from
+    /// <see cref="AnalysisStory.SideLeafKeys"/> (#3691) — the advisory keys the greedy walk could not reach and
+    /// that therefore no longer root a card of their own. Ephemeral like <see cref="DrillDown"/> and the
+    /// amplifier components: no <c>analysis_findings</c> column, so a finding read back from the store carries
+    /// none here, and the sentence <c>FactAdvice.PopulateStoryText</c> appended to
+    /// <see cref="StoryText"/> is the part that persists and reaches a read-back card. The
+    /// <c>side_leaves</c> array in <c>analyze_server</c> is rendered from this.
+    /// </summary>
+    public List<string> SideLeafKeys { get; set; } = [];
 
     /// <summary>
     /// Drill-down data collected after graph traversal. Ephemeral — not persisted.

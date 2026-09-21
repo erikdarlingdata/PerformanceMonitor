@@ -195,19 +195,109 @@ public sealed class PgTargetVacuumTests
         Assert.Contains(hold.AmplifierResults, a => a.Matched && a.Description.Contains("PG_AUTOVACUUM_BACKLOG co-fired", StringComparison.Ordinal));
     }
 
-    /* ── PG_XMIN_HOLD: the alert's identity arm, on the shared bars ── */
+    /* ── PG_XMIN_HOLD: the HORIZON's persistence, on the shared bars (#3691 step 40) ── */
 
+    /// <summary>
+    /// The grading pins of v1 (#3674), unchanged in value and in expectation — with a single persistent holder
+    /// the horizon's run IS that holder's win count, so the shift from identity to age cannot move this path.
+    /// That is the byte-identity claim, executed rather than asserted in prose.
+    /// </summary>
     [Theory]
-    [InlineData(60_000_000L, 31, 41, 0.5)]   /* majority over ≥ 5 observations, at the bar: the alert's Warning */
+    [InlineData(60_000_000L, 31, 41, 0.5)]   /* majority over ≥ 5 captures, at the bar: the alert's Warning */
     [InlineData(60_000_000L, 20, 41, 0.0)]   /* under the majority: transient */
     [InlineData(60_000_000L, 3, 4, 0.0)]     /* 75% of four observations: under the floor (#3537's false fire) */
     [InlineData(49_999_999L, 31, 41, 0.0)]   /* under the age bar */
     [InlineData(60_000_000L, 0, 0, 0.0)]     /* no observations */
-    public void TheXminBase_IsTheAlertsIdentityArm(long age, int held, int total, double expected)
+    public void TheXminBase_IsTheHorizonsPersistenceArm(long age, int held, int total, double expected)
     {
         var fact = Xmin(age, held, total);
         Assert.Equal(expected, PgTargetScorer.ScoreBase(fact), precision: 9);
-        Assert.Equal(expected > 0 ? 1 : 0, fact.Metadata[PgTargetScorer.XminIdentityArmKey]);
+        Assert.Equal(expected > 0 ? 1 : 0, fact.Metadata[PgTargetScorer.XminPersistenceArmKey]);
+    }
+
+    /// <summary>
+    /// The defect #3691 step 40 names: the lane-36 stock storm, five equally-old transactions alternating as
+    /// the capture's winner on a horizon that never came back. v1's identity arm saw each identity win once
+    /// and graded 0; the horizon arm grades it as held, and grades it IDENTICALLY to the one-holder shape —
+    /// attribution does not touch the score.
+    /// </summary>
+    [Fact]
+    public void FiveAlternatingHolders_OnAPinnedHorizon_GradeAsHeld_AndIdenticallyToOneHolder()
+    {
+        /* Lane 36's shape at the shared bar's scale: pinned for 24 of 25 captures, five holders taking turns. */
+        var pinned = XminAlternating(60_000_000, held: 24, total: 25, holders: 5);
+        var single = Xmin(60_000_000, held: 24, total: 25);
+
+        Assert.Equal(0.5, PgTargetScorer.ScoreBase(pinned), precision: 9);
+        Assert.Equal(PgTargetScorer.ScoreBase(single), PgTargetScorer.ScoreBase(pinned), precision: 9);
+        Assert.Equal(1, pinned.Metadata[PgTargetScorer.XminPersistenceArmKey]);
+        Assert.Equal(5, pinned.Metadata[PgTargetScorer.XminDistinctHoldersKey]);
+        Assert.Equal(0, pinned.Metadata[PgTargetScorer.XminHolderAttributedKey]);
+
+        /* The ramp, too: attribution is invisible to it. */
+        var rampedAlternating = XminAlternating(125_000_000, held: 24, total: 25, holders: 5);
+        rampedAlternating.Metadata[PgTargetScorer.XminHorizonFloorAgeKey] = 125_000_000;
+        rampedAlternating.Metadata[PgTargetScorer.XminFreezeMaxAgeKey] = 200_000_000;
+        Assert.Equal(0.75, PgTargetScorer.ScoreBase(rampedAlternating), precision: 9);
+    }
+
+    /// <summary>
+    /// The graded age is the run's FLOOR, not its peak: a horizon that touched 4 M for one capture of a run
+    /// otherwise below the bar is not a pinned horizon, and a run whose floor is at the bar is.
+    /// </summary>
+    [Fact]
+    public void TheGradedAge_IsTheRunsFloor_NotItsPeak()
+    {
+        var spike = Xmin(300_000_000, held: 31, total: 41,
+            (PgTargetScorer.XminHorizonFloorAgeKey, 10_000_000),
+            (PgTargetScorer.XminHorizonRunPeakAgeKey, 300_000_000));
+        Assert.Equal(0.0, PgTargetScorer.ScoreBase(spike), precision: 9);
+
+        var floored = Xmin(300_000_000, held: 31, total: 41,
+            (PgTargetScorer.XminHorizonFloorAgeKey, 50_000_000),
+            (PgTargetScorer.XminHorizonRunPeakAgeKey, 300_000_000));
+        Assert.Equal(0.5, PgTargetScorer.ScoreBase(floored), precision: 9);
+    }
+
+    /// <summary>
+    /// Attribution's two questions and the dominance line between them: one holder at or over the share is
+    /// named and its kind keys the consumers that read a kind (the idle-in-transaction leaf, the slot-xmin
+    /// amplifier, the remedy arms); a run split across KINDS names nobody and leaves
+    /// <c>holder_source</c> at "unknown", which is what closes those edges.
+    /// </summary>
+    [Fact]
+    public void Dominance_AttributesTheHolder_AndSourceAlternationClosesTheKindKeyedConsumers()
+    {
+        var dominated = XminAlternating(60_000_000, held: 20, total: 25, holders: 2);   /* 10 of 20 = the share */
+        Assert.Equal(0.5, dominated.Metadata[PgTargetScorer.XminModalHolderShareKey], precision: 9);
+        Assert.Equal(PgTargetAdvice.HolderSourceCode("session"), dominated.Metadata[PgTargetScorer.XminHolderSourceKey]);
+
+        var mixed = XminAlternating(60_000_000, held: 24, total: 25, holders: 5, backendShare: 0.4, slotShare: 0.35);
+        Assert.Equal(PgTargetAdvice.HolderSourceCode(null), mixed.Metadata[PgTargetScorer.XminHolderSourceKey]);
+        Assert.Equal("unknown", PgTargetAdvice.HolderSourceName(mixed.Metadata[PgTargetScorer.XminHolderSourceKey]));
+
+        /* Graded all the same — the horizon was pinned either way. */
+        Assert.Equal(0.5, PgTargetScorer.ScoreBase(mixed), precision: 9);
+    }
+
+    /// <summary>The four kind shares partition the held run, so they sum to 1 over any run the collector wrote.</summary>
+    [Fact]
+    public void TheWinnerSourceShares_SumToOne_OverAHeldRun()
+    {
+        foreach (var fact in new[]
+        {
+            Xmin(60_000_000, 31, 41),
+            XminAlternating(60_000_000, held: 24, total: 25, holders: 5),
+            XminAlternating(60_000_000, held: 24, total: 25, holders: 5, backendShare: 0.5, slotShare: 0.5),
+            XminAlternating(60_000_000, held: 24, total: 25, holders: 4, backendShare: 0.25, slotShare: 0.75),
+        })
+        {
+            var sum = fact.Metadata[PgTargetScorer.XminWinnerBackendShareKey]
+                + fact.Metadata[PgTargetScorer.XminWinnerSlotShareKey]
+                + fact.Metadata[PgTargetScorer.XminWinnerStandbyShareKey]
+                + fact.Metadata[PgTargetScorer.XminWinnerPreparedShareKey];
+            Assert.Equal(1.0, sum, precision: 9);
+        }
     }
 
     [Fact]
@@ -430,22 +520,85 @@ public sealed class PgTargetVacuumTests
 
         var advice = FactAdvice.Compose(PgTargetFactKeys.XminHold, Lookup(fact))!;
 
-        Assert.Contains("holding the xmin horizon 60,000,000 transactions back, in 31 of 41 holder-bearing collections", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("The xmin horizon sat at least 60,000,000 transactions back for 31 of 41 consecutive captures, held by", advice.Headline, StringComparison.Ordinal);
         Assert.Contains(expectedRemedy, advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("Counter-objective", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("the alert's majority standard is 50% over at least 5 observations", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("won 100% of the run, at or past the 50% share", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("No action on this evidence alone", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("took turns", advice.Remediation, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ATransientHolder_IsNamedAsContext_NotAsAFinding()
+    public void ATransientHold_IsNamedAsContext_NotAsAFinding()
     {
         var fact = Xmin(60_000_000, held: 2, total: 41);
         fact.ObjectName = "session:4242";
         new FactScorer().ScoreAll([fact]);
         var advice = FactAdvice.Compose(PgTargetFactKeys.XminHold, Lookup(fact))!;
-        Assert.Contains("a transient holder, not a chronic one", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("a transient hold, not a pinned horizon", advice.Headline, StringComparison.Ordinal);
         Assert.StartsWith("No action on this evidence alone", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The value-stated sentence the brief asks for: the horizon's own figures, the number of holders that took
+    /// turns, and the statement that resolving one moves the horizon to the next rather than releasing it. The
+    /// kind's remedy survives a SAME-kind rotation (five backends are still backends); a rotation across kinds
+    /// replaces it with the set.
+    /// </summary>
+    [Fact]
+    public void TheAlternationAdvice_NamesTheSetRatherThanTheLatestWinner()
+    {
+        var sameKind = XminAlternating(60_000_000, held: 24, total: 25, holders: 5);
+        new FactScorer().ScoreAll([sameKind]);
+        var a = FactAdvice.Compose(PgTargetFactKeys.XminHold, Lookup(sameKind))!;
+
+        Assert.Contains("The xmin horizon sat at least 60,000,000 transactions back for 24 of 25 consecutive captures — 5 holders took turns holding it", a.Headline, StringComparison.Ordinal);
+        Assert.Contains("5 distinct holder(s) won captures of the run — client backends 100%", a.Investigation, StringComparison.Ordinal);
+        Assert.Contains("No holder reached the 50% share", a.Investigation, StringComparison.Ordinal);
+        Assert.Contains("threshold_lineage = 0", a.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith("5 equally old holders took turns holding the horizon — resolving one moves the horizon to the next", a.Remediation, StringComparison.Ordinal);
+        Assert.Contains("pg_terminate_backend", a.Remediation, StringComparison.Ordinal);
+        AssertNeverDisablesAutovacuum(a);
+
+        var mixedKinds = XminAlternating(60_000_000, held: 24, total: 25, holders: 5, backendShare: 0.4, slotShare: 0.35);
+        new FactScorer().ScoreAll([mixedKinds]);
+        var b = FactAdvice.Compose(PgTargetFactKeys.XminHold, Lookup(mixedKinds))!;
+        Assert.Contains("Holders of SEVERAL KINDS took turns pinning the horizon", b.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_terminate_backend(pid)", b.Remediation, StringComparison.Ordinal);
+        Assert.Contains("Counter-objective", b.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The edge that must close under kind alternation: the idle-in-transaction leaf (lane 15's, keyed on
+    /// <c>holder_source</c> = session) opens when backends dominate the run and closes when no kind does —
+    /// without the leaf's own file knowing anything about alternation, because the dominant source IS what the
+    /// metadata key now carries.
+    /// </summary>
+    [Fact]
+    public void TheKindKeyedLeaf_OpensOnADominantSource_AndClosesOnAlternationAcrossKinds()
+    {
+        var parked = new Fact
+        {
+            Source = PgTargetSources.SessionsSource,
+            Key = PgTargetFactKeys.IdleInTransaction,
+            Value = 1,
+            ServerId = 1,
+            Metadata = { [PgTargetScorer.IdleInTransactionHolderHorizonAgeKey] = 60_000_000 },
+        };
+        parked.BaseSeverity = 0.6;
+        parked.Severity = 0.6;
+
+        var dominant = XminAlternating(60_000_000, held: 24, total: 25, holders: 5);
+        var graph = new PgTargetRelationshipGraph();
+        Assert.Single(
+            graph.GetActiveEdges(PgTargetFactKeys.XminHold, Lookup(dominant, parked)),
+            e => e.Destination == PgTargetFactKeys.IdleInTransaction);
+
+        var mixed = XminAlternating(60_000_000, held: 24, total: 25, holders: 5, backendShare: 0.4, slotShare: 0.35);
+        Assert.DoesNotContain(
+            graph.GetActiveEdges(PgTargetFactKeys.XminHold, Lookup(mixed, parked)),
+            e => e.Destination == PgTargetFactKeys.IdleInTransaction);
     }
 
     [Fact]
@@ -742,6 +895,11 @@ public sealed class PgTargetVacuumTests
         return fact;
     }
 
+    /// <summary>
+    /// A hold fact in the #3691 step-40 vocabulary: <paramref name="held"/> is the horizon's run of consecutive
+    /// above-bar captures out of <paramref name="total"/> holder-bearing captures, and ONE session holds all of
+    /// it (the v1 shape, so the grading pins above are the v1 pins unchanged).
+    /// </summary>
     private static Fact Xmin(long age, int held, int total, params (string Key, double Value)[] extra)
     {
         var fact = new Fact
@@ -755,13 +913,54 @@ public sealed class PgTargetVacuumTests
             {
                 [PgTargetScorer.XminAgeKey] = age,
                 [PgTargetScorer.XminHolderSourceKey] = 1,
+                [PgTargetScorer.XminLatestHolderSourceKey] = 1,
                 [PgTargetScorer.XminObservationsTotalKey] = total,
-                [PgTargetScorer.XminObservationsHeldKey] = held,
-                [PgTargetScorer.XminObservationsAboveThresholdKey] = total,
+                [PgTargetScorer.XminHeldCapturesKey] = held,
+                [PgTargetScorer.XminHeldFractionKey] = total > 0 ? (double)held / total : 0.0,
+                [PgTargetScorer.XminHorizonFloorAgeKey] = age,
+                [PgTargetScorer.XminHorizonRunPeakAgeKey] = age,
+                [PgTargetScorer.XminPeakWinningAgeKey] = age,
+                [PgTargetScorer.XminDistinctHoldersKey] = held > 0 ? 1 : 0,
+                [PgTargetScorer.XminWinnerBackendShareKey] = held > 0 ? 1.0 : 0.0,
+                [PgTargetScorer.XminWinnerSlotShareKey] = 0.0,
+                [PgTargetScorer.XminWinnerStandbyShareKey] = 0.0,
+                [PgTargetScorer.XminWinnerPreparedShareKey] = 0.0,
+                [PgTargetScorer.XminModalHolderCapturesKey] = held,
+                [PgTargetScorer.XminModalHolderShareKey] = held > 0 ? 1.0 : 0.0,
+                [PgTargetScorer.XminDominantSourceShareKey] = held > 0 ? 1.0 : 0.0,
+                [PgTargetScorer.XminHolderAttributedKey] = held > 0 ? 1 : 0,
                 [PgTargetScorer.XminMinutesSinceLastHolderKey] = 0,
             },
         };
         foreach (var (k, v) in extra) fact.Metadata[k] = v;
+        return fact;
+    }
+
+    /// <summary>
+    /// The lane-36 shape: one pinned horizon, <paramref name="holders"/> equally-old holders of the SAME kind
+    /// rotating as <c>is_winner</c> across the run, so no identity wins twice in a row and none reaches the
+    /// dominance share. <paramref name="backendShare"/> under 1.0 splits the run across KINDS as well, which is
+    /// the case that closes the kind-keyed graph edges.
+    /// </summary>
+    private static Fact XminAlternating(long age, int held, int total, int holders, double backendShare = 1.0, double slotShare = 0.0)
+    {
+        var fact = Xmin(age, held, total);
+        /* A rotation of five over twenty-four captures gives the busiest holder five wins, not 4.8. */
+        var modalCaptures = holders > 0 ? Math.Ceiling((double)held / holders) : 0;
+        var modalShare = held > 0 ? modalCaptures / held : 0.0;
+        var attributed = modalShare >= PgTargetScorer.XminHolderDominanceShare;
+        fact.ObjectName = attributed ? "session:4242" : null;
+        fact.Metadata[PgTargetScorer.XminDistinctHoldersKey] = holders;
+        fact.Metadata[PgTargetScorer.XminModalHolderCapturesKey] = modalCaptures;
+        fact.Metadata[PgTargetScorer.XminModalHolderShareKey] = modalShare;
+        fact.Metadata[PgTargetScorer.XminHolderAttributedKey] = attributed ? 1 : 0;
+        fact.Metadata[PgTargetScorer.XminWinnerBackendShareKey] = backendShare;
+        fact.Metadata[PgTargetScorer.XminWinnerSlotShareKey] = slotShare;
+        fact.Metadata[PgTargetScorer.XminDominantSourceShareKey] = Math.Max(backendShare, slotShare);
+        fact.Metadata[PgTargetScorer.XminHolderSourceKey] =
+            Math.Max(backendShare, slotShare) >= PgTargetScorer.XminHolderDominanceShare
+                ? PgTargetAdvice.HolderSourceCode(backendShare >= slotShare ? "session" : "replication_slot")
+                : PgTargetAdvice.HolderSourceCode(null);
         return fact;
     }
 }

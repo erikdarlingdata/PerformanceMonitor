@@ -1113,6 +1113,55 @@ export const SERVER_TABS = [
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
           "the window there is nothing to compare against, and the read says so rather than calling it clear."
       ),
+      /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
+         block and the per-server memory clerk — because the read composes four arms over two raw hypertables
+         and three separate fetches of it would pay for that three times on one tab (the fanout() reason).
+
+         include_fleet_median is deliberately NOT sent. It walks query_store_stats and wait_stats fleet-wide
+         over the window, which on a large store is the read deadline's whole budget, and a server tab is a
+         per-server question; fleet_median therefore reads null here with the payload's own note saying it was
+         not computed, which an agent calling the tool can ask for and this page does not.
+
+         The last two panels are SERVER blocks beside DATABASE rows, and their titles say so: the QDS_* waits
+         and the Query Store memory clerk are instance-wide, and nothing on this page attributes them to a
+         database. Each shows the payload's own note as its notice — the wait block because the proxy is the
+         NON-sleep QDS types only and a reader who takes it for the whole of Query Store's cost is reading it
+         wrong, the clerk because its absence is a RANK (outside the collector's top 25) and not a zero. */
+      ...fanout("get_query_store_clutter", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "Query Store Clutter",
+          subtitle: ctx.label + ", per database, worst first",
+          viz: "table",
+          rowsKey: "databases",
+          columns: QS_CLUTTER_COLUMNS,
+          noteKey: "server_note",
+          emptyText:
+            "No Query Store rows, no query_store fan-out run and no query_store_health capture for this " +
+            "server in this window. The read says which of those it found rather than showing an empty grid.",
+        },
+        {
+          title: "Query Store Overhead (per server)",
+          subtitle: ctx.label,
+          viz: "table",
+          rowsKey: "qs_overhead.wait_stats.included",
+          columns: QS_OVERHEAD_WAIT_COLUMNS,
+          noteKey: "qs_overhead.wait_stats.excluded_note",
+          emptyText:
+            "No non-sleep QDS_* wait deltas in this window. Query Store's four sleep waits are dropped at " +
+            "collection on purpose, so their absence here is the filter working, not a quiet server.",
+        },
+        {
+          title: "Query Store Memory Clerk",
+          subtitle: SNAPSHOT,
+          span: 1,
+          viz: "stat",
+          stats: QS_CLERK_STATS,
+          noteKey: "qs_overhead.memory_clerk.note",
+          emptyText:
+            "MEMORYCLERK_QUERYDISKSTORE did not appear in any memory_clerks capture in this window. The " +
+            "collector stores the top 25 clerks over 1 MB per capture, so that is a RANK, not a zero.",
+        },
+      ]),
       /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
          heatmap viz in this page's vocabulary and inventing a fifth one is not what the issue asked for --
          but the READ is portable, and a bucketed table is the same answer: one row per (time bin x
@@ -2455,6 +2504,14 @@ const ALERT_READ_STATS = [
   { key: "alert_read_health.instance_last_failure_read", label: "Which read (service)", format: "text", small: true },
   { key: "alert_read_health.instance_last_failure_elapsed_ms", label: "Ran for (service)", format: "ms", small: true },
   { key: "alert_read_health.instance_last_failure_at", label: "Newest (service)", format: "reltime", small: true },
+  /* #3848: the second population, beside the failure counts it is read against rather than replacing
+     them. A read that crossed the 10 s deadline once and answered on the retry two seconds later is the
+     store's write bands showing through - it used to be a blind condition, and it is now a count. Read
+     the pair: retries with no failures is write pressure with alerting intact; both moving is a band that
+     was still on twelve seconds later. Neither tile has a "Newest" or "Which read" companion, unlike
+     every count above, because a retried read did not go blind - there is no episode to date. */
+  { key: "alert_read_health.retried_reads", label: "Retried reads (server)", format: "int" },
+  { key: "alert_read_health.instance_retried_reads", label: "Retried reads (service)", format: "int" },
   { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
 ];
 
@@ -2677,6 +2734,75 @@ const QUERY_STORE_COLUMNS = [
   { key: "avg_rowcount", label: "Avg Rows", format: "num1" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
   { key: "replica_role", label: "Replica" },
+];
+
+/*
+ * #3797: the Query Store CLUTTER rows, and the per-server overhead block beside them.
+ *
+ * The verdict is COLOURED, not re-derived: `sevKey` points the cell at the band the server already computed
+ * (R1 — the browser never recomputes a threshold), and `verdict_reasons` is shown as the token list that
+ * raised it so the colour is never the only evidence. `excluded_reason` is its own column rather than a
+ * footnote: a replica reads Unknown/excluded by architecture, and a reader who cannot see WHY on the row
+ * will file the absence as a defect. `recommendations` is the SERVER's prose (QueryStoreClutter.Recommendations
+ * — the same sentences the MCP payload and the WPF grid carry), behind a disclosure because each one is a
+ * paragraph; it is never re-worded here.
+ */
+const QS_CLUTTER_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "verdict", label: "Verdict", sevKey: "verdict" },
+  { key: "verdict_reasons", label: "Reasons", render: (r) => listCell(r.verdict_reasons) },
+  /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
+  { key: "excluded_reason", label: "Excluded Because" },
+  { key: "read_cost.runs_slowest_pct", label: "Slowest on %", format: "num1" },
+  { key: "read_cost.slowest_share_pct", label: "Share of Pass %", format: "num1" },
+  { key: "read_cost.slowest_item_ms_p50", label: "Slowest ms p50", format: "ms" },
+  { key: "read_cost.dominance_ratio", label: "vs Others", format: "num2" },
+  { key: "plan_churn.plans_per_query_p95", label: "Plans/Query p95", format: "int" },
+  { key: "plan_churn.plans_per_query_max", label: "Plans/Query Max", format: "int" },
+  { key: "plan_churn.new_plans_per_day", label: "New Plans/Day", format: "num1" },
+  { key: "plan_churn.never_seen_twice_fraction", label: "One-Shot Fraction", format: "num2" },
+  { key: "plan_churn.distinct_plans", label: "Plans", format: "int" },
+  { key: "config.actual_state", label: "State" },
+  /* V137 (#3796). A dash here is a health capture older than the rung — never asked — which the payload's
+     capture_mode_note spells out; it is NOT the engine's NONE, and the two must not look alike. */
+  { key: "config.query_capture_mode", label: "Capture Mode" },
+  { key: "config.max_plans_per_query", label: "Max Plans/Query", format: "int" },
+  { key: "config.stale_query_threshold_days", label: "Stale Days", format: "int" },
+  { key: "config.pct_of_cap", label: "% of Cap", format: "num1" },
+  { key: "config.captured_at", label: "Options Captured", format: "time" },
+  {
+    key: "recommendations",
+    label: "Recommendation",
+    wrap: true,
+    render: (r) => {
+      const lines = Array.isArray(r.recommendations) ? r.recommendations : [];
+      if (!lines.length) return document.createTextNode("—");
+      return disclosure(lines[0], el("div", {}, lines.map((line) => el("p", { text: line }))), { max: 90 });
+    },
+  },
+];
+
+/* The per-server overhead proxy's wait rows. wait_ms_per_hour is the server's own rating over the seconds
+   those rows measured; a null is an unknowable interval, which the generic formatter renders as a dash. */
+const QS_OVERHEAD_WAIT_COLUMNS = [
+  { key: "wait_type", label: "Wait Type" },
+  { key: "wait_ms_per_hour", label: "Wait ms/hour", format: "num1" },
+  { key: "wait_ms_total", label: "Wait ms (window)", format: "int" },
+  { key: "waiting_tasks_total", label: "Waiting Tasks", format: "int" },
+  { key: "measured_seconds", label: "Measured s", format: "int" },
+  { key: "rows_observed", label: "Rows", format: "int" },
+  { key: "rows_unknowable", label: "Unrateable Rows", format: "int" },
+  { key: "last_observed", label: "Last Seen", format: "time" },
+];
+
+/* The Query Store memory clerk, the second half of the per-server overhead proxy. All three keys are null
+   together — the clerk never appeared in a capture — which is exactly when vizStat prefers the panel's
+   sentence to a row of em-dashes, and the payload's own `note` (shown as the panel's notice) says whether
+   that is "no captures at all" or "below the collector's top 25", which are different facts. */
+const QS_CLERK_STATS = [
+  { key: "qs_overhead.memory_clerk.latest_memory_mb", label: "Latest MB", format: "num1" },
+  { key: "qs_overhead.memory_clerk.max_memory_mb_in_window", label: "Window Max MB", format: "num1" },
+  { key: "qs_overhead.memory_clerk.latest_clerk_captured_at", label: "Clerk Last Seen", format: "time" },
 ];
 
 const LONG_QUERY_COLUMNS = [

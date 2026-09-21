@@ -427,7 +427,8 @@
         "type": "Project",
         "dependencies": {
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Collectors": "[3.8.0, )"
+          "PerformanceMonitor.Collectors": "[3.8.0, )",
+          "PerformanceMonitor.Common": "[3.8.0, )"
         }
       },
       "performancemonitor.notifications": {

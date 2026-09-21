@@ -83,6 +83,31 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// will start it again. Ten seconds keeps a single stall well inside that, and caps the unbudgeted
     /// worst case at 45 x 10 s instead of 45 x 30 s.</para>
     ///
+    /// <para><b>The arithmetic after #3848's retry, and why the bound above still holds.</b> A read that
+    /// crosses this deadline is now retried ONCE, two seconds later, under this same deadline
+    /// (<see cref="ExecuteWithOneRetryAsync"/>), so a stalled read costs at most 22 s rather than 10 s and
+    /// the pass's unbudgeted worst case becomes 45 x 22 s. That figure is reached only when EVERY read on
+    /// EVERY server stalls twice — a fleet-wide store outage, which is precisely the case where this pass
+    /// SHOULD be slow and where a fast pass would only mean it gave up on all forty-five conditions
+    /// quickly. The case the retry is FOR costs 12 s on one read of one server: the measured population is
+    /// sparse transients inside the store's own write bands (raw-hypertable compression, the daily-tier
+    /// materialization's WAL storm, the hourly successor refreshes, timed-checkpoint fsync tails of
+    /// 8–25 s), every one of which the monitoring seat's own retry-once discipline survived while this
+    /// pass — which had no retry — recorded a blind condition and ran into the same band 30 s later. So the
+    /// upper bound moves by a factor the outage case earns and the ordinary case never pays.</para>
+    ///
+    /// <para>The number itself does NOT move, and that is the point of retrying instead: the asymmetry
+    /// below still says err short, because a read that runs long holds a fleet-sweep permit. A retry re-asks
+    /// the same question after the band has had two seconds to pass, which is a different lever from
+    /// waiting longer inside one attempt — and it is the only one of the two that a 25-second fsync tail
+    /// can be survived on without raising this deadline past the 30 s cadence.</para>
+    ///
+    /// <para><b>Deliberately reader-side, and independent of the three-band grid redesign</b> (#3678 /
+    /// #3781 / #3745, which decide together when the store writes). That work changes whether the bands
+    /// collide; this changes whether a twelve-second write burst blinds an alert. Both are wanted, neither
+    /// waits on the other, and this one carries no coupling to the grid's shape — so a rescheduled band
+    /// makes the retry rarer rather than wrong.</para>
+    ///
     /// <para><b>The asymmetry is why erring SHORT is right here, and it is the reverse of #2810.</b>
     /// A read that exceeds this deadline skips one alert check and logs it; the next pass runs 30 s
     /// later, so the cost is one cycle of delay on one alert. A read that runs long holds a fleet
@@ -103,9 +128,33 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// </summary>
     internal const int AlertPassCommandTimeoutSeconds = 10;
 
+    /// <summary>
+    /// How long <see cref="ExecuteWithOneRetryAsync"/> waits between a read's two attempts (#3848).
+    ///
+    /// <para>Two seconds, and the number is the monitoring seat's measured one rather than a guess: its
+    /// retry-once-sequential discipline uses this pause and did not lose a read across the week that
+    /// produced this issue, over the same store and the same bands. What the pause has to outlast is a
+    /// transient measured in seconds — a checkpoint fsync tail, a compression chunk, one hourly
+    /// materialization's WAL burst — and what it must NOT do is re-ask while the band is still on, which
+    /// is what a zero-wait retry does: a second attempt issued immediately against a store that just held
+    /// a statement for ten seconds spends another ten and buys the same answer, turning one blind
+    /// condition into a 20-second permit hold with nothing to show. Two seconds is also small enough that
+    /// the pass's worst case stays legible arithmetic (22 s per stalled read against a 30 s cadence);
+    /// a pause long enough to outlast a 25 s fsync tail would not be a retry, it would be a second
+    /// deadline.</para>
+    ///
+    /// <para>Not fitted to the failure distribution, deliberately and for the reason the deadline above
+    /// states about itself: every observed kill was censored AT the deadline, so nothing in the record
+    /// says how much longer any individual read wanted. This is chosen from a working discipline's
+    /// measured value and from the cadence, and a number claiming to fit that data would be invented.</para>
+    /// </summary>
+    internal const int AlertPassRetryDelaySeconds = 2;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly Func<int, int>? _runningJobsCadenceMinutes;
     private readonly Func<int, int>? _blockingSnapshotCadenceMinutes;
+    private readonly AlertReadFailureCounter? _readFailures;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
 
     /// <param name="runningJobsCadenceMinutes">
     /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
@@ -116,14 +165,214 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// <param name="blockingSnapshotCadenceMinutes">
     /// The same resolver for the dmv_blocking_snapshot cadence, behind #1839's freshness bound.
     /// </param>
+    /// <param name="readFailures">
+    /// #3848: the process counter every RETRIED read is tallied on. Passed explicitly by the worker rather
+    /// than defaulted to <see cref="AlertReadFailureCounter.Shared"/> inside this type, matching how the
+    /// engine takes it — a test constructs its own and cannot pollute the shared one. Null (most test call
+    /// sites) retries exactly the same way and counts nothing.
+    /// </param>
+    /// <param name="delay">
+    /// The pause between a read's two attempts, injectable so a pin can assert the seam WAITED
+    /// <see cref="AlertPassRetryDelaySeconds"/> without spending two seconds of test time doing it.
+    /// Defaults to <see cref="Task.Delay(TimeSpan, CancellationToken)"/>, which is what production runs.
+    /// </param>
     public DarlingAlertReadAdapter(
         NpgsqlDataSource postgres,
         Func<int, int>? runningJobsCadenceMinutes = null,
-        Func<int, int>? blockingSnapshotCadenceMinutes = null)
+        Func<int, int>? blockingSnapshotCadenceMinutes = null,
+        AlertReadFailureCounter? readFailures = null,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
         _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
+        _readFailures = readFailures;
+        _delay = delay ?? Task.Delay;
+    }
+
+    /* ---------------- the retry seam (#3848) ---------------- */
+
+    /// <summary>
+    /// Runs one alert-pass read under the <see cref="AlertPassCommandTimeoutSeconds"/> deadline its own
+    /// command carries; on a COMMAND-TIMEOUT failure and nothing else, waits
+    /// <see cref="AlertPassRetryDelaySeconds"/> and runs it once more (#3848).
+    ///
+    /// <para><b>One seam rather than fourteen edits.</b> This type issues nineteen commands across
+    /// fourteen public reads, and the retry decision is one decision — fourteen copies of it would be free
+    /// to disagree the moment any of them grew an arm, which is the argument
+    /// <see cref="PostgresTransportFault"/> already makes for the write side's two callers. Each read's
+    /// body is passed in whole, so the retry re-runs the read from its CONNECTION OPEN outward rather than
+    /// re-executing a half-consumed command: the multi-statement reads (database state's four maintenance
+    /// statements ahead of the deviation read; the anomalous-jobs freshness probe ahead of its page) are
+    /// re-run from the top, which is sound because every one of those statements is idempotent by
+    /// construction — they are <c>INSERT ... ON CONFLICT DO NOTHING</c>, an <c>UPDATE</c> to a fixed value,
+    /// a <c>DELETE</c> of rows absent from the newest snapshot, and reads. That property is what makes a
+    /// whole-read retry safe here and is NOT a general licence: it holds because this type performs no
+    /// accumulating write at all, which is the same test
+    /// <see cref="StoreWriteReattempt.IsSafeToReattempt"/> applies one seam over and answers differently.
+    /// The store-write precedent is deliberately not reused wholesale — its <c>StoreCopyPhase</c> conjunct
+    /// is about a COPY's exactly-once property and has no meaning for a read.</para>
+    ///
+    /// <para><b>What counts as a command timeout, MEASURED against Npgsql 10.0.3 rather than assumed.</b>
+    /// A client-side <c>CommandTimeout</c> expiry arrives as an <see cref="NpgsqlException"/> whose
+    /// <see cref="Exception.InnerException"/> is a <see cref="TimeoutException"/> — message "Exception
+    /// while reading from stream" over "Timeout during reading attempt", with NO SQLSTATE, which is the
+    /// rendering #2826 and #3013 both exist because of. Verified on a rig (postgres:17-alpine,
+    /// <c>SELECT pg_sleep(30)</c> at <c>CommandTimeout = 2</c>) in all three places the wait can land:
+    /// <c>ExecuteScalarAsync</c>, <c>ExecuteReaderAsync</c>, and <c>ReadAsync</c> mid-stream while rows
+    /// are being consumed. All three produce that identical pair, and the connection is left
+    /// <c>State = Open</c> and immediately reusable afterwards — measured, including a second
+    /// <c>ExecuteReaderAsync</c> on the same connection after a mid-stream kill — with the backend's
+    /// statement genuinely cancelled (<c>pg_stat_activity</c> held zero surviving <c>pg_sleep</c> backends
+    /// one second later). So the second attempt neither inherits a poisoned connection nor races a
+    /// statement that is still running.</para>
+    ///
+    /// <para><b>And what does NOT, which is the load-bearing half.</b> Three neighbouring shapes were
+    /// measured on the same rig, and each is excluded on its own evidence:</para>
+    /// <list type="bullet">
+    /// <item>The store's OWN <c>statement_timeout</c> cancelling the read arrives as a
+    /// <see cref="PostgresException"/>, SQLSTATE <c>57014</c>, with no <see cref="TimeoutException"/>
+    /// anywhere in the chain. That is the backend answering, and an identical second attempt gets an
+    /// identical answer — <see cref="PostgresTransportFault"/>'s reasoning, and the reason the
+    /// <see cref="PostgresException"/> test comes FIRST at every level of the chain walk below.</item>
+    /// <item>The pass's stopping token cancelling the read arrives as an
+    /// <see cref="OperationCanceledException"/> wrapping a <see cref="PostgresException"/> at
+    /// <c>57014</c> ("canceling statement due to user request"). A pre-cancelled token produces a bare
+    /// <see cref="OperationCanceledException"/>. Both propagate untouched, and the <c>passToken</c> guard
+    /// is checked besides — belt and braces, because a retry that outlives an orderly stop while holding a
+    /// sweep permit is the one case where a second attempt is guaranteed useless
+    /// (<see cref="StoreWriteReattempt"/>'s reasoning, verbatim).</item>
+    /// <item>A CONNECT timeout is an <see cref="NpgsqlException"/> over a
+    /// <see cref="TimeoutException"/> too — "Failed to connect to ..." over "Timeout during connection
+    /// attempt" — so it is inside this predicate and is retried. That is deliberate and not a leak: a
+    /// store that could not be reached inside the connect timeout is exactly a store worth asking again
+    /// two seconds later, it is the same transient population, and the cost is bounded by the same
+    /// arithmetic. The predicate does not try to tell the two apart because the only discriminator is an
+    /// exception MESSAGE, which is what #3013 refuses to key on.</item>
+    /// </list>
+    ///
+    /// <para>Any other exception propagates unchanged, on the first attempt, with no delay: a
+    /// <see cref="PostgresException"/> is the store's considered answer and re-asking buys a second round
+    /// trip against a backend that just said no, while turning a legible SQLSTATE into a doubled one.</para>
+    ///
+    /// <para><b>Both truths are counted.</b> A retry that succeeds records
+    /// <see cref="AlertReadFailureCounter.RecordRetriedRead"/> and nothing else — the condition WAS judged,
+    /// on evidence that arrived late, and the cost stays visible as a count instead of as a blind alert. A
+    /// retry that ALSO times out records the retry and then propagates, so the caller's own catch arm
+    /// records today's read failure exactly as it did before this change: one failure, not two, and the
+    /// caller's elapsed still measures its own last attempt because every counted site restarts its clock
+    /// between consecutive awaits. The retry is therefore counted per attempt-PAIR rather than per success,
+    /// which is the honest direction — a retry counted only when it worked would understate the write
+    /// bands' cost by exactly the episodes where the band was worst.</para>
+    /// </summary>
+    /// <param name="read">The whole read, run under the caller's token — re-invoked as-is on the retry.</param>
+    /// <param name="serverKey">
+    /// The alert pass's server key, so a retry lands in the same bucket the read's failure would. Taken as
+    /// the caller's raw string (not the parsed <c>server_id</c>) because that is the spelling the counter is
+    /// keyed on, and the surface derives its lookup the same way — the silent-zero hazard
+    /// <c>AlertReadFailureSurfaceTests</c> pins from source.
+    /// </param>
+    /// <param name="readName">The read's short constant name, for the counter.</param>
+    /// <param name="passToken">
+    /// The pass's stopping token. A read cancelled through it is never a retry candidate, and the 2 s wait
+    /// honours it — so a service stopping mid-band does not spend two seconds per in-flight read waiting to
+    /// re-ask a store it is shutting down.
+    /// </param>
+    /// <remarks>
+    /// <c>internal</c> rather than private so <c>AlertReadRetrySeamTests</c> can drive it with a fake read
+    /// that throws the exact exception shapes the rig measured, on a fake delay — the alternative is a pin
+    /// that needs a live store to stall on demand, which is the shape that gets skipped in CI and then
+    /// stops being evidence. The twelve production callers are all in this file.
+    /// </remarks>
+    internal async Task<T> ExecuteWithOneRetryAsync<T>(
+        Func<CancellationToken, Task<T>> read,
+        string serverKey,
+        string readName,
+        CancellationToken passToken)
+    {
+        try
+        {
+            return await read(passToken);
+        }
+        /* Ahead of the filter rather than relying on it to answer false, exactly as StoreWriteReattempt
+           orders its arms: a cancellation must never be reclassified as a retryable stall, and an arm whose
+           correctness rests on a predicate NOT matching is one predicate edit away from retrying through a
+           shutdown. It also catches the shape the rig measured for a token cancel — an
+           OperationCanceledException wrapping PostgresException 57014 — whose inner chain the predicate
+           below would otherwise have to reason about at all. */
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception firstAttempt) when (
+            !passToken.IsCancellationRequested && IsCommandTimeout(firstAttempt))
+        {
+            /* Counted HERE, before the second attempt runs, rather than after it returns — so the figure
+               means "a read crossed the deadline and was re-asked" whatever the retry then does. Recorded
+               after the wait would drop every retry that a shutdown interrupts; recorded only on success
+               would understate the bands' cost by exactly the episodes where the band was worst, and the
+               surface's own note commits to counting both outcomes here. */
+            _readFailures?.RecordRetriedRead(serverKey, readName);
+
+            /* The pause, on the PASS's token: a service stopping mid-band must not spend two seconds per
+               in-flight read waiting to re-ask a store it is shutting down. A trip here throws
+               TaskCanceledException (measured), which is an OperationCanceledException — so the caller's
+               own cancellation arm sees a cancellation, and no second attempt is made. */
+            await _delay(TimeSpan.FromSeconds(AlertPassRetryDelaySeconds), passToken);
+
+            /* The SAME read, re-invoked whole, under the SAME deadline its command carries. A failure on
+               this attempt propagates: the caller's fault arm records it as today's single read failure,
+               which is why a read that stalls twice counts once as a failure and once as a retry. The
+               first attempt's exception is not chained onto it — StoreWriteReattempt's reasoning: two
+               different faults in one message column is worse than the one that actually ended the read. */
+            return await read(passToken);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="exception"/> is a client-side command (or connect) deadline expiry — the
+    /// only fault #3848 retries.
+    ///
+    /// <para>The chain is WALKED rather than the outermost type tested, because Npgsql wraps: the measured
+    /// shape is <see cref="NpgsqlException"/> over <see cref="TimeoutException"/>, and both render as the
+    /// same "Exception while reading from stream" text a lost connection does, so neither the outermost
+    /// type nor the message can separate them. Same walk shape as
+    /// <see cref="PostgresTransportFault.IsTransportFault"/> and deliberately NOT that predicate: the
+    /// transport test also admits <see cref="System.Net.Sockets.SocketException"/> and
+    /// <see cref="System.IO.IOException"/> — a reset socket and a torn stream — which are connection
+    /// faults rather than the read taking too long. Those propagate here, because the population this
+    /// retry is sized for is a store that is UP and slow inside a write band, and a broken connection
+    /// during an alert pass is a different condition that the count should keep saying out loud.</para>
+    ///
+    /// <para><b><see cref="PostgresException"/> answers false at EVERY level of the chain</b>, tested
+    /// before the timeout test at each step. It means the backend received the statement and replied —
+    /// including its own <c>statement_timeout</c> cancelling us at SQLSTATE <c>57014</c>, which the rig
+    /// measured as a bare <see cref="PostgresException"/> with no <see cref="TimeoutException"/> in the
+    /// chain at all. An identical second attempt gets an identical answer, and retrying past a SQLSTATE
+    /// turns a legible error into a doubled one.</para>
+    ///
+    /// <para>Unlike the transport predicate this does NOT fall back to "any
+    /// <see cref="NpgsqlException"/>": a bare one with no <see cref="TimeoutException"/> inside it is some
+    /// other client-side fault, and a retry gate that ends in a catch-all would drift into retrying
+    /// everything the first time Npgsql introduces a wrapper. The whole value of this gate is that it is
+    /// narrow.</para>
+    /// </summary>
+    internal static bool IsCommandTimeout(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException)
+            {
+                return false;
+            }
+
+            if (current is TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /* ---------------- blocking (XE-preferred + DMV fallback) ---------------- */
@@ -175,8 +424,24 @@ AND   collection_time <= $3
 ORDER BY event_time DESC
 LIMIT 200";
 
-    public async Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(
+    public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetRecentBlockedProcessReportsCoreAsync(serverKey, hoursBack, ct),
+            serverKey,
+            "blocking",
+            cancellationToken);
+    }
+
+    private async Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsCoreAsync(
+        string serverKey, int hoursBack, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
         var (startTime, endTime) = Window(hoursBack);
@@ -272,8 +537,24 @@ AND   collection_time = (
 )
 GROUP BY collection_time";
 
-    public async Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(
+    public Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetCurrentBlockingWaitCoreAsync(serverKey, ct),
+            serverKey,
+            "blocking wait time",
+            cancellationToken);
+    }
+
+    private async Task<CurrentBlockingWaitResult?> GetCurrentBlockingWaitCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -318,8 +599,24 @@ AND   collection_time <= $3
 ORDER BY deadlock_time DESC
 LIMIT 50";
 
-    public async Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(
+    public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetRecentDeadlocksCoreAsync(serverKey, hoursBack, ct),
+            serverKey,
+            "deadlocks",
+            cancellationToken);
+    }
+
+    private async Task<List<DeadlockAlertRow>> GetRecentDeadlocksCoreAsync(
+        string serverKey, int hoursBack, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
         var (startTime, endTime) = Window(hoursBack);
@@ -402,8 +699,24 @@ AND collection_time >= $2
 GROUP BY wait_type
 ORDER BY accumulated_wait_ms DESC";
 
-    public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+    public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
         string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetPoisonWaitAccumulationCoreAsync(serverKey, windowMinutes, ct),
+            serverKey,
+            "poison waits",
+            cancellationToken);
+    }
+
+    private async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationCoreAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -527,7 +840,7 @@ LIMIT $3";
     public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
     public const string CdcFilter = "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE";
 
-    public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
+    public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
         int maxResults,
@@ -539,6 +852,32 @@ LIMIT $3";
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
         CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetLongRunningQueriesCoreAsync(serverKey, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases, exclusions, ct),
+            serverKey,
+            "long-running queries",
+            cancellationToken);
+    }
+
+    private async Task<LongRunningQueryReadResult> GetLongRunningQueriesCoreAsync(
+        string serverKey,
+        int thresholdMinutes,
+        int maxResults,
+        bool excludeSpServerDiagnostics,
+        bool excludeWaitFor,
+        bool excludeBackups,
+        bool excludeMiscWaits,
+        bool excludeCdc,
+        IReadOnlyList<string> excludedDatabases,
+        LongRunningQueryExclusions exclusions,
+        CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
         var thresholdMs = (long)thresholdMinutes * 60 * 1000;
@@ -681,8 +1020,24 @@ LEFT JOIN baseline b
 WHERE c.total_size_mb IS NOT NULL
 ORDER BY c.database_name, c.file_name";
 
-    public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+    public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
         string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetDatabaseFileGrowthCoreAsync(serverKey, lookbackMinutes, ct),
+            serverKey,
+            "database file growth",
+            cancellationToken);
+    }
+
+    private async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthCoreAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
         var windowStart = DateTime.SpecifyKind(
@@ -744,8 +1099,24 @@ AND   volume_total_mb > 0
 GROUP BY volume_mount_point
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
-    public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(
+    public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetVolumeFreeSpaceCoreAsync(serverKey, ct),
+            serverKey,
+            "volume free space",
+            cancellationToken);
+    }
+
+    private async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -799,8 +1170,24 @@ ORDER BY
          THEN persistent_version_store_size_mb / database_data_size_mb
          ELSE 0 END DESC";
 
-    public async Task<List<PvsPressureInfo>> GetPvsPressureAsync(
+    public Task<List<PvsPressureInfo>> GetPvsPressureAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetPvsPressureCoreAsync(serverKey, ct),
+            serverKey,
+            "PVS pressure",
+            cancellationToken);
+    }
+
+    private async Task<List<PvsPressureInfo>> GetPvsPressureCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -850,8 +1237,24 @@ WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
 
-    public async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
+    public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetTempDbSpaceCoreAsync(serverKey, ct),
+            serverKey,
+            "TempDB space",
+            cancellationToken);
+    }
+
+    private async Task<TempDbSpaceInfo?> GetTempDbSpaceCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -922,8 +1325,24 @@ AND percent_of_average >= $2
 ORDER BY percent_of_average DESC
 LIMIT 5";
 
-    public async Task<AnomalousJobsResult> GetAnomalousJobsAsync(
+    public Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetAnomalousJobsCoreAsync(serverKey, multiplier, ct),
+            serverKey,
+            "anomalous jobs",
+            cancellationToken);
+    }
+
+    private async Task<AnomalousJobsResult> GetAnomalousJobsCoreAsync(
+        string serverKey, int multiplier, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
         var thresholdPercent = (decimal)(multiplier * 100);
@@ -1144,8 +1563,24 @@ WHERE (e.expected_state IS NULL
         AND p.eff IS DISTINCT FROM e.expected_state)
 ORDER BY l.database_name";
 
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetDatabaseStatesCoreAsync(serverKey, ct),
+            serverKey,
+            "database state",
+            cancellationToken);
+    }
+
+    private async Task<List<DatabaseStateInfo>> GetDatabaseStatesCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
@@ -1296,8 +1731,24 @@ AND   n.forced = 1
 AND   n.failures > p.failures
 ORDER BY n.database_name, n.query_id, n.plan_id";
 
-    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+    public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
+    {
+        /* #3848: every read in this type goes out through the one retry seam, which re-asks
+           the store once two seconds later when this read crosses its own 10 s command
+           deadline — the sparse write-band transient that used to blind this condition for a
+           pass. The read below is unchanged and is what runs on both attempts; the name is the
+           same one the engine's own catch arm records a failure under, so one read has one name
+           across both counts. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetForcePlanFailuresCoreAsync(serverKey, ct),
+            serverKey,
+            "forced-plan failures",
+            cancellationToken);
+    }
+
+    private async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 

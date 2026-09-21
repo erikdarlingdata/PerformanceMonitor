@@ -144,8 +144,12 @@ public sealed class CollectionCaveatsParityTests
             var analyze = ToolBody(source, "analyze_server", "AnalyzeServer", sku);
             var facts = ToolBody(source, "get_analysis_facts", "GetAnalysisFacts", sku);
 
-            /* analyze_server: the unavailable envelope, the empty envelope and the findings envelope. */
-            Assert.Equal(3, CountOf(analyze, ".Attach(new"));
+            /* analyze_server: the unavailable envelope, the empty envelope and the findings envelope carry the caveat
+               block; since #3691 lane 42 the findings envelope ALSO passes through StorySideLeaves.Attach (the config
+               levers the walk swept onto each story), counted apart so the two attachments cannot be confused — and
+               so both SKUs' files must carry the side-leaf pass exactly once. */
+            Assert.Equal(1, CountOf(analyze, "StorySideLeaves.Attach(new"));
+            Assert.Equal(3, CountOf(analyze, ".Attach(new") - CountOf(analyze, "StorySideLeaves.Attach(new"));
             Assert.Equal(1, CountOf(analyze, "CollectionCaveats.Compose(coverageCaveat, collectionCaveat)"));
             Assert.Contains("new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount)", analyze, StringComparison.Ordinal);
             Assert.Contains("fact_count = analysisService.LastFactCount,", analyze, StringComparison.Ordinal);

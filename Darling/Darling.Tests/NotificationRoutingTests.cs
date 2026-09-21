@@ -511,6 +511,12 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
+               here rather than found by the FireAsync literal scan below because all three fire through a
+               band record's field (band.Metric) rather than a quoted string at the call site — the scan
+               cannot see a variable, so the census's forcing function is this line. */
+            DarlingSelfAlertEvaluator.RefreshJobStuckMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric,
+            DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
         };

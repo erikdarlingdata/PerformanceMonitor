@@ -271,6 +271,7 @@ public static class FactAdvice
             if (advice is null)
                 continue;
             advice = WithNamedHops(advice, story, byKey);
+            advice = WithSideLeaves(advice, story);
             story.StoryText = SerializeForStoryText(advice);
         }
     }
@@ -299,6 +300,28 @@ public static class FactAdvice
             investigation.Append(sentence);
         }
         return advice with { Investigation = investigation.ToString() };
+    }
+
+    /// <summary>
+    /// #3691 (lane 42): appends the ONE sentence naming the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's INVESTIGATION, after the named-hop sentences and by
+    /// the same rule — the levers are where to look next, and the lever's own card (the payload's
+    /// <c>side_leaves</c>) carries its value and its remediation. Before this, the lever rooted a card of its own
+    /// beside the incident; now the walk consumes it, so the root's card is the only place that can point at it and
+    /// this sentence is that pointer. Remediation is untouched: the lever's fix is the lever's, in its own family's
+    /// words. A story with no side leaves returns the block untouched — the byte-identity arm for every chain this
+    /// does not concern, which is nearly all of them.
+    /// </summary>
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story)
+    {
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys);
+        if (sentence is null)
+            return advice;
+        var investigation = advice.Investigation ?? string.Empty;
+        return advice with
+        {
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence
+        };
     }
 
     /// <summary>Serializes an advice block's prose to the compact {h,i,r} JSON stored in StoryText.</summary>
@@ -1643,6 +1666,14 @@ public static class FactAdvice
     /// and an operator reading one number would take a peak-sized σ for the whole window's. A fact from
     /// before the pair (no mean sigma) keeps the single-deviation sentence verbatim.
     /// </para>
+    /// <para>
+    /// #3691 lane 41: a <c>baseline_zero_history</c> fact gets a THIRD shape, before the σ sentence is built —
+    /// the SQL Server half of the same fix (one engine, one truth; the PostgreSQL twin is
+    /// <c>PgTargetAdvice.ComposeDeviation</c>). The bucket cleared its tier's sample and distinct-day floors and
+    /// held nothing but zeros, so the finding is an EXTREMITY against the strongest baseline statement there is,
+    /// not a deviation measured in sigmas — and the stored <c>deviation_sigma</c> is the display cap rather than a
+    /// measurement, so no σ figure is printed on this arm at all. The trusted sentence below is untouched.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomaly(IReadOnlyDictionary<string, Fact> facts, string key, string observedKey, string noun, Func<double, string> fmt, string meaning, string? windowMeanKey = null)
     {
@@ -1654,6 +1685,31 @@ public static class FactAdvice
             return fallback;
 
         var samples = FactMeta(facts, key, "baseline_samples");
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var days = FactMeta(facts, key, "baseline_distinct_days");
+            var restsOn = samples is > 0
+                ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+                  (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+                : "this server's hour-of-week baseline";
+            return fallback with
+            {
+                Headline = $"{noun} reached {fmt(observed.Value)} — against a month in which this hour saw none",
+                Investigation =
+                    $"{noun} reached {fmt(observed.Value)} this window. This server's baseline for this hour-of-week is not " +
+                    $"thin — it is a measured ZERO: {restsOn}, not one of them above zero. {meaning} That makes this an " +
+                    "extremity rather than a deviation: the quantity went from never-happens to this, and there is no " +
+                    "dispersion to divide by precisely because there was nothing to divide. Beyond any σ — no deviation " +
+                    "figure is printed, because none would be honest against a history of zeros. Check whether it lines up " +
+                    "with a workload change, a deploy, or a one-off job before treating it as chronic.",
+                Remediation =
+                    "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                    "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a " +
+                    "quantity that was reliably zero and now is not will usually recur; the standard threshold finding will " +
+                    "pick it up on a later window with its own detail, and treat it then with the matching wait or resource advice."
+            };
+        }
         var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {sigma.Value:0.#}σ above its {fmt(mean.Value)} baseline for this hour-of-week");
         if (samples is > 0)
             inv.Append($" (over {samples.Value:N0} baseline samples)");
