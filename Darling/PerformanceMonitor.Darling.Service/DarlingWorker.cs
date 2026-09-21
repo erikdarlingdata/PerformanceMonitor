@@ -6080,7 +6080,7 @@ LIMIT 1";
 
             _timescaleAvailable = true;
             _logger.LogInformation(
-                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and retention policies are still applied on the start path only, so anything that start left unbuilt stays unbuilt until the next one. The probe took {ElapsedMs} ms.",
+                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and retention policies are still applied on the start path only, so anything that start left unbuilt stays unbuilt until the next one. This pass took {ElapsedMs} ms, connection acquisition included.",
                 probeClock.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
