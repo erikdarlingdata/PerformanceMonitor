@@ -230,13 +230,26 @@ public sealed class DarlingWorker : BackgroundService
         InPlace,
     }
 
-    /// <summary>One store-object convergence step: what it is called in the summary line, which segment runs
-    /// it, how to read its return value, and the call itself.</summary>
+    /// <summary>
+    /// One store-object convergence step: what it is called in the summary line, which segment runs it, how to
+    /// read its return value, and the call itself.
+    ///
+    /// <para><b>The delegate is <c>EnsureAsync</c> rather than the obvious <c>RunAsync</c>, and that name is
+    /// load-bearing rather than a preference.</b> <c>Lite.Tests.QueryStoreServerGateTests</c> holds the Query
+    /// Store backfill's lease handoff in BOTH SKUs partly by asserting that a call on a local named
+    /// <c>step</c> to a method named <c>RunAsync</c> occurs exactly ONCE in this file — a deliberate count pin,
+    /// because the defect it guards (a <c>using</c> moved into or out of the loop body) leaves every
+    /// occurrence count in the file invariant, so the span between the acquire and the handoff is all it has
+    /// to work with. A second such call here, on an unrelated <c>step</c> of an entirely different kind, turns
+    /// that pin red and reports it as a Query Store lease defect. It scans this file as TEXT, which is why the
+    /// sentence above describes the call instead of quoting it. The verb is the vocabulary of the twelve things
+    /// this delegate actually calls anyway — they are all <c>Ensure*</c> or <c>Converge*</c>.</para>
+    /// </summary>
     internal sealed record StoreObjectConvergenceStep(
         string Name,
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> RunAsync);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -6595,7 +6608,7 @@ LIMIT 1";
     {
         try
         {
-            var count = await step.RunAsync(connection, logger, cancellationToken);
+            var count = await step.EnsureAsync(connection, logger, cancellationToken);
             tally.Steps++;
             if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
             {
