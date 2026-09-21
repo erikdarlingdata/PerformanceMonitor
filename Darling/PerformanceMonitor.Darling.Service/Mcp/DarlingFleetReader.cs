@@ -1326,7 +1326,9 @@ GROUP BY server_id, collector_name";
     }
 
     /// <summary>Reads the cross-server 7-day collector health and counts each server's HEALTHY / FAILING
-    /// collectors through the shared <see cref="CollectorHealth.HealthStatus"/> banding.</summary>
+    /// collectors through the shared <see cref="CollectorHealth.HealthStatus"/> banding, plus (#3819) the
+    /// ones that stopped producing, off <see cref="CollectorHealth.RegressedFromProductive"/> rather than
+    /// off a band.</summary>
     private static async Task<Dictionary<int, CollectorCounts>> ReadFailingCollectorCountsAsync(
         NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
@@ -1898,6 +1900,7 @@ public sealed class FleetServerCard
     /// bar.</para>
     /// </summary>
     [JsonPropertyName("regressed_collector_count")] public int RegressedCollectorCount { get; init; }
+
     /// <summary>Every collector banded for this server in the health window, on any band (#3539 A8d) — the
     /// denominator <c>collector_severity</c> grades <c>failed_collector_count</c> against. Not
     /// healthy + failed: STALE, WARNING, STOPPED and the permission bands are banded collectors that are

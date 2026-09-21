@@ -7,14 +7,14 @@
  */
 
 using System;
-using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
+using System.Text.Json;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -324,24 +324,11 @@ public sealed class RegressedFromProductiveTests
             CollectorCount = 40,
         };
 
-        var json = System.Text.Json.JsonSerializer.Serialize(card, DarlingFleetReader.JsonOptions);
+        var json = JsonSerializer.Serialize(card, DarlingFleetReader.JsonOptions);
 
         /* Values, not just keys, and DIFFERENT values - so a card that serialized one count under both
            names could not pass. */
         JsonAssert.Contains("\"failed_collector_count\": 1", json);
         JsonAssert.Contains("\"regressed_collector_count\": 23", json);
-    }
-
-    private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        var parts = relativePath.Split('/');
-        while (dir is not null && !File.Exists(Path.Combine(new[] { dir }.Concat(parts).ToArray())))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
     }
 }
