@@ -205,9 +205,19 @@ public sealed class McpAlertSettingsKeyTests
     /// Lite's re-fire and the exemption lost its reason. Paid for by
     /// <see cref="GetAlertSettings_OmitsPgCountThresholds_BecauseLiteHasNoPostgresSeam"/>, which also
     /// holds the exact-set pin that stood in the parity test as an <c>Assert.Empty</c> while the array
-    /// was empty.</para></summary>
+    /// was empty.</para>
+    ///
+    /// <para>#3712 (V137) added the third entry: Darling's <c>analysis</c> group gained
+    /// <c>uncorroborated_route_source</c>, the PROVENANCE of its <c>uncorroborated_route</c> — which of the
+    /// knob's two Darling homes decided it, the settings row's <c>analysis_uncorroborated_route</c> column or
+    /// darling.json's <c>analysis.uncorroboratedRoute</c> (<c>store</c> / <c>file</c> / <c>default</c>). Lite
+    /// has ONE home for the knob, its settings file (<c>analysis_uncorroborated_route</c>, edited in Settings
+    /// → Alerts), so a provenance key here could only ever read <c>file</c>: a constant dressed as a reading,
+    /// which is exactly the placeholder this array's history rejected. Lite's <c>uncorroborated_route</c> and
+    /// <c>uncorroborated_route_note</c> still compare — the route and the where-to-edit note are real on both
+    /// SKUs. Paid for by <see cref="GetAlertSettings_OmitsUncorroboratedRouteSource_BecauseLiteHasOneHomeForTheKnob"/>.</para></summary>
     private static readonly string[] LiteOmittedMembers =
-        { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold" };
+        { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source" };
 
     /// <summary>
     /// Darling's <c>BuildAlertSettingsPayload</c> shape read out of Darling's SOURCE — each top-level key in
@@ -514,13 +524,60 @@ public sealed class McpAlertSettingsKeyTests
 
         Assert.Empty(pgGateCallers);
 
-        /* Pinned as an exact set, so a third member-level exemption cannot be added without this test
+        /* Pinned as an exact set, so a fourth member-level exemption cannot be added without this test
            being the place someone justifies it — the same guard the smtp assertion applies to groups, and
            the non-empty successor to the Assert.Empty that stood in the parity test while the array was
-           empty. */
+           empty. The third entry is #3712's; its paying test is the one below. */
         Assert.Equal(
-            new[] { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold" },
+            new[] { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source" },
             LiteOmittedMembers);
+    }
+
+    /// <summary>
+    /// #3712 (V137): the provenance key, and the test that pays for its <see cref="LiteOmittedMembers"/> entry
+    /// in the same three halves as the PostgreSQL gates above. Darling must still emit
+    /// <c>analysis.uncorroborated_route_source</c> (or the exemption is dead weight hiding a Darling
+    /// regression); Lite must still not (or the exemption masks a key that has since arrived and could be
+    /// compared); and the reason — Lite has ONE home for the knob — is checkable rather than assertable, so it
+    /// is checked: no Lite source names Darling's store column or its settings table, and Lite's own
+    /// <c>App.LoadAlertSettings</c> reads the route from the settings file under the key the file uses. The
+    /// route itself and its note are NOT exempt and compare like every other member: Lite reports a real
+    /// value there (<c>App.AnalysisUncorroboratedRoute</c>) and a real note (where it is edited). If Lite ever
+    /// grows a second home for the knob, this scan is where that shows up, the entry comes out, and the
+    /// member compares — #2426's ag history, repeated.
+    /// </summary>
+    [Fact]
+    public void GetAlertSettings_OmitsUncorroboratedRouteSource_BecauseLiteHasOneHomeForTheKnob()
+    {
+        var darlingAnalysis = DarlingPayloadShape().Single(g => g.Key == "analysis").Value;
+        Assert.Contains("uncorroborated_route", darlingAnalysis);
+        Assert.Contains("uncorroborated_route_source", darlingAnalysis);
+        Assert.Contains("uncorroborated_route_note", darlingAnalysis);
+
+        var analysis = Settings().GetProperty("analysis");
+        Assert.Contains("uncorroborated_route", KeysOf(analysis));
+        Assert.Contains("uncorroborated_route_note", KeysOf(analysis));
+        Assert.DoesNotContain("uncorroborated_route_source", KeysOf(analysis));
+        /* A real value, not a placeholder: the live static, in its wire spelling. */
+        Assert.Equal(FindingRouting.RouteText(App.AnalysisUncorroboratedRoute), analysis.GetProperty("uncorroborated_route").GetString());
+
+        var liteRoot = Path.GetDirectoryName(FindRepoFile(Path.Combine("Lite", "PerformanceMonitorLite.csproj")))!;
+        var storeHomeCallers = Directory
+            .EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => File.ReadAllText(f) is var text
+                     && (text.Contains("config_alert_settings", StringComparison.Ordinal)
+                      || text.Contains("StoreUncorroboratedRoute", StringComparison.Ordinal)
+                      || text.Contains("uncorroborated_route_source", StringComparison.Ordinal)))
+            .Select(f => Path.GetFileName(f))
+            .ToArray();
+
+        Assert.Empty(storeHomeCallers);
+
+        /* The one home, named: the settings-file key App.LoadAlertSettings parses the route from. */
+        var app = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "App.xaml.cs")));
+        Assert.Contains("read.TryGetProperty(\"analysis_uncorroborated_route\", out v)", app, StringComparison.Ordinal);
     }
 
     /// <summary>

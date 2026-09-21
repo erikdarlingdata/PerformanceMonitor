@@ -229,10 +229,17 @@ public class AnalysisSinglesDigestTests
         Assert.Contains("- queries: 1 singles across 1 servers", detail, StringComparison.Ordinal);
         Assert.Contains("pm-server-1: Analysis: anomaly [aaaaaaaa] 1.62", detail, StringComparison.Ordinal);
 
-        /* Where the full finding lives, and the one edit that turns paging back on. */
+        /* Where the full finding lives, and how paging is turned back on: the STORE home first (the Viewer's
+           combo or update_alert_settings, live within a sweep — #3712's V137 code half), with darling.json's
+           analysis.uncorroboratedRoute named as what the store column defers to when NULL, never as "edit the
+           file and restart". */
         Assert.Contains("get_analysis_findings", detail, StringComparison.Ordinal);
         Assert.Contains("notification_type", detail, StringComparison.Ordinal);
+        Assert.Contains("update_alert_settings (analysis.uncorroborated_route;", detail, StringComparison.Ordinal);
+        Assert.Contains("Settings > Automated Analysis", detail, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroboratedRoute", detail, StringComparison.Ordinal);
+        Assert.Contains("governs only while the column is NULL", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("in darling.json.", detail, StringComparison.Ordinal);
 
         /* Nothing collapsed, so the collapse sentence is absent. */
         Assert.DoesNotContain("ledger rows collapsed", detail, StringComparison.Ordinal);

@@ -286,10 +286,11 @@ public sealed class SelfDiskWarnGbFloorRungTests
 
         /* The V126 column rides at its APPENDED position — the rule every knob rung on this table follows,
            so every earlier ordinal keeps its column. It was the END until #3653 (A5, Q5) appended the two
-           Long-Running Query opt-out lists after it (LongRunningQueryExclusionKnobRungTests pins those two
-           at the end now); [^3] is the V126 slot, and the equality is what would catch a rung inserted
-           anywhere but after it. */
-        Assert.Equal(75, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^3]).TypedValue);
+           Long-Running Query opt-out lists after it, and #3712's code half appended the route knob's store
+           column after those (UncorroboratedRouteStoreKnobTests pins that one at the end now); 66 is the
+           V126 slot — an absolute ordinal rather than a from-the-end index, so the next appended knob does
+           not move this pin again — and the equality is what would catch a rung inserted anywhere but after it. */
+        Assert.Equal(75, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[66]).TypedValue);
     }
 
     /* ---- the seam reaches the gate -------------------------------------------------------------------- */

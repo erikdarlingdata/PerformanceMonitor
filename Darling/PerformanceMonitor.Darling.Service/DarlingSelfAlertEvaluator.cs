@@ -2292,8 +2292,10 @@ internal sealed class DarlingSelfAlertEvaluator
 
         sb.Append("\nTo promote a single: open its finding on the web surface or read it with get_analysis_findings;"
             + " the key above is its alert-history metric_name and the dedup fingerprints are the ones a page"
-            + " would have delivered. To page every notify-worthy finding again, set analysis.uncorroboratedRoute"
-            + " to 'page' in darling.json.");
+            + " would have delivered. To page every notify-worthy finding again, set the route to 'page' in the"
+            + " Viewer's Settings > Automated Analysis or through update_alert_settings (analysis.uncorroborated_route;"
+            + " live within one collection sweep) - the store column wins over darling.json's analysis.uncorroboratedRoute,"
+            + " which governs only while the column is NULL.");
 
         return (shortMessage, sb.ToString());
     }

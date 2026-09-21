@@ -900,20 +900,48 @@ public sealed class AnalysisConfig
     /// <summary>
     /// Where a notify-worthy but UNCORROBORATED finding goes (#3712) — <c>digest</c> (default) or <c>page</c>;
     /// see <c>FindingRouting</c>. A string rather than the enum so a hand-edited value that is neither parses
-    /// to "no opinion" (<c>DarlingAlertSettings</c> falls to the shipped default) instead of failing the
-    /// whole config load.
+    /// to "no opinion" (<c>DarlingAlertSettings</c> falls through it) instead of failing the whole config load.
     ///
-    /// <para><b>FILE-LEVEL, not a store column</b> — the <c>web.publicBaseUrl</c> / force-plan-bot posture:
-    /// <c>config_alert_settings</c> gains no column for it (one un-landed migration rung at a time, repo-wide,
-    /// and two were in flight when this shipped), so the value is authoritative from darling.json and a store
-    /// reload does not change it. It lives inside this section for the JSON shape an operator expects
-    /// (<c>analysis.uncorroboratedRoute</c> beside <c>analysis.notifySeverity</c>), which means
-    /// <c>StoreConfigProvider.LoadViewAsync</c> has to CARRY it across the wholesale <c>config.Analysis</c>
-    /// swap — the same backfill-from-bootstrap shape <c>BuildServerFromRow</c> uses for a file-only secret.
-    /// When a rung window opens, the column replaces the carry and the MCP write tool gains the field.</para>
+    /// <para><b>The FILE half of a two-source knob.</b> This member is darling.json's value and nothing else;
+    /// the store's half is <see cref="StoreUncorroboratedRoute"/>, the V137
+    /// <c>config_alert_settings.analysis_uncorroborated_route</c> column, and the precedence
+    /// <c>DarlingAlertSettings.UncorroboratedFindingRoute</c> applies is <b>store non-NULL wins over file</b>:
+    /// a route set in the Viewer's Settings window or through <c>update_alert_settings</c> governs from the next
+    /// reload beacon, and only a NULL column defers to this value, and only an unparseable value here defers
+    /// to the shipped <c>digest</c>. The knob shipped FILE-LEVEL in #3732 because two rungs were in flight; the
+    /// column landed in V137 and the code half in the same lane as this paragraph.</para>
+    ///
+    /// <para><b>Why it stays a distinct member rather than being overwritten by the column on load.</b> It
+    /// lives inside this section for the JSON shape an operator expects (<c>analysis.uncorroboratedRoute</c>
+    /// beside <c>analysis.notifySeverity</c>), and <c>StoreConfigProvider.ApplyToConfig</c> swaps
+    /// <c>config.Analysis</c> WHOLESALE on every reload, so <c>StoreConfigProvider.LoadViewAsync</c> CARRIES
+    /// this value across the swap (the <c>BuildServerFromRow</c> backfill-from-bootstrap shape) and reads the
+    /// column into the sibling. Folding the column INTO this member would lose the file's value the moment the
+    /// store held one — and then an operator clearing the store column back to NULL ("let the file govern
+    /// again") would find nothing left to govern. Two members, one resolver, and the MCP read can say which
+    /// one decided.</para>
     /// </summary>
     [JsonPropertyName("uncorroboratedRoute")]
     public string UncorroboratedRoute { get; set; } = PerformanceMonitor.Notifications.FindingRouting.DigestText;
+
+    /// <summary>
+    /// The STORE half of the #3712 route knob: <c>config.config_alert_settings.analysis_uncorroborated_route</c>
+    /// (V137, nullable <c>text</c> under a CHECK admitting only <c>digest</c> / <c>page</c>), read by
+    /// <c>StoreConfigProvider.ReadAlertSettingsAsync</c> like every appended knob and swapped in with the
+    /// section on every reload beacon. NULL is a VALUE here — "not set in the store; the file-level
+    /// <see cref="UncorroboratedRoute"/> governs" — which is what every store reads the morning after the
+    /// V137 upgrade and what a fresh seed leaves (the seed deliberately does not copy the file's value in,
+    /// or the tri-state's third state would be unreachable on every install). Non-NULL wins over the file.
+    ///
+    /// <para><see cref="JsonIgnoreAttribute">JsonIgnore</see> on purpose: darling.json has no key for it and
+    /// must not grow one by accident — a store value that could also be typed into the file is a value with
+    /// two authors and no tiebreak, the #3314 by-halves shape this member exists to avoid. It is populated by
+    /// exactly one writer, the store read, and a value that is neither spelling (impossible under the CHECK;
+    /// possible on a store whose CHECK was dropped by hand) is treated by the resolver as NULL and logged
+    /// once per reload by <c>LoadViewAsync</c>, never silently turned into a page or a digest.</para>
+    /// </summary>
+    [JsonIgnore]
+    public string? StoreUncorroboratedRoute { get; set; }
 }
 
 /// <summary>
