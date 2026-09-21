@@ -7992,35 +7992,116 @@ LIMIT 1";
 
     /// <summary>
     /// The sentence a missing COMPANION object carries (#3818): the raw error, the object the server actually
-    /// named, the fact that the extension IS present (its base object resolved - see the ordering property on
-    /// <see cref="PgExtensionDependency.Companions"/>), the two states that produce this, and the remedy for
-    /// each. Neither of them is <c>CREATE EXTENSION</c>, which is why this is not
-    /// <see cref="ExtensionMissingExplanation"/>: on the fleet that motivated it the extension was installed,
-    /// preloaded and readable on every one of the 23 failing clusters, and the stored sentence said it was
-    /// not installed. <c>ALTER EXTENSION ... UPDATE</c> is a statement - no <c>shared_preload_libraries</c>
-    /// change, no restart, no parameter group - so the preload paragraph the base sentence carries is
-    /// deliberately absent here; sending someone to schedule a reboot for an update script is the same
-    /// wrong-remedy defect the base sentence exists to prevent.
+    /// named, what the catalog says about the extension, and the remedy that follows FROM THAT STATE. Not
+    /// <see cref="ExtensionMissingExplanation"/>, whose sentence says the extension is not installed and gives
+    /// <c>CREATE EXTENSION</c> plus a preload restart: on the upgraded-fleet case that motivated #3818 the
+    /// extension was installed, preloaded and readable, and all three of those were false.
+    ///
+    /// <para><b>Four states, four sentences (#3830), because one remedy for all of them was wrong on the
+    /// fleet it shipped for.</b> #3818's sentence had a single remedy, <c>ALTER EXTENSION ... UPDATE</c>,
+    /// inferred from the ordering property alone - the base object resolved, therefore the extension is
+    /// present, therefore it is present at an old version. The middle step does not survive the Aurora
+    /// flavor: there the base object that resolved is <c>aurora_stat_statements()</c>, which is not the
+    /// extension's at all and needs none, so "it resolved" licenses nothing about <c>pg_extension</c>. The 23
+    /// clusters that produced #3818 were exactly that case - no row, never created, the collector productive
+    /// throughout - and they were told to update an extension they did not have.</para>
+    ///
+    /// <para><b>So the state ARRIVES rather than being inferred.</b> <paramref name="extensionRow"/> is the
+    /// <c>pg_extension</c> row the connect-time read observed, scoped to the database this fault came from,
+    /// and <see cref="PgExtensionCompanionObject.VerdictFrom"/> draws the verdict from it here. When nothing
+    /// was observed the sentence falls back to the two-possibilities form, which is the most #3818's
+    /// inference could honestly claim - a hedge, kept only where there is no answer to prefer over it.</para>
     /// </summary>
+    /// <param name="extensionRow">The <c>pg_extension</c> row for the declared extension, as observed at
+    /// connect. <c>default</c> (not observed) is the safe value and produces the fallback sentence.</param>
+    /// <param name="isAurora">Whether the target is Aurora, which decides only what an ABSENT extension
+    /// costs - together with the collector's declared <c>AuroraNativeAlternative</c>.</param>
     private static string CompanionMissingExplanation(
-        PostgresException ex, PgExtensionDependency extension, PgExtensionCompanionObject companion, string? connectedDatabase)
+        PostgresException ex,
+        PgExtensionDependency extension,
+        PgExtensionCompanionObject companion,
+        string? connectedDatabase,
+        PgExtensionRowObservation extensionRow,
+        bool isAurora)
     {
         var where = string.IsNullOrWhiteSpace(connectedDatabase)
             ? "in the connected database"
             : $"in database '{connectedDatabase}'";
 
-        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
-            + $"which is NOT the {extension.ExtensionName} extension's base object: that resolved, so the "
-            + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
-            + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
-            + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
-            + "upgraded in place or restored keeps the version the extension was created at until someone "
-            + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
-            + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
-            + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
-            + "schema it was created in; check pg_extension.extversion and extnamespace). This is "
+        var head = $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
+            + $"which is NOT the {extension.ExtensionName} extension's base object";
+
+        const string tail = "This is "
             + "NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather than an "
             + "error so it does not fill the log every cycle; the collector retries every cycle.";
+
+        /* The row is only usable if it was read in the database this fault came from: pg_extension is per
+           database, and a RunsPerDatabase collector faults in databases the connect-time read never saw. A
+           mismatch degrades to "not observed", which is the fallback sentence, never a claim about the
+           wrong catalog. */
+        var verdict = companion.VerdictFrom(extensionRow.InDatabase(connectedDatabase));
+
+        switch (verdict)
+        {
+            /* NO ROW. The extension was never created in that database, so there is no version to update:
+               ALTER EXTENSION would raise, and CREATE EXTENSION is the only statement that changes
+               anything. Whether it is WORTH running is the flavor's question, and the collector answers it
+               by declaring what it reads on Aurora instead. */
+            case PgExtensionCompanionVerdict.NoRow when isAurora && extension.AuroraNativeAlternative is { } auroraSource:
+                return head + $". pg_extension has NO row for {extension.ExtensionName} {where}: the extension "
+                    + "was never created there, so it is not present at any version and there is nothing for "
+                    + $"ALTER EXTENSION {extension.ExtensionName} UPDATE to update. This target is Aurora, where "
+                    + $"this collector's source is {auroraSource} — which needs no extension — so the collector "
+                    + $"is not waiting on one: running CREATE EXTENSION {extension.ExtensionName} {where} is "
+                    + $"OPTIONAL, and what it buys is {companion.ObjectName} and nothing else. " + tail;
+
+            case PgExtensionCompanionVerdict.NoRow:
+                return head + $". pg_extension has NO row for {extension.ExtensionName} {where}: the extension "
+                    + "was never created there, so it is not present at any version and there is nothing for "
+                    + $"ALTER EXTENSION {extension.ExtensionName} UPDATE to update. The remedy is CREATE EXTENSION "
+                    + $"{extension.ExtensionName} {where}"
+                    + (extension.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries
+                        ? $", and {extension.ExtensionName} has to be in shared_preload_libraries before that "
+                          + "does anything — a parameter-group change and a restart. "
+                        : ". ")
+                    + tail;
+
+            /* BELOW the companion's version: #3818's case, and now stated as a fact read out of the catalog
+               rather than as one of two possibilities. */
+            case PgExtensionCompanionVerdict.BelowCompanionVersion:
+                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                    + "extension missing. pg_extension says it is at catalog version "
+                    + $"{extensionRow.ExtensionVersion}, below the {companion.SinceExtensionVersion} whose update "
+                    + $"script creates {companion.ObjectName} — an engine upgraded in place or restored keeps the "
+                    + "version the extension was created at until someone runs ALTER EXTENSION "
+                    + $"{extension.ExtensionName} UPDATE {where} — a statement, with no restart and no "
+                    + "shared_preload_libraries change; RDS and Aurora do not run it for you. " + tail;
+
+            /* AT OR ABOVE: the update everything else would have recommended is already done, so recommending
+               it again is the wrong-remedy defect in its third form. */
+            case PgExtensionCompanionVerdict.AtOrAboveCompanionVersion:
+                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                    + "extension missing. pg_extension says it is at catalog version "
+                    + $"{extensionRow.ExtensionVersion}, which already carries {companion.ObjectName} "
+                    + $"({companion.SinceExtensionVersion} and later), so no ALTER EXTENSION "
+                    + $"{extension.ExtensionName} UPDATE is owed and it would change nothing. The object is "
+                    + "installed outside the schema the query text names (a relocatable extension lives in "
+                    + "whatever schema it was created in; check pg_extension.extnamespace), or the error text "
+                    + "above names a reason of its own. " + tail;
+
+            /* NOTHING OBSERVED — or a version string nothing can rank. The two-possibilities sentence, which
+               is everything the fault alone supports. */
+            default:
+                return head + ": that resolved, so the "
+                    + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
+                    + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
+                    + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
+                    + "upgraded in place or restored keeps the version the extension was created at until someone "
+                    + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
+                    + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
+                    + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
+                    + "schema it was created in; check pg_extension.extversion and extnamespace). " + tail;
+        }
     }
     /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
@@ -8034,8 +8115,17 @@ LIMIT 1";
     /// server's own answers, so its arm names it (#3410). Returning "ERROR" means "let the general handler
     /// have it", which keeps the genuinely unexpected loud.</para>
     /// </summary>
+    /// <param name="extensionRow">#3830: the <c>pg_extension</c> row a PostgreSQL connect observed for the
+    /// declared extension, which the companion arm needs and the exception cannot carry. <c>default</c> means
+    /// nothing was observed, and every arm treats that as "no answer" rather than as "no row".</param>
+    /// <param name="isAurora">#3830: whether the target is Aurora, which decides what an ABSENT extension
+    /// costs a collector that declares an Aurora-native alternative.</param>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
-        PostgresException ex, string collectorName, string? connectedDatabase = null)
+        PostgresException ex,
+        string collectorName,
+        string? connectedDatabase = null,
+        PgExtensionRowObservation extensionRow = default,
+        bool isAurora = false)
     {
         var fault = PostgresTargetProvider.Instance.Classify(
             ex, CollectorCatalog.YieldsOnLockTimeout(collectorName));
@@ -8104,7 +8194,8 @@ LIMIT 1";
                the generic arm below. */
             CollectorTargetFault.ObjectMissing when MissingCompanionOf(ex, RequiredExtensionsOf(collectorName)) is { } found =>
                 (CollectorRuntimePrecondition.DegradedStatus,
-                    CompanionMissingExplanation(ex, found.Extension, found.Companion, connectedDatabase)),
+                    CompanionMissingExplanation(
+                        ex, found.Extension, found.Companion, connectedDatabase, extensionRow, isAurora)),
 
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
@@ -8703,7 +8794,12 @@ LIMIT 1";
            one, because it holds whatever database the initial probe landed on rather than the database
            this fault came from. See CollectorFaultDatabase. */
         catch (PostgresException ex) when (
-            PostgresFaultOutcome(ex, collectorName, CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase))
+            PostgresFaultOutcome(
+                ex,
+                collectorName,
+                CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase),
+                runtime.PgStatStatementsExtension,
+                runtime.Target.IsAurora)
                 is { Status: not "ERROR" } outcome)
         {
             /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the
