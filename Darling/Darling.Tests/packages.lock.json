@@ -720,7 +720,8 @@
         "type": "Project",
         "dependencies": {
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Collectors": "[3.7.0, )"
+          "PerformanceMonitor.Collectors": "[3.7.0, )",
+          "PerformanceMonitor.Common": "[3.7.0, )"
         }
       },
       "performancemonitor.darling.viewer": {

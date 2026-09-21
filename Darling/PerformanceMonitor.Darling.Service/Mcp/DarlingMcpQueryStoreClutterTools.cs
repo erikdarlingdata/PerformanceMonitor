@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -26,8 +27,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>get_query_store_clutter</c> (#3797) — the Query Store clutter view, over rows the collectors already
 /// write and nothing else. The maintainer's design intent: <i>some sort of view of Query Store clutter,
 /// reachable by the MCP, web and WPF viewers; not a new query — analyse what we've already collected.</i>
-/// This is the MCP surface and the reader beneath it; the two viewer surfaces are a second lane, and this
-/// payload is the shape they will render.
+/// This is the MCP surface. The reader and the composition beneath it live in
+/// <c>PerformanceMonitor.Darling.Storage</c> (<see cref="DarlingQueryStoreClutterReader"/> /
+/// <see cref="QueryStoreClutter"/>) beside the <c>DarlingPg*Reader</c> family and for the same reason
+/// (#2530): the web server tab reads THIS tool, and the WPF Viewer's Query Store Clutter grid runs the same
+/// query text and the same composition in-process, so neither surface carries a second copy of the SQL or a
+/// second spelling of a verdict.
 ///
 /// <para><b>The case that motivated it (2026-09-20, the largest production store).</b> One database out of
 /// dozens carried 92–96% of the <c>query_store</c> collector's per-database read time; the plan dimension
@@ -56,13 +61,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>excluded_reason: qs_read_only_replica</c>, verdict Unknown, and its per-server overhead block is
 /// still reported because waits and clerks are real on a replica. Its READ_ONLY is never a defect.</para>
 ///
-/// <para><b>What it does NOT do.</b> No viewer yet (web and WPF are the second lane). Capture mode is
-/// <c>null</c> with <c>capture_mode_known: false</c>: <c>query_store_health</c> does not collect
-/// <c>QUERY_CAPTURE_MODE</c> until #3796's rung lands, so the churn arm cannot yet be told apart from the
-/// configuration that manufactures it, and the recommendations say so rather than guess. The fleet
-/// reference is opt-in (<c>include_fleet_median</c>): it costs a fleet-wide walk of two raw hypertables over
-/// the window, which the default call keeps off so the per-server answer stays inside the read deadline
-/// (20 s client-side, 15 s <c>statement_timeout</c> on the managed store's <c>mcp</c> role).</para>
+/// <para><b>Capture mode is read, not stubbed.</b> V137 (#3796) added <c>query_capture_mode</c> to
+/// <c>query_store_health</c> and the collector fills it hourly, so the config arm publishes the mode and
+/// <c>capture_mode_known</c> says whether the newest capture carried one. A NULL is a row written before that
+/// rung — never asked — and is published that way rather than as <c>NONE</c>. The churn recommendations name
+/// the mode they are looking at: <c>ALL</c> beside churn is the switch-to-AUTO case, <c>AUTO</c> beside it
+/// points at the workload.</para>
+///
+/// <para><b>What it does NOT do.</b> No Lite twin: Lite has every input and no port, which is why
+/// <c>get_query_store_clutter</c> sits on <c>CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>
+/// with the port written out rather than being quietly absent. The fleet reference is opt-in
+/// (<c>include_fleet_median</c>): it costs a fleet-wide walk of two raw hypertables over the window, which
+/// the default call keeps off so the per-server answer stays inside the read deadline (30 s client-side on
+/// the shared storage reader, 15 s <c>statement_timeout</c> on the managed store's <c>mcp</c> role).</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpQueryStoreClutterTools
@@ -76,12 +87,14 @@ public sealed class DarlingMcpQueryStoreClutterTools
     /// 90 minutes, the cadence slack between a request and the first collection that could have served it.</summary>
     private static readonly TimeSpan WindowFloorTolerance = TimeSpan.FromMinutes(90);
 
-    /// <summary>The sentence beside <c>query_capture_mode: null</c> until #3796's rung lands.</summary>
+    /// <summary>The sentence beside <c>query_capture_mode</c>, naming what a null there means. A null is a
+    /// health row captured before the V137 rung (#3796) created the column — the mode was never asked for —
+    /// and a reader must not read it as <c>NONE</c>, which is a mode the engine really can be in.</summary>
     public const string CaptureModeNote =
-        "query_capture_mode lands with the V137 rung (#3796); until then the churn arm cannot be told apart from the config that manufactures it";
+        "query_capture_mode is the query_store_health column added by the V137 rung (#3796) and filled hourly; null means the newest capture predates the rung — never asked, never NONE";
 
     [McpServerTool(Name = "get_query_store_clutter"), Description(
-        "The Query Store CLUTTER view for one server, composed from rows already collected — no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs — the slowest item's share of the whole pass, get_collection_health's #3502 verdict figure; the motivating case read 92-96%), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run) — it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from raw query_store_stats: distinct_queries, distinct_plans (plan_id — the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new — the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode: null with capture_mode_known: false — the mode is not collected until #3796's rung lands, so the churn arm cannot yet be told apart from the configuration that manufactures it. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown — Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from — off by default because it walks two raw hypertables fleet-wide over the window. The plan-churn and wait arms read the raw tier only, which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
+        "The Query Store CLUTTER view for one server, composed from rows already collected — no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs — the slowest item's share of the whole pass, get_collection_health's #3502 verdict figure; the motivating case read 92-96%), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run) — it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from raw query_store_stats: distinct_queries, distinct_plans (plan_id — the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new — the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode (the DMV's query_capture_mode_desc spelling verbatim: ALL / AUTO / CUSTOM / NONE) with capture_mode_known beside it — null means the newest capture predates the V137 rung (#3796) that added the column, which is NEVER ASKED and never NONE. The mode is the one option on that row that names a plan-churn factory, so the churn recommendations name it: ALL beside high churn is the 'switch to AUTO' case, AUTO beside it points at the workload. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown — Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from — off by default because it walks two raw hypertables fleet-wide over the window. The plan-churn and wait arms read the raw tier only, which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreClutter(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -232,8 +245,8 @@ public sealed class DarlingMcpQueryStoreClutterTools
                         interval_length_minutes = c.IntervalLengthMinutes,
                         /* #3796: the column the health row does not carry yet. Null with the flag beside it,
                            never a guess — the flag flips when the rung lands and the reader gains the column. */
-                        query_capture_mode = (string?)null,
-                        capture_mode_known = false,
+                        query_capture_mode = c.QueryCaptureMode,
+                        capture_mode_known = c.QueryCaptureMode is { Length: > 0 },
                         capture_mode_note = CaptureModeNote,
                     }
                     : null,
@@ -278,7 +291,10 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     storage_near_cap_pct = QueryStoreClutter.StorageNearCapPct,
                     note = "read_cost_dominant needs runs_slowest_pct >= runs_slowest_gate_pct AND fanout_items_max >= min_fanout_items_for_read_cost; then slowest_share_pct >= the warning bar is Warning, >= the critical bar Critical. plan_churn_high is plans_per_query_p95 against its two bars. one_shot_plans is never_seen_twice_fraction >= its bar over at least min_distinct_plans_for_one_shot plans. plans_per_query_at_cap is plans_per_query_max >= max_plans_per_query. storage_near_cap is pct_of_cap >= its bar. qs_read_only (not the replica bit) is Critical. qs_off and not_measured are reasons on an Unknown row, never a band.",
                 },
-                capture_mode_known = false,
+                /* The SERVER-level flag is the AND over the rows: it says the whole config arm can be read
+                   for the mode, so a client that finds it true need not check each row, and one row still
+                   on a pre-rung capture makes it false rather than being averaged away. */
+                capture_mode_known = config.Count > 0 && config.TrueForAll(c => c.QueryCaptureMode is { Length: > 0 }),
                 capture_mode_note = CaptureModeNote,
                 database_count = composed.Count,
                 databases_returned = page.Count,

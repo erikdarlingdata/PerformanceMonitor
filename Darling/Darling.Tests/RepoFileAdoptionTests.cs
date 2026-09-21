@@ -144,6 +144,11 @@ public sealed class RepoFileAdoptionTests
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
         "PgTargetMeasuredLineageTests.cs",
+        /* #3797: its viewer-surface pins slice regions out of ViewerServerTab.xaml and server-tabs.js between
+           anchors several lines apart (the Queries group's sub-tab block, a column array, one DataGrid's
+           column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
+           loader call on the NEXT line — anchors that a CRLF read would miss on every arm. */
+        "QueryStoreClutterViewerSurfacesTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */

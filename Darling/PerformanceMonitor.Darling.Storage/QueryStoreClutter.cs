@@ -13,7 +13,7 @@ using System.Linq;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The pure half of <c>get_query_store_clutter</c> (#3797): the arithmetic that turns the four arms
@@ -45,7 +45,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the fleet median beside every headline figure is the reference a reader should trust over the bar when
 /// the two disagree.</para>
 /// </summary>
-internal static class QueryStoreClutter
+public static class QueryStoreClutter
 {
     /* ─────────────────────────── thresholds (published on the payload) ─────────────────────────── */
 
@@ -416,9 +416,20 @@ internal static class QueryStoreClutter
     /// <summary>
     /// The prose for one database's reasons, worded as the product words the same remedies elsewhere
     /// (<c>get_collection_health</c>'s per-database schedule override / stagger for a dominant fan-out item;
-    /// <c>get_query_store_health</c>'s knobs for the store itself). Capture mode is named as the knob it is
-    /// and as not yet collected — the churn arm cannot be told apart from the configuration that
-    /// manufactures it until #3796's rung lands.
+    /// <c>get_query_store_health</c>'s knobs for the store itself). Every surface that shows these rows shows
+    /// these sentences: the MCP payload, the web server tab and the Viewer's Query Store Clutter grid read
+    /// this one method, so a remedy cannot be worded three ways.
+    ///
+    /// <para><b>Capture mode names the mode.</b> <c>query_capture_mode</c> is collected (V137, #3796), so the
+    /// churn arms say which of the two cases they are looking at instead of asking the reader to go and find
+    /// out: <c>ALL</c> beside churn is "switch to AUTO"; <c>AUTO</c> beside it points at the workload;
+    /// <c>CUSTOM</c> is AUTO with operator thresholds the health row does not carry; <c>NONE</c> means the
+    /// churn is inside the queries the store already holds. A NULL mode is a row captured before the rung —
+    /// never asked, and said that way rather than guessed at.</para>
+    ///
+    /// <para><b>No band is derived here.</b> These sentences explain the reasons <see cref="Judge"/> already
+    /// raised; the mode steers the WORDING and never the verdict, so a capture mode cannot silently become a
+    /// threshold nobody published.</para>
     /// </summary>
     public static IReadOnlyList<string> Recommendations(DatabaseClutter row)
     {
@@ -440,11 +451,11 @@ internal static class QueryStoreClutter
                     lines.Add(
                         $"Queries here carry {b.PlansPerQueryP95.ToString(culture)} plans each at the 95th percentile (max {b.PlansPerQueryMax.ToString(culture)}, {b.DistinctPlans.ToString(culture)} plans over {b.DistinctQueries.ToString(culture)} queries in the window). Tighten MAX_PLANS_PER_QUERY / STALE_QUERY_THRESHOLD_DAYS"
                         + (row.Config is { } c1 ? $" (currently {c1.MaxPlansPerQuery.ToString(culture)} / {c1.StaleQueryThresholdDays.ToString(culture)})" : string.Empty)
-                        + ", or check QUERY_CAPTURE_MODE: ALL beside this churn is the 'switch to AUTO' case, AUTO beside it points at the workload. The mode is not collected until #3796's rung lands, so this view cannot yet say which.");
+                        + ", or check QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
                     break;
                 case ReasonOneShotPlans when row.PlanChurn is { } b:
                     lines.Add(
-                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection — plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. With the mode uncollected (#3796) the recommendation is to read it on the target: if it is ALL, AUTO is the fix; if it is already AUTO, the workload is generating unique plans faster than the store forgets them.");
+                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection — plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
                     break;
                 case ReasonPlansAtCap when row.PlanChurn is { } b && row.Config is { } c2:
                     lines.Add(
@@ -468,6 +479,34 @@ internal static class QueryStoreClutter
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// The one sentence about <c>QUERY_CAPTURE_MODE</c> that both churn recommendations end on, written from
+    /// the mode the health row actually carries (V137, #3796). The four modes are the DMV's own
+    /// <c>query_capture_mode_desc</c> spellings; anything else is printed verbatim rather than mapped onto one
+    /// of them, because an unrecognised spelling is a fact about the engine and not a default to fall back to.
+    /// </summary>
+    public static string CaptureModeClause(DarlingQueryStoreClutterReader.ConfigRow? config)
+    {
+        if (config is null)
+        {
+            return "no query_store_health capture for this database inside the window, so the mode is unread here — get_query_store_health carries it.";
+        }
+
+        if (config.QueryCaptureMode is not { Length: > 0 } mode)
+        {
+            return "the newest health capture for this database predates the V137 rung (#3796) that added the column, so the mode was never asked — it lands on the next hourly capture. Until then, read it on the target.";
+        }
+
+        return mode.ToUpperInvariant() switch
+        {
+            "ALL" => "it is ALL, which captures every query the engine compiles — one-off ad hoc statements included — so on an ad hoc workload the churn above is the capture mode manufacturing it. AUTO is the fix (it was the engine default from SQL Server 2019 and on Azure SQL Database, and skips queries under the engine's own significance thresholds).",
+            "AUTO" => "it is already AUTO, so the engine is already skipping insignificant queries and the churn above is the WORKLOAD: unique plans are arriving faster than the store forgets them. The levers left are the plan cap, the stale-query threshold, and the queries themselves.",
+            "CUSTOM" => "it is CUSTOM — AUTO with operator-set thresholds (the 2019+ capture_policy_* knobs, which this row does not collect, so CUSTOM says the thresholds were tuned and not to what). Read the policy on the target before blaming the workload.",
+            "NONE" => "it is NONE, so no NEW query is being captured at all: the churn above is inside the queries the store already holds, and tightening the capture mode further cannot reduce it.",
+            _ => $"it is {mode}, which is not one of the four modes this view knows (ALL / AUTO / CUSTOM / NONE) — read it on the target rather than acting on this row.",
+        };
     }
 
     private static HealthSeverity Max(HealthSeverity a, HealthSeverity b) => a >= b ? a : b;

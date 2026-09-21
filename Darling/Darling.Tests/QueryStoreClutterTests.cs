@@ -18,6 +18,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -54,9 +55,12 @@ public sealed class QueryStoreClutterTests
         new(1, db, new DateTime(2026, 9, 20, 6, 0, 0), new DateTime(2026, 9, 20, 6, 0, 0).AddHours(spanHours), collections,
             10, distinctPlans, p95, Math.Max(max, p95), seenOnce, firstSeenLater);
 
+    /// <param name="captureMode">The V137 (#3796) column. Defaults to <c>AUTO</c> so a fixture that says
+    /// nothing about capture mode is a MEASURED one; a fixture about the pre-rung null passes null explicitly.</param>
     private static DarlingQueryStoreClutterReader.ConfigRow Config(
-        string db, string actual = "READ_WRITE", int readonlyReason = 0, long current = 4096, long max = 8192, long maxPlans = 200) =>
-        new(1, db, actual, "READ_WRITE", readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0));
+        string db, string actual = "READ_WRITE", int readonlyReason = 0, long current = 4096, long max = 8192, long maxPlans = 200,
+        string? captureMode = "AUTO") =>
+        new(1, db, actual, "READ_WRITE", readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0), captureMode);
 
     /* ─────────────────────────── the judgment ─────────────────────────── */
 
@@ -300,8 +304,8 @@ public sealed class QueryStoreClutterTests
         var config = new[]
         {
             Config("alpha"), Config("beta"), Config("gamma"),
-            new DarlingQueryStoreClutterReader.ConfigRow(2, "alpha", "READ_ONLY", "READ_WRITE", replicaBit, 0, 8192, "AUTO", 21, 200, 60, new DateTime(2026, 9, 20)),
-            new DarlingQueryStoreClutterReader.ConfigRow(3, "solo", "READ_WRITE", "READ_WRITE", 0, 0, 8192, "AUTO", 21, 200, 60, new DateTime(2026, 9, 20)),
+            new DarlingQueryStoreClutterReader.ConfigRow(2, "alpha", "READ_ONLY", "READ_WRITE", replicaBit, 0, 8192, "AUTO", 21, 200, 60, new DateTime(2026, 9, 20), "AUTO"),
+            new DarlingQueryStoreClutterReader.ConfigRow(3, "solo", "READ_WRITE", "READ_WRITE", 0, 0, 8192, "AUTO", 21, 200, 60, new DateTime(2026, 9, 20), "AUTO"),
         };
         var waits = new[]
         {
@@ -328,7 +332,7 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void Recommendations_NameTheKnobs_AndSayCaptureModeIsUncollected()
+    public void Recommendations_NameTheKnobs_AndTheCaptureModeTheRowActuallyCarries()
     {
         var row = QueryStoreClutter.Compose(
             [ReadCost("beta", 10, 8, 90)],
@@ -340,7 +344,57 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("per-database schedule override", lines[0], StringComparison.Ordinal);
         Assert.Contains("80% of the query_store collector's fan-out runs", lines[0], StringComparison.Ordinal);
         Assert.Contains("MAX_PLANS_PER_QUERY / STALE_QUERY_THRESHOLD_DAYS (currently 200 / 21)", lines[1], StringComparison.Ordinal);
-        Assert.Contains("#3796", lines[1], StringComparison.Ordinal);
+        /* The fixture's mode is AUTO, so the sentence must say the workload is the remaining lever — and
+           must NOT still be asking the reader to go and read a mode this row already carries. */
+        Assert.Contains("it is already AUTO", lines[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("not collected", lines[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("#3796", lines[1], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The capture-mode clause is a FUNCTION of the mode on the row, and every mode the engine can be in
+    /// gets its own answer. Pinned as a table rather than one example, because the failure this guards is a
+    /// clause that reads correctly for ALL and says the same thing for AUTO — a right-sounding sentence
+    /// under the wrong evidence.
+    /// </summary>
+    [Theory]
+    [InlineData("ALL", "AUTO is the fix")]
+    [InlineData("AUTO", "it is already AUTO")]
+    [InlineData("CUSTOM", "operator-set thresholds")]
+    [InlineData("NONE", "no NEW query is being captured")]
+    [InlineData("SOMETHING_ELSE", "not one of the four modes")]
+    public void CaptureModeClause_AnswersEachModeInItsOwnTerms(string mode, string expected)
+    {
+        var clause = QueryStoreClutter.CaptureModeClause(Config("beta", captureMode: mode));
+        Assert.Contains(expected, clause, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CaptureModeClause_CallsANullModeNeverAsked_AndNeverNone()
+    {
+        var preRung = QueryStoreClutter.CaptureModeClause(Config("beta", captureMode: null));
+        Assert.Contains("never asked", preRung, StringComparison.Ordinal);
+        Assert.Contains("#3796", preRung, StringComparison.Ordinal);
+        Assert.DoesNotContain("NONE", preRung, StringComparison.Ordinal);
+
+        /* No config row at all is a THIRD state — not a null mode and not a mode — and says so. */
+        var noConfig = QueryStoreClutter.CaptureModeClause(null);
+        Assert.Contains("no query_store_health capture", noConfig, StringComparison.Ordinal);
+    }
+
+    /// <summary>The mode steers the wording and never the band: the same arms under ALL and under AUTO
+    /// must reach the same verdict and the same reason tokens.</summary>
+    [Fact]
+    public void CaptureMode_DoesNotMoveTheVerdict()
+    {
+        var all = QueryStoreClutter.Judge(ReadCost("beta", 10, 8, 90), Churn("beta", 6), Config("beta", captureMode: "ALL"));
+        var auto = QueryStoreClutter.Judge(ReadCost("beta", 10, 8, 90), Churn("beta", 6), Config("beta", captureMode: "AUTO"));
+        var unread = QueryStoreClutter.Judge(ReadCost("beta", 10, 8, 90), Churn("beta", 6), Config("beta", captureMode: null));
+
+        Assert.Equal(all.Verdict, auto.Verdict);
+        Assert.Equal(all.Verdict, unread.Verdict);
+        Assert.Equal(all.Reasons, auto.Reasons);
+        Assert.Equal(all.Reasons, unread.Reasons);
     }
 
     /* ─────────────────────────── the surface ─────────────────────────── */
@@ -398,9 +452,11 @@ public sealed class QueryStoreClutterTests
 
         Assert.Contains("excluded_wait_types", description, StringComparison.Ordinal);
 
-        /* capture mode: null, flagged, and the rung named */
-        Assert.Contains("query_capture_mode: null", description, StringComparison.Ordinal);
-        Assert.Contains("capture_mode_known: false", description, StringComparison.Ordinal);
+        /* capture mode: the column, its four values, its flag, and what a null there means */
+        Assert.Contains("query_capture_mode", description, StringComparison.Ordinal);
+        Assert.Contains("ALL / AUTO / CUSTOM / NONE", description, StringComparison.Ordinal);
+        Assert.Contains("capture_mode_known", description, StringComparison.Ordinal);
+        Assert.Contains("never NONE", description, StringComparison.Ordinal);
         Assert.Contains("#3796", description, StringComparison.Ordinal);
 
         /* the page dialect and the window floor's shared clause */
@@ -417,11 +473,13 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void CaptureModeNote_NamesTheRung_AndTheAmbiguityItLeaves()
+    public void CaptureModeNote_NamesTheRung_AndWhatANullMeans()
     {
         Assert.Contains("#3796", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
         Assert.Contains("V137", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
-        Assert.Contains("cannot be told apart from the config that manufactures it", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
+        /* The whole job of this sentence: a null is an unasked question, and a reader who takes it for the
+           engine's NONE has read a real mode out of an absence. */
+        Assert.Contains("never asked, never NONE", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the statements ─────────────────────────── */
@@ -484,7 +542,14 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("SELECT DISTINCT ON (server_id, database_name)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_store_health", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY server_id, database_name, capture_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("capture_time\n", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        /* One anchor carrying three facts at once: capture_time is PROJECTED (not merely ORDER BY'd — the
+           line break is what tells the two occurrences apart), query_capture_mode follows it, and the mode is
+           the LAST projected column, which is what makes the reader's ordinal 12 the mode rather than a shift
+           of every ordinal before it (V137, #3796). */
+        Assert.Contains(
+            "capture_time,\n    query_capture_mode\nFROM v_query_store_health",
+            sql.Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
         /* not a MAX(capture_time) anchor: the newest capture is per database, not per server */
         Assert.DoesNotContain("MAX(capture_time)", sql, StringComparison.Ordinal);
     }
@@ -549,7 +614,8 @@ public sealed class QueryStoreClutterTests
         var row = Regex.Match(instructions, @"^\s*\| `get_query_store_clutter` \| (.+?) \| (.+?) \|\s*$", RegexOptions.Multiline);
         Assert.True(row.Success, "DarlingMcpInstructions.cs has no Tool Reference row for get_query_store_clutter");
         Assert.Contains("qs_read_only_replica", row.Groups[1].Value, StringComparison.Ordinal);
-        Assert.Contains("capture_mode_known: false", row.Groups[1].Value, StringComparison.Ordinal);
+        Assert.Contains("capture_mode_known", row.Groups[1].Value, StringComparison.Ordinal);
+        Assert.Contains("never `NONE`", row.Groups[1].Value, StringComparison.Ordinal);
         Assert.Contains("`include_fleet_median` (default false)", row.Groups[2].Value, StringComparison.Ordinal);
         Assert.Contains("`get_query_store_clutter` composes the Query Store clutter view", instructions, StringComparison.Ordinal);
     }
@@ -566,12 +632,12 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void TheDarlingReadme_DescribesTheTool_WithTheReplicaRuleAndTheCaptureModeGap()
+    public void TheDarlingReadme_DescribesTheTool_WithTheReplicaRuleAndTheCaptureMode()
     {
         var readme = ReadRepoFile("Darling", "README.md");
         Assert.Contains("`get_query_store_clutter` (#3797)", readme, StringComparison.Ordinal);
         Assert.Contains("excluded by architecture", readme, StringComparison.Ordinal);
-        Assert.Contains("`capture_mode_known: false` until #3796", readme, StringComparison.Ordinal);
+        Assert.Contains("`query_capture_mode` is the V137 (#3796) column read verbatim", readme, StringComparison.Ordinal);
     }
 
     /// <summary>The tool body never names the process clock: an anchored read's only "now" is its anchor

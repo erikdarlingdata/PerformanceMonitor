@@ -16,9 +16,11 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The Queries inner tab's sub-tab dispatch — the seven-sub-tab group matching Lite's
-/// <c>QueriesSubTabControl</c> exactly: Performance Trends and Active Queries (W1f-2), the Top Queries /
-/// Top Procedures / Query Store grids (W1f-1), Plan Corrections (#1952), then Query Heatmap last (W1f-2).
+/// The Queries inner tab's sub-tab dispatch — TEN sub-tabs, counted off <c>QueriesSubTabControl</c> in
+/// <c>ViewerServerTab.xaml</c> and matching the index constants below one for one. Seven are Lite's:
+/// Performance Trends and Active Queries (W1f-2), the Top Queries / Top Procedures / Query Store grids
+/// (W1f-1), Plan Corrections (#1952), and Query Heatmap last (W1f-2). Three are Darling-only — the LIVE
+/// Current Active Queries tab, Query Store Regressions (Dashboard parity) and Query Store Clutter (#3797).
 /// Copied from Lite's <c>ServerTab</c> (Refresh / Slicers / Grids partials) with reads rewired to the
 /// <see cref="ViewerDataService"/> Postgres reads. A sub-tab switch reloads through the shell's
 /// overlap-guarded <see cref="RefreshActiveInnerTabAsync"/> (the Queries tab is the active inner tab
@@ -36,11 +38,12 @@ public partial class ViewerServerTab
 {
     /* Queries sub-tab order — matches Lite's QueriesSubTabControl (W1f-2), keeping Query Heatmap last, the
        Darling-only LIVE "Current Active Queries" tab inserted right after the stored "Active Queries" tab,
-       and the Query Store Regressions grid (Dashboard parity) inserted right after Query Store — matching
-       the Dashboard's Query Store → Query Store Regressions adjacency: Performance Trends, Active Queries,
-       Current Active Queries (live), the three grids, Query Store Regressions, Plan Corrections, Query
-       Heatmap. Every reference below uses the NAMED constant, so inserting a tab only shifts these values —
-       no literal-index caller needs touching. */
+       the Query Store Regressions grid (Dashboard parity) inserted right after Query Store — matching
+       the Dashboard's Query Store → Query Store Regressions adjacency — and the Darling-only Query Store
+       Clutter grid (#3797) after that: Performance Trends, Active Queries, Current Active Queries (live),
+       the three grids, Query Store Regressions, Query Store Clutter, Plan Corrections, Query Heatmap. Every
+       reference below uses the NAMED constant, so inserting a tab only shifts these values — no
+       literal-index caller needs touching. */
     private const int PerformanceTrendsSubTabIndex = 0;
     private const int ActiveQueriesSubTabIndex = 1;
     private const int CurrentActiveQueriesSubTabIndex = 2;
@@ -48,8 +51,12 @@ public partial class ViewerServerTab
     private const int TopProceduresSubTabIndex = 4;
     private const int QueryStoreSubTabIndex = 5;
     private const int QueryStoreRegressionsSubTabIndex = 6;
-    private const int PlanCorrectionsSubTabIndex = 7;
-    private const int QueryHeatmapSubTabIndex = 8;
+    /* #3797, inserted after Query Store Regressions: the per-database clutter view answers the question the
+       two Query Store grids above raise, and it is Darling-only for now — Lite has every input and no port
+       (CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools carries the port, written out). */
+    private const int QueryStoreClutterSubTabIndex = 7;
+    private const int PlanCorrectionsSubTabIndex = 8;
+    private const int QueryHeatmapSubTabIndex = 9;
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
@@ -145,6 +152,9 @@ public partial class ViewerServerTab
                 break;
             case QueryStoreRegressionsSubTabIndex:
                 await LoadQueryStoreRegressionsAsync(startUtc, endUtc);
+                break;
+            case QueryStoreClutterSubTabIndex:
+                await LoadQueryStoreClutterAsync(startUtc, endUtc);
                 break;
             case PlanCorrectionsSubTabIndex:
                 await LoadPlanCorrectionsAsync(startUtc, endUtc);
