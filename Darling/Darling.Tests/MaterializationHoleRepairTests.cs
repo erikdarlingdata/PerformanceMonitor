@@ -202,9 +202,11 @@ public sealed class MaterializationHoleRepairTests
            launched between the segment that ends with the aggregate ensure and the segment that begins with
            the dedup/compression pair, which is exactly what "after the ensure, before compression" meant. The
            retention ensure did NOT move (it has its own hourly tenant), so that anchor is unchanged. */
-        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale,", StringComparison.Ordinal);
+        /* The SEGMENT CALLS, not the stage names — the enum members and the list's per-step tags spell those
+           tokens far earlier in the file, so a bare-name anchor would measure the declaration. */
+        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var launchAt = worker.IndexOf("holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);", StringComparison.Ordinal);
-        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch,", StringComparison.Ordinal);
+        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var retentionAt = worker.IndexOf("TimescaleSupport.EnsureRetentionPoliciesAsync(", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
         var drainAt = worker.IndexOf("await holeRepair;", StringComparison.Ordinal);

@@ -426,9 +426,13 @@ public sealed class IntervalHonestHourlyRollupTests
     {
         var worker = ReadWorkerSource();
 
-        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale,", StringComparison.Ordinal);
+        /* The SEGMENT CALLS, not the stage names: the enum's own members and the list's per-step tags spell
+           those same tokens a thousand lines earlier, so an anchor on the bare stage name measures the
+           declaration's position and proves nothing about the start path. The argument list is what makes
+           each anchor a call site. */
+        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var logAt = worker.IndexOf("TimescaleSupport.LogSupersededHourlyRollupCoverageAsync(", StringComparison.Ordinal);
-        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch,", StringComparison.Ordinal);
+        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
 
         Assert.True(ensureAt > 0 && logAt > 0 && compressionAt > 0 && plainModeAt > 0);
