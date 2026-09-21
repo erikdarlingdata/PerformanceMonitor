@@ -35,6 +35,7 @@ public partial class ViewerServerTab : UserControl
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
     private DataGridFilterManager<QueryStoreHealthRow>? _queryStoreHealthFilterMgr;
+    private DataGridFilterManager<ViewerDataService.QueryStoreClutterRow>? _queryStoreClutterFilterMgr;
     private DataGridFilterManager<AutomaticTuningRow>? _automaticTuningFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
@@ -61,6 +62,7 @@ public partial class ViewerServerTab : UserControl
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
         _queryStoreHealthFilterMgr = new DataGridFilterManager<QueryStoreHealthRow>(QueryStoreHealthGrid);
+        _queryStoreClutterFilterMgr = new DataGridFilterManager<ViewerDataService.QueryStoreClutterRow>(QueryStoreClutterGrid);
         _automaticTuningFilterMgr = new DataGridFilterManager<AutomaticTuningRow>(AutomaticTuningGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
@@ -83,6 +85,7 @@ public partial class ViewerServerTab : UserControl
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
         _filterManagers[QueryStoreHealthGrid] = _queryStoreHealthFilterMgr;
+        _filterManagers[QueryStoreClutterGrid] = _queryStoreClutterFilterMgr;
         _filterManagers[AutomaticTuningGrid] = _automaticTuningFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
