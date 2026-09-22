@@ -46,9 +46,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// roles' rows as <c>&lt;insufficient privilege&gt;</c>, which <c>get_store_query_stats</c> reports. The #3334
 /// resolve function is the precedent for the shape.</para>
 ///
-/// <para><b>Secrets never reach the reader.</b> Provisioning puts each role's password in an
-/// <c>ALTER ROLE ... PASSWORD '...'</c> literal on every start, and the module records a utility statement's
-/// text without normalizing that literal (measured on the bundled 18.4 / 1.12). The conf's v13 block sets
+/// <para><b>Secrets never reach the reader.</b> The module records a utility statement's text without
+/// normalizing its literals (measured on the bundled 18.4 / 1.12), so an <c>ALTER ROLE ... PASSWORD '...'</c>
+/// is kept verbatim. The service's own provisioning sends SCRAM-SHA-256 verifiers rather than passwords
+/// (#3910), but an operator's role DDL, or a bring-your-own store's provisioning script, can still carry
+/// one. The conf's v13 block sets
 /// <c>pg_stat_statements.track_utility = off</c>, so a managed store records no utility statement at all. Two
 /// guards stand behind it, for a store that tracks utility statements anyway: the reader shows the text of
 /// normalized DML only (every other statement keeps its timings and reads as <see cref="WithheldText"/>), and

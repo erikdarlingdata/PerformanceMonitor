@@ -33,7 +33,12 @@
 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
---   1. Replace CHANGE_ME_ADMIN_PASSWORD and CHANGE_ME_VIEWER_PASSWORD with strong passwords.
+--   1. Replace CHANGE_ME_ADMIN_PASSWORD and CHANGE_ME_VIEWER_PASSWORD with strong passwords. Better, keep the
+--      passwords out of every statement (#3910): replace each literal with a SCRAM-SHA-256 verifier, which
+--      PostgreSQL stores as-is, or set the passwords afterwards with psql's \password admin and
+--      \password viewer, which compute the verifier locally and send only that. A password literal is kept
+--      verbatim by anything that records statement text: log_statement, a failed statement's STATEMENT line
+--      in the server log, auto_explain, and pg_stat_statements with utility tracking on.
 --   2. If your database is not named "darling", change it in the REVOKE/GRANT ... ON DATABASE
 --      lines and in the ALTER DATABASE note at the bottom.
 --   3. If the owner role is not "darling", change it in the ALTER DEFAULT PRIVILEGES FOR ROLE

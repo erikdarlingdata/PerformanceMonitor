@@ -1105,7 +1105,7 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Provisioning_SetsStatementTimeout_OnViewerAndMcp_NotAdmin()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
         Assert.Contains($"ALTER ROLE viewer SET statement_timeout = '{ComposeLimits.StatementTimeout}';", sql, StringComparison.Ordinal);
         Assert.Contains($"ALTER ROLE mcp    SET statement_timeout = '{ComposeLimits.StatementTimeout}';", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ALTER ROLE admin  SET statement_timeout", sql, StringComparison.Ordinal);
@@ -1114,7 +1114,7 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Provisioning_HasNoStaleLoopbackComment()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
         Assert.DoesNotContain("LOOPBACK-ONLY", sql, StringComparison.Ordinal);
     }
 

@@ -460,12 +460,13 @@ public sealed class DarlingManagedPostgres
     /// The block re-states the EFFECTIVE list read from the file at append time plus
     /// <see cref="StatementStatisticsLibrary"/>; see <see cref="MergePreloadLibraries"/>.</para>
     ///
-    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> Role provisioning
-    /// interpolates each generated password into an <c>ALTER ROLE ... PASSWORD '...'</c> literal on every
-    /// start (<see cref="DarlingManagedRoles"/>), and pg_stat_statements records a utility statement's text
-    /// without normalizing that literal. Off keeps utility statements out of the view entirely, so the reader
-    /// surface can never show a password; the reader function also shows the text of normalized DML only, as
-    /// a second guard.</para>
+    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> pg_stat_statements records a
+    /// utility statement's text without normalizing its literals, so any <c>ALTER ROLE ... PASSWORD '...'</c>
+    /// run against the store (an operator's, or a bring-your-own provisioning script's) would be kept verbatim.
+    /// The service's own provisioning sends SCRAM-SHA-256 verifiers, never a password, and only when one
+    /// changes (#3910), so it no longer depends on this; the setting keeps every other utility statement out
+    /// of the view too, and the reader function shows the text of normalized DML only, as a second
+    /// guard.</para>
     ///
     /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This append runs
     /// before <c>pg_ctl start</c>, so a service-owned start loads the library on the very start that writes the
