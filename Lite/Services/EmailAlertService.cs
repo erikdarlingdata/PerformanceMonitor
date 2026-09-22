@@ -71,7 +71,7 @@ public class EmailAlertService : IFindingAlertSender
     /// findings carry their own <c>analysis_notify_cooldown_minutes</c> throttle and were not part of what
     /// #3430 measured.</para>
     /// </param>
-    public async Task TrySendAlertEmailAsync(
+    public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -113,21 +113,26 @@ public class EmailAlertService : IFindingAlertSender
                 numericCurrentValue, numericThresholdValue,
                 delivery,
                 muted, detailText, contextJson));
+
+            /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
+               delivery). The engine callers discard it. */
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
+            return null;
         }
     }
 
     /// <summary>
-    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted equivalent
-    /// is the latest row for that metric_name). Delegates to the injected store.
+    /// <see cref="IFindingAlertSender"/>: latest DELIVERED-page time for (serverId, metricName) —
+    /// seeds the shared AnalysisNotificationService #2054 hold across restarts. #3916: a hold is
+    /// earned by a delivery, so the seed reads only rows that reached someone. Delegates to the
+    /// injected store.
     /// </summary>
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+        => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
 
     /// <summary>
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -136,8 +141,9 @@ public class EmailAlertService : IFindingAlertSender
     /// params — so no separate fallback row is needed.
     /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
     /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
+    /// <para>#3916: returns the delivery the row recorded; null only when the send path caught.</para>
     /// </summary>
-    public Task SendFindingAlertAsync(FindingAlert alert)
+    public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
         var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
 
@@ -172,21 +178,24 @@ public class EmailAlertService : IFindingAlertSender
     /// numeric severity/threshold, the full detail text, the serialized context — so every reader of the
     /// table sees one shape. Never throws.
     /// </summary>
-    private async Task RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
+    private async Task<AlertDelivery?> RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
     {
         try
         {
             string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+            var delivery = AlertDelivery.RoutedToDigest();
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 serverId.ToString(), alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
-                AlertDelivery.RoutedToDigest(),
+                delivery,
                 false, alert.DetailText, contextJson));
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError($"RecordDigestRoutedFindingAsync error: {ex.Message}");
+            return null;
         }
     }
 }

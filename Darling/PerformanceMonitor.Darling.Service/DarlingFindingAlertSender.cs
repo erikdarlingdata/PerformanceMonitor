@@ -54,13 +54,12 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     }
 
     /// <summary>
-    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted
-    /// equivalent is the latest row for that metric_name). Delegates to the PG store.
+    /// <see cref="IFindingAlertSender"/>: latest DELIVERED-page time for (serverId, metricName) —
+    /// seeds the shared AnalysisNotificationService #2054 hold across restarts. #3916: a hold is
+    /// earned by a delivery, so the seed reads only rows that reached someone. Delegates to the PG store.
     /// </summary>
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+        => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
 
     /// <summary>
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -68,12 +67,13 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     /// numeric severity/threshold and the detail text — so no separate fallback row is needed.
     /// <para>The channels get <see cref="FindingAlert.DeliveredProse"/> and the row gets
     /// <c>DetailText</c>: two destinations, two values. See <see cref="FindingAlert"/>.</para>
+    /// <para>#3916: returns the delivery the row recorded; null only when this method caught.</para>
     /// </summary>
-    public async Task SendFindingAlertAsync(FindingAlert alert)
+    public async Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
         if (alert is null)
         {
-            return;
+            return null;
         }
 
         try
@@ -129,11 +129,14 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 alert.Severity, alert.NotifyThreshold,
                 delivery,
                 false, alert.DetailText, contextJson));
+
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError("Finding alert delivery failed for {Metric} on {Server}: {Message}",
                 alert.MetricName, alert.ServerName, ex.Message);
+            return null;
         }
     }
 }

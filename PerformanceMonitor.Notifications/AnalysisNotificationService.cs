@@ -270,7 +270,7 @@ public sealed class AnalysisNotificationService
                     var seedKey = BucketKey(m);
                     if (_cooldowns.ContainsKey(seedKey))
                         continue;
-                    var lastPersisted = await _sender.GetLastAlertTimeAsync(serverId, FindingMessageFormatter.MetricName(m));
+                    var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
                     if (lastPersisted.HasValue)
                         _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
                 }

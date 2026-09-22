@@ -320,13 +320,15 @@ public class AnalysisProseDeliveryTests
     {
         public List<FindingAlert> Sent { get; } = new();
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
             Task.FromResult<DateTime?>(null);
 
-        public Task SendFindingAlertAsync(FindingAlert alert)
+        /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
+        public AlertDelivery? Delivery { get; set; }
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.CompletedTask;
+            return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
 
