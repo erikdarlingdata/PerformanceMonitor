@@ -2022,9 +2022,16 @@ internal static class DarlingDataReader
     ///
     /// <para>Reads <c>v_collection_log</c>, the same view the viewer uses, so the web dashboard and the
     /// MCP surface cannot drift from what the desktop shows. $1 server_id, $2 window start, $3 window
-    /// end (naive UTC), $4 row cap, $5 collector name or NULL, $6 duration floor in ms or NULL.</para>
+    /// end (naive UTC), $4 row cap, $5 collector name or NULL, $6 duration floor in ms or NULL, $7 run
+    /// status or NULL.</para>
     ///
-    /// <para>The two filters are NULL-tolerant predicates against always-bound parameters rather than
+    /// <para>The status arm (#3869) compares <c>UPPER($7)</c> rather than the raw parameter, so the stored
+    /// vocabulary's own casing is what matches whatever spelling the caller sent. The tool validates the
+    /// value against <c>EnumeratedCollectorDriver.CollectionLogStatuses</c> before reaching here, so this
+    /// predicate can never quietly match nothing on a typo — an unknown status is refused up there, not
+    /// filtered to an empty page down here.</para>
+    ///
+    /// <para>The three filters are NULL-tolerant predicates against always-bound parameters rather than
     /// conditionally appended text, which is the shape a dozen sibling readers already use
     /// (<c>DarlingStoredPlanReader</c>, <c>DarlingObjectStatsReader</c>, <c>DarlingAgReader</c>). It keeps
     /// every parameter at a FIXED position, which is what makes a renumbering bug impossible rather than
@@ -2069,6 +2076,7 @@ internal static class DarlingDataReader
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR collector_name = $5::text)
         AND   ($6::double precision IS NULL OR duration_ms >= $6::double precision)
+        AND   ($7::text IS NULL OR status = UPPER($7::text))
         """;
 
     /// <summary>
@@ -2147,6 +2155,12 @@ internal static class DarlingDataReader
     /// <para><paramref name="collectorName"/> is matched EXACTLY, not by prefix or pattern. A name the store
     /// has never seen therefore returns zero rows, which the caller cannot distinguish from a quiet window on
     /// the row list alone; the tool's empty branch is what separates those two.</para>
+    ///
+    /// <para><paramref name="status"/> (#3869) is matched exactly too, case-insensitively, against the closed
+    /// vocabulary in <c>EnumeratedCollectorDriver.CollectionLogStatuses</c>. Unlike the collector name, an
+    /// unknown value is NOT this reader's problem: the tool refuses it by name before calling, because a
+    /// closed set whose members the caller cannot see makes "no rows" an unreadable answer. Appended after
+    /// the floor, like every filter before it, so no existing positional caller moved.</para>
     /// </summary>
     public static async Task<List<CollectionLogEntry>> GetCollectionLogAsync(
         NpgsqlDataSource postgres,
@@ -2156,6 +2170,7 @@ internal static class DarlingDataReader
         int maxRows,
         string? collectorName = null,
         double? minDurationMs = null,
+        string? status = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<CollectionLogEntry>();
@@ -2168,6 +2183,7 @@ internal static class DarlingDataReader
         AddInt(command, maxRows);
         AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
         AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

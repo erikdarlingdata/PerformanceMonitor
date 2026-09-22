@@ -392,6 +392,12 @@ LIMIT 1";
     /// predicates against always-bound parameters, which keeps every parameter at a fixed position — the same
     /// shape Darling's twin uses, and the same shape <c>ThrowIfDuplicateNameAsync</c> already uses here.</para>
     ///
+    /// <para><paramref name="status"/> is #3869's third filter, applied here for the same reason and matched
+    /// case-insensitively against the log's own stored vocabulary via <c>UPPER($7)</c>. The MCP tool validates
+    /// the value against <c>EnumeratedCollectorDriver.CollectionLogStatuses</c> before calling, so an unknown
+    /// status is refused by name up there rather than filtered to an empty page down here — which on the
+    /// failure-hunting filter would read as "no failures", the worst false negative this read can produce.</para>
+    ///
     /// <para>Supplying <paramref name="minDurationMs"/> also switches the ordering to SLOWEST FIRST. A floor
     /// under newest-first ordering cannot reach the tail — the cap keeps the most recent matches, and the slow
     /// runs being hunted are the ones that are not recent. The two are one decision, so the ordering is
@@ -399,7 +405,7 @@ LIMIT 1";
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -430,6 +436,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   ($5 IS NULL OR collector_name = $5)
 AND   ($6 IS NULL OR duration_ms >= $6)
+AND   ($7 IS NULL OR status = UPPER($7))
 " + ordering + @"
 LIMIT $4";
 
@@ -439,6 +446,7 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
         command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
 
         var items = new List<CollectionLogRow>();
         using var reader = await command.ExecuteReaderAsync();
