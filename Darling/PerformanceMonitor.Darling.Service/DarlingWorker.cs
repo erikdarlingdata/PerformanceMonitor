@@ -2857,6 +2857,11 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* #3916 PR B: once the sweeps and the command loop (analyze_now) have drained, nothing enqueues a
+           page any more; drop the analysis hold-back queue unstamped. A page queued at stop is not a
+           delivery, so nothing holds its story and the next start re-attempts it. */
+        notificationService.Dispose();
+
         /* Drain the Query Store backfill loop the same way (#2022): a slice abandoned mid-shutdown is
            fine — its boundary is derived (or hole-recorded) from what actually landed, so the next
            start resumes exactly where the COPY committed. */
