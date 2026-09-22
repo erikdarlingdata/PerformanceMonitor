@@ -374,6 +374,9 @@ public class InferenceEngine
             DefinedAmplifiers = definedAmplifiers,
             IsAbsolution = false,
             RootFactMetadata = rootFact?.Metadata,
+            /* #3691 lane 43: the root fact's ranked objects, beside its metadata and for the same consumer
+               shape — the payload names them; nothing here re-sorts or trims the collector's rank. */
+            RootFactRanked = rootFact?.Ranked ?? [],
             // Carry the root fact's database through so findings/recommendation cards can show it.
             DatabaseName = rootFact?.DatabaseName,
             NamedHops = namedHops,

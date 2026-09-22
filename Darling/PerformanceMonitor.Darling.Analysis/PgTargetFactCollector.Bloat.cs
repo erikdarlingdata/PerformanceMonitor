@@ -390,16 +390,27 @@ ORDER BY t.growth_bytes DESC NULLS LAST, t.index_bytes DESC";
                     StampGrowthPct(fact, growth, firstBloat);
                 }
 
-                /* Every returned row — the worst included — rides by name, so the advice can list the top three
-                   and the graph can intersect on schema.table. The earlier-zero case carries no percentage. */
+                /* Every returned row — the worst included, as Ranked[0] — rides by name in the typed list, so the
+                   advice can list the top three and the graph can intersect on schema.table. Until #3691 lane 43
+                   these rode as growth_bytes_<schema.table> / growth_pct_<…> / dead_tuples_<…> metadata keys: the
+                   NAME inside the key, and BloatNamedObjects parsing it back out with a string prefix test. The
+                   figures keep the un-prefixed names they had, so a reader who knows the fact's metadata knows
+                   these. The earlier-zero case carries no percentage — a quarter of nothing is not a fraction —
+                   and a row with no dead-tuple reading carries no dead-tuple figure, which is the same honesty
+                   the absent key used to express. */
+                var rowDatabase = reader.IsDBNull(5) ? null : reader.GetString(5);
                 var rowName = TableObjectName(reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7));
                 var rowFirst = reader.IsDBNull(11) ? 0L : ToInt64(reader.GetValue(11));
                 var rowGrowth = reader.IsDBNull(17) ? 0L : ToInt64(reader.GetValue(17));
-                fact.Metadata[PgTargetScorer.BloatNamedGrowthBytesPrefix + rowName] = rowGrowth;
+                var figures = new Dictionary<string, double>(StringComparer.Ordinal)
+                {
+                    [PgTargetScorer.BloatGrowthBytesKey] = rowGrowth,
+                };
                 if (rowFirst > 0)
-                    fact.Metadata[PgTargetScorer.BloatNamedGrowthPctPrefix + rowName] = 100.0 * rowGrowth / rowFirst;
+                    figures[PgTargetScorer.BloatGrowthPctKey] = 100.0 * rowGrowth / rowFirst;
                 if (!reader.IsDBNull(14))
-                    fact.Metadata[PgTargetScorer.BloatNamedDeadTuplesPrefix + rowName] = ToInt64(reader.GetValue(14));
+                    figures[PgTargetScorer.BloatDeadTuplesKey] = ToInt64(reader.GetValue(14));
+                fact.Ranked.Add(new RankedObject(rowName, rowDatabase, rowGrowth, figures));
             }
 
             if (fact is not null)
@@ -504,15 +515,23 @@ ORDER BY t.growth_bytes DESC NULLS LAST, t.index_bytes DESC";
                     StampGrowthPct(fact, growth, firstReclaimable);
                 }
 
+                /* The index twin of the table read's ranked rows — same shape, same figure names, three-part
+                   names (schema.table.index) so the graph can still recover the parent table. No dead-tuple
+                   figure: dead tuples are the heap's, and this fact is about an index's reclaimable bytes. */
+                var rowDatabase = reader.IsDBNull(9) ? null : reader.GetString(9);
                 var rowName = IndexObjectName(
                     reader.IsDBNull(10) ? null : reader.GetString(10),
                     reader.IsDBNull(11) ? null : reader.GetString(11),
                     reader.IsDBNull(12) ? null : reader.GetString(12));
                 var rowFirst = reader.IsDBNull(16) ? 0L : ToInt64(reader.GetValue(16));
                 var rowGrowth = reader.IsDBNull(20) ? 0L : ToInt64(reader.GetValue(20));
-                fact.Metadata[PgTargetScorer.BloatNamedGrowthBytesPrefix + rowName] = rowGrowth;
+                var figures = new Dictionary<string, double>(StringComparer.Ordinal)
+                {
+                    [PgTargetScorer.BloatGrowthBytesKey] = rowGrowth,
+                };
                 if (rowFirst > 0)
-                    fact.Metadata[PgTargetScorer.BloatNamedGrowthPctPrefix + rowName] = 100.0 * rowGrowth / rowFirst;
+                    figures[PgTargetScorer.BloatGrowthPctKey] = 100.0 * rowGrowth / rowFirst;
+                fact.Ranked.Add(new RankedObject(rowName, rowDatabase, rowGrowth, figures));
             }
 
             if (fact is not null)

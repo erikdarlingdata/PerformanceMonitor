@@ -156,9 +156,18 @@ public sealed class PgTargetBloatLiveTests
             Assert.Equal(21, trend.Metadata[PgTargetScorer.BloatObjectsEstimableKey]);
             Assert.Equal(1, trend.Metadata[PgTargetScorer.BloatObjectsConsideredKey]);
             Assert.Equal(1, trend.Metadata[PgTargetScorer.BloatObjectsOverLineKey]);
-            /* None of the small tables is named, at 90 % or any percentage. */
+            /* None of the small tables is named, at 90 % or any percentage. #3691 lane 43: the names ride on
+               Fact.Ranked now, so "not named" is the ranked list being the subject alone — and the metadata is
+               back to meaning only what its own keys say, which the second assertion re-checks against the
+               retired growth_bytes_<name> spelling as well as the small tables' names. */
             Assert.Equal(["public.big"], PgTargetScorer.BloatNamedObjects(trend).ToList());
+            var rankedTrend = Assert.Single(trend.Ranked);
+            Assert.Equal("public.big", rankedTrend.ObjectName);
+            Assert.Equal(400 * MiB, rankedTrend.Value);
+            Assert.Equal(400 * MiB, rankedTrend.Figures![PgTargetScorer.BloatGrowthBytesKey]);
+            Assert.Equal(400.0, rankedTrend.Figures[PgTargetScorer.BloatGrowthPctKey], precision: 6);
             Assert.DoesNotContain(trend.Metadata.Keys, k => k.Contains("small_", StringComparison.Ordinal));
+            Assert.DoesNotContain(trend.Metadata.Keys, k => k.StartsWith("growth_bytes_", StringComparison.Ordinal));
 
             var indexTrend = Assert.Single(facts, f => f.Key == PgTargetFactKeys.IndexBloatTrend);
             Assert.Equal("public.big.big_pkey", indexTrend.ObjectName);

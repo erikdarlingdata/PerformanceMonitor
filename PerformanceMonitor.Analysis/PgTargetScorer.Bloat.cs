@@ -40,9 +40,12 @@ namespace PerformanceMonitor.Analysis;
 /// <para><b>Metadata contract with the collector</b> (<c>PgTargetFactCollector.Bloat.cs</c>): the keys below
 /// are the whole interface between the read and the grade, and the advice partial reads the same names. A
 /// missing key reads as 0 through <c>GetValueOrDefault</c>, which for every gate here means "does not fire".
-/// The top-3 objects ride as <c>growth_bytes_&lt;schema.table&gt;</c> / <c>growth_pct_&lt;schema.table&gt;</c> /
-/// <c>dead_tuples_&lt;schema.table&gt;</c> — the name in the KEY, the way the wait profile carries
-/// <c>contrib_Type:event</c>, because <see cref="Fact.Metadata"/> is doubles-only.</para>
+/// The top-3 objects ride on <see cref="Fact.Ranked"/> (#3691 lane 43), each entry naming its object and
+/// carrying its own <c>growth_bytes</c> / <c>growth_pct</c> / <c>dead_tuples</c> figures under those
+/// un-prefixed names. They used to be key-ENCODED into metadata as
+/// <c>growth_bytes_&lt;schema.table&gt;</c> and read back out by a prefix test — a naming convention doing a
+/// type's job, which is what the typed seam replaced; <see cref="Fact.Metadata"/> stays doubles-only and now
+/// means only what its own key says.</para>
 /// </summary>
 public static partial class PgTargetScorer
 {
@@ -186,16 +189,13 @@ public static partial class PgTargetScorer
     /// in the lookback yet.</summary>
     public const int BloatReasonInsufficientSamples = 5;
 
-    /* metadata: the named objects (name in the key) */
-
-    /// <summary>Metadata key prefix: <c>growth_bytes_&lt;schema.table&gt;</c> (table fact) or
-    /// <c>growth_bytes_&lt;schema.table.index&gt;</c> (index fact), value = growth bytes, for each of the
-    /// top <see cref="BloatTopObjects"/>. The name lives in the key because metadata is doubles.</summary>
-    public const string BloatNamedGrowthBytesPrefix = "growth_bytes_";
-    /// <summary>Metadata key prefix: <c>growth_pct_&lt;name&gt;</c>; absent for an object whose earlier estimate was zero.</summary>
-    public const string BloatNamedGrowthPctPrefix = "growth_pct_";
-    /// <summary>Metadata key prefix (table fact): <c>dead_tuples_&lt;name&gt;</c> at the latest sample.</summary>
-    public const string BloatNamedDeadTuplesPrefix = "dead_tuples_";
+    /* The top-3 objects used to ride as three metadata key PREFIXES with the object's name appended —
+       growth_bytes_<schema.table>, growth_pct_<…>, dead_tuples_<…> — and BloatNamedObjects recovered the names
+       with a StartsWith test over every metadata key. #3691 lane 43 moved them onto Fact.Ranked, where an entry
+       is a typed (name, database, value, figures) record and the figures keep those same names WITHOUT the
+       prefix. The prefixes are deleted rather than kept beside the list: while both existed, an object could be
+       named in one and not the other, and the graph predicate reading one would disagree with the advice reading
+       the other. */
 
     /// <summary>
     /// Layer-1 base severity for the bloat family. One arm per key; an unknown key under this source is 0.
@@ -257,21 +257,28 @@ public static partial class PgTargetScorer
     }
 
     /// <summary>
-    /// The object names a bloat fact carries — the worst in <see cref="Fact.ObjectName"/> and every named one
-    /// in the <see cref="BloatNamedGrowthBytesPrefix"/> keys — for the same-object co-fire predicates. Public
-    /// because the graph and the advice read the same set. An index fact's names are
-    /// <c>schema.table.index</c>; <paramref name="parentTables"/> returns their <c>schema.table</c> prefix
-    /// instead so an index can be matched to its table's fact.
+    /// The object names a bloat fact carries — the worst in <see cref="Fact.ObjectName"/> and every object on
+    /// <see cref="Fact.Ranked"/> — for the same-object co-fire predicates. Public because the graph and the
+    /// advice read the same set. An index fact's names are <c>schema.table.index</c>;
+    /// <paramref name="parentTables"/> returns their <c>schema.table</c> prefix instead so an index can be
+    /// matched to its table's fact.
+    ///
+    /// <para><b>Signature and semantics are unchanged by #3691 lane 43; only the source is.</b> It read the
+    /// <c>growth_bytes_&lt;name&gt;</c> metadata keys with a prefix test and now reads the typed ranked list.
+    /// <see cref="Fact.ObjectName"/> is still unioned in rather than assumed to be <c>Ranked[0]</c>: this is a
+    /// predicate helper that a hand-built fact reaches too (the amplifier tests build facts directly), and a
+    /// fact that names an object without ranking anything must still match on that name. The union is what makes
+    /// the collector's invariant — <c>Ranked[0]</c> IS <c>ObjectName</c> — free of consequence here.</para>
     /// </summary>
     public static HashSet<string> BloatNamedObjects(Fact fact, bool parentTables = false)
     {
         var names = new HashSet<string>(StringComparer.Ordinal);
         if (!string.IsNullOrEmpty(fact.ObjectName))
             names.Add(fact.ObjectName);
-        foreach (var key in fact.Metadata.Keys)
+        foreach (var ranked in fact.Ranked)
         {
-            if (key.StartsWith(BloatNamedGrowthBytesPrefix, StringComparison.Ordinal) && key.Length > BloatNamedGrowthBytesPrefix.Length)
-                names.Add(key[BloatNamedGrowthBytesPrefix.Length..]);
+            if (!string.IsNullOrEmpty(ranked.ObjectName))
+                names.Add(ranked.ObjectName);
         }
 
         if (!parentTables)
@@ -289,8 +296,11 @@ public static partial class PgTargetScorer
     }
 
     /// <summary>
-    /// Whether the backlog fact and the bloat fact name the same table. The backlog fact carries ONE table
-    /// (its <see cref="Fact.ObjectName"/>); the bloat fact carries up to three by name. When the backlog fact
+    /// Whether the backlog fact and the bloat fact name the same table. The bloat fact carries up to three by
+    /// name; the backlog fact's subject is its <see cref="Fact.ObjectName"/> — the table this asks about, and
+    /// still the one table the intersection is tested on even though #3691 lane 43's M3 gave that fact ranked
+    /// companions of its own (a backlog card's SUBJECT is what a bloat trend co-fires with; two facts agreeing
+    /// about some third table is not the same claim). When the backlog fact
     /// has no name (an older collector, a hand-built fact) the intersection cannot be tested and the answer is
     /// co-presence — stated in the amplifier / edge description so the reader knows which it was.
     /// </summary>

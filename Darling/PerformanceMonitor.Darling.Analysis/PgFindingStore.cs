@@ -398,7 +398,10 @@ ORDER BY local_bucket, story_path_hash";
                        beside this chain. In memory only, like the two above. */
                     SideLeafKeys = story.SideLeafKeys,
                     /* Carried in-memory only; no analysis_findings column for it. */
-                    RootFactMetadata = story.RootFactMetadata
+                    RootFactMetadata = story.RootFactMetadata,
+                    /* #3691 lane 43: the root fact's ranked objects, in memory only like the metadata above —
+                       analyze_server's root_fact renders them; a read-back finding has none. */
+                    RootFactRanked = story.RootFactRanked
                 });
             }
         }

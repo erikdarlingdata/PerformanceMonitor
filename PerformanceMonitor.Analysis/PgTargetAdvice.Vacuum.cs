@@ -139,7 +139,23 @@ public static partial class PgTargetAdvice
             inv.Append(". ");
         }
 
-        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h. ");
+        /* #3691 lane 43 (M3): the next two persistently-backlogged tables BY NAME, with each one's own ratio and
+           slope. Before it, the read stopped at one row and the card could only COUNT the others
+           (tables_in_backlog) — an operator who read "4 other tables are past their line too" had to call
+           get_pg_autovacuum to learn which, and the collector had thrown the rows away. The clause rides on the
+           subject's persistence sentence because Ranked[0] IS the subject, so "and two more" means "besides this
+           table"; empty on a server with one backlogged table, which is the byte-identity arm. */
+        var rest = FactAdvice.NameTheRest(f, o =>
+        {
+            var oRatio = o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogRatioKey) ?? o.Value;
+            var oHours = o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogHoursKey) ?? 0;
+            var oSlope = o.Figures is not null && o.Figures.TryGetValue(PgTargetScorer.BacklogSlopePerHourKey, out var s)
+                ? $", {Fmt(Math.Abs(s))}/h {(s > 0 ? "and rising" : s < 0 ? "and falling" : "and flat")}"
+                : string.Empty;
+            return $"{oRatio:0.#}× for {FmtHours(oHours)}{oSlope}";
+        });
+
+        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h{rest}. ");
 
         if (slopeComputable)
         {
@@ -181,6 +197,8 @@ public static partial class PgTargetAdvice
             inv.Append("PG_XMIN_HOLD co-fired: the xmin horizon is held back, so dead tuples newer than it are not removable by any vacuum — this backlog cannot clear until the holder is released. ");
         if (autovacuumOff)
             inv.Append("CONFIG_PG_AUTOVACUUM_OFF co-fired: autovacuum is off server-wide, so this backlog is by configuration. ");
+        /* The POPULATION, a different number from the named list above: every table that met the gate, which can
+           exceed the three rows the read returns. So the count stays and so does the pointer to the tool. */
         if (others > 0)
             inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too — get_pg_autovacuum lists them all by ratio. ");
 
@@ -562,10 +580,19 @@ public static partial class PgTargetAdvice
 
         var headline = $"{table}{db} has autovacuum_enabled = off and sits at {ratio:0.#}× its own {(insertArm ? "insert-vacuum" : "autovacuum trigger")} line for {FmtHours(hours)}";
 
+        /* #3691 lane 43: the ranked tables BY NAME, appended to the sentence that states the subject's own ratio
+           and hours — because Ranked[0] IS the subject, so "and two more" means "besides the table just
+           described" and cannot be misread against the population count below. They used to ride as
+           disabled_rank_{n}_ratio / _hours: the same two figures with no name attached, so this card could state
+           their shape and not which table. Empty string when the read found only the subject, which is the
+           byte-identity arm for every single-disabled-table server. */
+        var rest = FactAdvice.NameTheRest(f, o =>
+            $"{o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogRatioKey) ?? o.Value:0.#}× for {FmtHours(o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogHoursKey) ?? 0)}");
+
         var inv = new StringBuilder();
         inv.Append(insertArm
-            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}. "
-            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}. ");
+            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. "
+            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. ");
         inv.Append("The engine computed that line and would have fired; the reloption is the only reason it did not. ");
         if (hasLastAutovacuum)
             inv.Append($"autovacuum last ran on this table {FmtHours(sinceLast)} before the window end. ");
@@ -575,19 +602,11 @@ public static partial class PgTargetAdvice
             inv.Append($"The table is {FmtBytes(totalBytes)} on disk. ");
         if (serverOff)
             inv.Append("CONFIG_PG_AUTOVACUUM_OFF also fired: the launcher is off server-wide, so the per-table reloption is moot until autovacuum = on — the server setting subsumes this card. ");
+        /* The POPULATION, which is a different number from the ranked list: every disabled table that met the
+           gate, however many the read returned (the read stops at FactRanked.MaxObjects). So this sentence keeps
+           its count and sends the reader to the tool for the tail the card cannot name. */
         if (others > 0)
-        {
-            inv.Append($"{others:0} more disabled table{(others == 1 ? " has" : "s have")} met the same gate");
-            var shapes = new List<string>();
-            for (var rank = 2; rank <= 3; rank++)
-            {
-                if (m.TryGetValue(PgTargetScorer.AutovacuumDisabledRankRatioKey(rank), out var r))
-                    shapes.Add($"{r:0.#}× for {FmtHours(m.GetValueOrDefault(PgTargetScorer.AutovacuumDisabledRankHoursKey(rank)))}");
-            }
-            if (shapes.Count > 0)
-                inv.Append($" ({string.Join(", ", shapes)})");
-            inv.Append(" — get_pg_autovacuum_health names them, disabled tables first. ");
-        }
+            inv.Append($"{others:0} more disabled table{(others == 1 ? " has" : "s have")} met the same gate — get_pg_autovacuum_health names them all, disabled tables first. ");
         if (facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0)
             inv.Append("PG_AUTOVACUUM_BACKLOG carries the grade (ratio, slope, tables in backlog); this card names the cause. ");
 
