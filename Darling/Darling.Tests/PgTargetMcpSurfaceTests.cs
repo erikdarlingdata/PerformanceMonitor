@@ -79,7 +79,9 @@ public sealed class PgTargetMcpSurfaceTests
     [Fact]
     public void APgStoryPath_YieldsPgReads_DeduplicatedAcrossThePath_AndNeverASqlServerRead()
     {
-        var path = $"{PgTargetFactKeys.CheckpointPressure} → {PgTargetFactKeys.ConfigMaxWalSize}";
+        /* #3859: the two-key chain as KEYS, not as the rendered string this used to hand over for re-splitting;
+           the tools it must name are the same two, which is the point — the parse was pure overhead. */
+        var path = StoryKeys.OfPath(PgTargetFactKeys.CheckpointPressure, PgTargetFactKeys.ConfigMaxWalSize);
         var tools = ToolNames(ToolRecommendations.GetForStoryPath(path));
 
         Assert.Contains("get_pg_write_stats", tools);
@@ -89,21 +91,21 @@ public sealed class PgTargetMcpSurfaceTests
         Assert.DoesNotContain("get_wait_stats", tools);
 
         /* ANOMALY_PG_CPU_SPIKE reaches the PostgreSQL arm, not the SQL Server ANOMALY_CPU prefix arm. */
-        var anomaly = ToolNames(ToolRecommendations.GetForStoryPath(PgTargetFactKeys.AnomalyCpuSpike));
+        var anomaly = ToolNames(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath(PgTargetFactKeys.AnomalyCpuSpike)));
         Assert.Contains("get_pg_cpu_utilization", anomaly);
         Assert.DoesNotContain(anomaly, t => t.StartsWith("get_cpu", StringComparison.Ordinal));
 
         /* The #3616 rider: HADR_SYNC_COMMIT scores since that lane but yielded an empty next_tools here; the
            Darling half of the pair (#3659 is Lite's) names the AG read this SKU alone has. */
-        var hadr = ToolNames(ToolRecommendations.GetForStoryPath("HADR_SYNC_COMMIT"));
+        var hadr = ToolNames(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath("HADR_SYNC_COMMIT")));
         Assert.Equal(new[] { "get_wait_trend", "get_ag_health", "get_perfmon_trend", "get_file_io_stats" }, hadr);
         Assert.All(hadr, t => Assert.Contains(t, RegisteredTools));
 
         /* And the SQL Server side is untouched. */
-        var sqlServer = ToolNames(ToolRecommendations.GetForStoryPath("CXPACKET → CONFIG_MAXDOP"));
+        var sqlServer = ToolNames(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath("CXPACKET", "CONFIG_MAXDOP")));
         Assert.NotEmpty(sqlServer);
         Assert.DoesNotContain(sqlServer, t => t.StartsWith("get_pg_", StringComparison.Ordinal));
-        Assert.Empty(ToolRecommendations.GetForStoryPath("NOT_A_KEY"));
+        Assert.Empty(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath("NOT_A_KEY")));
     }
 
     [Fact]

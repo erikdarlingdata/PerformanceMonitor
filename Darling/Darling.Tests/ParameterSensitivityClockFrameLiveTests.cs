@@ -230,6 +230,8 @@ public sealed class ParameterSensitivityClockFrameLiveTests
         {
             RootFactKey = "PARAMETER_SENSITIVITY",
             StoryPath = "PARAMETER_SENSITIVITY",
+            /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+            PathKeys = ["PARAMETER_SENSITIVITY"],
             Severity = 1.0,
         };
 

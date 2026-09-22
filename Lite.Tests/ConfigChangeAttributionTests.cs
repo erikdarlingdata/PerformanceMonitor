@@ -751,7 +751,7 @@ public sealed class ConfigChangeAttributionTests
     public void LiteToolRecommendations_PointAtTheHistoryReads_TheCompare_AndTheAudit()
     {
         Assert.Contains(ConfigChangeAttribution.FactKey, ToolRecommendations.FactKeys);
-        var json = System.Text.Json.JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(ConfigChangeAttribution.FactKey), McpHelpers.JsonOptions);
+        var json = System.Text.Json.JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath(ConfigChangeAttribution.FactKey)), McpHelpers.JsonOptions);
         using var doc = System.Text.Json.JsonDocument.Parse(json);
         var tools = doc.RootElement.EnumerateArray().Select(e => e.GetProperty("tool").GetString()).ToArray();
         Assert.Equal(new[] { "get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes", "compare_analysis", "audit_config" }, tools);

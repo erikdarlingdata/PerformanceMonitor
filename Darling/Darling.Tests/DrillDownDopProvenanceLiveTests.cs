@@ -104,6 +104,8 @@ VALUES
         {
             RootFactKey = factKey,
             StoryPath = factKey,
+            /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+            PathKeys = [factKey],
             /* Past the display gate — below it the expensive drill-downs are skipped wholesale and this
                collector never runs at all. */
             Severity = 1.0,

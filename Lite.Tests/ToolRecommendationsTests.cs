@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Mcp;
 using Xunit;
 
@@ -39,7 +40,9 @@ public sealed class ToolRecommendationsTests
 
     private static JsonElement[] RecommendationsFor(string factKey)
     {
-        var json = JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(factKey), PerformanceMonitor.Common.McpHelpers.JsonOptions);
+        /* #3859: the table takes the engine's TYPED keys now, never a rendered path — OfPath names one chain
+           key here, which is exactly what this helper always meant by its single-key argument. */
+        var json = JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath(factKey)), PerformanceMonitor.Common.McpHelpers.JsonOptions);
         return JsonDocument.Parse(json).RootElement.EnumerateArray().Select(e => e.Clone()).ToArray();
     }
 
