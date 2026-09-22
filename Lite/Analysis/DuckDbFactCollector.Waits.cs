@@ -224,12 +224,15 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// <summary>
     /// Collects blocking facts from blocked_process_reports.
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
-    /// Value is events per OBSERVED hour — the hours the collector was actually up inside the window
-    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), not the nominal window (#3538 A2): forty
-    /// events in the one hour the collector saw of a four-hour window is a 40/hr storm, not a 10/hr
-    /// murmur. <c>period_hours</c> stays the nominal window; <c>observed_hours</c> is the divisor. An
-    /// unobserved window emits no fact.
+    /// Value is the busiest 4-hour sub-window's events per hour (#3871), the PG collector's shape
+    /// exactly — see <c>PgFactCollector.CollectBlockingFactsAsync</c> for the grain argument (the same
+    /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one) and for why the
+    /// divisor is <c>min(4, observed hours)</c> (#3538 A2's observed-time rule, and the ≤4-hour
+    /// degeneracy). DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's
+    /// <c>date_bin</c> does. <c>events_per_hour</c> stays published as whole-window context.
     /// </summary>
+    private const double PeakWindowHours = 4.0;
+
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         if (context.ObservedDurationMs <= 0) return;
@@ -240,16 +243,30 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 
         using var command = connection.CreateCommand();
         command.CommandText = @"
+WITH reports AS (
+    SELECT
+        wait_time_ms,
+        blocking_spid,
+        blocking_status,
+        time_bucket(INTERVAL '4 hours', collection_time, $2) AS bucket_start
+    FROM v_blocked_process_reports
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+),
+buckets AS (
+    SELECT COUNT(*) AS bucket_event_count
+    FROM reports
+    GROUP BY bucket_start
+)
 SELECT
     COUNT(*) AS event_count,
     AVG(wait_time_ms) AS avg_wait_time_ms,
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
-    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+FROM reports";
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -265,21 +282,25 @@ AND   collection_time <= $3";
         var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
         var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+        var peakEventCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
+        var peakEventsPerHour = peakEventCount / Math.Min(PeakWindowHours, observedHours);
 
         facts.Add(new Fact
         {
             Source = "blocking",
             Key = "BLOCKING_EVENTS",
-            Value = eventsPerHour,
+            Value = peakEventsPerHour,
             ServerId = context.ServerId,
             Metadata = new Dictionary<string, double>
             {
                 ["event_count"] = eventCount,
                 ["events_per_hour"] = eventsPerHour,
+                ["events_per_hour_peak_4h"] = peakEventsPerHour,
+                ["peak_4h_event_count"] = peakEventCount,
                 ["avg_wait_time_ms"] = avgWaitTimeMs,
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,

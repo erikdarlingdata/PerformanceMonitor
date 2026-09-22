@@ -239,26 +239,57 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         }
     }
 
+    /* #3871: the busiest 4-hour sub-window rides out of the same statement as the whole-window
+       aggregates. date_bin's ORIGIN is the window start ($2, reused — Npgsql positional params may
+       repeat), NOT an epoch: with an epoch origin a scheduled 4-hour pass that does not begin on a
+       4-hour epoch boundary splits across two buckets and its peak reads BELOW its own whole-window
+       average, so the ≤4h degeneracy (a short window IS its own peak bucket) only holds with the
+       window-start origin. */
     public const string BlockingSql = @"
+WITH reports AS (
+    SELECT
+        wait_time_ms,
+        blocking_spid,
+        blocking_status,
+        date_bin('4 hours', collection_time, $2) AS bucket_start
+    FROM blocked_process_reports
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+),
+buckets AS (
+    SELECT COUNT(*) AS bucket_event_count
+    FROM reports
+    GROUP BY bucket_start
+)
 SELECT
     COUNT(*) AS event_count,
     AVG(wait_time_ms) AS avg_wait_time_ms,
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
-    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count
-FROM blocked_process_reports
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+FROM reports";
+
+    /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
+    /// on (#3871). The peak rate divides by <c>min(this, observed hours)</c>, never by the constant
+    /// alone: a one-hour read's peak bucket holds at most one observed hour of events, and dividing it
+    /// by four would deflate the storm fourfold.</summary>
+    private const double PeakWindowHours = 4.0;
 
     /// <summary>
     /// Collects blocking facts from blocked_process_reports.
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
-    /// Value is events per OBSERVED hour — the hours the collector was actually up inside the window
-    /// (<see cref="AnalysisContext.ObservedDurationMs"/>), not the nominal window (#3538 A2): forty
-    /// events in the one hour the collector saw of a four-hour window is a 40/hr storm, not a 10/hr
-    /// murmur. <c>period_hours</c> stays the nominal window; <c>observed_hours</c> is the divisor. An
-    /// unobserved window emits no fact.
+    /// Value is the busiest 4-hour sub-window's events per hour (#3871): the same storm must not grade
+    /// CRITICAL on a 4-hour pass and Information on a 24-hour one, and a whole-window average dilutes a
+    /// one-hour storm by however much quiet surrounds it, so the graded value is the peak 4-hour bucket
+    /// — the grain the (10, 50) pair was measured on — while <c>events_per_hour</c> stays published as
+    /// the whole-window context. The peak divides by <c>min(4, observed hours)</c>, keeping #3538 A2's
+    /// observed-time rule (forty events in the one hour the collector saw is a 40/hr storm, not a 10/hr
+    /// murmur) and making a ≤4-hour window grade exactly what it always did: with the window-start
+    /// bucket origin such a window is one bucket, and the divisor is its observed hours.
+    /// <c>period_hours</c> stays the nominal window; <c>observed_hours</c> the observed. An unobserved
+    /// window emits no fact.
     /// </summary>
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -281,21 +312,25 @@ AND   collection_time <= $3";
         var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
         var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+        var peakEventCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
+        var peakEventsPerHour = peakEventCount / Math.Min(PeakWindowHours, observedHours);
 
         facts.Add(new Fact
         {
             Source = "blocking",
             Key = "BLOCKING_EVENTS",
-            Value = eventsPerHour,
+            Value = peakEventsPerHour,
             ServerId = context.ServerId,
             Metadata = new Dictionary<string, double>
             {
                 ["event_count"] = eventCount,
                 ["events_per_hour"] = eventsPerHour,
+                ["events_per_hour_peak_4h"] = peakEventsPerHour,
+                ["peak_4h_event_count"] = peakEventCount,
                 ["avg_wait_time_ms"] = avgWaitTimeMs,
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,

@@ -112,6 +112,13 @@ public sealed class AnalysisCoverageLivePostgresTests
             Assert.Equal(1.0, blocking.Metadata["observed_hours"], precision: 6);
             Assert.Equal(4.0, blocking.Metadata["period_hours"], precision: 6);
 
+            /* #3871's ≤4h degeneracy, pinned on the pre-existing fixture: a 4-hour window is ONE bucket
+               under the window-start origin, so the peak IS the window and the graded value is exactly
+               what this test always asserted. The peak keys ride beside the whole-window context. */
+            Assert.Equal(10.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+            Assert.Equal(10.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+            Assert.Equal(10.0, blocking.Metadata["events_per_hour"], precision: 6);
+
             var gap = Assert.Single(facts, f => f.Key == WindowCoverage.FactKey);
             Assert.Equal(WindowCoverage.FactSource, gap.Source);
             Assert.Equal(0.25, gap.Value, precision: 6);
@@ -224,6 +231,98 @@ public sealed class AnalysisCoverageLivePostgresTests
                 Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("caveat").ValueKind);
                 Assert.False(doc.RootElement.GetProperty("coverage").GetProperty("partial").GetBoolean());
             }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #3871: the same storm must grade the same on every pass length. 232 blocked-process reports inside
+    /// ONE hour of an otherwise-quiet, fully-observed 24-hour window: the whole-window average reads
+    /// 232/24 ≈ 9.7/hr — under the concern bar, the dilution the issue was filed about — while the graded
+    /// value is the busiest 4-hour sub-window's rate, 232/4 = 58/hr, past the CRITICAL bar (50) the pair
+    /// pins at its measured 4-hour grain. The steady day is the control: 3/hr across all 24 hours puts 12
+    /// events in every bucket, 12/4 = 3/hr, under the concern bar (10) exactly as the average always said.
+    /// </summary>
+    [Fact]
+    public async Task AOneHourStorm_GradesTheSame_OnAFourHourAndATwentyFourHourPass()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live storm-grain test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var stormEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var stormStart = stormEnd.AddHours(-24);
+
+            /* Lifetime-history gate, then full coverage: a wait sample every 15 minutes across the whole
+               day, so observed hours ≈ 24 and the peak divisor is min(4, 24) = 4 — the constant's own
+               grain, not a gap artifact. */
+            await PlantWaitAsync(connection, stormEnd.AddHours(-40), "OLD_WAIT", 1_000L, ct);
+            for (var i = 0; i <= 96; i++)
+                await PlantWaitAsync(connection, stormStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+
+            /* The storm: 232 reports inside hour six — wholly inside the [4h, 8h) bucket. */
+            for (var i = 0; i < 232; i++)
+                await PlantBlockingAsync(connection, stormStart.AddHours(6).AddSeconds(i * 15), 100 + (i % 50), ct);
+
+            var stormContext = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = stormStart,
+                TimeRangeEnd = stormEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var stormFacts = await new PgFactCollector(postgres).CollectFactsAsync(stormContext);
+
+            var storm = Assert.Single(stormFacts, f => f.Key == "BLOCKING_EVENTS");
+            Assert.Equal(58.0, storm.Value, precision: 6);
+            Assert.Equal(58.0, storm.Metadata["events_per_hour_peak_4h"], precision: 6);
+            Assert.Equal(232.0, storm.Metadata["peak_4h_event_count"], precision: 6);
+            /* The context the average always told — and the grade it used to produce. */
+            Assert.InRange(storm.Metadata["events_per_hour"], 9.0, 10.0);
+            Assert.True(storm.Value >= 50.0, "the storm must sit past the CRITICAL bar at the pair's own grain");
+
+            /* The control: the day BEFORE, same server, steady 3/hr — every 4-hour bucket holds 12. */
+            var steadyEnd = stormStart;
+            var steadyStart = steadyEnd.AddHours(-24);
+            for (var i = 0; i <= 96; i++)
+                await PlantWaitAsync(connection, steadyStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+            for (var hour = 0; hour < 24; hour++)
+                for (var e = 0; e < 3; e++)
+                    await PlantBlockingAsync(connection, steadyStart.AddHours(hour).AddMinutes(7 + e * 17), 200 + e, ct);
+
+            var steadyContext = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = steadyStart,
+                TimeRangeEnd = steadyEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var steadyFacts = await new PgFactCollector(postgres).CollectFactsAsync(steadyContext);
+
+            var steady = Assert.Single(steadyFacts, f => f.Key == "BLOCKING_EVENTS");
+            Assert.Equal(3.0, steady.Value, precision: 6);
+            Assert.Equal(12.0, steady.Metadata["peak_4h_event_count"], precision: 6);
+            Assert.True(steady.Value < 10.0, "a steady 3/hr day must stay under the concern bar");
 
             bodySucceeded = true;
         }

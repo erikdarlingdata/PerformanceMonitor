@@ -528,7 +528,11 @@ FROM per_collection";
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
-                ["is_new"] = isNew ? 1 : 0
+                ["is_new"] = isNew ? 1 : 0,
+                /* #3871 rider: the DefaultRatioThreshold this detector gates on is measured now (its own
+                   distribution, 3,655 windows / 14 d / p99 3.14), and the stamp is how a reader tells a
+                   measured bar from an inherited one without opening the source. */
+                ["threshold_lineage"] = 1
             };
             AddBaselineContext(metadata, baseline);
 
