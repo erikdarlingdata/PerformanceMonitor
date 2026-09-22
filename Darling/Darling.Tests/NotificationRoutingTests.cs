@@ -570,6 +570,7 @@ public sealed class NotificationRoutingTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     /// <summary>An <see cref="IAlertSettings"/> whose every member is a plain settable default — the routes

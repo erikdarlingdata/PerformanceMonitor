@@ -70,8 +70,14 @@ public interface IAlertHistoryStore
     Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null);
 
     /// <summary>
-    /// MAX(alert_time) over every row that was a PAGING candidate (any channel/result) — seeds the analysis
-    /// per-finding cooldown across restart. Stamped unconditionally upstream.
+    /// MAX(alert_time) over every row that was a PAGING candidate (any channel/result, muted or not) — the
+    /// #2716 seed of Darling's Postgres Tier-0-predictor cooldowns (called with <paramref name="dedupKey"/>).
+    /// Those live cooldowns are stamped UNCONDITIONALLY, even when muted or undelivered (a muted alert still
+    /// consumes its cooldown, mirroring AlertEngine), so "any result" is the persisted equivalent THERE.
+    /// <para>#3916: this is no longer the analysis seed. The analysis #2054 hold must be EARNED by a delivery,
+    /// and a row that reached no one (a month-old undelivered <c>tray</c> row held one production story silent
+    /// for 35 days) must not arm it — the analysis seed moved to <see cref="GetLastDeliveredPageUtcAsync"/>.
+    /// Do not add <c>alert_sent</c> here: it would break the Tier-0 family's seed/stamp agreement.</para>
     /// <para>#3712: rows the corroboration gate routed to the digest (<c>notification_type =
     /// <see cref="AlertDelivery.ChannelDigest"/></c>) are EXCLUDED. A digest entry is not a page, and a
     /// seed that read one would hold the page a story earns when it later gains corroboration as a repeat
@@ -86,6 +92,18 @@ public interface IAlertHistoryStore
     /// </para>
     /// </summary>
     Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null);
+
+    /// <summary>
+    /// MAX(alert_time) over the rows that were a DELIVERED page — <c>alert_sent</c> true, minus the #3712
+    /// digest exclusion — for (serverId, metricName). Seeds the analysis per-finding #2054 hold across a
+    /// restart (#3916): a hold must be earned by a delivery, so a row that reached no one (no channel
+    /// configured, every channel failed, muted) seeds nothing and the story is heard on its next firing.
+    /// <para>The digest exclusion is redundant by construction (a digest row is never Sent) and is kept so
+    /// the exclusion stays one symbol and stays pinned.</para>
+    /// <para>Dashboard's JSON store answers with ANY row: every Dashboard analysis page raises the tray
+    /// balloon through the shared service's sink, so every page row there is a delivered page.</para>
+    /// </summary>
+    Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName);
 }
 
 /// <summary>
