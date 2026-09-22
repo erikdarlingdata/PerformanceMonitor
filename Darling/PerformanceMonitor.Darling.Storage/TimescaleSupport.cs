@@ -5086,14 +5086,18 @@ WITH NO DATA";
            names this sweep creates rather than a second copy of them. The list carries its own ordering
            requirement — L2 before the day-grain daily it feeds — on its declaration. */
         var aggregates = HourlyAggregates
-            .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
-            .Concat(DailyAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: false)))
+            .Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddHourlyRefreshPolicySql(a.View))))
+            .Concat(DailyAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddDailyRefreshPolicySql(a.View)))))
         /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
            and the retention list cannot drift apart. HourlyRefreshPhaseOrder appends them from the same list,
            so every view here has a slot on the phase grid. */
-        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true)))
+        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddHourlyRefreshPolicySql(a.View)))))
+        /* #3893: the off-grid aggregates, LAST - raw-sourced, so no ordering requirement - each with its own
+           policy builder rather than a tier flag, because they take neither tier's policy (no grid minute, no
+           daily window). See OffGridAggregates. */
+        .Concat(OffGridAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: a.PolicySql)))
         .ToArray();
 
         /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
@@ -5117,7 +5121,7 @@ WITH NO DATA";
         }
 
         var ready = 0;
-        foreach (var (createSql, view, hourly) in aggregates)
+        foreach (var (createSql, view, policyFor) in aggregates)
         {
             try
             {
@@ -5129,7 +5133,19 @@ WITH NO DATA";
                 /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
                    missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
                    below, instead of taking the whole sweep down before the first CREATE runs. */
-                var policySql = hourly ? AddHourlyRefreshPolicySql(view) : AddDailyRefreshPolicySql(view);
+                var policySql = policyFor();
+
+                /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE
+                   its policy exists, because nothing later would be early enough. #3620's width ensure runs in
+                   the aggregate-compression step, a later convergence stage, and walks the compression targets
+                   only; the policy's first run is the seven-day backfill and creates the materialization's first
+                   chunks at whatever width the hypertable has at that moment. Catalog-gated, so a settled start
+                   calls nothing. See SetOffGridMaterializationChunkIntervalSql. */
+                if (IsOffGridAggregate(view))
+                {
+                    using var width = new NpgsqlCommand(SetOffGridMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await width.ExecuteNonQueryAsync(cancellationToken);
+                }
 
                 using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
@@ -5825,6 +5841,11 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsIntervalHourlyView,  DropAfter: IntervalRetentionInterval,      TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedHourlyView, QueryStoreStatsCorrectedDailyView, QueryStoreStatsIntervalDailyView }),
             (Relation: QueryStoreStatsCorrectedHourlyView, DropAfter: HourlyRetentionInterval,        TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsCorrectedDailyView }),
             (Relation: QueryStoreStatsIntervalDailyView,   DropAfter: IntervalDailyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStoreStatsDayGrainDailyView }),
+
+            /* #3893: the fleet collection-health rollup is a LEAF (#1757's rule): its consumer is the seven-day
+               fleet read, so Coverage names the aggregate itself, the baseline tier's shape. 8 days - the
+               arithmetic is on CollectionHealthRetentionInterval. */
+            (Relation: CollectionHealthHourlyView, DropAfter: CollectionHealthRetentionInterval, TimeColumn: "bucket", Coverage: new[] { CollectionHealthHourlyView }),
         })
         /* The seven baseline-tier policies (#1757; nine until #2007). Coverage is the tier ITSELF: see the leaf rule in the
            summary above -- their consumer is the baseline computation, whose capture requirement is the
@@ -6315,9 +6336,9 @@ AND   j.hypertable_name = '{relation}'";
            pass's one Information line. */
         logger?.Log(
             pass == RetentionSweepPass.Startup ? LogLevel.Information : LogLevel.Debug,
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily, collection-health rollup {CollectionHealth}; the daily history CAGGs carry no policy and are kept indefinitely)",
             applied, RetentionPolicies.Count, armed, held, unchanged, indeterminate, converged,
-            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval);
+            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval, CollectionHealthRetentionInterval);
 
         /* #3812, in the #3756 discipline: ONE Information line per evaluation, UNCONDITIONAL — written on the
            all-unchanged pass exactly as on the pass that armed something, because a check whose negative outcome
@@ -8358,6 +8379,231 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         }
 
         return converged;
+    }
+
+    /* ─────────────── the fleet collection-health rollup (#3893 arm 2) ─────────────── */
+
+    /// <summary>The fleet collection-health rollup's continuous aggregate (#3893): one row per
+    /// (server, collector, hour) of <c>collection_log</c>.</summary>
+    public const string CollectionHealthHourlyView = "collection_health_hourly";
+
+    /// <summary>
+    /// The fleet collection-health rollup's inputs, materialized per hour so the seven-day read stops
+    /// decompressing six of its seven days on every call (#3893 arm 2). The ELEVEN aggregates are
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, expression for expression, and each one
+    /// re-aggregates losslessly over hours — COUNT by SUM, SUM by SUM, MAX by MAX — which is why the read can
+    /// be served from buckets EXACTLY (the reader composes the partial head hour from raw).
+    ///
+    /// <para><b>THE FROZEN-PREDICATE PRICE (#3698's known cost; the #1757 comment above states the rule:
+    /// baking a row filter is safe only when nothing can freeze a configurable behavior).</b> This CREATE
+    /// bakes, at materialization time, <c>EnumeratedCollectorDriver.AbandonedByNotePredicateSql</c> (and
+    /// through it <c>WholeCycleBudgetNoteSqlPattern</c>), <c>EnumeratedCollectorDriver.AbandonedRunPredicateSql</c>
+    /// (and through it <c>AbandonedStatus</c>), <c>CollectorRuntimePrecondition.NamedSkipStatusSqlList</c>
+    /// (and its three statuses), and the literals <c>'SUCCESS'</c>, <c>'ERROR'</c>, <c>'SKIPPED'</c>,
+    /// <c>'PERMISSIONS'</c>, <c>'EXTENSION_MISSING'</c>. Changing ANY of them changes what already-materialized
+    /// buckets MEAN: the aggregate must be dropped and rebuilt (CREATE ... IF NOT EXISTS will not re-define
+    /// it), or the fleet card bands a week of history under the old predicate.</para>
+    ///
+    /// <para>FROM the hypertable, not <c>v_collection_log</c> (every precedent aggregate selects from its
+    /// hypertable); <c>server_id &lt;&gt; 0</c> is a literal and is baked for the reason the read excludes the
+    /// fleet-maintenance sentinel.</para>
+    /// </summary>
+    public const string CreateCollectionHealthHourlySql = $@"
+CREATE MATERIALIZED VIEW IF NOT EXISTS collect.{CollectionHealthHourlyView}
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    collector_name,
+    time_bucket(INTERVAL '1 hour', collection_time) AS bucket,
+    COUNT(*) AS total_runs,
+    SUM(CASE WHEN status = 'SUCCESS'
+              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+             THEN 1 ELSE 0 END) AS success_count,
+    SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+    MAX(collection_time) AS last_run_time,
+    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+             THEN 1 ELSE 0 END) AS abandoned_count,
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+    MAX(CASE WHEN status IS NULL
+              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+             THEN collection_time END) AS last_non_skip_time,
+    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+    MAX(CASE WHEN NOT (status = 'SUCCESS'
+                       AND COALESCE(rows_collected, 0) = 0
+                       AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+             THEN collection_time END) AS last_zero_row_streak_break_time
+FROM collect.collection_log
+WHERE server_id <> 0
+GROUP BY server_id, collector_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// How far back each refresh of <see cref="CollectionHealthHourlyView"/> re-materializes: EIGHT DAYS — the
+    /// seven-day consumer window + one bucket (the head hour straddling the window's start) + margin, rounded up
+    /// to the whole day, equal to <see cref="CollectionHealthRetentionInterval"/>.
+    ///
+    /// <para><b>THE WINDOW MUST COVER THE CONSUMER WINDOW, OR HOLES ARE PERMANENT (#3893's watermark hole, found
+    /// before merge).</b> <c>materialized_only = false</c> serves raw rows only ABOVE the watermark; below it only
+    /// materialized buckets exist. A refresh moves the watermark to the end of its window, so a run whose window
+    /// starts AFTER the current watermark jumps it past every unrefreshed hour in between, and those hours are
+    /// never materialized. The first design (start_offset 3 h) did exactly that twice over: the FIRST run after
+    /// the ensure pass (which creates the aggregate WITH NO DATA — exact until then, because nothing is
+    /// materialized and the whole window is served real-time from raw) stranded all history older than 3 h, and
+    /// any outage longer than two hours stranded its gap. A run whose window starts at or before the watermark
+    /// can never jump a gap; with the window starting eight days back, far below the watermark, a hole cannot
+    /// form inside the consumer window BY CONSTRUCTION (an outage longer than eight days leaves its gap older
+    /// than the consumer window). The first run after install therefore IS the one-time backfill.</para>
+    ///
+    /// <para><b>Cost.</b> A refresh re-materializes only the INVALIDATED ranges inside its window, not the whole
+    /// window, so a steady-state run touches only the new hour (measured in the #3893 PR: 1–3 ms with nothing or
+    /// one still-filling hour new, 0.12 s for a whole fleet hour). A late row landing in a compressed chunk
+    /// invalidates its bucket, which the next run heals once, by decompressing that range once. This window sizes
+    /// the REFRESH, not the READ tail — the tail stays bounded by <see cref="CollectionHealthTailWorstCaseAge"/>
+    /// whatever this is. A pin fails if it ever drops below the consumer window plus a bucket.</para>
+    /// </summary>
+    public const string CollectionHealthRefreshStartOffset = "8 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRefreshStartOffset"/>, pinned equal
+    /// by test.</summary>
+    public static readonly TimeSpan CollectionHealthRefreshStartSpan = TimeSpan.FromDays(8);
+
+    /// <summary>The one consumer's window (<c>DarlingFleetReader</c>'s seven-day fleet collection-health read).
+    /// <see cref="CollectionHealthRefreshStartSpan"/> must be at least this plus a bucket (pinned).</summary>
+    public static readonly TimeSpan CollectionHealthConsumerWindow = TimeSpan.FromDays(7);
+
+    /// <summary>The refresh cadence of <see cref="CollectionHealthHourlyView"/>, and ALSO its end offset — the
+    /// same argument twice, like every refresh policy here (<see cref="ScheduleIntervalDoublesAsEndOffset"/>).
+    /// One hour: the bucket width.</summary>
+    public const string CollectionHealthRefreshScheduleInterval = "1 hour";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRefreshScheduleInterval"/>, pinned
+    /// equal by test.</summary>
+    public static readonly TimeSpan CollectionHealthRefreshScheduleSpan = TimeSpan.FromHours(1);
+
+    /// <summary>What one refresh run is allowed to take in the tail-age bound below — one hour, far above
+    /// what a steady-state run takes (0.12 s for a whole fleet hour, measured in the #3893 PR).</summary>
+    public static readonly TimeSpan CollectionHealthRefreshRunAllowance = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The WORST-CASE AGE of the real-time tail a <see cref="CollectionHealthHourlyView"/> read serves from raw
+    /// (watermark to now): the end offset, plus the still-filling bucket the watermark rounds down past, plus
+    /// a whole schedule interval between runs, plus a run's own duration — 1 h + 1 h + 1 h + 1 h = 4 h.
+    ///
+    /// <para><b>It must stay well under <see cref="CompressAfterDays"/> (one day), and a pin fails if it does
+    /// not.</b> <c>materialized_only = false</c> serves the tail from raw <c>collection_log</c>; if the tail
+    /// ever reached a compressed chunk, every read would decompress again and the problem #3893 removes would
+    /// be rebuilt inside the fix.</para>
+    /// </summary>
+    public static TimeSpan CollectionHealthTailWorstCaseAge =>
+        CollectionHealthRefreshScheduleSpan + HourlyBucket + CollectionHealthRefreshScheduleSpan + CollectionHealthRefreshRunAllowance;
+
+    /// <summary>Retention horizon of <see cref="CollectionHealthHourlyView"/>. Its one consumer reads seven days;
+    /// 7 d + one bucket (the head hour straddling the cut) + margin, rounded UP to whole days = 8 days — the
+    /// same span as <see cref="CollectionHealthRefreshStartOffset"/>. A chunk-level drop, so the slack costs one
+    /// small chunk.</summary>
+    public const string CollectionHealthRetentionInterval = "8 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRetentionInterval"/>, pinned equal by
+    /// test.</summary>
+    public static readonly TimeSpan CollectionHealthRetentionSpan = TimeSpan.FromDays(8);
+
+    /// <summary>
+    /// <see cref="CollectionHealthHourlyView"/>'s refresh policy — OFF the minute grid, deliberately.
+    ///
+    /// <para><b>Why not the grid.</b> The hourly phase grid has no free light slot: a
+    /// <see cref="HourlyAggregates"/> or <see cref="BaselineAggregates"/> member grows the light band by a
+    /// minute and drops <see cref="RefreshSlotWarningSeconds"/> about 50 s, below the 896 s
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> (the #3698 arithmetic), and any registry
+    /// membership would be a 24th <see cref="AggregateCompressionTargets"/> entry in a band full at
+    /// twenty-three. So it is on none of those lists (<see cref="OffGridAggregates"/>): no grid minute, no
+    /// compression target.</para>
+    ///
+    /// <para><b>Finish-to-start, no <c>initial_start</c> — the daily tier's precedent
+    /// (<see cref="AddDailyRefreshPolicySql"/>).</b> Its start minute therefore DRIFTS forward run by run and
+    /// will eventually visit the heaviest refresh window. That is acceptable ONLY because the refresh is
+    /// measured cheap even with its eight-day window (the fleet-sized steady-state measurement is in the #3893
+    /// PR: milliseconds, 0.12 s for a whole fleet hour). If that stops holding, this belongs on the grid
+    /// (#3892), not here.</para>
+    ///
+    /// <para>Every converge that walks refresh jobs skips it by MEMBERSHIP: the #3012 window/phase converge
+    /// reads <see cref="HourlyRefreshPhaseOrder"/>, the #3745 batching converge reads
+    /// <see cref="DailyAggregates"/>, and the compression / chunk-interval ensures read
+    /// <see cref="AggregateCompressionTargets"/> — none of which contains it. Its materialization WIDTH is
+    /// nonetheless #3620's one raw chunk, set by the creation sweep itself before this policy exists
+    /// (<see cref="SetOffGridMaterializationChunkIntervalSql"/> says why it cannot wait for #3620's ensure).</para>
+    /// </summary>
+    public static string AddCollectionHealthRefreshPolicySql()
+        => AddContinuousAggregatePolicySql(
+            CollectionHealthHourlyView,
+            CollectionHealthRefreshStartOffset,
+            CollectionHealthRefreshScheduleInterval,
+            CollectionHealthRefreshScheduleInterval,
+            phaseMinutes: null);
+
+    /// <summary>
+    /// Continuous aggregates <see cref="EnsureContinuousAggregatesAsync"/> creates that are on NONE of the
+    /// three registry lists — no grid minute, no compression target — each paired with its own policy builder
+    /// (#3893). The sweep appends them LAST (raw-sourced, no ordering requirement). Grants: none of their own,
+    /// exactly like every other aggregate in <c>collect</c> — the roles reach them through
+    /// <c>DarlingManagedRoles</c>' <c>GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp</c> (re-run every
+    /// start) and its <c>ALTER DEFAULT PRIVILEGES ... IN SCHEMA collect</c> grant to admin/viewer.
+    /// </summary>
+    public static readonly (string CreateSql, string View, Func<string> PolicySql)[] OffGridAggregates =
+    {
+        (CreateCollectionHealthHourlySql, CollectionHealthHourlyView, AddCollectionHealthRefreshPolicySql),
+    };
+
+    /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of <see cref="OffGridAggregates"/>?</summary>
+    public static bool IsOffGridAggregate(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+        return OffGridAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Holds an off-grid aggregate's materialization at #3620's width, one raw chunk
+    /// (<see cref="MaterializationChunkInterval"/>), issuing <c>set_chunk_time_interval</c> ONLY when the catalog
+    /// reads another width, so a settled start calls nothing. Run by <see cref="EnsureContinuousAggregatesAsync"/>
+    /// between the aggregate's CREATE and its policy (#3893).
+    ///
+    /// <para><b>Why here, not in #3620's ensure.</b> Left alone, TimescaleDB gives a first-level aggregate's
+    /// materialization TEN raw chunks (10 days here), and <c>drop_chunks</c> removes a chunk only once its whole
+    /// range is past the horizon. The 8-day <see cref="CollectionHealthRetentionInterval"/> would then hold 8 to
+    /// 18 days, the over-hold #3620 removed from every other aggregate. #3620's ensure cannot catch this one in
+    /// time. It runs in the aggregate-compression step, a LATER convergence stage than this sweep, and
+    /// <c>set_chunk_time_interval</c> governs only chunks created after the call. This aggregate's policy carries
+    /// no <c>initial_start</c>, and its first run is the seven-day backfill, which creates the first chunks. The
+    /// aggregate is created <c>WITH NO DATA</c>, so a width set before the policy exists covers every chunk it
+    /// will ever have.</para>
+    /// </summary>
+    public static string SetOffGridMaterializationChunkIntervalSql(string view)
+    {
+        if (!IsOffGridAggregate(view))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not an off-grid continuous aggregate — it is not in OffGridAggregates; the registry aggregates take their width from #3620's EnsureMaterializationChunkIntervalAsync");
+        }
+
+        return $@"SELECT set_chunk_time_interval(
+    format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass,
+    INTERVAL '{MaterializationChunkInterval}')
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.dimensions AS d
+  ON  d.hypertable_schema = ca.materialization_hypertable_schema
+  AND d.hypertable_name = ca.materialization_hypertable_name
+  AND d.dimension_type = 'Time'
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'
+AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunkIntervalSpan.TotalSeconds}";
     }
 
     /// <summary>The V23 non-catalog hypertable: the per-run observability log. Bare name — the connection's

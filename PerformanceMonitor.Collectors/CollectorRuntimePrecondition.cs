@@ -64,6 +64,16 @@ public static class CollectorRuntimePrecondition
     /// <summary>
     /// The <c>collection_log</c> status meaning the Extended Events session a collector reads is absent or
     /// stopped on the monitored server, so the tolerant reader came back with nothing to say.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, last_non_skip_time) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string CaptureSessionMissingStatus = "SESSION_MISSING";
 
@@ -74,6 +84,16 @@ public static class CollectorRuntimePrecondition
     /// stored explanation instead of expanding the status word itself. Since #3240 a missing extension a
     /// collector DECLARES no longer lands here — that case has its own status
     /// (<see cref="ExtensionMissingStatus"/>), because its remedy is never a grant.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, and as the literal permission_denied_count counts) is baked, at materialization
+    /// time, into <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>),
+    /// which serves the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week
+    /// of already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE
+    /// ... IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string DegradedStatus = "PERMISSIONS";
 
@@ -86,6 +106,16 @@ public static class CollectorRuntimePrecondition
     /// says so) — and an optional extension left uninstalled is a legitimate resting state, not a broken
     /// grant. The stored message names the extension; this status is what lets the health surfaces band it
     /// apart.
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="NamedSkipStatusSqlList"/>, and as the literal extension_missing_count counts) is baked, at materialization
+    /// time, into <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>),
+    /// which serves the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week
+    /// of already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE
+    /// ... IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string ExtensionMissingStatus = "EXTENSION_MISSING";
 
@@ -129,6 +159,16 @@ public static class CollectorRuntimePrecondition
     /// <para>A pin holds this string and <see cref="NamedSkipStatuses"/> to the same membership, so a
     /// fourth status added to one and not the other fails a build rather than leaving a read asking about
     /// three of four.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This list (last_non_skip_time) — and adding a fourth
+    /// status to <see cref="NamedSkipStatuses"/>, which moves it — is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string NamedSkipStatusSqlList =
         "'" + ExtensionMissingStatus + "', '" + DegradedStatus + "', '" + CaptureSessionMissingStatus + "'";

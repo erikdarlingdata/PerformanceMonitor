@@ -356,8 +356,10 @@ public sealed class FleetCollectionHealthMemoTests
 
         /* And the statement text and its deadline are untouched by this change — the plan was never the problem. */
         Assert.Contains("FROM v_collection_log\nWHERE collection_time >= $1\nAND   server_id <> 0\nGROUP BY server_id, collector_name", reader, StringComparison.Ordinal);
+        /* #3893 arm 2 changed the one line deliberately: the statement is now CHOSEN (composed from the hourly
+           aggregate when both guards pass, else this raw scan), and the deadline still follows it. */
         Assert.Contains(
-            "await using var command = postgres.CreateCommand(FleetCollectionHealthSql);\n        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;",
+            "await using var command = postgres.CreateCommand(composed ? FleetCollectionHealthComposedSql : FleetCollectionHealthSql);\n        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;",
             reader,
             StringComparison.Ordinal);
     }

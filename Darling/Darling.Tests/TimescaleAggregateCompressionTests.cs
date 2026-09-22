@@ -534,15 +534,27 @@ public sealed class TimescaleAggregateCompressionTests
             /* The aggregates have to exist, over hypertables, before anything can be compressed on them — the same
                ordering the worker's TimescaleDB block runs. */
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            /* #3893: collection_log too, as the worker does (its "collection_log hypertable" step precedes the
+               aggregate ensure, pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate
+               is sourced from it, and on a store whose migrations ran before CREATE EXTENSION it is still a plain
+               table until this runs, so the aggregate's CREATE would fail and the count below would read one
+               short, depending on which class reached the shared store first. */
+            Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
             await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, created);
+            /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
+               targets (no compression band slot) — so the created count is the targets plus those. */
+            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count + TimescaleSupport.OffGridAggregates.Length, created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
                every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read
                so the change count below is asserted against what was actually wide, not against a version fact. */
+            /* #3893: counted over the compression TARGETS only, because that is the set this ensure narrows. The
+               off-grid collection-health aggregate is not one of them: the creation sweep has ALREADY set it to one
+               raw chunk, before its policy existed (CollectionHealthAggregateTests pins that). */
             var wideBefore = (await MaterializationChunkIntervalSecondsAsync(connection, ct))
-                .Count(kv => kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
+                .Count(kv => TimescaleSupport.IsAggregateCompressionTarget(kv.Key)
+                    && kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
 
             var firstLog = new CapturingTestLogger();
             var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);
