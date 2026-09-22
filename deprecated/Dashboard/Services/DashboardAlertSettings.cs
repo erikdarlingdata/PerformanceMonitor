@@ -79,6 +79,8 @@ namespace PerformanceMonitorDashboard.Services
 
         public double AnalysisNotifySeverity        => Math.Clamp(Prefs.AnalysisNotifySeverity, 0.0, 2.0);
         public int    AnalysisNotifyCooldownMinutes => Math.Clamp(Prefs.AnalysisNotifyCooldownMinutes, 30, 10080);
+        /* #3916: the analysis page cap per hold-back window is the Dashboard's per-event cap (default 10). */
+        public int    AnalysisPageCap               => Math.Clamp(Prefs.AlertPerEventMaxPerCycle, 1, 100);
 
         /* #2710: the deprecated Dashboard serves no web dashboard - no triage page to link to. */
         public string TriageBaseUrl => "";

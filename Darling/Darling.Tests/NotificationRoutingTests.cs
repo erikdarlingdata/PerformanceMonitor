@@ -603,6 +603,7 @@ public sealed class NotificationRoutingTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 5;
         public string TriageBaseUrl => "";
     }
 }
