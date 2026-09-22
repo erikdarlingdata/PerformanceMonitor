@@ -565,8 +565,26 @@ public sealed class PgTargetGrowthTests
         },
     };
 
-    /// <summary>A graded bloat trend (lane 13's shape) on one table: 1 GiB heap, 100 → 500 MiB estimate → 0.59375.</summary>
-    private static Fact Bloat(string? database, string table) => new()
+    /// <summary>A graded bloat trend (lane 13's shape) on one table: 1 GiB heap, 100 → 500 MiB estimate → 0.59375.
+    /// The table rides on <c>Fact.Ranked</c> as its own subject since #3691 lane 43 — it was a
+    /// <c>growth_bytes_&lt;table&gt;</c> metadata key, and <c>BloatNamedObjects</c> (which the growth family's
+    /// same-database predicate reaches) reads the typed list now.</summary>
+    private static Fact Bloat(string? database, string table)
+    {
+        var fact = BloatFact(database, table);
+        fact.Ranked.Add(new RankedObject(
+            table,
+            database,
+            400 * MiB,
+            new Dictionary<string, double>(StringComparer.Ordinal)
+            {
+                [PgTargetScorer.BloatGrowthBytesKey] = 400 * MiB,
+                [PgTargetScorer.BloatGrowthPctKey] = 400.0,
+            }));
+        return fact;
+    }
+
+    private static Fact BloatFact(string? database, string table) => new()
     {
         Source = PgTargetSources.BloatSource,
         Key = PgTargetFactKeys.BloatTrend,
@@ -584,7 +602,6 @@ public sealed class PgTargetGrowthTests
             [PgTargetScorer.BloatSamplesKey] = 336,
             [PgTargetScorer.BloatSpanHoursKey] = 335,
             [PgTargetScorer.BloatLookbackDaysKey] = PgTargetScorer.BloatLookbackDays,
-            [PgTargetScorer.BloatNamedGrowthBytesPrefix + table] = 400 * MiB,
         },
     };
 

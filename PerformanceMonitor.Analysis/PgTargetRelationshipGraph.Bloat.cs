@@ -20,8 +20,10 @@ namespace PerformanceMonitor.Analysis;
 /// <para><b>Why the table intersection, and what happens without names.</b> A backlog on <c>orders</c> says
 /// nothing about bloat growing on <c>events</c>; an edge on co-presence alone would tell a story whose two
 /// halves are about different tables. So the predicate intersects the backlog fact's one table
-/// (<see cref="Fact.ObjectName"/>) with the set the bloat fact names (its worst table plus the
-/// <c>growth_bytes_&lt;schema.table&gt;</c> metadata keys, through <see cref="PgTargetScorer.BloatNamedObjects"/>).
+/// (<see cref="Fact.ObjectName"/>) with the set the bloat fact names (its worst table plus its
+/// <see cref="Fact.Ranked"/> entries, through <see cref="PgTargetScorer.BloatNamedObjects"/> — they were
+/// <c>growth_bytes_&lt;schema.table&gt;</c> metadata keys before #3691 lane 43 typed the seam; the predicate's
+/// semantics did not change with its source).
 /// When the backlog fact carries no name at all the intersection cannot be tested and the edge falls back
 /// to co-presence — and the description says "a table this trend names", which in that one case is the
 /// weaker claim; <see cref="PgTargetScorer.BloatAndBacklogShareATable"/> is the single definition both the

@@ -112,17 +112,22 @@ public sealed class PgTargetBloatTests
 
     /* ── the named objects and the same-table predicate ── */
 
+    /// <summary>#3691 lane 43: the names now come off <c>Fact.Ranked</c> instead of the
+    /// <c>growth_bytes_&lt;name&gt;</c> metadata keys. <c>BloatNamedObjects</c>' SIGNATURE and semantics are
+    /// unchanged — it is a graph and amplifier predicate helper — so this pin keeps asserting the same sets;
+    /// only how the fixtures plant the names moved. The nameless-fact arm below is why the helper still unions
+    /// <c>ObjectName</c> in rather than trusting <c>Ranked[0]</c>.</summary>
     [Fact]
-    public void NamedObjects_ReadTheWorstAndEveryGrowthKey_AndParentTablesDropTheIndexPart()
+    public void NamedObjects_ReadTheWorstAndEveryRankedObject_AndParentTablesDropTheIndexPart()
     {
-        var table = Table("public.orders", GiB, 100 * MiB, 500 * MiB,
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "public.events", 300 * MiB),
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "sales.ledger", 10 * MiB));
+        var table = Table("public.orders", GiB, 100 * MiB, 500 * MiB);
+        Rank(table, "public.events", 300 * MiB);
+        Rank(table, "sales.ledger", 10 * MiB);
         Assert.Equal(["public.events", "public.orders", "sales.ledger"], PgTargetScorer.BloatNamedObjects(table).Order(StringComparer.Ordinal));
 
-        var index = Index("public.orders.orders_pkey", 512 * MiB, 0, 300 * MiB, 5,
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "sales.ledger.ledger_idx", 20 * MiB),
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "bare_index", MiB));
+        var index = Index("public.orders.orders_pkey", 512 * MiB, 0, 300 * MiB, 5);
+        Rank(index, "sales.ledger.ledger_idx", 20 * MiB);
+        Rank(index, "bare_index", MiB);
         Assert.Equal(["bare_index", "public.orders", "sales.ledger"], PgTargetScorer.BloatNamedObjects(index, parentTables: true).Order(StringComparer.Ordinal));
         Assert.True(PgTargetScorer.BloatNamedObjects(index, parentTables: true).Overlaps(PgTargetScorer.BloatNamedObjects(table)));
 
@@ -260,11 +265,12 @@ public sealed class PgTargetBloatTests
             (PgTargetScorer.BloatObjectsSeenKey, 40),
             (PgTargetScorer.BloatObjectsEstimableKey, 38),
             (PgTargetScorer.BloatObjectsConsideredKey, 6),
-            (PgTargetScorer.BloatObjectsOverLineKey, 1),
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "public.events", 300 * MiB),
-            (PgTargetScorer.BloatNamedGrowthPctPrefix + "public.events", 40),
-            (PgTargetScorer.BloatNamedDeadTuplesPrefix + "public.events", 20_000),
-            (PgTargetScorer.BloatNamedGrowthBytesPrefix + "sales.ledger", 10 * MiB));
+            (PgTargetScorer.BloatObjectsOverLineKey, 1));
+        /* #3691 lane 43: the next-by-growth objects and their three figures now ride on Fact.Ranked, in the
+           read's own rank order, instead of as growth_bytes_<name> / growth_pct_<name> / dead_tuples_<name>
+           metadata keys. The SENTENCE the card renders from them is unchanged — asserted below verbatim. */
+        Rank(trend, "public.events", 300 * MiB, pct: 40, dead: 20_000);
+        Rank(trend, "sales.ledger", 10 * MiB);
         var backlog = Backlog(5.0, "public.orders");
         var facts = new List<Fact> { trend, backlog };
         new FactScorer().ScoreAll(facts);
@@ -443,21 +449,39 @@ public sealed class PgTargetBloatTests
                 [PgTargetScorer.BloatObjectBytesKey] = heapBytes,
                 [PgTargetScorer.BloatSamplesKey] = 14,
                 [PgTargetScorer.BloatLookbackDaysKey] = PgTargetScorer.BloatLookbackDays,
-                [PgTargetScorer.BloatNamedGrowthBytesPrefix + objectName] = growth,
             },
         };
         if (earlier > 0)
         {
             fact.Metadata[PgTargetScorer.BloatGrowthPctKey] = 100.0 * growth / earlier;
             fact.Metadata[PgTargetScorer.BloatGrowthPctComputableKey] = 1;
-            fact.Metadata[PgTargetScorer.BloatNamedGrowthPctPrefix + objectName] = 100.0 * growth / earlier;
         }
         else
         {
             fact.Metadata[PgTargetScorer.BloatGrowthPctComputableKey] = 0;
         }
         foreach (var (k, v) in extra) fact.Metadata[k] = v;
+        /* #3691 lane 43: the collector's Ranked[0] IS the subject — same name, same value, same figures — so a
+           fixture that ranks anything starts with itself or FactRankedTests' invariant would rightly fail it. */
+        Rank(fact, objectName, growth, pct: earlier > 0 ? 100.0 * growth / earlier : null);
         return fact;
+    }
+
+    /// <summary>Appends one <c>Fact.Ranked</c> entry in the bloat reads' own shape: growth bytes as the value,
+    /// and the growth percentage / dead tuples as figures under the fact's own un-prefixed metadata names
+    /// (absent where the read has nothing to say — an earlier estimate of zero has no percentage, and an index
+    /// row has no dead tuples). #3691 lane 43.</summary>
+    private static void Rank(Fact fact, string objectName, double growthBytes, double? pct = null, double? dead = null)
+    {
+        var figures = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            [PgTargetScorer.BloatGrowthBytesKey] = growthBytes,
+        };
+        if (pct.HasValue)
+            figures[PgTargetScorer.BloatGrowthPctKey] = pct.Value;
+        if (dead.HasValue)
+            figures[PgTargetScorer.BloatDeadTuplesKey] = dead.Value;
+        fact.Ranked.Add(new RankedObject(objectName, fact.DatabaseName, growthBytes, figures));
     }
 
     private static Fact Index(string objectName, long indexBytes, long earlier, long growth, long samples, params (string Key, double Value)[] extra)

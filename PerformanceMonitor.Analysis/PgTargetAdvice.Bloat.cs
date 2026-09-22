@@ -119,18 +119,12 @@ public static partial class PgTargetAdvice
             ? "This table crossed it. "
             : "This table did not cross it; the fact is context, not a finding. ");
 
-        var others = NamedObjects(m, PgTargetScorer.BloatNamedGrowthBytesPrefix).Where(n => n.Name != f.ObjectName).ToList();
-        if (others.Count > 0)
-        {
-            inv.Append("Next by growth: ");
-            inv.Append(string.Join("; ", others.Select(o =>
-            {
-                var oPct = m.TryGetValue(PgTargetScorer.BloatNamedGrowthPctPrefix + o.Name, out var p) ? $", {Pct(p)}" : string.Empty;
-                var oDead = m.TryGetValue(PgTargetScorer.BloatNamedDeadTuplesPrefix + o.Name, out var d) ? $", {Fmt(d)} dead tuples now" : string.Empty;
-                return $"{o.Name} ({FmtBytes(o.Value)}{oPct}{oDead})";
-            })));
-            inv.Append(". ");
-        }
+        /* #3691 lane 43: the next-by-growth tables by name, off the typed ranked list instead of the
+           growth_bytes_<name> metadata keys this used to scan with a prefix test. Same order (the read's ORDER BY,
+           which is what the keys were sorted back into), same three figures, same rule that the subject is not
+           repeated — Ranked[0] IS the subject, so NameTheRest skipping it is that rule rather than a filter over
+           a name comparison. Empty when the read returned one table, which is the byte-identity arm. */
+        inv.Append(NextByGrowth(f, dead: true));
         inv.Append($"Population: {seen:0} table{(seen == 1 ? string.Empty : "s")} seen in the lookback, {estimable:0} with a usable estimate, {considered:0} at or over the {FmtBytes(PgTargetScorer.BloatSizeFloorBytes)} heap floor, {overLine:0} over the line. ");
 
         if (backlogSameTable)
@@ -218,17 +212,9 @@ public static partial class PgTargetAdvice
         inv.Append($"The line is measured — growth of at least {FmtBytes(PgTargetScorer.BloatGrowthConcerningBytes)} AND at least {Pct(100.0 * PgTargetScorer.BloatGrowthConcerningFraction)} of the earlier estimate (the fleet p90 of worst-table fourteen-day growth, the engine-neutral quantity shared with PG_BLOAT_TREND); an index needs {PgTargetScorer.IndexBloatMinimumSamples} daily samples before its trend is graded at all (a chosen minimum, not a measured one). ");
         inv.Append(graded ? "This index crossed it. " : "This index did not cross it; the fact is context, not a finding. ");
 
-        var others = NamedObjects(m, PgTargetScorer.BloatNamedGrowthBytesPrefix).Where(n => n.Name != f.ObjectName).ToList();
-        if (others.Count > 0)
-        {
-            inv.Append("Next by growth: ");
-            inv.Append(string.Join("; ", others.Select(o =>
-            {
-                var oPct = m.TryGetValue(PgTargetScorer.BloatNamedGrowthPctPrefix + o.Name, out var p) ? $", {Pct(p)}" : string.Empty;
-                return $"{o.Name} ({FmtBytes(o.Value)}{oPct})";
-            })));
-            inv.Append(". ");
-        }
+        /* The index twin of the table card's clause — same source, same shape, no dead-tuple figure (dead tuples
+           are the heap's, and this fact is about an index's reclaimable bytes). */
+        inv.Append(NextByGrowth(f, dead: false));
         inv.Append($"Population: {seen:0} index{(seen == 1 ? string.Empty : "es")} seen in the lookback, {estimable:0} with a usable estimate, {considered:0} at or over the {FmtBytes(PgTargetScorer.BloatSizeFloorBytes)} floor with enough samples, {overLine:0} over the line. ");
         AppendSkippedShare(inv, m);
 
@@ -306,6 +292,45 @@ public static partial class PgTargetAdvice
     }
 
     /// <summary>The named objects a bloat fact carries under <paramref name="prefix"/>, largest value first.</summary>
+    /// <summary>
+    /// The "Next by growth: …" sentence both bloat cards carry, off <see cref="Fact.Ranked"/> through the shared
+    /// <see cref="FactAdvice.NameTheRest"/> grammar (#3691 lane 43). Returns the empty string when the fact ranks
+    /// only its own subject — the byte-identity arm for every server with one estimable object over the floor.
+    ///
+    /// <para>Its own sentence rather than a clause on the subject's: the bloat cards state the subject's figures
+    /// over several sentences (the estimate's movement, the measured heap size, the spot percentage that was NOT
+    /// graded, whether the line was crossed) and appending the rest to any one of them would read as a comment on
+    /// that sentence's claim. "Next by growth" is the same words the key-encoded version used, so a reader's
+    /// expectation of this card is unchanged; <paramref name="dead"/> is what differs between the table fact (dead
+    /// tuples at the latest sample belong to a heap) and the index fact.</para>
+    /// </summary>
+    private static string NextByGrowth(Fact fact, bool dead)
+    {
+        var named = FactAdvice.NameTheRestList(
+            fact,
+            o =>
+            {
+                var figures = o.Figures;
+                var pct = figures is not null && figures.TryGetValue(PgTargetScorer.BloatGrowthPctKey, out var p) ? $", {Pct(p)}" : string.Empty;
+                var deadText = dead && figures is not null && figures.TryGetValue(PgTargetScorer.BloatDeadTuplesKey, out var d)
+                    ? $", {Fmt(d)} dead tuples now"
+                    : string.Empty;
+                return $"{FmtBytes(figures?.GetValueOrDefault(PgTargetScorer.BloatGrowthBytesKey) ?? o.Value)}{pct}{deadText}";
+            },
+            /* Semicolons between objects, as this card always had them: three comma-separated figures per object
+               make a comma between objects one comma among four. */
+            separator: "; ");
+
+        return named.Length == 0 ? string.Empty : $"Next by growth: {named}. ";
+    }
+
+    /// <summary>
+    /// The named objects behind a key-ENCODED metadata prefix, worst value first then by name — the shape the
+    /// bloat cards used before #3691 lane 43 typed their seam, still here because the DATABASE-GROWTH family
+    /// (<c>PgTargetAdvice.Growth.cs</c>, <see cref="PgTargetScorer.GrowthNamedBytesPrefix"/>) encodes its named
+    /// databases the same way and was not part of lane 43's three migrations. It is a candidate for the same
+    /// move; until someone makes it, this is that family's reader and the bloat families no longer call it.
+    /// </summary>
     private static List<(string Name, double Value)> NamedObjects(Dictionary<string, double> m, string prefix) =>
         m.Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal) && kv.Key.Length > prefix.Length)
             .Select(kv => (Name: kv.Key[prefix.Length..], Value: kv.Value))

@@ -82,30 +82,57 @@ public static class FactAdvice
     /// </summary>
     public static string NameTheRest(Fact fact, Func<RankedObject, string> figures)
     {
+        var named = NameTheRestList(fact, figures, separator: ", ");
+        if (named.Length == 0)
+            return string.Empty;
+
+        /* Spelled out to three, which is FactRanked.MaxObjects — the numeral arm exists so a cap raised without
+           touching this file reads as English rather than as "and 4 more" beside spelled-out siblings. */
+        var rest = fact.Ranked.Count - 1;
+        var count = rest switch
+        {
+            1 => "one",
+            2 => "two",
+            3 => "three",
+            _ => rest.ToString(CultureInfo.InvariantCulture),
+        };
+
+        return $"; and {count} more: {named}";
+    }
+
+    /// <summary>
+    /// The NAMED LIST alone — <c>"public.orders (300 MB, 40%), sales.ledger (10 MB)"</c> — without the clause
+    /// grammar <see cref="NameTheRest"/> wraps it in, for a family whose card states the rest in a SENTENCE of
+    /// its own rather than as a clause on the subject's. Empty string under two ranked objects, same rule and
+    /// same reason (#3691 lane 43).
+    ///
+    /// <para>Two entry points and one formatter, because the alternative is two grammars: the bloat cards state
+    /// the subject's figures across several sentences and could not append "and two more" to any one of them
+    /// without reading as a comment on that sentence, while the autovacuum-disabled card states its subject in
+    /// one sentence and wants the clause there. What must not differ between them is how an object and its
+    /// figures are rendered, and that lives here.</para>
+    ///
+    /// <para><paramref name="separator"/> is the caller's because it is a property of the FIGURES, not a
+    /// preference: the bloat families state three figures per object ("300 MB, 40%, 20,000 dead tuples now"),
+    /// so a comma between objects would be one comma among four and the list would stop parsing to a human;
+    /// the clause form's figures carry none, so a comma is right there. Both spellings are pinned.</para>
+    /// </summary>
+    public static string NameTheRestList(Fact fact, Func<RankedObject, string> figures, string separator)
+    {
         ArgumentNullException.ThrowIfNull(fact);
         ArgumentNullException.ThrowIfNull(figures);
+        ArgumentException.ThrowIfNullOrEmpty(separator);
 
         if (fact.Ranked.Count < 2)
             return string.Empty;
 
-        var rest = fact.Ranked.Skip(1).ToList();
-        var named = rest.Select(o =>
+        var named = fact.Ranked.Skip(1).Select(o =>
         {
             var text = figures(o) ?? string.Empty;
             return text.Length == 0 ? o.ObjectName : $"{o.ObjectName} ({text})";
         });
 
-        /* Spelled out to three, which is FactRanked.MaxObjects — the numeral arm exists so a cap raised without
-           touching this file reads as English rather than as "and 4 more" beside spelled-out siblings. */
-        var count = rest.Count switch
-        {
-            1 => "one",
-            2 => "two",
-            3 => "three",
-            _ => rest.Count.ToString(CultureInfo.InvariantCulture),
-        };
-
-        return $"; and {count} more: {string.Join(", ", named)}";
+        return string.Join(separator, named);
     }
 
     /// <summary>
