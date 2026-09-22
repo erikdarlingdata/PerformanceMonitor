@@ -206,6 +206,37 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.Contains(rows, r => r.TableName == "HotTable" && r.RowLockWaitInMs == 100_000);
     }
 
+    /// <summary>
+    /// #3876, the reporter's repro: a database renamed between captures. The old name's rows exist only in
+    /// an OLDER capture; the new name's rows only in the newest. "Latest" used to be resolved PER NAME
+    /// (MAX(collection_time) GROUP BY database_name), which made the dead name its own immortal group — the
+    /// grid showed it a month later and the DB selector still offered it. Anchored on the SERVER's latest
+    /// capture, the grid and the selector both see only what the newest pass collected — the same answer
+    /// Database sizes and Storage growth always gave — while the old name's rows stay in the store untouched
+    /// as capture-time history.
+    /// </summary>
+    [Fact]
+    public async Task IndexLocking_AfterADatabaseRename_ShowsOnlyTheCurrentName_InGridAndSelector()
+    {
+        // Pre-rename capture: contended rows under the OLD name only.
+        await InsertObjectStat(_prior, "OldName", 400, 1, "dbo", "RenamedHot", "PK_RenamedHot", 90m, 100_000, 50, 2, 0, 100, 40_000, 1);
+        // Newest capture: the same workload under the NEW name; the old name is absent from this pass.
+        await InsertObjectStat(_latest, "NewName", 400, 1, "dbo", "RenamedHot", "PK_RenamedHot", 95m, 110_000, 80, 3, 0, 150, 70_000, 2);
+
+        var rows = await _dataService.GetIndexLockingAsync(ServerId);
+        Assert.Contains(rows, r => r.DatabaseName == "NewName" && r.RowLockWaitInMs == 70_000);
+        Assert.DoesNotContain(rows, r => r.DatabaseName == "OldName");
+
+        var dbs = await _dataService.GetIndexLockingDatabasesAsync(ServerId);
+        Assert.Contains("NewName", dbs);
+        Assert.DoesNotContain("OldName", dbs);
+
+        /* The dead name must not be resurrectable through the filter arm either: scoping the grid to the
+           old name finds nothing at the current capture, rather than the pre-rename rows. */
+        var oldScoped = await _dataService.GetIndexLockingAsync(ServerId, 200, "OldName");
+        Assert.Empty(oldScoped);
+    }
+
     // ── anomaly detection ──
 
     [Fact]

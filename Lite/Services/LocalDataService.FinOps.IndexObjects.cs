@@ -206,9 +206,26 @@ LIMIT {topN}";
     }
 
     /// <summary>
-    /// Per-index locking/latch contention at each database's latest snapshot for a server, top objects by
-    /// total lock+latch wait. Cumulative totals, no delta (#1138 §3B). Optionally scoped to one database
-    /// (the Locking grid's DB selector); per-database latest so "all databases" shows every DB's newest row.
+    /// Per-index locking/latch contention at the server's latest snapshot, top objects by total lock+latch
+    /// wait. Cumulative totals, no delta (#1138 §3B). Optionally scoped to one database (the Locking grid's
+    /// DB selector).
+    /// <para>#3876: this read used to resolve "latest" PER <c>database_name</c> — <c>MAX(collection_time)</c>
+    /// GROUPed BY the name string — which made every name the store has ever seen its own immortal group.
+    /// Rename a database and its old name keeps a group whose newest row is the last capture before the
+    /// rename; that group is still "the latest for that name" forever, so the grid and its DB selector showed
+    /// databases that had not existed for a month (the reporter's four-tab split: Database sizes, Database
+    /// Resources and Storage growth all anchor on the server's latest capture and had already dropped the old
+    /// names). The per-name grouping was meant to keep a database visible when it missed the newest pass, but
+    /// it cannot buy that: one collector run stamps every database it collects with a single
+    /// <c>collection_time</c> (<c>RemoteCollectorService.DefinitionRunner.cs</c> takes one
+    /// <c>DateTime.UtcNow</c> per run and hands it to every batch), so for a database present in the newest
+    /// pass the per-name MAX IS the server-wide MAX — identical rows — and for a database absent from it the
+    /// only thing the grouping adds is a row for a name that is gone. So the anchor is now the server's
+    /// latest capture, which is how <see cref="GetIndexUsageAsync"/> one screen up, Database sizes
+    /// (<c>LocalDataService.FinOps.Inventory.cs</c>) and Storage growth
+    /// (<c>LocalDataService.FinOps.StorageGrowth.cs</c>) have always resolved it: ONE resolution path for the
+    /// current set of databases, not two truths about which databases exist. Capture-time names stay in the
+    /// store untouched — history is not rewritten, it is simply no longer read as the present.</para>
     /// </summary>
     public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null)
     {
@@ -216,15 +233,9 @@ LIMIT {topN}";
         using var command = connection.CreateCommand();
 
         // Build the optional DB filter as literal SQL so a NULL parameter never has to be typed by DuckDB.
-        var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+        var dbFilter = databaseName == null ? "" : " AND ios.database_name = $2";
 
         command.CommandText = $@"
-WITH latest AS (
-    SELECT database_name, MAX(collection_time) AS latest_time
-    FROM v_index_object_stats
-    WHERE server_id = $1{dbFilter}
-    GROUP BY database_name
-)
 SELECT
     ios.database_name,
     ios.schema_name,
@@ -245,8 +256,8 @@ SELECT
     COALESCE(ios.page_latch_wait_count, 0) AS page_latch_wait_count,
     COALESCE(ios.page_io_latch_wait_count, 0) AS page_io_latch_wait_count
 FROM v_index_object_stats ios
-JOIN latest l ON l.database_name = ios.database_name AND l.latest_time = ios.collection_time
 WHERE ios.server_id = $1
+AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -293,8 +304,11 @@ LIMIT {topN}";
     }
 
     /// <summary>
-    /// Distinct databases that have any lock/latch contention at their latest snapshot — the source for the
-    /// Locking grid's database selector (#1138 §3B).
+    /// Distinct databases that have any lock/latch contention at the server's latest snapshot — the source
+    /// for the Locking grid's database selector (#1138 §3B). Anchored on the same server-latest capture as
+    /// <see cref="GetIndexLockingAsync"/>: the selector and the grid must agree on which databases exist, and
+    /// under #3876's per-name grouping both offered month-dead names (the selector is how the reporter's old
+    /// names could still be PICKED, not merely displayed).
     /// </summary>
     public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId)
     {
@@ -302,16 +316,10 @@ LIMIT {topN}";
         using var command = connection.CreateCommand();
 
         command.CommandText = @"
-WITH latest AS (
-    SELECT database_name, MAX(collection_time) AS latest_time
-    FROM v_index_object_stats
-    WHERE server_id = $1
-    GROUP BY database_name
-)
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
-JOIN latest l ON l.database_name = ios.database_name AND l.latest_time = ios.collection_time
 WHERE ios.server_id = $1
+AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
