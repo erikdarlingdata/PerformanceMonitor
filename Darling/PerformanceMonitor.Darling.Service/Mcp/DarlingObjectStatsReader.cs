@@ -383,18 +383,27 @@ internal static class DarlingObjectStatsReader
     /* ─────────────────────────── object locking ─────────────────────────── */
 
     /// <summary>
-    /// Per-index locking / latch contention at each database's latest snapshot — the viewer's
+    /// Per-index locking / latch contention at the SERVER's latest capture — the viewer's
     /// <c>IndexLockingAllSql</c> projected to the columns get_object_locking surfaces: only rows with a
     /// nonzero lock/latch wait or promotion, most contended first. Counters are cumulative since the last
     /// restart. $1 server_id, $2 cap.
+    ///
+    /// <para><b>#3878: this read used to resolve "latest" PER <c>database_name</c></b> —
+    /// <c>MAX(collection_time)</c> GROUPed BY the name string, joined back to the rows — which made every
+    /// name the store has ever seen its own immortal group. A database renamed away keeps a group whose
+    /// newest row is the last capture before the rename, so the read returned it forever, and an agent
+    /// calling <c>get_object_locking</c> was handed month-dead database names as live peers (#3876 is the
+    /// field report against Lite's identical port; #3877 fixed that half). The grouping was meant to keep a
+    /// database visible when it missed the newest pass, and it cannot: one collector run stamps every
+    /// database it collects with a single <c>collection_time</c>, so for a database present in the newest
+    /// pass the per-name MAX IS the server-wide MAX — identical rows — while for one absent from it the
+    /// grouping adds nothing but a name that is gone. The anchor is now the server's newest capture, which
+    /// is how <see cref="IndexUsageSql"/> one screen up and <see cref="DatabaseSizeLatestSql"/> below have
+    /// always resolved it, and how <see cref="ObjectSizeGrowthSql"/>'s <c>boundaries</c> resolves its own:
+    /// one instant, one answer about which databases exist. Capture-time names stay in the store as the
+    /// history they honestly are — nothing is rewritten, it is only no longer read as the present.</para>
     /// </summary>
     public const string IndexLockingSql = """
-        WITH latest AS (
-            SELECT database_name, MAX(collection_time) AS latest_time
-            FROM v_index_object_stats
-            WHERE server_id = $1
-            GROUP BY database_name
-        )
         SELECT
             ios.database_name,
             ios.schema_name,
@@ -411,8 +420,8 @@ internal static class DarlingObjectStatsReader
             COALESCE(ios.page_latch_wait_in_ms, 0) AS page_latch_wait_in_ms,
             COALESCE(ios.page_io_latch_wait_in_ms, 0) AS page_io_latch_wait_in_ms
         FROM v_index_object_stats ios
-        JOIN latest l ON l.database_name = ios.database_name AND l.latest_time = ios.collection_time
         WHERE ios.server_id = $1
+        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
         AND (
             COALESCE(ios.row_lock_wait_in_ms, 0) > 0
             OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
