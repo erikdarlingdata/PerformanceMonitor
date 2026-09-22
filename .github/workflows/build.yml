@@ -791,7 +791,7 @@ jobs:
   # shape the build job uses for doc-only changes). Mirrors the nightly darling-pg job step-for-step;
   # the one live-SQL-Server E2E stays skipped (DARLING_TEST_SQL unset — no SQL Server on the runner).
   darling-pg:
-    name: Darling PostgreSQL tests
+    name: Darling PG tests
     runs-on: windows-latest
     # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
     # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
@@ -800,6 +800,20 @@ jobs:
     # has NO timeout: on release it waits on SignPath's manual approval gate, which can
     # legitimately take hours.
     timeout-minutes: 30
+    # THREE shards cut by CLASS-NAME HASH (#3890), the machinery #3887 proved on the Lite suite.
+    # Measured on this job's own step timings: ~190s fixed (of which Build Darling.Tests is 132s)
+    # plus 266s of tests, so only the 266s shards and the fixed floor decides where the returns
+    # stop - 2 shards land ~5m23s, 3 ~4m39s, 4 ~4m17s. Three is the stop: it puts this job under
+    # the build job's 6m16s, which is what actually bounds the PR wall, and a fourth Windows runner
+    # from the shared pool buys twenty seconds of a number nothing reads.
+    #
+    # The prebuilt-ladder image this was filed alongside is dead on measurement: the migration
+    # ladder replays in ~1s (timed by running one live class twice against one store) and the whole
+    # cluster costs 8s to initdb and start. There was nothing there to save.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     permissions:
       contents: read
 
@@ -968,7 +982,23 @@ jobs:
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-pr.trx
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $raw = dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          $classes = @($raw | ConvertFrom-Json)
+          if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
+
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $mine = @($classes | Where-Object {
+              ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))[0] % 3) -eq ${{ matrix.shard }}
+          })
+          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          $shardArgs = foreach ($class in $mine) { '-class'; $class }
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
+          exit $LASTEXITCODE
 
       - name: Stop PostgreSQL
         if: always() && steps.filter.outputs.darling == 'true'
@@ -983,11 +1013,47 @@ jobs:
         if: failure() && steps.filter.outputs.darling == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: darling-pg-failure
+          # Per-shard: matrix legs sharing one artifact name collide and fail the upload.
+          name: darling-pg-failure-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/darling-pg.log
             TestResults/
           if-no-files-found: ignore
+
+  # The single answer branch protection already requires. Matrixing darling-pg renames its own
+  # checks to "Darling PG tests (0/1/2)", so the context dev has required since this job existed -
+  # "Darling PostgreSQL tests" - would have stopped reporting and blocked every pull request on a
+  # check that never runs, including the one making this change. Rather than a protection edit with
+  # a deadlock window for every branch cut before the merge, the join job INHERITS that name: the
+  # required context keeps reporting, and it now means "every shard passed" instead of "the one
+  # sequential run passed". Nothing in repo settings has to change.
+  #
+  # It reports on every non-cancelled event, so it cannot be the silent-green shape the whole-tree
+  # guards job exists to prevent: a leg that never starts leaves needs.darling-pg.result at
+  # something other than success, and this fails loudly and says which.
+  darling-pg-result:
+    name: Darling PostgreSQL tests
+    needs: darling-pg
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report the shards' one answer
+        shell: bash
+        env:
+          RESULT: ${{ needs.darling-pg.result }}
+        run: |
+          set -euo pipefail
+          case "${RESULT}" in
+            success)
+              echo "::notice title=Darling PG shards green::Every shard succeeded, or the Darling gate skipped the suite on all of them." ;;
+            skipped)
+              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all." ;;
+            *)
+              echo "::error title=Darling PG shards failed::needs.darling-pg.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit; read the failing shard's log."
+              exit 1 ;;
+          esac
 
   # ── Linux service build + container image (#1804) ────────────────────────────────────────────────
   # The Darling service is cross-platform .NET on purpose, but until this job nothing PROVED it on
