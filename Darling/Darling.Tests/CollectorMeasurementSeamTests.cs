@@ -547,6 +547,8 @@ public class CollectorMeasurementSeamTests
                    Not a ServerEpoch marker: a reseeded sysjobhistory IDENTITY says nothing about any
                    cumulative counter on the instance, so it forgets no baselines and carries its own count. */
                 JobHistoryCollector.IdentityRegressionsMeasurement,
+                JobHistoryCollector.IdentityWatermarkMeasurement,
+                JobHistoryCollector.IdentityTargetRowMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

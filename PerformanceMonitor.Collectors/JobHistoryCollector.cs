@@ -246,6 +246,12 @@ AND   (
     /// </summary>
     public const string IdentityRegressionsMeasurement = "job_history_identity_regressions";
 
+    /// <summary>The store watermark the regressed target fell below, on the run that detected it.</summary>
+    public const string IdentityWatermarkMeasurement = "job_history_identity_store_watermark";
+
+    /// <summary>The first target <c>instance_id</c> read on the run that detected the regression — the new epoch's floor.</summary>
+    public const string IdentityTargetRowMeasurement = "job_history_identity_target_row";
+
     public override string Name => "job_history";
 
     public override string TargetTable => "job_history";
@@ -365,10 +371,11 @@ AND   (
     /// epoch (and a persisted <c>job_history_identity</c> / <c>_previous</c> state pair, which would let the
     /// read layer's <c>discontinuities[]</c> name this by itself) is the named follow-up on #3885.</para>
     ///
-    /// <para><b>ClearGroups, with this collector's own group.</b> job_history keeps no delta baselines, so
-    /// the forget is a no-op by construction and the call is used for the one thing a definition has no
-    /// other channel for: handing the host a sentence with both numbers in it. Deliberately not
-    /// <c>ClearServer</c> - there is nothing on this server to forget.</para>
+    /// <para><b>No forget call.</b> job_history keeps no delta baselines, so there is nothing to clear, and the
+    /// forget API (<c>ClearGroups</c> / <c>ClearServer</c>) belongs to the epoch comparator and the host remove
+    /// paths alone (measurement-contract rule 3). The regression is recorded as a MEASUREMENT on the run
+    /// (<see cref="IdentityRegressionsMeasurement"/> = 1), which the <c>collection_log</c> note and the host's
+    /// cycle line both render with the two numbers the operator needs beside it.</para>
     /// </summary>
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
@@ -385,16 +392,16 @@ AND   (
             {
                 regressionReported = true;
                 context.Measure(IdentityRegressionsMeasurement, 1);
-                context.Deltas.ClearGroups(
-                    context.ServerId,
-                    "job history identity regressed on " + context.ServerName
-                    + ": store watermark " + context.NumericWatermark.Value.ToString(CultureInfo.InvariantCulture)
-                    + ", target row " + instanceId.ToString(CultureInfo.InvariantCulture)
-                    + " - msdb was purged and reseeded, restored, or is a different instance; re-reading the "
-                    + "bounded " + ArchivalEmptyFallbackHours.ToString(CultureInfo.InvariantCulture)
-                    + "-hour window this run, after which the stored maximum is this instance's own and the "
-                    + "instance_id watermark is honest again",
-                    Name);
+                /* The two numbers an operator needs, on the same note: the watermark the store remembered and the
+                   first id the target now holds. Counts on the measurement seam are the definition's only channel
+                   to the run record, and these two are honest as numbers (#3161). */
+                context.Measure(IdentityWatermarkMeasurement, context.NumericWatermark.Value);
+                context.Measure(IdentityTargetRowMeasurement, instanceId);
+                /* The measurement IS the marker: the run's collection_log note renders identity_regressions=1 and
+                   the host's cycle line carries it, so the store and the log both say the reseed happened on this
+                   run. No ClearGroups/ClearServer: job_history keeps no delta baselines and the forget API is
+                   reserved for the epoch comparator and the host remove paths (MeasurementContractCensusTests
+                   rule 3) - a note is not a forget. */
             }
 
             rows.Add(new Row

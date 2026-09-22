@@ -136,7 +136,7 @@ public sealed class JobHistoryIdentityEpochTests
     }
 
     [Fact]
-    public async Task Regression_IsDetectedFromTheRows_LoggedOnce_AndCounted()
+    public async Task Regression_IsDetectedFromTheRows_AndCountedOnce_WithBothNumbers()
     {
         /* The store remembers 11,500,000; the reseeded target hands back ids in the thousands. A row at or
            below the watermark can only arrive on the bounded-window arm, so the rows themselves are the
@@ -153,21 +153,18 @@ public sealed class JobHistoryIdentityEpochTests
         Assert.Equal(3, rows.Count);
         Assert.Equal(new[] { 4_001L, 4_002L, 4_003L }, rows.Select(r => r.InstanceId).ToArray());
 
-        /* ONE sentence for three low rows, with both numbers in it and the cause named. */
-        var sentence = Assert.Single(deltas.Discontinuities);
-        Assert.Contains("job history identity regressed on test-server", sentence, StringComparison.Ordinal);
-        Assert.Contains("store watermark 11500000", sentence, StringComparison.Ordinal);
-        Assert.Contains("target row 4001", sentence, StringComparison.Ordinal);
-        Assert.Contains("purged and reseeded", sentence, StringComparison.Ordinal);
-        /* Its own group only - job_history keeps no delta baselines, and there is nothing on this server
-           whose baselines a job-history reseed invalidates. */
-        Assert.Equal(new[] { "job_history" }, deltas.ClearedGroups.ToArray());
-
-        /* A count on the run's collection_log note, never a verdict (#3161). */
-        var measurement = Assert.Single(context.Measurements);
-        Assert.Equal(JobHistoryCollector.IdentityRegressionsMeasurement, measurement.Label);
-        Assert.Equal(1L, measurement.Value);
+        /* No forget call: job_history keeps no delta baselines, and the forget API belongs to the epoch
+           comparator and the host remove paths alone (measurement-contract rule 3). The regression reaches the
+           run record as MEASUREMENTS - a count of one plus the two numbers an operator needs - never as prose. */
+        Assert.Empty(deltas.Discontinuities);
+        Assert.Empty(deltas.ClearedGroups);
+        var byLabel = context.Measurements.ToDictionary(m => m.Label, m => m.Value, StringComparer.Ordinal);
+        Assert.Equal(3, byLabel.Count);
+        Assert.Equal(1L, byLabel[JobHistoryCollector.IdentityRegressionsMeasurement]);
+        Assert.Equal(11_500_000L, byLabel[JobHistoryCollector.IdentityWatermarkMeasurement]);
+        Assert.Equal(4_001L, byLabel[JobHistoryCollector.IdentityTargetRowMeasurement]);
         Assert.Equal("job_history_identity_regressions", JobHistoryCollector.IdentityRegressionsMeasurement);
+
     }
 
     [Fact]
