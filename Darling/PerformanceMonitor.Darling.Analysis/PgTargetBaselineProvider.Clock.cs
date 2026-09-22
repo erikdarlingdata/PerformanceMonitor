@@ -76,6 +76,15 @@ AND   c.collection_time = (
           WHERE server_id = $1
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+/* V138 (#3691): the SERVER's TimeZone, never a per-database or per-role override of it. pg_server_config
+   now also holds pg_db_role_setting's rows, and TimeZone is squarely overridable there
+   (ALTER DATABASE ... SET TimeZone is a common per-tenant habit) - so without this predicate the LIMIT 1
+   could return one database's zone and re-clock EVERY local-time bucket for the whole server, which is the
+   worst failure this read can have: every daily/hourly bucket key silently shifts and nothing reports an
+   error. The inner MAX(collection_time) is per SERVER, not per name, so it needs no predicate; only the
+   outer row select does. */
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
 AND   c.setting IS NOT NULL
 LIMIT 1";
 

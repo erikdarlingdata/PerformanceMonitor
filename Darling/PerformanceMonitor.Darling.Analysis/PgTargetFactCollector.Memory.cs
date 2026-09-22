@@ -48,6 +48,13 @@ AND   c.collection_time = (
           WHERE server_id = $1
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+/* V138 (#3691): server-wide rows only. The per-database and per-role overrides pg_server_config now also
+   holds repeat a setting's NAME under a different scope, and the memory facts key on the name - an
+   override row would shadow the server-wide value. The inner MAX(collection_time) is per SERVER, so it
+   needs no predicate of its own. work_mem is the setting most often overridden per database, which is
+   exactly why this filter is not optional here. */
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
 AND   c.name IN (
           'shared_buffers', 'work_mem', 'max_connections', 'max_parallel_workers_per_gather',
           'maintenance_work_mem', 'autovacuum_work_mem', 'autovacuum_max_workers',
