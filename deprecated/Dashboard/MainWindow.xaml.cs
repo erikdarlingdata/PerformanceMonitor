@@ -457,6 +457,10 @@ namespace PerformanceMonitorDashboard
             // out their full timeout during shutdown.
             _analysisScheduler?.Stop();
 
+            /* #3916 PR B: drop the hold-back queue unstamped — a page queued at close is not a delivery, so
+               nothing holds its story and the next launch re-attempts it. */
+            _analysisNotificationService?.Dispose();
+
             // Save alert history to disk
             _alertHistoryStore?.SaveAlertLog();
 

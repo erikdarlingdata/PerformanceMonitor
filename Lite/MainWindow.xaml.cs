@@ -41,6 +41,7 @@ public partial class MainWindow : Window
     private readonly ScheduleManager _scheduleManager;
     private RemoteCollectorService? _collectorService;
     private CollectionBackgroundService? _backgroundService;
+    private AnalysisNotificationService? _analysisNotificationService;
     private CancellationTokenSource? _backgroundCts;
     private SystemTrayService? _trayService;
     private WindowResumeGuard? _resumeGuard;
@@ -213,7 +214,7 @@ public partial class MainWindow : Window
                written inside the window drops the queued page. The read fails OPEN (logged, "not muted"): the
                finding already passed the queue-time mute filter in FindingStore. */
             var muteReadStore = new PerformanceMonitorLite.Analysis.FindingStore(_databaseInitializer);
-            var analysisNotificationService = new AnalysisNotificationService(
+            var analysisNotificationService = _analysisNotificationService = new AnalysisNotificationService(
                 _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
                 isStoryMuted: async (serverId, storyPathHash) =>
                     (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
@@ -497,6 +498,10 @@ public partial class MainWindow : Window
                 /* Shutdown timed out, proceeding anyway */
             }
         }
+
+        /* #3916 PR B: drop the analysis hold-back queue unstamped once collection has stopped — a page queued
+           at close is not a delivery, so nothing holds its story and the next launch re-attempts it. */
+        _analysisNotificationService?.Dispose();
 
         // Stop all server tab refresh timers
         foreach (var tab in _openServerTabs.Values)
