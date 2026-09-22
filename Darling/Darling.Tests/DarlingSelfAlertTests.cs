@@ -44,7 +44,7 @@ public sealed class DarlingSelfAlertTests
 
     /* ---------------- fakes ---------------- */
 
-    private sealed class FakeSettings : IAlertEngineSettings
+    internal sealed class FakeSettings : IAlertEngineSettings
     {
         public bool AlertsEnabled { get; set; } = true;
         public bool CpuEnabled { get; set; }
@@ -101,7 +101,7 @@ public sealed class DarlingSelfAlertTests
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 
-    private sealed class RecordingDeliverer : IAlertDeliverer
+    internal sealed class RecordingDeliverer : IAlertDeliverer
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
@@ -121,7 +121,7 @@ public sealed class DarlingSelfAlertTests
         }
     }
 
-    private sealed class FakeHistoryStore : IAlertHistoryStore
+    internal sealed class FakeHistoryStore : IAlertHistoryStore
     {
         public List<AlertHistoryRecord> Records { get; } = new();
 
@@ -145,7 +145,7 @@ public sealed class DarlingSelfAlertTests
     /// Minimal ILogger that records level + formatted message. #1681 pins that a self-alert FIRING reaches the
     /// service log, which for a long time only recoveries did.
     /// </summary>
-    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    internal sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
 
@@ -163,7 +163,7 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>One evaluator + fakes + a controllable clock per test.</summary>
-    private sealed class Harness
+    internal sealed class Harness
     {
         public FakeSettings Settings { get; } = new();
         public RecordingDeliverer Deliverer { get; } = new();
@@ -4066,6 +4066,18 @@ public sealed class DarlingSelfAlertTests
 
     private const int LiveServerId = -770077;
 
+    /// <summary>
+    /// A bare evaluator for the live store reads, which became INSTANCE methods when #3854 routed them
+    /// through the shared retry seam — the counter and the pause live on the instance, so the reads cannot
+    /// be static any more. Nothing else on it is exercised by these fixtures: they assert the raw signals a
+    /// read returns from seeded rows, so the deliverer, the history store and the mute seam are inert.
+    /// </summary>
+    private static DarlingSelfAlertEvaluator LiveReadEvaluator()
+    {
+        var h = new Harness();
+        return new DarlingSelfAlertEvaluator(h.Settings, h.Deliverer, h.History, _ => false);
+    }
+
     [Fact]
     public async Task LiveStoreReads_ComputeCollectionStoppedAndCaptureDown()
     {
@@ -4094,7 +4106,7 @@ public sealed class DarlingSelfAlertTests
                 await InsertLogAsync(connection, ct, logId++, "wait_stats", utcNow.AddMinutes(-2), "ERROR");
             }
 
-            var (lastSuccess, recentRuns, recentSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (lastSuccess, recentRuns, recentSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold, ct);
 
             Assert.NotNull(lastSuccess);
@@ -4120,7 +4132,7 @@ public sealed class DarlingSelfAlertTests
             await InsertLogAsync(connection, ct, logId++, "blocked_process_report", utcNow.AddMinutes(-1), "SUCCESS");
             await InsertLogAsync(connection, ct, logId++, "deadlocks", utcNow.AddMinutes(-1), "SESSION_MISSING");
 
-            var missing = await DarlingSelfAlertEvaluator.ReadMissingCaptureSessionsAsync(postgres, LiveServerId, ct);
+            var missing = await LiveReadEvaluator().ReadMissingCaptureSessionsAsync(postgres, LiveServerId, ct);
             Assert.Equal(new[] { "Deadlock" }, missing);
 
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
@@ -4196,7 +4208,7 @@ public sealed class DarlingSelfAlertTests
 
             /* Window 3, inside the tied instant: log_id DESC must pick the three HIGHEST ids — all
                SUCCESS. A missing or ascending tiebreak lets the tied instant's ERRORs leak in. */
-            var (_, tieRuns, tieSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (_, tieRuns, tieSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, 3, ct);
             Assert.Equal(3, tieRuns);
             Assert.Equal(3, tieSuccess);
@@ -4204,7 +4216,7 @@ public sealed class DarlingSelfAlertTests
             /* Window 8, across both instants: all six newest-instant rows (3 ERROR + 3 SUCCESS) fill the
                window before ANY older row — time-first — leaving room for exactly two of the older
                SUCCESSes. 5 = 3 + 2 is only reachable by that fill order. */
-            var (lastSuccess, spanRuns, spanSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+            var (lastSuccess, spanRuns, spanSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
                 postgres, LiveServerId, 8, ct);
             Assert.Equal(8, spanRuns);
             Assert.Equal(5, spanSuccess);
@@ -4264,7 +4276,7 @@ public sealed class DarlingSelfAlertTests
             await InsertAgReplicaAsync(connection, ct, utcNow, null, "NODE3", "SECONDARY", "CONNECTED");
 
             var (replicaTime, replicas) =
-                await DarlingSelfAlertEvaluator.ReadLatestAgReplicaStatesAsync(postgres, LiveServerId, ct);
+                await LiveReadEvaluator().ReadLatestAgReplicaStatesAsync(postgres, LiveServerId, ct);
 
             Assert.NotNull(replicaTime);
             Assert.Equal(2, replicas.Count);                       /* the un-keyable NULL row is dropped */
@@ -4276,7 +4288,7 @@ public sealed class DarlingSelfAlertTests
             await InsertAgDatabaseAsync(connection, ct, utcNow, "AG1", "Orders", "NODE2", null, null, true, "SUSPEND_FROM_USER");
 
             var (databaseTime, databases) =
-                await DarlingSelfAlertEvaluator.ReadLatestAgDatabaseReplicaStatesAsync(postgres, LiveServerId, ct);
+                await LiveReadEvaluator().ReadLatestAgDatabaseReplicaStatesAsync(postgres, LiveServerId, ct);
 
             Assert.NotNull(databaseTime);
             Assert.Equal(2, databases.Count);

@@ -1041,15 +1041,90 @@ public sealed class AlertReadFailureSurfaceTests
     /// <summary>
     /// A counted call, with its read name and the CLOCK it took its elapsed from.
     ///
-    /// <para>The third argument is required to be <c>&lt;identifier&gt;.ElapsedMilliseconds</c> and the
+    /// <para>The ELAPSED argument is required to be <c>&lt;identifier&gt;.ElapsedMilliseconds</c> and the
     /// close paren is anchored, which is what makes this pattern a coverage check rather than a name
-    /// extractor: a site that passed a literal, a constant, a field or a computed number would not match,
-    /// and every count asserted over these matches would fall short and say which file. The narrower
+    /// extractor: a site that passed a literal, a field or a computed number THERE would not match, and
+    /// every count asserted over these matches would fall short and say which file. The narrower
     /// alternative — reading the name and separately hoping a duration went along — is the shape that lets
     /// a site ship with <c>0</c> in the slot and a log line that reads correctly.</para>
+    ///
+    /// <para>The name arm admits either a string literal or a <c>…ReadName</c> CONSTANT identifier (#3854).
+    /// It was literal-only until the seven reads the alert pass issues outside the adapter joined #3848's
+    /// retry seam: a retried read is tallied under the same name its catch arm records a failure under, and
+    /// the only way to make "the same name" a property of the source rather than of a list is to have both
+    /// sites pass ONE constant. A literal-only pattern would therefore have forced the two spellings this
+    /// file exists to prevent — so the arm widened, and
+    /// <see cref="EveryCountedSite_NamesItsReadDistinctly"/> resolves a constant to its declared value
+    /// before checking distinctness, which keeps the published names under assertion either way.</para>
+    ///
+    /// <para>The elapsed arm is UNCHANGED and still requires an <c>&lt;identifier&gt;.ElapsedMilliseconds</c>:
+    /// that is the route that otherwise ships a correct-looking log line with no measurement behind it, and
+    /// a constant or a literal there must still fail.</para>
     /// </summary>
     private const string s_recordCall =
-        @"RecordReadFailure\([^,]+,\s*""(?<name>[^""]+)""\s*,\s*(?<clock>[A-Za-z_][A-Za-z0-9_]*)\.ElapsedMilliseconds\s*\)";
+        @"RecordReadFailure\([^,]+,\s*(?:""(?<name>[^""]+)""|(?<nameConst>[A-Za-z_][A-Za-z0-9_.]*ReadName))"
+        + @"\s*,\s*(?<clock>[A-Za-z_][A-Za-z0-9_]*)\.ElapsedMilliseconds\s*\)";
+
+    /// <summary>
+    /// The read-name constants the counted sites pass by name (#3854), resolved to the values the surface
+    /// actually publishes so the distinctness census still compares real names.
+    ///
+    /// <para>Read off the product rather than restated — a literal copy here would let the pin agree with
+    /// itself while the shipped name drifted, which is the #3060 shape.</para>
+    /// </summary>
+    /// <para>Resolved from the SOURCE declaration rather than from the compiled constant, because this
+    /// whole file is a source census over files in a project it does not reference by type — so the value
+    /// is read out of the same text every other assertion here reads.</para>
+    private static readonly Dictionary<string, string> s_readNameConstants = LoadReadNameConstants();
+
+    /// <summary>
+    /// Every <c>internal const string …ReadName = "…";</c> declaration across the counted files, so a new
+    /// constant is resolvable the moment it is declared and a RENAMED value cannot drift past this census.
+    /// </summary>
+    private static Dictionary<string, string> LoadReadNameConstants()
+    {
+        var constants = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var relative in new[]
+        {
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+        })
+        {
+            foreach (Match m in Regex.Matches(
+                ReadSource(relative),
+                @"const\s+string\s+(?<id>\w*ReadName)\s*=\s*""(?<value>[^""]*)""\s*;"))
+            {
+                constants[m.Groups["id"].Value] = m.Groups["value"].Value;
+            }
+        }
+
+        Assert.NotEmpty(constants);
+        return constants;
+    }
+
+    /// <summary>
+    /// The value a counted site names its read, whether it passed a literal or one of the constants above.
+    /// An unrecognised constant fails loudly rather than resolving to something empty — a census that
+    /// silently dropped a site would report clean on the site it stopped seeing.
+    /// </summary>
+    private static string ResolveReadName(Match call)
+    {
+        if (call.Groups["name"].Success)
+        {
+            return call.Groups["name"].Value;
+        }
+
+        var identifier = call.Groups["nameConst"].Value;
+        var bare = identifier[(identifier.LastIndexOf('.') + 1)..];
+
+        Assert.True(
+            s_readNameConstants.TryGetValue(bare, out var value),
+            $"a counted site names its read with the constant '{identifier}', which this census cannot "
+            + "resolve — add it to s_readNameConstants so its published name stays under assertion");
+
+        return value!;
+    }
 
     /// <summary>The one rendering of the measurement in a log line, so a log census greps one token.</summary>
     private const string ElapsedPlaceholder = "after {ElapsedMs} ms";
@@ -1229,7 +1304,7 @@ public sealed class AlertReadFailureSurfaceTests
             var raw = ReadSource(relative);
             foreach (Match m in Regex.Matches(raw, s_recordCall))
             {
-                names.Add((m.Groups["name"].Value, relative));
+                names.Add((ResolveReadName(m), relative));
             }
         }
 

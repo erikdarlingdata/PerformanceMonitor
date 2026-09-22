@@ -492,11 +492,16 @@ public sealed class AlertReadFailureCounter
     /// <paramref name="InstanceReadFailures"/> spans its own three populations.
     ///
     /// <para>No fleet-scoped part is reported beside it, unlike the failure total, because nothing
-    /// records a fleet-scoped retry today: the retry seam lives in the per-server alert-read adapter, and
-    /// the conditions <see cref="FleetScopedReads"/> names execute their own commands outside it. A part
-    /// that is structurally zero would be the confident-zero shape this class exists to remove — the same
-    /// reason the fleet bucket's pass denominator is written and never read. Should a fleet-scoped read
-    /// ever join the seam, its retries land in this total and a fleet part becomes worth publishing.</para>
+    /// records a fleet-scoped retry today, and #3854 did not change that while widening what the seam
+    /// covers: the retried population is now every store read the alert pass issues PER SERVER — the
+    /// twelve on the alert-read adapter, the six the Darling store's self-alert evaluator issues for one
+    /// server (collection signals, missing capture sessions, the two agent-status reads, and the two
+    /// Availability-Group grains), and the worker's latest-CPU read — so every one of them keys a server
+    /// bucket. The conditions <see cref="FleetScopedReads"/> names still execute their own commands
+    /// outside the seam, so a fleet part would be a structural zero, which is the confident-zero shape
+    /// this class exists to remove — the same reason the fleet bucket's pass denominator is written and
+    /// never read. Should a fleet-scoped read ever join the seam, its retries land in this total and a
+    /// fleet part becomes worth publishing.</para>
     /// </param>
     public sealed record Reading(
         long ServerReadFailures,
@@ -893,8 +898,10 @@ public sealed class AlertReadFailureCounter
         + "stamp on it would invite reading a retry as a soft failure. counting_since is its currency term "
         + "like every other count here. instance_retried_reads is the same figure across this whole service; "
         + "there is no fleet part for it because nothing records a fleet-scoped retry today - the retry seam "
-        + "is in the per-server alert-read adapter, and the conditions listed below run their own commands "
-        + "outside it, so a fleet part would be a structural zero. On Lite both figures stay at zero, and "
+        + "covers the alert pass's PER-SERVER store reads (the alert-read adapter's, the Darling store's "
+        + "self-alert reads for one server, and the latest-CPU read), and the conditions listed below run "
+        + "their own commands outside it, so a fleet part would be a structural zero. On Lite both figures "
+        + "stay at zero, and "
         + "that is a property of the SKU rather than a quiet store: Lite's alerting reads hit the local store "
         + "with no command deadline, so there is no deadline for a read to cross and nothing to retry on. "
         + "instance_read_failures spans every server on this service plus the "

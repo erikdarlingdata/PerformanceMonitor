@@ -529,9 +529,264 @@ public sealed class AlertReadRetrySeamTests
         }
     }
 
+    /// <summary>
+    /// #3854: the seven store reads the alert pass issues OUTSIDE the adapter go out through the same seam,
+    /// and there is exactly ONE seam rather than a second copy of the retry decision.
+    ///
+    /// <para>The twin of <see cref="EveryPublicReadOnTheAdapter_GoesOutThroughTheSeam"/> for the reads
+    /// #3851 named and deliberately left: six on <c>DarlingSelfAlertEvaluator</c> (collection signals,
+    /// missing capture sessions, the two agent-status reads, the two Availability-Group grains) and
+    /// <c>DarlingWorker.ReadLatestCpuAsync</c>. Every one runs on the same
+    /// <see cref="DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds"/> deadline and is counted on the
+    /// same <see cref="AlertReadFailureCounter"/>, so an eighth read written in the old self-executing
+    /// shape reds here on the day it is written rather than shipping unretried and silently blind.</para>
+    ///
+    /// <para><b>The one-seam property is asserted structurally</b>, because it is the part a future edit
+    /// would break cheaply: the evaluator must hold NO retry mechanics of its own — no delay constant, no
+    /// timeout predicate, no second <c>RecordRetriedRead</c> call site — and must reach the decision only
+    /// by calling the adapter's static overload. Two seams would be free to disagree the moment either grew
+    /// an arm, which is #3848's own argument one scope out.</para>
+    /// </summary>
+    [Fact]
+    public void EveryStoreReadOnTheEvaluator_GoesOutThroughTheOneSharedSeam()
+    {
+        var evaluator = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(evaluator);
+
+        /* The forwarder shape, matched exactly as the adapter's pin matches its own: `internal Task<…>
+           ReadXAsync(` with NO `async`, because the pre-#3854 shape was `internal static async Task<…>` and
+           the absence of both `static` and `async` IS the property. Permissive return type for the reason
+           that pin records as its own first bug — these return nested generics and tuples
+           (`Task<(DateTime?, IReadOnlyList<AgReplicaReading>)>`), so a class stopping at the first `>`
+           would silently see a fraction of the population. */
+        var forwarders = Regex.Matches(
+                stripped, @"internal\s+Task<.+?>\s+(?<name>(?:Read|Has)\w+Async)\s*\(")
+            .Select(m => m.Groups["name"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        /* Six here; the seventh is the worker's latest-CPU read, asserted below. Counted in both
+           directions like the adapter's census: downward catches an extractor that stopped matching, upward
+           puts a person in front of a new read to decide whether it shares this budget. */
+        Assert.Equal(6, forwarders.Count);
+
+        var unrouted = Regex.Matches(
+                stripped, @"internal\s+static\s+async\s+Task<.+?>\s+(?<name>(?:Read|Has)\w+Async)\s*\(")
+            .Select(m => m.Groups["name"].Value)
+            .ToList();
+
+        Assert.True(
+            unrouted.Count == 0,
+            $"{unrouted.Count} store read(s) on the self-alert evaluator execute their own commands instead "
+            + "of going out through the shared #3848 retry seam, so a write-band stall blinds them for a "
+            + "pass: " + string.Join(", ", unrouted));
+
+        foreach (var name in forwarders)
+        {
+            var core = name[..^5] + "CoreAsync";
+            var body = ExpressionBodyOf(stripped, name, "the self-alert evaluator");
+
+            Assert.Contains("ReadWithOneRetryAsync(", body, StringComparison.Ordinal);
+            Assert.Contains($"{core}(", body, StringComparison.Ordinal);
+
+            /* The Core sibling holds the read and stays STATIC — it takes its data source as a parameter,
+               so nothing about moving the public half onto the instance changed what the read does. */
+            Assert.Matches(
+                new Regex(@"private\s+static\s+async\s+Task<.+?>\s+" + Regex.Escape(core) + @"\s*\("),
+                stripped);
+        }
+
+        /* ONE seam: the evaluator's own forwarder reaches the adapter's static overload and holds no copy
+           of the decision. */
+        var hop = ExpressionBodyOf(stripped, "ReadWithOneRetryAsync<T>", "the self-alert evaluator");
+        Assert.Contains(
+            "DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(", hop, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("IsCommandTimeout", stripped, StringComparison.Ordinal);
+        Assert.DoesNotContain("RecordRetriedRead", stripped, StringComparison.Ordinal);
+        Assert.DoesNotContain("AlertPassRetryDelaySeconds", stripped, StringComparison.Ordinal);
+
+        /* The seventh read, in the worker: same seam, same counter name constant. */
+        var worker = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var cpu = ExpressionBodyOf(worker, "ReadLatestCpuAsync", "the worker");
+        Assert.Contains(
+            "DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(", cpu, StringComparison.Ordinal);
+        Assert.Contains("ReadLatestCpuCoreAsync(", cpu, StringComparison.Ordinal);
+        Assert.Matches(
+            new Regex(@"private\s+async\s+Task<.+?>\s+ReadLatestCpuCoreAsync\s*\("), worker);
+    }
+
+    /// <summary>
+    /// The name each of the seven is given AT the seam is the same one its condition's catch arm records a
+    /// failure under — taken from a shared constant rather than spelled twice.
+    ///
+    /// <para>The evaluator's half of the property the adapter's census asserts against
+    /// <c>AlertEngine</c>'s catch arms: if a read carried one spelling into <c>retried_reads</c> and
+    /// another into the failure count, <c>last_failure_read</c> would stop being attributable and the two
+    /// figures could not be read beside each other — which is the whole instruction the surface gives for
+    /// them. Asserted by requiring every seam call and every <c>RecordReadFailure</c> call on these paths
+    /// to pass a CONSTANT rather than a literal, so the two cannot drift apart at all.</para>
+    /// </summary>
+    [Fact]
+    public void TheSevenReadsNameThemselvesTheSameWayAtTheSeamAndAtTheirCatchArm()
+    {
+        var evaluator = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
+
+        /* Every RecordReadFailure on the per-server conditions passes a ReadName constant. A literal here
+           would be the second spelling this pin exists to prevent. */
+        var literalFailures = Regex.Matches(
+                evaluator, @"RecordReadFailure\(Key\(serverId\),\s*""")
+            .Count;
+
+        Assert.True(
+            literalFailures == 0,
+            $"{literalFailures} per-server RecordReadFailure call(s) on the evaluator still pass a string "
+            + "literal, so the failure count and the retry count can spell one read two ways");
+
+        /* And the four names are shared BY CONSTRUCTION between the seam calls and the catch arms: each
+           constant is referenced at least twice (once at a seam call, once at a RecordReadFailure), which
+           is what makes "same name in both counts" a property of the source rather than of a list. */
+        foreach (var name in new[]
+                 {
+                     nameof(DarlingSelfAlertEvaluator.CollectionSignalsReadName),
+                     nameof(DarlingSelfAlertEvaluator.MissingCaptureSessionsReadName),
+                     nameof(DarlingSelfAlertEvaluator.AgentStatusReadName),
+                     nameof(DarlingSelfAlertEvaluator.AgStateReadName),
+                 })
+        {
+            var uses = Regex.Matches(evaluator, Regex.Escape(name)).Count;
+            Assert.True(
+                uses >= 3,
+                $"{name} is used {uses} time(s) — expected its declaration plus at least one seam call and "
+                + "one catch arm, which is what keeps the retry and failure counts on one spelling");
+        }
+
+        /* The read names themselves are the #3013 spellings the surface already publishes, unchanged by
+           the promotion from literals: a renamed read would silently re-key every historical reading. */
+        Assert.Equal("collection-health self-alert", DarlingSelfAlertEvaluator.CollectionSignalsReadName);
+        Assert.Equal("capture-down self-alert", DarlingSelfAlertEvaluator.MissingCaptureSessionsReadName);
+        Assert.Equal("agent-not-running self-alert", DarlingSelfAlertEvaluator.AgentStatusReadName);
+        Assert.Equal("Availability-Group self-alert", DarlingSelfAlertEvaluator.AgStateReadName);
+        Assert.Equal("latest-CPU read", DarlingWorker.LatestCpuReadName);
+    }
+
+    /// <summary>
+    /// The shared static overload behaves exactly as the instance one does — asserted through the same
+    /// three cases, because #3854's whole claim is that the evaluator's reads got the SAME retry and not a
+    /// similar one.
+    /// </summary>
+    [Fact]
+    public async Task TheSharedStaticSeam_RetriesADeadlineOnce_CountsIt_AndRefusesAServerReply()
+    {
+        var counter = new AlertReadFailureCounter();
+        var waits = new List<TimeSpan>();
+        var attempts = 0;
+
+        var answer = await DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(
+            _ =>
+            {
+                attempts++;
+                return attempts == 1
+                    ? throw new NpgsqlException(
+                        "Exception while reading from stream",
+                        new TimeoutException("Timeout during reading attempt"))
+                    : Task.FromResult(7);
+            },
+            "41",
+            DarlingSelfAlertEvaluator.CollectionSignalsReadName,
+            counter,
+            (delay, _) =>
+            {
+                waits.Add(delay);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        Assert.Equal(7, answer);
+        Assert.Equal(2, attempts);
+        Assert.Equal(
+            new[] { TimeSpan.FromSeconds(DarlingAlertReadAdapter.AlertPassRetryDelaySeconds) },
+            waits);
+
+        var reading = counter.ReadFor("41");
+        Assert.Equal(1, reading.ServerRetriedReads);
+        Assert.Equal(0, reading.ServerReadFailures);
+
+        /* The store's own statement_timeout — a considered answer — is refused, on the same instance the
+           retry above succeeded on, so this is the discrimination and not an absent seam. */
+        var serverReply = new PostgresException(
+            "canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
+        var secondAttempts = 0;
+
+        var refused = await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteWithOneRetryAsync<int>(
+                _ =>
+                {
+                    secondAttempts++;
+                    throw serverReply;
+                },
+                "41",
+                DarlingSelfAlertEvaluator.AgStateReadName,
+                counter,
+                (delay, _) =>
+                {
+                    waits.Add(delay);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None));
+
+        Assert.Same(serverReply, refused);
+        Assert.Equal(1, secondAttempts);
+        Assert.Single(waits);
+        Assert.Equal(1, counter.ReadFor("41").ServerRetriedReads);
+    }
+
+    /// <summary>
+    /// The EXPRESSION body of the member named <paramref name="name"/> — everything from its <c>=&gt;</c> to
+    /// the statement's terminating semicolon.
+    ///
+    /// <para>A separate extractor from <see cref="BodyOf"/> because #3854's forwarders are
+    /// expression-bodied: they have no braces at all, so a brace scan from the declaration runs past them
+    /// and returns the NEXT member's block — which is how this pin first read every forwarder as if it
+    /// were its own Core sibling and reported the routing missing. Anchored on the name followed by its
+    /// parameter list so a doc-comment mention (already stripped) or a call elsewhere cannot be mistaken
+    /// for the declaration.</para>
+    /// </summary>
+    private static string ExpressionBodyOf(string stripped, string name, string where)
+    {
+        var at = 0;
+        while ((at = stripped.IndexOf(name + "(", at, StringComparison.Ordinal)) >= 0)
+        {
+            var arrow = stripped.IndexOf("=>", at, StringComparison.Ordinal);
+            var brace = stripped.IndexOf('{', at);
+            var semi = stripped.IndexOf(';', at);
+
+            /* The declaration is the one whose parameter list is followed by `=>` before any `{` — i.e. an
+               expression-bodied member rather than a block-bodied one or a call site. */
+            if (arrow > at && (brace < 0 || arrow < brace) && semi > arrow)
+            {
+                var end = stripped.IndexOf(';', arrow);
+                if (end > arrow)
+                {
+                    return stripped[arrow..end];
+                }
+            }
+
+            at += name.Length;
+        }
+
+        Assert.Fail($"no expression-bodied declaration of '{name}' in {where}");
+        return string.Empty;
+    }
+
     /// <summary>The brace-balanced body of the declaration whose signature starts with <paramref name="prefix"/>
     /// and contains <paramref name="name"/> — enough to assert what a forwarder calls.</summary>
-    private static string BodyOf(string stripped, string prefix, string name)
+    private static string BodyOf(string stripped, string prefix, string name, string where = "the adapter")
     {
         var at = stripped.IndexOf(prefix, StringComparison.Ordinal);
         while (at >= 0)
@@ -547,7 +802,7 @@ public sealed class AlertReadRetrySeamTests
             at = stripped.IndexOf(prefix, at + prefix.Length, StringComparison.Ordinal);
         }
 
-        Assert.Fail($"no declaration matching '{prefix}…{name}' in the adapter");
+        Assert.Fail($"no declaration matching '{prefix}…{name}' in {where}");
         return string.Empty;
     }
 
