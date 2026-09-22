@@ -983,6 +983,11 @@ public sealed class TimescaleContinuousAggregateTests
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
 
+            /* #3745: the 3-day window is now THREE transactions rather than one. The window itself is
+               unchanged above — that is the point: what the incident required was slicing the commit, not
+               shortening the reach the hourly tier's retention leans on. */
+            Assert.Contains("buckets_per_batch => 1", sql, StringComparison.Ordinal);
+
             /* No initial_start: the daily tier keeps TimescaleDB's finish-to-start scheduling, untouched. */
             Assert.DoesNotContain("initial_start", sql, StringComparison.Ordinal);
 
