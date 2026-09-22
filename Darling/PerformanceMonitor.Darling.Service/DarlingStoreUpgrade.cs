@@ -208,6 +208,51 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// Parses major.minor from a PostgreSQL tool's <c>--version</c> line ("pg_ctl (PostgreSQL) 18.6" =&gt; 18.6)
+    /// or a bare version string ("17.10"), reading the same first numeric token <see cref="ParsePostgresMajor"/>
+    /// reads. A beta/rc or bare major ("19beta1", "18") carries no minor and yields null, as does anything
+    /// unparseable; the caller then has only the major to go on, as it always did. The result is always two
+    /// parts, so "18.6" and "18.6.0" compare equal whichever source they came from.
+    /// </summary>
+    internal static Version? ParsePostgresVersion(string? versionOutput)
+    {
+        if (string.IsNullOrWhiteSpace(versionOutput))
+        {
+            return null;
+        }
+
+        foreach (var token in versionOutput.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!char.IsDigit(token[0]))
+            {
+                continue;
+            }
+
+            var length = 0;
+            while (length < token.Length && (char.IsDigit(token[length]) || token[length] == '.'))
+            {
+                length++;
+            }
+
+            return Version.TryParse(token[..length].TrimEnd('.'), out var version) && version.Major > 0
+                ? new Version(version.Major, version.Minor)
+                : null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Whether an extracted runtime that carries no stamp IS the shipped package, so it can be adopted without
+    /// a swap. The full PostgreSQL version and the TimescaleDB version both have to match. When either side's
+    /// minor cannot be read, only TimescaleDB is compared, which is what this check did before #3906.
+    /// </summary>
+    internal static bool ExtractedRuntimeMatchesPackage(
+        Version? installedPostgres, Version? packagePostgres, string? installedTimescale, string? packageTimescale)
+        => (installedPostgres is null || packagePostgres is null || installedPostgres == packagePostgres)
+           && string.Equals(installedTimescale, packageTimescale, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// The major recorded in a data directory's <c>PG_VERSION</c> (a bare "17"). Same refuse-on-garbage
     /// posture as <see cref="ParsePostgresMajor"/>.
     /// </summary>
@@ -818,7 +863,8 @@ internal sealed class DarlingStoreUpgrade
                Compare the actual PostgreSQL majors instead, and ADOPT a runtime that already matches by
                recording the stamp without touching anything. Costs one small extract, once per host,
                because from then on the stamp answers. */
-            var installedMajor = await ReadRuntimeMajorFromBinariesAsync(binDirectory, cancellationToken);
+            var installedVersionLine = await ReadRuntimeVersionLineAsync(binDirectory, cancellationToken);
+            var installedMajor = ParsePostgresMajor(installedVersionLine);
             var zipMajor = TryReadZipPostgresMajor(runtimeZipPath);
 
             if (installedMajor is not null && zipMajor is not null && installedMajor == zipMajor)
@@ -829,22 +875,31 @@ internal sealed class DarlingStoreUpgrade
                    forever, because the new versioned library never lands and the same-major extension update
                    can then only reach the version already on disk. So the extension's library version is
                    compared too — same major but a different TimescaleDB means a same-major runtime swap
-                   (rescue, extract, no pg_upgrade, extension update), which is a path that already exists. */
+                   (rescue, extract, no pg_upgrade, extension update), which is a path that already exists.
+
+                   #3906: the same holds for the PostgreSQL MINOR. A host on 18.4 receiving 18.6 with an
+                   unchanged TimescaleDB would be stamped as current and keep 18.4, and every CVE 18.6 fixes,
+                   until some later package happened to change. A minor release is usually security
+                   servicing, so it is compared too, and a difference takes the same same-major swap. */
+                var installedVersion = ParsePostgresVersion(installedVersionLine);
+                var zipVersion = TryReadZipPostgresVersion(runtimeZipPath);
                 var installedTimescale = TryReadInstalledTimescaleVersion(binDirectory);
                 var zipTimescale = TryReadZipTimescaleVersion(runtimeZipPath);
 
-                if (string.Equals(installedTimescale, zipTimescale, StringComparison.OrdinalIgnoreCase))
+                if (ExtractedRuntimeMatchesPackage(installedVersion, zipVersion, installedTimescale, zipTimescale))
                 {
                     _logger.LogInformation(
-                        "Adopting the already-extracted runtime (PostgreSQL {Major}, TimescaleDB {Timescale}): it matches the shipped package, so nothing is swapped. Recording its stamp so future package changes are detectable.",
-                        installedMajor, installedTimescale ?? "(none)");
+                        "Adopting the already-extracted runtime (PostgreSQL {Version}, TimescaleDB {Timescale}): it matches the shipped package, so nothing is swapped. Recording its stamp so future package changes are detectable.",
+                        installedVersion?.ToString() ?? installedMajor.Value.ToString(CultureInfo.InvariantCulture), installedTimescale ?? "(none)");
                     TryWriteStamp(stampPath, zipHash);
                     return new RuntimeAdvance(false, null, zipHash);
                 }
 
                 _logger.LogWarning(
-                    "The extracted runtime and the shipped package are both PostgreSQL {Major}, but their TimescaleDB differs ({Installed} on disk, {Package} in the package) — updating the runtime so the extension can actually move. This is the drift #1705 caught.",
-                    installedMajor, installedTimescale ?? "(none)", zipTimescale ?? "(none)");
+                    "The extracted runtime and the shipped package are both PostgreSQL {Major} but are not the same runtime (PostgreSQL {InstalledVersion} + TimescaleDB {Installed} on disk, PostgreSQL {PackageVersion} + TimescaleDB {Package} in the package) — updating the runtime with a same-major swap, which runs no pg_upgrade. This is the drift #1705 and #3906 caught.",
+                    installedMajor,
+                    installedVersion?.ToString() ?? "(unreadable)", installedTimescale ?? "(none)",
+                    zipVersion?.ToString() ?? "(unreadable)", zipTimescale ?? "(none)");
             }
 
             if (installedMajor is null || zipMajor is null)
@@ -1041,6 +1096,36 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     internal static int? TryReadZipPostgresMajor(string zipPath)
     {
+        var info = TryReadZipPgCtlVersionInfo(zipPath);
+        if (info is null)
+        {
+            return null;
+        }
+
+        return info.FileMajorPart > 0
+            ? info.FileMajorPart
+            : ParsePostgresMajor(info.ProductVersion ?? info.FileVersion);
+    }
+
+    /// <summary>
+    /// The full PostgreSQL version inside a runtime zip (18.6), from the same version resource as
+    /// <see cref="TryReadZipPostgresMajor"/>. It reads the version STRING, not the numeric parts: EDB's
+    /// <c>pg_ctl.exe</c> says "18.4" in its string but encodes it as 18.0.4 in the fixed-size block, so
+    /// <c>FileMinorPart</c> reads 0 on every release. Null when no major.minor parses.
+    /// </summary>
+    internal static Version? TryReadZipPostgresVersion(string zipPath)
+    {
+        var info = TryReadZipPgCtlVersionInfo(zipPath);
+        return info is null ? null : ParsePostgresVersion(info.ProductVersion) ?? ParsePostgresVersion(info.FileVersion);
+    }
+
+    /// <summary>
+    /// Pulls <c>pgsql/bin/pg_ctl.exe</c> out of a runtime zip to a temp file and reads its version resource,
+    /// which <see cref="System.Diagnostics.FileVersionInfo"/> copies in full before the file is deleted. Null
+    /// when the entry is missing or the archive cannot be read.
+    /// </summary>
+    private static System.Diagnostics.FileVersionInfo? TryReadZipPgCtlVersionInfo(string zipPath)
+    {
         var temp = Path.Combine(Path.GetTempPath(), $"pm-runtime-probe-{Guid.NewGuid():N}.exe");
         try
         {
@@ -1058,10 +1143,7 @@ internal sealed class DarlingStoreUpgrade
                 source.CopyTo(destination);
             }
 
-            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(temp);
-            return info.FileMajorPart > 0
-                ? info.FileMajorPart
-                : ParsePostgresMajor(info.ProductVersion ?? info.FileVersion);
+            return System.Diagnostics.FileVersionInfo.GetVersionInfo(temp);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
         {
@@ -1149,14 +1231,14 @@ internal sealed class DarlingStoreUpgrade
         return null;
     }
 
-    /// <summary>The extracted runtime's PostgreSQL major, from <c>pg_ctl --version</c>.</summary>
-    private static async Task<int?> ReadRuntimeMajorFromBinariesAsync(string binDirectory, CancellationToken cancellationToken)
+    /// <summary>The extracted runtime's <c>pg_ctl --version</c> line, or null when it will not report one.</summary>
+    private static async Task<string?> ReadRuntimeVersionLineAsync(string binDirectory, CancellationToken cancellationToken)
     {
         try
         {
             var (exitCode, output) = await DarlingManagedPostgres.RunToolAsync(
                 Path.Combine(binDirectory, "pg_ctl.exe"), "--version", s_toolTimeout, cancellationToken);
-            return exitCode == 0 ? ParsePostgresMajor(output) : null;
+            return exitCode == 0 ? output : null;
         }
         catch (OperationCanceledException)
         {

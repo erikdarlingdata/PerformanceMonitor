@@ -72,6 +72,27 @@ updates:
         update-types:
           - "minor"
           - "patch"
+  # The .NET SDK that global.json pins (#3906). This is the .NET RUNTIME for everything published
+  # self-contained (Lite and the Viewer's Setup/Portable builds pack the runtime of whichever SDK built
+  # them), so a runtime security release reaches users only through this pin. The NuGet group above
+  # never moves it. After 10.0.12 (2026-09-08, three CVEs in Microsoft.DiaSymReader.Native among
+  # others), Dependabot moved Microsoft.Extensions.* to 10.0.12, but global.json stayed on 10.0.302,
+  # whose latestPatch roll-forward never leaves the 3xx band. That band ended at 10.0.303, so 3.8.0
+  # shipped runtime 10.0.11 and a security scan flagged it.
+  #
+  # Each pull request needs one more line by hand: the FROM line in Darling/Dockerfile has to name
+  # the same SDK. DockerfileSdkPinTests fails the pull request, with the version to use, until it
+  # does. Majors are ignored: .NET 10 is the LTS the products target, and a move to 11 is a
+  # retargeting decision, not a servicing bump.
+  - package-ecosystem: "dotnet-sdk"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   # GitHub Actions used by the workflows in .github/workflows.
   - package-ecosystem: "github-actions"
     directory: "/"

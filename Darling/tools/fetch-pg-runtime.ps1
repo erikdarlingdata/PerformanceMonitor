@@ -28,10 +28,23 @@
   are cheap and a corrupted cache self-heals. Extract/assemble directories are rebuilt from
   scratch every run.
 
-  HASH PROVENANCE: the SHA256 pins below were computed 2026-07-08 from artifacts downloaded
-  from the exact URLs pinned here (EDB PG18.4 zip 337,444,127 bytes; TimescaleDB 2.28.1-for-PG18
-  zip 7,794,443 bytes) - the same artifacts that built the DARLING01 managed-Postgres deployment.
+  HASH PROVENANCE: the PostgreSQL pin was computed 2026-09-22 from the EDB PG18.6 zip at the
+  exact URL pinned here (343,808,005 bytes); EDB publishes no checksum, so the pin is only as good
+  as the download it came from. The TimescaleDB pin was computed 2026-07-08 (2.28.1-for-PG18 zip,
+  7,794,443 bytes) and matches the sha256 digest GitHub publishes for that release asset.
   Bumping a version means updating URL + hash TOGETHER, from a fresh download you hashed yourself.
+
+  WHY THESE VERSIONS (#3906): PostgreSQL 18.6 (2026-08-13; 18.5 was never released) fixes 23 CVEs
+  that 18.4 carries. A PostgreSQL minor release is security servicing more often than not, so the
+  pin tracks the newest minor of its major; the weekly runtime-currency workflow fails when it
+  falls behind. A minor bump is safe for field stores: same data directory, no pg_upgrade.
+
+  TimescaleDB stays at 2.28.1 even though 2.29.1 fixed GHSA-hcfx-29v5-2rcw, because a TimescaleDB
+  bump is NOT yet safe for field stores. Every store's extension is pinned at its installed version,
+  and the store upgrade cannot move it. On the same-major swap, the post-start update probes the
+  extension before ALTER EXTENSION, which loads the missing old library and leaves every session in
+  the store database failing. On the pg_upgrade path, the bridge can only reach versions the OLD
+  runtime ships. #3908 fixes both; bump $tsVersion only together with that change.
 
 .PARAMETER OutputDirectory
   Where pg-runtime.zip lands. Defaults to Darling\artifacts (gitignored). Packaging copies or
@@ -72,9 +85,9 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 
 # ---- Pinned artifacts (update URL + SHA256 together; see HASH PROVENANCE above) -------------
-$pgVersion = '18.4'
-$pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.4-1-windows-x64-binaries.zip'
-$pgSha256 = '7EFFE34C0BF89027B3F171447D351CBC460F4566C8D0F643DAEC67F140787858'
+$pgVersion = '18.6'
+$pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64-binaries.zip'
+$pgSha256 = 'FBE23DA234EE31547BF8A36D29DFD81E82B849DF2D2B78D2EECB43D360252F8C'
 
 $tsVersion = '2.28.1'
 $tsUrl = 'https://github.com/timescale/timescaledb/releases/download/2.28.1/timescaledb-postgresql-18-windows-amd64.zip'

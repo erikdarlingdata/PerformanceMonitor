@@ -53,6 +53,44 @@ public sealed class DarlingStoreUpgradeTests
     public void ParsePostgresMajor_ReadsTheMajorOrRefuses(string input, int? expected)
         => Assert.Equal(expected, DarlingStoreUpgrade.ParsePostgresMajor(input));
 
+    [Theory]
+    [InlineData("pg_ctl (PostgreSQL) 18.6", "18.6")]
+    [InlineData("pg_ctl (PostgreSQL) 17.10", "17.10")]
+    [InlineData("18.4", "18.4")]
+    [InlineData("18.6.0", "18.6")]
+    [InlineData("postgres (PostgreSQL) 19beta1", null)]
+    [InlineData("18", null)]
+    [InlineData("", null)]
+    [InlineData("no version here", null)]
+    public void ParsePostgresVersion_ReadsMajorAndMinorOrRefuses(string input, string? expected)
+        => Assert.Equal(expected is null ? null : Version.Parse(expected), DarlingStoreUpgrade.ParsePostgresVersion(input));
+
+    /// <summary>
+    /// #3906: an unstamped host is adopted as current only when it IS the shipped runtime. Before this, a
+    /// matching major and TimescaleDB were enough, so 18.4 on disk was stamped as the 18.6 package and kept
+    /// every CVE 18.6 fixes. An unreadable minor falls back to the TimescaleDB comparison alone, which is
+    /// exactly the check as it stood before.
+    /// </summary>
+    [Theory]
+    [InlineData("18.6", "18.6", "2.30.1", "2.30.1", true)]
+    [InlineData("18.4", "18.6", "2.30.1", "2.30.1", false)]
+    [InlineData("18.6", "18.4", "2.30.1", "2.30.1", false)]
+    [InlineData("18.6", "18.6", "2.28.1", "2.30.1", false)]
+    [InlineData("18.4", "18.6", "2.28.1", "2.30.1", false)]
+    [InlineData(null, "18.6", "2.30.1", "2.30.1", true)]
+    [InlineData("18.6", null, "2.30.1", "2.30.1", true)]
+    [InlineData(null, null, "2.28.1", "2.30.1", false)]
+    [InlineData("18.6", "18.6", null, null, true)]
+    public void ExtractedRuntimeMatchesPackage_NeedsTheMinorAndTheExtensionToMatch(
+        string? installedPostgres, string? packagePostgres, string? installedTimescale, string? packageTimescale, bool expected)
+        => Assert.Equal(
+            expected,
+            DarlingStoreUpgrade.ExtractedRuntimeMatchesPackage(
+                installedPostgres is null ? null : Version.Parse(installedPostgres),
+                packagePostgres is null ? null : Version.Parse(packagePostgres),
+                installedTimescale,
+                packageTimescale));
+
     [Fact]
     public void ParseTimescaleDefaultVersion_ReadsTheControlFile()
     {
@@ -731,6 +769,176 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
+    /// #3906: the runtime swap every existing field host takes when a release moves the bundle WITHIN its
+    /// major, as 3.8.0's PostgreSQL 18.4 moving to 18.6 does. The twin above covers pg_upgrade. This path has
+    /// none: rescue the runtime, extract the new one, and start the SAME data directory on the new binaries.
+    /// Everything the twin measures is measured here too, because a same-major swap that loses a continuous
+    /// aggregate or breaks the extension is the same #1705 failure without the major change to blame.
+    ///
+    /// <para>Both host shapes run. A STAMPED host (every install since stamping shipped) swaps because the
+    /// zip's hash changed. An UNSTAMPED one reaches the no-stamp branch, which before #3906 compared majors
+    /// and TimescaleDB only, so it adopted 18.4 as the 18.6 package and swapped nothing. The unstamped run's
+    /// version assertion is what catches that.</para>
+    ///
+    /// <para>The fixture moves PostgreSQL's minor only. A TimescaleDB change in the pair is #3908: the store
+    /// upgrade cannot yet move an existing store's extension, and this test would fail on exactly that.
+    /// Gated on <c>DARLING_TEST_PGRUNTIME_PREVIOUS</c> (the previous release's runtime on the bundle's major,
+    /// built by new-upgraded-store-fixture.ps1 and set by the nightly) and <c>DARLING_TEST_PGRUNTIME_NEWZIP</c>.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RuntimeAdvance_SameMajorStoreWithRealData_SwapsWithoutPgUpgradeAndKeepsEverything_Gated(bool stamped)
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_PREVIOUS");
+        var newZip = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_NEWZIP");
+
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime) || string.IsNullOrWhiteSpace(newZip),
+            "Set DARLING_TEST_PGRUNTIME_PREVIOUS to the previous release's assembled pg-runtime (the bundle's PostgreSQL " +
+            "major, an older minor) and DARLING_TEST_PGRUNTIME_NEWZIP to a pg-runtime.zip built from the current pins. " +
+            "Darling\\tools\\new-upgraded-store-fixture.ps1 produces both.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_PREVIOUS={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+        Assert.SkipUnless(File.Exists(newZip!), $"DARLING_TEST_PGRUNTIME_NEWZIP={newZip} does not exist.");
+
+        /* A fixture that is not the same major is a stale fixture, not a reason to skip: a skip here would
+           quietly drop the only run of the upgrade nearly every field host takes. When the bundle moves to a
+           new major, new-upgraded-store-fixture.ps1's previous-release pins move with it. */
+        var previousMajor = OldRuntimeMajor(oldRuntime!);
+        var packageMajor = DarlingStoreUpgrade.TryReadZipPostgresMajor(newZip!);
+        Assert.NotNull(previousMajor);
+        Assert.NotNull(packageMajor);
+        Assert.True(previousMajor == packageMajor,
+            $"DARLING_TEST_PGRUNTIME_PREVIOUS is PostgreSQL {previousMajor} but the package is {packageMajor}: move the " +
+            "previous-release pins in new-upgraded-store-fixture.ps1 to what the last release shipped.");
+
+        var root = Directory.CreateTempSubdirectory("darling-samemajor-");
+        try
+        {
+            var deployment = Path.Combine(root.FullName, "deploy");
+            var runtimeRoot = Path.Combine(deployment, "pg-runtime");
+            Directory.CreateDirectory(deployment);
+            CopyDirectory(Path.Combine(oldRuntime!, "pgsql"), Path.Combine(runtimeRoot, "pgsql"));
+
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            var config = new PostgresConfig
+            {
+                Managed = true,
+                Port = FindFreeTcpPort(),
+                DataDirectory = dataDirectory,
+            };
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+
+            /* ---- 1. The store as the previous release left it. A stamped host carries the identity of the
+                    zip its runtime came from, which production writes at extraction; an unstamped one predates
+                    stamping, and its first start on the new package goes through the no-stamp branch. ---- */
+            var oldMajor = await BuildOldStoreAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
+            var oldTimescale = BundledTimescaleVersion(runtimeRoot);
+
+            if (stamped)
+            {
+                var stampSource = Path.Combine(root.FullName, "old-runtime-stamp-source.zip");
+                ZipFile.CreateFromDirectory(
+                    Path.Combine(runtimeRoot, "pgsql"), stampSource, CompressionLevel.NoCompression, includeBaseDirectory: true);
+                File.WriteAllText(
+                    Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
+                    DarlingStoreUpgrade.ComputeFileHash(stampSource));
+            }
+            else
+            {
+                Assert.False(File.Exists(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)),
+                    "the unstamped run needs a host with no stamp; building the store must not have written one");
+            }
+
+            var shippedZip = Path.Combine(deployment, "pg-runtime.zip");
+            File.Copy(newZip!, shippedZip);
+
+            var password = DarlingSecrets.Unprotect(
+                File.ReadAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory)).Trim());
+            var oldConnection = DarlingManagedPostgres.BuildConnectionString(config.Port, password);
+
+            /* ---- 2. Measure BEFORE, through the old binaries. ---- */
+            await StartWithRuntimeAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
+            var before = await MeasureStoreAsync(oldConnection, timeout.Token);
+            var beforeVersion = await ReadServerVersionAsync(oldConnection, timeout.Token);
+            await StopWithRuntimeAsync(runtimeRoot, dataDirectory, timeout.Token);
+
+            Assert.True(before.LogRows > 0, "the fixture must contain rows for the comparison to mean anything");
+            Assert.True(before.CaggRows > 0, "the fixture must contain a materialized continuous aggregate");
+
+            var packageVersion = DarlingStoreUpgrade.TryReadZipPostgresVersion(shippedZip);
+            Assert.True(packageVersion != beforeVersion || BundledTimescaleVersionOfZip(shippedZip) != oldTimescale,
+                $"the fixture must be a real runtime change; both sides are PostgreSQL {beforeVersion} + TimescaleDB {oldTimescale}");
+
+            /* ---- 3. The REAL bootstrap, with a capturing logger replayed into every failure message. ---- */
+            var log = new CapturingLogger();
+            var managed = new DarlingManagedPostgres(config, log, runtimeRoot);
+
+            string connectionString;
+            try
+            {
+                connectionString = await managed.EnsureRunningAsync(timeout.Token);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"The same-major runtime swap threw: {ex.Message}\n\n--- orchestration log ---\n{log}", ex);
+            }
+
+            try
+            {
+                /* ---- 4. Same major, NEW binaries, data intact, extension moved with its library. ---- */
+                var after = await MeasureStoreAsync(connectionString, timeout.Token);
+                var afterVersion = await ReadServerVersionAsync(connectionString, timeout.Token);
+
+                Assert.Equal(oldMajor, after.ServerMajor);
+                Assert.True(afterVersion == packageVersion,
+                    $"expected the store to run the package's PostgreSQL {packageVersion}, but it reports {afterVersion}." +
+                    $"\n\n--- orchestration log ---\n{log}");
+                Assert.Equal(before.LogRows, after.LogRows);
+                Assert.Equal(before.PlanRows, after.PlanRows);
+                Assert.Equal(before.PlanXmlLength, after.PlanXmlLength);
+                Assert.Equal(before.LogChecksum, after.LogChecksum);
+                Assert.Equal(before.CaggRows, after.CaggRows);
+                Assert.Equal(before.CompressedChunks, after.CompressedChunks);
+                Assert.Equal(BundledTimescaleVersion(runtimeRoot), after.TimescaleVersion);
+
+                /* No pg_upgrade ran, so there is no retained pre-upgrade data directory. */
+                Assert.False(
+                    Directory.Exists(DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, oldMajor)),
+                    $"a same-major swap must not copy the data directory aside; that is pg_upgrade's rollback.\n\n--- orchestration log ---\n{log}");
+
+                /* The previous runtime is rescued like any other swap, and the stamp now names the shipped zip,
+                   so the next start adopts it instead of swapping again. */
+                Assert.True(Directory.Exists(
+                    Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql")));
+                Assert.Equal(
+                    DarlingStoreUpgrade.ComputeFileHash(shippedZip),
+                    File.ReadAllText(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)).Trim());
+
+                var conf = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "postgresql.conf"), timeout.Token);
+                Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
+                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
+                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
+                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+            }
+            finally
+            {
+                await managed.StopIfStartedByThisProcessAsync();
+            }
+        }
+        finally
+        {
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_KEEP")))
+            {
+                TryDeleteTree(root.FullName);
+            }
+        }
+    }
+
+    /// <summary>
     /// The DARLING01 incident (#1738), reproduced with REAL packages: an 18 store, an 18 runtime extracted,
     /// and a PostgreSQL 17 zip dropped beside the service. Before the guard the runtime was swapped because
     /// the majors merely DIFFERED, and the store was down about seven minutes until the previous runtime was
@@ -1030,6 +1238,35 @@ public sealed class DarlingStoreUpgradeTests
         return File.Exists(control)
             ? DarlingStoreUpgrade.ParseTimescaleDefaultVersion(File.ReadAllText(control))
             : null;
+    }
+
+    private static string? BundledTimescaleVersionOfZip(string zipPath)
+    {
+        using var archive = ZipFile.OpenRead(zipPath);
+        var control = archive.GetEntry("pgsql/share/extension/timescaledb.control");
+        if (control is null)
+        {
+            return null;
+        }
+
+        using var reader = new StreamReader(control.Open());
+        return DarlingStoreUpgrade.ParseTimescaleDefaultVersion(reader.ReadToEnd());
+    }
+
+    /// <summary>The PostgreSQL major of an extracted runtime, from its pg_ctl.exe version resource.</summary>
+    private static int? OldRuntimeMajor(string runtimeRoot)
+    {
+        var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(Path.Combine(runtimeRoot, "pgsql", "bin", "pg_ctl.exe"));
+        return info.FileMajorPart > 0 ? info.FileMajorPart : DarlingStoreUpgrade.ParsePostgresMajor(info.ProductVersion ?? info.FileVersion);
+    }
+
+    /// <summary>The server's full version (18.6), read the way the runtime check parses a version line.</summary>
+    private static async Task<Version?> ReadServerVersionAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false };
+        await using var connection = new NpgsqlConnection(builder.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        return DarlingStoreUpgrade.ParsePostgresVersion(await ScalarAsync<string>(connection, "SHOW server_version", cancellationToken));
     }
 
     /* ---------------- plumbing ---------------- */
