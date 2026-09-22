@@ -148,6 +148,8 @@ public sealed class StoreObjectConvergenceTests
         Assert.True(compression < scheduleConverge && collectionLog < scheduleConverge,
             "#1778: the compression-schedule converge follows BOTH compression steps, so it covers collection_log in the same pass");
         Assert.True(reshape < aggregates, "the stale-shape drop precedes the ensure that rebuilds them");
+        Assert.True(collectionLog < aggregates,
+            "#3893: collection_log becomes a hypertable before the aggregate ensure, which creates collection_health_hourly over it; on a fresh store (migrations before CREATE EXTENSION) the other order fails that CREATE every first start");
         Assert.True(refreshConverge < aggregates,
             "#3012: the refresh converge precedes the aggregate ensure, or the ensure raises 22023 per aggregate on every already-deployed store");
 

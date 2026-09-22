@@ -27,6 +27,11 @@ namespace Darling.Tests;
 /// minute, a compression target) and the one bound its cadence must never cross (the real-time tail reaching
 /// compressed <c>collection_log</c>).
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every live test here goes through
+   OpenStoreAsync, which reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres
+   and then works entirely inside it. It never touches the shared database's tables, so it cannot race the live
+   collection, and serializing it would be pure slowdown. Leave it out; this comment is here so the next sweep
+   does not "fix" it. */
 public class CollectionHealthAggregateTests
 {
     /// <summary>The tail a read serves from raw must stay well inside uncompressed data: if a cadence or offset

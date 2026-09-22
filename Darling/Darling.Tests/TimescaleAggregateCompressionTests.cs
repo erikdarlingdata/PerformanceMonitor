@@ -534,6 +534,12 @@ public sealed class TimescaleAggregateCompressionTests
             /* The aggregates have to exist, over hypertables, before anything can be compressed on them — the same
                ordering the worker's TimescaleDB block runs. */
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            /* #3893: collection_log too, as the worker does (its "collection_log hypertable" step precedes the
+               aggregate ensure, pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate
+               is sourced from it, and on a store whose migrations ran before CREATE EXTENSION it is still a plain
+               table until this runs, so the aggregate's CREATE would fail and the count below would read one
+               short, depending on which class reached the shared store first. */
+            Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
             await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
