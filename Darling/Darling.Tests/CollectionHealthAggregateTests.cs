@@ -7,10 +7,15 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -210,4 +215,309 @@ CALL refresh_continuous_aggregate('collect.{TimescaleSupport.CollectionHealthHou
         var after = await WindowRunsAsync(connection, ct);
         Assert.Equal(after.Raw, after.Aggregate);
     }
+
+    /* ─────────── the composed reader (#3893 arm 2): live parity, the two guards, the late row ─────────── */
+
+    /// <summary>Plants every CASE arm the eleven aggregates branch on, for 2 servers × 3 collectors every
+    /// 17 minutes from eight days + 13 minutes ago to now (so rows straddle the seven-day head boundary at
+    /// every minute offset and land in the last, never-materialized hour), plus two productive-then-stopped
+    /// collectors (a zero-row SUCCESS streak; a flip to a named skip) and fleet-maintenance sentinel rows the
+    /// read must exclude. The arm per row rotates through thirteen shapes: productive SUCCESS, empty SUCCESS,
+    /// ERROR, SKIPPED, the three named skips, ABANDONED, the pre-#2803 abandoned-by-note SUCCESS at both
+    /// shipped budgets, a SUCCESS with NULL rows_collected (the COALESCE path; <c>status</c> is NOT NULL, so
+    /// the aggregates' <c>status IS NULL</c> arm is unreachable by any write), the empty-enumeration SUCCESS (NOT an abandonment) and YIELDED.</summary>
+    private static async Task PlantEveryArmAsync(NpgsqlConnection connection, long idBase, CancellationToken ct)
+    {
+        await using var plant = new NpgsqlCommand($@"
+WITH n AS (SELECT (now() AT TIME ZONE 'UTC') AS u),
+arms (k, status, rows_collected, error_message) AS
+(
+    VALUES (0, 'SUCCESS'::text, 5, NULL::text),
+           (1, 'SUCCESS', 0, NULL),
+           (2, 'ERROR', NULL, 'boom'),
+           (3, 'SKIPPED', 0, NULL),
+           (4, '{CollectorRuntimePrecondition.DegradedStatus}', 0, 'denied'),
+           (5, '{CollectorRuntimePrecondition.ExtensionMissingStatus}', 0, 'no extension'),
+           (6, '{CollectorRuntimePrecondition.CaptureSessionMissingStatus}', 0, 'no session'),
+           (7, '{EnumeratedCollectorDriver.AbandonedStatus}', 0, '{EnumeratedCollectorDriver.WholeCycleBudgetNote(120)}'),
+           (8, 'SUCCESS', 0, '{EnumeratedCollectorDriver.WholeCycleBudgetNote(120)}'),
+           (9, 'SUCCESS', 0, '{EnumeratedCollectorDriver.WholeCycleBudgetNote(600)}'),
+           (10, 'SUCCESS', NULL, NULL),
+           (11, 'SUCCESS', 0, '{EnumeratedCollectorDriver.EmptyEnumerationMessage}'),
+           (12, 'YIELDED', 0, NULL)
+)
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+SELECT {idBase} + row_number() OVER (), p.server_id, 'srv-' || p.server_id, p.collector_name, p.t, 1, p.status, p.rows_collected, p.error_message
+FROM
+(
+    SELECT s AS server_id, 'collector_' || c AS collector_name, n.u - INTERVAL '8 days 13 minutes' + g * INTERVAL '17 minutes' AS t,
+           a.status, a.rows_collected, a.error_message
+    FROM n
+    CROSS JOIN generate_series(1, 2) s
+    CROSS JOIN generate_series(1, 3) c
+    CROSS JOIN generate_series(0, 700) g
+    JOIN arms a ON a.k = (g + s + c) % 13
+    UNION ALL
+    SELECT s, x.collector, t,
+           CASE WHEN x.collector = 'collector_streak' OR t < n.u - INTERVAL '1 day' THEN 'SUCCESS' ELSE '{CollectorRuntimePrecondition.CaptureSessionMissingStatus}' END,
+           CASE WHEN x.collector = 'collector_streak' THEN CASE WHEN t < n.u - INTERVAL '2 days' THEN 9 ELSE 0 END
+                WHEN t < n.u - INTERVAL '1 day' THEN 4 ELSE 0 END,
+           NULL
+    FROM n
+    CROSS JOIN generate_series(1, 2) s
+    CROSS JOIN (VALUES ('collector_streak'), ('collector_skipflip')) x (collector)
+    CROSS JOIN LATERAL generate_series(n.u - INTERVAL '8 days', n.u - INTERVAL '1 minute', INTERVAL '20 minutes') t
+    UNION ALL
+    SELECT 0, 'fleet_maintenance', t, 'ERROR', 0, NULL
+    FROM n CROSS JOIN LATERAL generate_series(n.u - INTERVAL '6 days', n.u, INTERVAL '6 hours') t
+) p
+WHERE p.t < (SELECT u FROM n)", connection);
+        await plant.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Rows that land AFTER the policy run, above its watermark (served real-time): an existing pair
+    /// and a brand-new collector.</summary>
+    private static async Task PlantAboveWatermarkAsync(NpgsqlConnection connection, long idBase, CancellationToken ct)
+    {
+        await using var plant = new NpgsqlCommand($@"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERVAL '5 seconds', 1, 'ERROR', NULL),
+       ({idBase + 1}, 2, 'srv-2', 'collector_late', (now() AT TIME ZONE 'UTC') - INTERVAL '1 second', 1, 'SUCCESS', 3)", connection);
+        await plant.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One statement's result, keyed (server, collector), every one of the thirteen ordinals rendered
+    /// invariantly (timestamps to the tick, so a MAX that loses a microsecond cannot compare equal).</summary>
+    private static async Task<SortedDictionary<string, string>> ReadRowsAsync(
+        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(sql);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+        if (headEnd is { } h)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = h });
+        }
+        var rows = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.Equal(13, reader.FieldCount);
+        while (await reader.ReadAsync(ct))
+        {
+            var fields = Enumerable.Range(0, 13).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
+                ? "NULL"
+                : reader.GetValue(i) switch
+                {
+                    DateTime d => d.Ticks.ToString(CultureInfo.InvariantCulture),
+                    var v => Convert.ToString(v, CultureInfo.InvariantCulture),
+                }));
+            rows.Add(reader.GetInt32(0) + "|" + reader.GetString(1), string.Join(" ", fields));
+        }
+        return rows;
+    }
+
+    /// <summary>The product's banded fleet payload, through the product's own chooser
+    /// (<c>ReadFailingCollectorCountsAsync</c> is private; reached by reflection so the test takes no seam).</summary>
+    private static async Task<Dictionary<int, DarlingFleetReader.CollectorCounts>> ReadBandedAsync(
+        NpgsqlDataSource postgres, DateTime now, CancellationToken ct)
+    {
+        var method = typeof(DarlingFleetReader).GetMethod("ReadFailingCollectorCountsAsync", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("ReadFailingCollectorCountsAsync not found");
+        return await (Task<Dictionary<int, DarlingFleetReader.CollectorCounts>>)method.Invoke(null, [postgres, now, ct])!;
+    }
+
+    private static void AssertSameRows(SortedDictionary<string, string> raw, SortedDictionary<string, string> composed)
+    {
+        var onlyRaw = raw.Where(r => !composed.TryGetValue(r.Key, out var c) || c != r.Value).Select(r => "raw  " + r.Key + " " + r.Value);
+        var onlyComposed = composed.Where(c => !raw.TryGetValue(c.Key, out var r) || r != c.Value).Select(c => "comp " + c.Key + " " + c.Value);
+        var diff = onlyRaw.Concat(onlyComposed).ToList();
+        Assert.True(diff.Count == 0, $"composed read differs from the raw scan in {diff.Count} row(s):\n" + string.Join("\n", diff));
+    }
+
+    private static DateTime NaiveUtcNow() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+    private static async Task DropAggregateAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW collect.{TimescaleSupport.CollectionHealthHourlyView}", connection);
+        await drop.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// THE PARITY PROOF. Eight days of every CASE arm, materialized by the PRODUCT's first policy run (no hand
+    /// backfill), then rows landing above the watermark: the composed read (whole buckets + raw head slice)
+    /// EQUALS the raw scan per (server, collector) across all thirteen ordinals, the guard says composed, and
+    /// the banded fleet payload the product computes through the composed path is identical to the one it
+    /// computes through the raw path (the aggregate dropped, so the chooser falls back).
+    /// </summary>
+    [Fact]
+    public async Task ComposedRead_EqualsRawScan_AcrossEveryCaseArm_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live parity test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 10_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+        await PlantAboveWatermarkAsync(connection, 19_000_000, ct);
+
+        var now = NaiveUtcNow();
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        await using (var mark = new NpgsqlCommand(DarlingFleetReader.CollectionHealthWatermarkSql, connection))
+        {
+            /* The first run materialized the window: the watermark is finite and well past the head hour, so
+               the composed read below really is served from buckets, not all real-time. */
+            var watermark = Assert.IsType<DateTime>(await mark.ExecuteScalarAsync(ct));
+            Assert.True(watermark > headEnd.AddDays(6), $"watermark {watermark:O} is not past the materialized week");
+        }
+        Assert.True(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
+
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+        var composed = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
+        Assert.Equal(2 * 5 + 1, raw.Count); // 2 servers × (3 rotating + streak + skipflip) + collector_late; sentinel excluded
+        AssertSameRows(raw, composed);
+
+        /* Every arm is actually exercised (a parity over zeros proves nothing). */
+        var all = string.Join(" ", raw.Values);
+        foreach (var column in new[] { "error_count", "permission_denied_count", "abandoned_count", "extension_missing_count" })
+        {
+            Assert.Contains(column + "=", all, StringComparison.Ordinal);
+            Assert.DoesNotContain(raw.Values, v => v.Contains("collector_1 ", StringComparison.Ordinal) && v.Contains(column + "=0 ", StringComparison.Ordinal));
+        }
+
+        var bandedComposed = await ReadBandedAsync(postgres, now, ct);
+        await DropAggregateAsync(connection, ct);
+        Assert.False(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
+        var bandedRaw = await ReadBandedAsync(postgres, now, ct);
+        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), bandedComposed.OrderBy(kv => kv.Key));
+        Assert.Equal(2, bandedRaw.Count);
+    }
+
+    /// <summary>
+    /// THE CONTINUITY GUARD. A whole hour missing below the watermark — here engineered by deleting one
+    /// materialized bucket's rows from the materialization hypertable, the shape an interrupted or hand-run
+    /// narrow refresh leaves — is a HOLE the composed read would serve short (asserted: forced, it differs
+    /// from raw). The guard sees the missing bucket, the chooser falls back to the raw scan, and the product's
+    /// banded payload equals the raw path's.
+    /// </summary>
+    [Fact]
+    public async Task ContinuityGuard_HourMissingBelowWatermark_FallsBackToRaw_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live continuity-guard test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 20_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        string materialization;
+        await using (var find = new NpgsqlCommand(
+            "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) " +
+            "FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '" +
+            TimescaleSupport.CollectionHealthHourlyView + "'", connection))
+        {
+            materialization = (string)(await find.ExecuteScalarAsync(ct))!;
+        }
+        await using (var hole = new NpgsqlCommand(
+            $"DELETE FROM {materialization} WHERE bucket = date_trunc('hour', (now() AT TIME ZONE 'UTC') - INTERVAL '3 days')", connection))
+        {
+            Assert.True(await hole.ExecuteNonQueryAsync(ct) > 0);
+        }
+
+        var now = NaiveUtcNow();
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+        var forced = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
+        Assert.NotEqual(raw, forced); // the hole is real: served from buckets, the read is short
+
+        Assert.False(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
+        var banded = await ReadBandedAsync(postgres, now, ct);
+        await DropAggregateAsync(connection, ct);
+        var bandedRaw = await ReadBandedAsync(postgres, now, ct);
+        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), banded.OrderBy(kv => kv.Key));
+    }
+
+    /// <summary>THE ABSENT GUARD. No aggregate (plain PostgreSQL, or not yet created): the probe says so, the
+    /// chooser never names the view (a relation in a statement resolves at parse time), and the raw scan
+    /// serves the read.</summary>
+    [Fact]
+    public async Task AbsentAggregate_ReadsRaw_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live absent-aggregate test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 30_000_000, ct);
+        await DropAggregateAsync(connection, ct);
+
+        var now = NaiveUtcNow();
+        var headEnd = DarlingFleetReader.CeilingHour(now.AddDays(-7));
+        await using (var probe = new NpgsqlCommand(DarlingFleetReader.CollectionHealthRollupProbeSql, connection))
+        {
+            Assert.False(Assert.IsType<bool>(await probe.ExecuteScalarAsync(ct)));
+        }
+        Assert.False(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
+        var banded = await ReadBandedAsync(postgres, now, ct);
+        Assert.Equal(2, banded.Count);
+        Assert.All(banded.Values, c => Assert.Equal(5, c.Total));
+    }
+
+    /// <summary>
+    /// A LATE ROW BELOW THE WATERMARK — the one staleness the design accepts, stated here as behaviour. A row
+    /// written after a refresh with a collection_time below the watermark lands in a bucket that already
+    /// exists, so the continuity guard (which counts buckets, not rows) does NOT see it: until the next policy
+    /// run the composed read UNDERCOUNTS that pair by the late row (and the guard still says composed). The
+    /// insert logged an invalidation for its bucket; the next run re-materializes exactly that range and the
+    /// read is exact again. Bound: one refresh interval (an hour) of staleness, for rows the product never
+    /// routinely writes (every <c>collection_log</c> writer stamps the insert-time clock).
+    /// </summary>
+    [Fact]
+    public async Task LateRowBelowWatermark_UndercountsUntilTheNextRun_ThenHeals_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live late-row test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 40_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+        await using (var late = new NpgsqlCommand(@"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES (49000000, 1, 'srv-1', 'collector_2', (now() AT TIME ZONE 'UTC') - INTERVAL '2 days', 1, 'ERROR', NULL, 'late')", connection))
+        {
+            await late.ExecuteNonQueryAsync(ct);
+        }
+
+        var now = NaiveUtcNow();
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+        var before = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
+        Assert.True(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct)); // guard is blind to it, by design
+        var stale = raw.Keys.Where(k => raw[k] != before[k]).ToList();
+        Assert.Equal(new[] { "1|collector_2" }, stale);
+        Assert.Contains("total_runs=", before[stale[0]], StringComparison.Ordinal);
+        Assert.Equal(TotalRuns(raw[stale[0]]) - 1, TotalRuns(before[stale[0]]));
+
+        await RunPolicyAsync(connection, jobId, ct);
+        var after = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
+        AssertSameRows(raw, after);
+    }
+
+    private static long TotalRuns(string row) =>
+        long.Parse(row.Split(' ').Single(f => f.StartsWith("total_runs=", StringComparison.Ordinal))["total_runs=".Length..], CultureInfo.InvariantCulture);
 }
