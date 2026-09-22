@@ -2449,6 +2449,39 @@ WITH NO DATA";
     public const string DailyRefreshScheduleInterval = "1 day";
 
     /// <summary>
+    /// ONE BUCKET PER TRANSACTION for the daily refreshes (#3745) — the structural half of an incident the
+    /// WAL knob only bounded.
+    ///
+    /// <para><b>What went wrong, and why the window was not the thing to change.</b> A daily policy's window is
+    /// <see cref="DailyRefreshStartOffset"/> wide, so one run re-materializes THREE daily buckets — and by
+    /// default TimescaleDB does that in ONE transaction. On the largest store in the measured population a
+    /// single such run wrote 8.3 million rows, overran the 1 GB <c>max_wal_size</c> into a forced second
+    /// checkpoint, and reads stalled for four minutes behind it. Nothing about the WINDOW was wrong: the 3-day
+    /// reach is what <see cref="HourlyRetentionInterval"/> leans on (a drop must never outrun the aggregate
+    /// meant to preserve that history), and the cadence was never near the runtime. What was wrong was that
+    /// three buckets' worth of writes had to commit or roll back together, so the WAL burst — and with it the
+    /// checkpoint pressure and the fsync tail every other backend queues behind — was sized by the WINDOW
+    /// rather than by a bucket.</para>
+    ///
+    /// <para><b>Why this is the fix and not the 16 GB knob.</b> Raising <c>max_wal_size</c> stopped that class
+    /// of storm and stays: it is the right size for this workload. But it moves the cliff rather than removing
+    /// it — the burst still scales with the window and with row volume, so the next store that grows three
+    /// times finds the same edge one knob further out. Slicing removes the scaling: TimescaleDB's own
+    /// documentation states that with <c>buckets_per_batch</c> set "each batch is an individual transaction",
+    /// so a 3-day window becomes three commits whose peak WAL is one bucket's worth no matter how large the
+    /// store gets. Measured on a 2.28.1 rig, the sliced policy logs one
+    /// <c>continuous aggregate refresh … (batch N of M)</c> line per bucket, which is the observable proof the
+    /// setting took.</para>
+    ///
+    /// <para><b>Daily only, and the reason is arithmetic rather than caution.</b> An hourly policy's window is
+    /// <see cref="HourlyRefreshStartOffset"/> against an hourly bucket, and since #3012 that window IS the
+    /// tier's own cadence — it already refreshes a single bucket per run, so batching it would add a config key
+    /// that changes nothing. TimescaleDB's default is 10 buckets per batch, which for a 3-bucket window is one
+    /// batch: the default is exactly the behaviour that produced the incident.</para>
+    /// </summary>
+    public const int DailyRefreshBucketsPerBatch = 1;
+
+    /// <summary>
     /// The width of the hourly refresh grid in minutes, taken from
     /// <see cref="HourlyRefreshScheduleSpan"/> rather than written as 60, so the grid and the cadence it
     /// tiles cannot disagree about how long an hour is.
@@ -4843,7 +4876,8 @@ WITH NO DATA";
             DailyRefreshStartOffset,
             DailyRefreshScheduleInterval,
             DailyRefreshScheduleInterval,
-            phaseMinutes: null);
+            phaseMinutes: null,
+            bucketsPerBatch: DailyRefreshBucketsPerBatch);
 
     /// <summary>The TimescaleDB policy proc behind a continuous-aggregate refresh job — what
     /// <c>timescaledb_information.jobs.proc_name</c> reports, and the leading token of the job label both
@@ -4901,19 +4935,34 @@ WITH NO DATA";
     /// TimescaleDB's handling of a past anchor. It is computed in UTC (<c>now() AT TIME ZONE 'UTC'</c>, then
     /// back to <c>timestamptz</c>) rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
     /// in the SESSION time zone and would land off-grid on any of the half-hour and quarter-hour zones.</para>
+    ///
+    /// <para><b><paramref name="bucketsPerBatch"/> slices the run into one transaction per bucket</b> and is
+    /// named only when a caller passes it — see <see cref="DailyRefreshBucketsPerBatch"/> for the incident that
+    /// made a multi-bucket window's single transaction the thing to break up, and for why the hourly tier has
+    /// nothing to slice.</para>
     /// </summary>
     public static string AddContinuousAggregatePolicySql(
         string view,
         string startOffset,
         string endOffset,
         string scheduleInterval,
-        int? phaseMinutes)
+        int? phaseMinutes,
+        int? bucketsPerBatch = null)
     {
         var initialStart = phaseMinutes is int phase
             ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
             : string.Empty;
 
-        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true{initialStart})";
+        /* Named BEFORE if_not_exists rather than after, so the idempotence flag stays the last argument it has
+           always been and the statement a store without batching emits is byte-identical to the one it emitted
+           before #3745 — an unbatched tier's rendered SQL must not move just because a batched one gained an
+           argument. Omitted entirely when null: add_continuous_aggregate_policy's own default (10) is the
+           behaviour every hourly policy already has, and naming it would only invite a reader to tune it. */
+        var batching = bucketsPerBatch is int buckets
+            ? $", buckets_per_batch => {buckets.ToString(CultureInfo.InvariantCulture)}"
+            : string.Empty;
+
+        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}'{batching}, if_not_exists => true{initialStart})";
     }
 
     /// <summary>
@@ -5284,6 +5333,158 @@ WHERE j.job_id = $1::integer";
             logger?.LogInformation(
                 "TimescaleDB: {Converged}/{Total} hourly refresh policies moved onto the {Interval} window and their own minute on the phase grid ({Minutes} distinct minutes, #3012/#3174).",
                 converged, stale.Count, HourlyRefreshStartOffset, HourlyRefreshPhaseOrder.Count);
+        }
+
+        return converged;
+    }
+
+    /// <summary>
+    /// What every continuous-aggregate refresh policy on this store currently batches at — the read half of
+    /// <see cref="ConvergeContinuousAggregateBatchingAsync"/> (#3745).
+    ///
+    /// <para>Deliberately a SEPARATE statement from <see cref="ContinuousAggregateRefreshStateSql"/> rather
+    /// than a column added to it: that one is the #3012 window-and-phase read, it drives an
+    /// <c>alter_job</c> that MOVES a schedule, and the two converges must be able to disagree about which
+    /// policies they touch — this one reaches only the daily tier, which the other one is explicitly written to
+    /// pass over. The JOIN is the same measured pair of identities for the same reason
+    /// (<c>timescaledb_information.jobs</c> resolves a continuous-aggregate job back to its user view, and the
+    /// materialization-hypertable form reads nothing — matching either cannot double-count, because a user view
+    /// lives in <c>collect</c> and a materialization hypertable in <c>_timescaledb_internal</c>).</para>
+    ///
+    /// <para>The value is read out of the job's own <c>config</c> JSONB, which is where
+    /// <c>add_continuous_aggregate_policy</c> stores it (measured on 2.28.1: <c>"buckets_per_batch": 1</c>).
+    /// A policy created before #3745 has NO such key, so this yields NULL — and NULL is treated as needing
+    /// converge, which is correct: absent means TimescaleDB's default of ten buckets a batch, which for a
+    /// 3-bucket window is the single transaction the incident was.</para>
+    /// </summary>
+    public const string ContinuousAggregateBatchingStateSql = @"
+SELECT
+    j.job_id,
+    ca.view_name,
+    (j.config->>'buckets_per_batch')::int AS buckets_per_batch
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Sets <c>buckets_per_batch</c> on ONE existing refresh policy and touches nothing else. <c>$1</c> the job
+    /// id (<c>::integer</c> — <c>alter_job</c> takes <c>job_id INTEGER</c> and PostgreSQL does not down-cast
+    /// bigint during function resolution, the #1586 trap), <c>$2</c> the bucket count.
+    ///
+    /// <para><b>The narrowness is the point, and it is what separates this from its #3012 sibling.</b>
+    /// <see cref="SetContinuousAggregateRefreshSql"/> also names <c>fixed_schedule</c> and
+    /// <c>initial_start</c>, because re-phasing a decayed hourly job is half of what it is for. Re-phasing is
+    /// exactly what must NOT happen here: the daily tier keeps TimescaleDB's finish-to-start scheduling on
+    /// purpose (it was never near its own cadence and never appeared in the convoy), and an <c>initial_start</c>
+    /// arriving through a batching converge would silently put seven daily jobs on a fixed schedule as a side
+    /// effect. So only <c>config</c> is named, and only the ONE key inside it is written — <c>jsonb_set</c>
+    /// against the job's own config, so <c>start_offset</c>, <c>end_offset</c> and <c>mat_hypertable_id</c>
+    /// survive verbatim, which is why this is a <c>SELECT … FROM timescaledb_information.jobs</c> rather than a
+    /// bare function call. Verified on a 2.28.1 rig: this form sets the key and leaves <c>initial_start</c>
+    /// unmoved. Every un-named <c>alter_job</c> parameter means "leave unchanged", so this also cannot arm a
+    /// paused job.</para>
+    /// </summary>
+    public const string SetContinuousAggregateBatchingSql = "SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{buckets_per_batch}', to_jsonb($2::int))) FROM timescaledb_information.jobs AS j WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// Converges the DAILY refresh policies an already-deployed store carries onto
+    /// <see cref="DailyRefreshBucketsPerBatch"/> (#3745), without moving a single schedule.
+    ///
+    /// <para><b>Why a converge is needed at all, when the create path already passes the argument.</b>
+    /// <c>add_continuous_aggregate_policy(… if_not_exists => true)</c> returns -1 for a policy the store
+    /// ALREADY has whose window matches — it does not reconcile the rest of the config — so the batching
+    /// argument added to the create statement reaches new stores only. Every store that survived the incident
+    /// is by definition an old one: its seven daily policies would keep refreshing three buckets in one
+    /// transaction forever while the source read as if it had been fixed. That is the same gap #3012's window
+    /// converge exists to close, arriving one argument later.</para>
+    ///
+    /// <para><b>DAILY only, by membership in <see cref="DailyAggregates"/> rather than by name.</b> An hourly
+    /// policy refreshes one bucket per run already (#3012 made the window the cadence), so setting the key
+    /// there would write a config value that changes no behaviour and would have to be maintained anyway. The
+    /// membership test is against the registry list the ensure sweep and the compression registry read, so a
+    /// daily view added later is batched without an edit here — the <see cref="DailyAggregates"/> hoist is what
+    /// makes that true.</para>
+    ///
+    /// <para><b>Selects only what differs</b> (NULL — the pre-#3745 shape — counts as different), so a
+    /// converged store issues no <c>alter_job</c> at all and this step is one catalog read per pass. Returns
+    /// how many it set. Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often
+    /// a least-privilege bring-your-own store whose login does not own the job) leaves that policy unsliced and
+    /// the rest still converge, and the read itself failing on a plain-PostgreSQL store is a debug line and a
+    /// zero.</para>
+    /// </summary>
+    public static async Task<int> ConvergeContinuousAggregateBatchingAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var daily = new HashSet<string>(DailyAggregates.Select(a => a.View), StringComparer.Ordinal);
+
+        var stale = new List<(int JobId, string View, int? Was)>();
+        var already = 0;
+        try
+        {
+            using var probe = new NpgsqlCommand(ContinuousAggregateBatchingStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (!daily.Contains(view))
+                {
+                    continue;
+                }
+
+                var buckets = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2);
+                if (buckets == DailyRefreshBucketsPerBatch)
+                {
+                    already++;
+                    continue;
+                }
+
+                stale.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), view, buckets));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store (no such catalog) or a TimescaleDB too old to accept the key. The caller
+               already gates on the extension; nothing to converge either way. */
+            logger?.LogDebug("Continuous-aggregate batching converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, view, was) in stale)
+        {
+            try
+            {
+                using var alter = new NpgsqlCommand(SetContinuousAggregateBatchingSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(DailyRefreshBucketsPerBatch);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogDebug(
+                    "TimescaleDB: {View}'s daily refresh policy (job {JobId}) now refreshes {Buckets} bucket(s) per batch (was {Was}) — each batch is its own transaction, so a {Window} window is that many commits instead of one (#3745).",
+                    view, jobId, DailyRefreshBucketsPerBatch, was, DailyRefreshStartOffset);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not set {View}'s daily refresh policy (job {JobId}) to {Buckets} bucket(s) per batch — it keeps re-materializing its whole {Window} window in ONE transaction, which is the WAL burst reads stall behind (often a permission issue: the store login must own the job): {Message}",
+                    view, jobId, DailyRefreshBucketsPerBatch, DailyRefreshStartOffset, ex.Message);
+            }
+        }
+
+        if (converged > 0)
+        {
+            logger?.LogInformation(
+                "Continuous-aggregate batching: {Converged} daily policies set to {Buckets} bucket(s) per batch, {Already} already converged",
+                converged, DailyRefreshBucketsPerBatch, already);
         }
 
         return converged;

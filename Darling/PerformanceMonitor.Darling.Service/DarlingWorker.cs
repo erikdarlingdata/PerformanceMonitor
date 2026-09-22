@@ -327,6 +327,13 @@ public sealed class DarlingWorker : BackgroundService
         new("aggregate refresh converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, logger, ct)),
 
+        /* #3745: directly after the window converge, because both are alter_job passes over the same policy
+           jobs and this one reaches the tier that one deliberately passes over (daily). It only writes the
+           buckets_per_batch key — no initial_start, so the daily tier keeps its finish-to-start scheduling —
+           and it selects only policies whose stored value differs, so a converged store issues no DDL. */
+        new("aggregate batching converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateBatchingAsync(connection, logger, ct)),
+
         /* CREATE MATERIALIZED VIEW IF NOT EXISTS per aggregate plus its refresh policy (a quiet -1 once the
            converge above has made the windows match). THE step the issue is loudest about: its per-aggregate
            failure isolation is what leaves one rollup family missing on an otherwise healthy store. */

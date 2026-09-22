@@ -136,6 +136,7 @@ public sealed class StoreObjectConvergenceTests
         var scheduleConverge = At("ConvergeCompressionScheduleAsync");
         var reshape = At("DropStaleContinuousAggregatesAsync");
         var refreshConverge = At("ConvergeContinuousAggregateRefreshAsync");
+        var batchingConverge = At("ConvergeContinuousAggregateBatchingAsync");
         var aggregates = At("EnsureContinuousAggregatesAsync");
         var dedupIndexes = At("EnsureIntervalDedupMaterializationIndexesAsync");
         var aggregateCompression = At("EnsureAggregateCompressionAsync");
@@ -149,6 +150,17 @@ public sealed class StoreObjectConvergenceTests
         Assert.True(reshape < aggregates, "the stale-shape drop precedes the ensure that rebuilds them");
         Assert.True(refreshConverge < aggregates,
             "#3012: the refresh converge precedes the aggregate ensure, or the ensure raises 22023 per aggregate on every already-deployed store");
+
+        /* #3745: the batching converge is a step of this list, and it sits between the window converge and the
+           ensure. WHY the position is asserted rather than left free: both converges are alter_job passes over
+           the same refresh jobs, and keeping them adjacent is what makes "the hourly tier is re-windowed, the
+           daily tier is sliced" one readable pair rather than two unrelated steps; and it must precede the
+           ensure for the same measured reason the window converge does — the ensure's add_* call is the thing
+           that would otherwise be the only writer of the batching argument, and it skips policies that already
+           exist. Its own narrowness (config only, no initial_start, daily only) is pinned in
+           DailyRefreshBatchingTests. */
+        Assert.True(refreshConverge < batchingConverge && batchingConverge < aggregates,
+            "#3745: the daily batching converge sits with the window converge, before the aggregate ensure that cannot reconcile an existing policy's config");
         Assert.True(aggregates < dedupIndexes, "#3597: the dedup-index sweep needs the aggregates to exist");
         Assert.True(aggregates < aggregateCompression, "#3581: the aggregate-compression ensure needs the aggregates to exist");
         Assert.True(retiredBaselines < fallbackViews, "#2007: the retirement drop precedes the fallback ensure");
