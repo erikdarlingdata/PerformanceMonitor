@@ -33,10 +33,12 @@ namespace PerformanceMonitor.Notifications;
 public interface IFindingAlertSender
 {
     /// <summary>
-    /// Latest <c>alert_time</c> for (serverId, metricName) across any channel/result —
-    /// seeds the analysis per-finding cooldown across restarts.
+    /// Latest <c>alert_time</c> for (serverId, metricName) over rows that were a DELIVERED page —
+    /// seeds the analysis per-finding #2054 hold across restarts. #3916: a hold must be earned by a
+    /// delivery, so a row that reached no one seeds nothing. Forwards to
+    /// <see cref="IAlertHistoryStore.GetLastDeliveredPageUtcAsync"/>.
     /// </summary>
-    Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName);
+    Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName);
 
     /// <summary>
     /// Sends a composed analysis-finding alert through this app's channels and records it
@@ -46,8 +48,12 @@ public interface IFindingAlertSender
     /// with <see cref="AlertDelivery.RoutedToDigest"/>. The routing record itself
     /// (<see cref="AlertContext.Routing"/>) is already on the context when the alert arrives; the sender's
     /// only job on that arm is to keep the channels shut and write the row.</para>
+    /// <para>#3916: returns the <see cref="AlertDelivery"/> the row recorded (the digest arm returns
+    /// <see cref="AlertDelivery.RoutedToDigest"/>), so the service can tell a page that reached someone
+    /// from one that reached no one — only the former may arm the #2054 hold. Null ONLY when the sender
+    /// caught an exception, which is read as not delivered.</para>
     /// </summary>
-    Task SendFindingAlertAsync(FindingAlert alert);
+    Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert);
 }
 
 /// <summary>

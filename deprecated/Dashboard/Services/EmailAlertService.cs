@@ -55,8 +55,10 @@ namespace PerformanceMonitorDashboard.Services
         /// records Dashboard's per-channel rows: an <c>email</c> row when email is attempted
         /// (configured + outside cooldown) and a <c>webhook</c> row when a webhook is delivered.
         /// Each channel operates independently. Never throws.
+        /// <para>#3916: returns the most-delivered disposition among the rows it recorded (Sent if any
+        /// channel sent), or null when it recorded no row or caught. The threshold callers discard it.</para>
         /// </summary>
-        public async Task TrySendAlertEmailAsync(
+        public async Task<AlertDelivery?> TrySendAlertEmailAsync(
             string metricName,
             string serverName,
             string currentValue,
@@ -69,21 +71,30 @@ namespace PerformanceMonitorDashboard.Services
                 var result = await _core.TrySendAsync(
                     metricName, serverName, currentValue, thresholdValue, serverId, context, attemptChannels: true);
 
+                AlertDelivery? recorded = null;
+
                 if (result.EmailAttempted)
                 {
                     var emailContextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-                    RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, result.EmailSent, "email", result.SendError, contextJson: emailContextJson);
+                    recorded = RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, result.EmailSent, "email", result.SendError, contextJson: emailContextJson);
                 }
 
                 if (result.WebhookSent)
                 {
                     var webhookContextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-                    RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, true, "webhook", contextJson: webhookContextJson);
+                    var webhook = RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, true, "webhook", contextJson: webhookContextJson);
+
+                    /* Per-channel rows: the most-delivered one speaks for the send (a sent webhook beats a
+                       failed email row). */
+                    if (recorded is null || !recorded.Sent) recorded = webhook;
                 }
+
+                return recorded;
             }
             catch (Exception ex)
             {
                 _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
+                return null;
             }
         }
 
@@ -92,8 +103,9 @@ namespace PerformanceMonitorDashboard.Services
         /// Thin forwarder over <see cref="JsonAlertHistoryStore.RecordAlertAsync"/>. The store
         /// completes synchronously (in-memory + trim), so this stays a sync method to preserve
         /// the existing call sites' shape (MainWindow threshold alerts call it directly).
+        /// <para>#3916: returns the disposition it recorded; the threshold call sites discard it.</para>
         /// </summary>
-        public void RecordAlert(string serverId, string serverName, string metricName,
+        public AlertDelivery RecordAlert(string serverId, string serverName, string metricName,
             string currentValue, string thresholdValue, bool alertSent,
             string notificationType, string? sendError = null, bool muted = false, string? detailText = null,
             string? contextJson = null)
@@ -110,15 +122,17 @@ namespace PerformanceMonitorDashboard.Services
                 null, null,
                 delivery,
                 muted, detailText, contextJson)).GetAwaiter().GetResult();
+            return delivery;
         }
 
         /// <summary>
-        /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-        /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-        /// restarts. Thin forwarder over the store.
+        /// <see cref="IFindingAlertSender"/>: latest delivered-page time for (serverId, metricName) —
+        /// seeds the shared AnalysisNotificationService #2054 hold across restarts (#3916). On this SKU
+        /// every page row is a delivered page (the tray balloon rides the shared service's sink), so the
+        /// store answers with any row. Thin forwarder over the store.
         /// </summary>
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-            => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+            => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
 
         /// <summary>
         /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -127,15 +141,18 @@ namespace PerformanceMonitorDashboard.Services
         /// configured to log (so the Alerts history tab still shows the finding). The fallback
         /// lives here, not in <see cref="TrySendAlertEmailAsync"/>, because the threshold-alert
         /// path records its own "tray" row separately — this fallback is analysis-path only.
+        /// <para>#3916: returns the most-delivered disposition recorded. The shared service counts a
+        /// Dashboard page as delivered through its wired tray sink regardless, so this value only matters
+        /// to a caller without one.</para>
         /// </summary>
-        public async Task SendFindingAlertAsync(FindingAlert alert)
+        public async Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             if (alert.Route == FindingRoute.Digest)
             {
                 /* #3712: the corroboration gate routed this finding to the digest — no channel is consulted.
                    The deprecated SKU has no digest document; the row is the whole record here, written with the
                    shared disposition so its grid and MCP read label it the way the live SKUs do. */
-                RecordAlert(
+                return RecordAlert(
                     alert.ServerId,
                     alert.ServerName,
                     alert.MetricName,
@@ -146,10 +163,9 @@ namespace PerformanceMonitorDashboard.Services
                     muted: false,
                     detailText: alert.DetailText,
                     contextJson: AlertContextSerializer.Serialize(alert.Context));
-                return;
             }
 
-            await TrySendAlertEmailAsync(
+            var recorded = await TrySendAlertEmailAsync(
                 alert.MetricName,
                 alert.ServerName,
                 alert.CurrentValue,
@@ -170,7 +186,7 @@ namespace PerformanceMonitorDashboard.Services
 
             if (!emailWouldLog && !webhooksAttempted)
             {
-                RecordAlert(
+                recorded = RecordAlert(
                     alert.ServerId,
                     alert.ServerName,
                     alert.MetricName,
@@ -182,6 +198,12 @@ namespace PerformanceMonitorDashboard.Services
                     detailText: alert.DetailText,
                     contextJson: AlertContextSerializer.Serialize(alert.Context));
             }
+
+            /* A configured channel that recorded nothing (email inside its cooldown, webhook throttled)
+               delivered nothing; say so rather than return null, which the contract reserves for a catch. */
+#pragma warning disable CS0618
+            return recorded ?? AlertDelivery.FromLegacyStoredColumns(false, AlertDelivery.ChannelUndelivered, null);
+#pragma warning restore CS0618
         }
 
         /// <summary>
