@@ -416,6 +416,9 @@ public sealed class DarlingWorker : BackgroundService
        first hypertable conversion is real work. That pass is the one a start path would have spent minutes on
        too, and cutting it short costs only the steps it had not reached: they are idempotent, so the next
        hour resumes at the one that was interrupted rather than redoing the ladder. */
+    /// <summary>The convergence list, read-only, for tests that build a store the way the product does (#3908).</summary>
+    internal static IReadOnlyList<StoreObjectConvergenceStep> StoreObjectConvergence => s_storeObjectConvergence;
+
     private static readonly TimeSpan s_storeObjectConvergenceBudget = TimeSpan.FromMinutes(5);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the

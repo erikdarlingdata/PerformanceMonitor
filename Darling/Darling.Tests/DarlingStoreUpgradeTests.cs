@@ -298,6 +298,165 @@ public sealed class DarlingStoreUpgradeTests
     public void ParseTimescaleLibraryVersion_ReadsOnlyTheVersionedLoaderName(string fileName, string? expected)
         => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
 
+    /// <summary>
+    /// #3908: a runtime carries the libraries of older TimescaleDB releases beside its own, so "the" versioned
+    /// library is ambiguous and name order would answer 2.28.1 for a 2.30.1 runtime. Its version is the control
+    /// file's default_version, read the same way from an extracted tree and from a zip; the library list is
+    /// every version it can load.
+    /// </summary>
+    [Fact]
+    public void TimescaleVersionReaders_UseTheControlFile_AndListEveryCarriedLibrary()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-tsreaders-");
+        try
+        {
+            var pgsql = Path.Combine(root.FullName, "pgsql");
+            Directory.CreateDirectory(Path.Combine(pgsql, "bin"));
+            Directory.CreateDirectory(Path.Combine(pgsql, "lib"));
+            Directory.CreateDirectory(Path.Combine(pgsql, "share", "extension"));
+            foreach (var library in new[] { "timescaledb.dll", "timescaledb-2.28.1.dll", "timescaledb-tsl-2.28.1.dll", "timescaledb-2.30.1.dll", "timescaledb-tsl-2.30.1.dll" })
+            {
+                File.WriteAllText(Path.Combine(pgsql, "lib", library), "x");
+            }
+
+            File.WriteAllText(
+                Path.Combine(pgsql, "share", "extension", "timescaledb.control"),
+                "comment = 'Enables scalable inserts'\ndefault_version = '2.30.1'\nmodule_pathname = '$libdir/timescaledb'\n");
+
+            var zip = Path.Combine(root.FullName, "pg-runtime.zip");
+            ZipFile.CreateFromDirectory(pgsql, zip, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            Assert.Equal("2.30.1", DarlingStoreUpgrade.TryReadInstalledTimescaleVersion(Path.Combine(pgsql, "bin")));
+            Assert.Equal("2.30.1", DarlingStoreUpgrade.TryReadZipTimescaleVersion(zip));
+            Assert.Equal(new[] { "2.28.1", "2.30.1" }, DarlingStoreUpgrade.TryReadTimescaleLibraryVersions(pgsql));
+            Assert.Equal(new[] { "2.28.1", "2.30.1" }, DarlingStoreUpgrade.TryReadZipTimescaleLibraryVersions(zip));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #3908's seam, on real servers. A store created by 3.8.0's runtime (TimescaleDB 2.28.1) is started on the
+    /// current bundle. An ordinary Npgsql session cannot move its extension: type loading is the session's
+    /// first statement, which loads the old library, and TimescaleDB then refuses the ALTER (or, with no
+    /// carried library, the load itself fails). The primitive, whose ALTER is the session's first statement,
+    /// moves it. Also checked: a database without the extension answers Absent, and repeating the ALTER is
+    /// harmless. Started with the scheduler off, the way the quiesced step starts it.
+    /// Gated on DARLING_TEST_PGRUNTIME_PREVIOUS and DARLING_TEST_PGRUNTIME, both set by the nightly.
+    /// </summary>
+    [Fact]
+    public async Task UpdateTimescaleAsFirstStatement_MovesAStoreAnOrdinarySessionCannot_Gated()
+    {
+        var previousRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_PREVIOUS");
+        var currentRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(previousRuntime) || string.IsNullOrWhiteSpace(currentRuntime),
+            "Set DARLING_TEST_PGRUNTIME_PREVIOUS (the previous release's runtime) and DARLING_TEST_PGRUNTIME (the current bundle, extracted).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+
+        var previousBin = Path.Combine(previousRuntime!, "pgsql", "bin");
+        var currentBin = Path.Combine(currentRuntime!, "pgsql", "bin");
+        var bundled = DarlingStoreUpgrade.TryReadInstalledTimescaleVersion(currentBin);
+        var original = DarlingStoreUpgrade.TryReadInstalledTimescaleVersion(previousBin);
+        Assert.NotNull(bundled);
+        Assert.SkipWhen(string.Equals(bundled, original, StringComparison.Ordinal),
+            $"Both runtimes ship TimescaleDB {bundled}, so there is no extension version to move.");
+
+        var root = Directory.CreateTempSubdirectory("darling-tsfirst-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var port = FindFreeTcpPort();
+        var owner = $"Host=127.0.0.1;Port={port};Username=darling;Database=postgres;Pooling=false";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+        string? runningBin = null;
+        try
+        {
+            var (initExit, initOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(previousBin, "initdb.exe"),
+                $"-D \"{dataDirectory}\" -U darling -A trust -E UTF8 --locale=C --data-checksums",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(initExit == 0, $"initdb failed: {initOutput}");
+            await File.AppendAllTextAsync(Path.Combine(dataDirectory, "postgresql.conf"), "\nshared_preload_libraries = 'timescaledb'\n", timeout.Token);
+
+            /* The store as the previous release left it: TimescaleDB at that release's version, with data. */
+            runningBin = await StartDirectAsync(previousBin, dataDirectory, port, quiesced: false, timeout.Token);
+            await ExecuteOnAsync(owner, "CREATE DATABASE darling", timeout.Token);
+            var store = owner.Replace("Database=postgres", "Database=darling", StringComparison.Ordinal);
+            await ExecuteOnAsync(store, "CREATE EXTENSION timescaledb", timeout.Token);
+            await ExecuteOnAsync(store, "CREATE TABLE m (t timestamptz NOT NULL, v int)", timeout.Token);
+            await ExecuteOnAsync(store, "SELECT create_hypertable('m', by_range('t'))", timeout.Token);
+            await ExecuteOnAsync(store, "INSERT INTO m SELECT now() - (g || ' min')::interval, g FROM generate_series(1, 5000) AS g", timeout.Token);
+            Assert.Equal(original, await ScalarOnAsync(store, "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", timeout.Token));
+            await StopDirectAsync(previousBin, dataDirectory, timeout.Token);
+            runningBin = null;
+
+            /* The current bundle, quiesced. */
+            runningBin = await StartDirectAsync(currentBin, dataDirectory, port, quiesced: true, timeout.Token);
+
+            /* An ordinary session: its type-loading query is its first statement. Npgsql loads types once per
+               connection string and this process already connected with the store's, so the control uses a
+               string it has never seen, as the service's first store connection after a start would be. */
+            var fresh = new NpgsqlConnectionStringBuilder(store) { ApplicationName = "ordinary-" + Guid.NewGuid().ToString("N") }.ConnectionString;
+            var ordinary = await Assert.ThrowsAsync<PostgresException>(() => ExecuteOnAsync(fresh, "ALTER EXTENSION timescaledb UPDATE", timeout.Token));
+            Assert.True(ordinary.SqlState is "58P01" or "0A000" or "55000",
+                $"expected the loader to block an ordinary session's ALTER, got {ordinary.SqlState}: {ordinary.MessageText}");
+
+            Assert.Equal(DarlingStoreUpgrade.TimescaleUpdateResult.Updated,
+                await DarlingStoreUpgrade.UpdateTimescaleAsFirstStatementAsync(owner, "darling", TimeSpan.FromMinutes(5), timeout.Token));
+            Assert.Equal(bundled, await ScalarOnAsync(store, "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", timeout.Token));
+            Assert.Equal("5000", await ScalarOnAsync(store, "SELECT count(*)::text FROM m", timeout.Token));
+
+            Assert.Equal(DarlingStoreUpgrade.TimescaleUpdateResult.Absent,
+                await DarlingStoreUpgrade.UpdateTimescaleAsFirstStatementAsync(owner, "postgres", TimeSpan.FromMinutes(5), timeout.Token));
+            Assert.Equal(DarlingStoreUpgrade.TimescaleUpdateResult.Updated,
+                await DarlingStoreUpgrade.UpdateTimescaleAsFirstStatementAsync(owner, "darling", TimeSpan.FromMinutes(5), timeout.Token));
+        }
+        finally
+        {
+            if (runningBin is not null)
+            {
+                await StopDirectAsync(runningBin, dataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    private static async Task<string> StartDirectAsync(string binDirectory, string dataDirectory, int port, bool quiesced, CancellationToken cancellationToken)
+    {
+        var options = $"-p {port} -c listen_addresses=127.0.0.1" + (quiesced ? " -c timescaledb.max_background_workers=0" : string.Empty);
+        var exitCode = await DarlingManagedPostgres.RunDetachingToolAsync(
+            Path.Combine(binDirectory, "pg_ctl.exe"),
+            $"-D \"{dataDirectory}\" -o \"{options}\" -w -t 120 start",
+            TimeSpan.FromMinutes(3),
+            cancellationToken);
+        Assert.Equal(0, exitCode);
+        return binDirectory;
+    }
+
+    private static async Task StopDirectAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+        => await DarlingManagedPostgres.RunToolAsync(
+            Path.Combine(binDirectory, "pg_ctl.exe"),
+            $"stop -D \"{dataDirectory}\" -m fast -w -t 120",
+            TimeSpan.FromMinutes(3),
+            cancellationToken);
+
+    private static async Task ExecuteOnAsync(string connectionString, string sql, CancellationToken cancellationToken)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 600 };
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<string?> ScalarOnAsync(string connectionString, string sql, CancellationToken cancellationToken)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 600 };
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
     [Fact]
     public void BuildStoreUpgradeReport_CarriesAPostCommitWarningThroughOnSuccess()
     {
@@ -1078,13 +1237,21 @@ public sealed class DarlingStoreUpgradeTests
 
             var major = await ReadServerMajorAsync(connection, cancellationToken);
 
-            await ExecuteAsync(connection, "CREATE EXTENSION IF NOT EXISTS timescaledb", cancellationToken);
-            await ExecuteAsync(connection, "CREATE SCHEMA IF NOT EXISTS collect", cancellationToken);
+            /* #3908: the store the product builds, not an approximation. The migrations, then TimescaleDB where
+               the product puts it (the collect schema), then the worker's own store-object convergence list:
+               72 hypertables, the continuous aggregates, and every refresh, compression and retention policy,
+               created under this runtime's TimescaleDB. An upgrade that breaks a policy the product owns is only
+               visible on a store that has them. */
+            await BuildProductStoreObjectsAsync(connectionString, cancellationToken);
+
+            /* The data-bearing fixtures sit in their own schema beside the product's tables, so they neither
+               collide with collect's real ones nor depend on their columns. */
+            await ExecuteAsync(connection, "CREATE SCHEMA IF NOT EXISTS fixture", cancellationToken);
 
             await ExecuteAsync(
                 connection,
                 """
-                CREATE TABLE collect.collection_log (
+                CREATE TABLE fixture.collection_log (
                     collection_time timestamptz NOT NULL,
                     server_id       integer      NOT NULL,
                     collector_name  text         NOT NULL,
@@ -1095,13 +1262,13 @@ public sealed class DarlingStoreUpgradeTests
                 cancellationToken);
             await ExecuteAsync(
                 connection,
-                "SELECT create_hypertable('collect.collection_log', by_range('collection_time'))",
+                "SELECT create_hypertable('fixture.collection_log', by_range('collection_time'))",
                 cancellationToken);
 
             await ExecuteAsync(
                 connection,
                 """
-                CREATE TABLE collect.query_plans (
+                CREATE TABLE fixture.query_plans (
                     collection_time timestamptz NOT NULL,
                     server_id       integer      NOT NULL,
                     query_hash      text         NOT NULL,
@@ -1111,14 +1278,14 @@ public sealed class DarlingStoreUpgradeTests
                 cancellationToken);
             await ExecuteAsync(
                 connection,
-                "SELECT create_hypertable('collect.query_plans', by_range('collection_time'))",
+                "SELECT create_hypertable('fixture.query_plans', by_range('collection_time'))",
                 cancellationToken);
 
             /* Collector rows across several days so the hypertable really has multiple chunks. */
             await ExecuteAsync(
                 connection,
                 """
-                INSERT INTO collect.collection_log (collection_time, server_id, collector_name, status, rows_collected)
+                INSERT INTO fixture.collection_log (collection_time, server_id, collector_name, status, rows_collected)
                 SELECT now() - (n || ' minutes')::interval,
                        1 + (n % 4),
                        'collector_' || (n % 7),
@@ -1132,7 +1299,7 @@ public sealed class DarlingStoreUpgradeTests
             await ExecuteAsync(
                 connection,
                 """
-                INSERT INTO collect.query_plans (collection_time, server_id, query_hash, plan_xml)
+                INSERT INTO fixture.query_plans (collection_time, server_id, query_hash, plan_xml)
                 SELECT now() - (n || ' hours')::interval,
                        1 + (n % 4),
                        md5(n::text),
@@ -1148,13 +1315,13 @@ public sealed class DarlingStoreUpgradeTests
             await ExecuteAsync(
                 connection,
                 """
-                CREATE MATERIALIZED VIEW collect.collection_hourly
+                CREATE MATERIALIZED VIEW fixture.collection_hourly
                 WITH (timescaledb.continuous) AS
                 SELECT time_bucket('1 hour', collection_time) AS bucket,
                        server_id,
                        count(*)             AS runs,
                        sum(rows_collected)  AS rows_collected
-                FROM collect.collection_log
+                FROM fixture.collection_log
                 GROUP BY 1, 2
                 """,
                 cancellationToken);
@@ -1163,11 +1330,11 @@ public sealed class DarlingStoreUpgradeTests
                is a different on-disk shape, and "the upgrade kept the rows" has to hold for those too. */
             await ExecuteAsync(
                 connection,
-                "ALTER TABLE collect.query_plans SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
+                "ALTER TABLE fixture.query_plans SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
                 cancellationToken);
             await ExecuteAsync(
                 connection,
-                "SELECT compress_chunk(c) FROM show_chunks('collect.query_plans') AS c",
+                "SELECT compress_chunk(c) FROM show_chunks('fixture.query_plans') AS c",
                 cancellationToken);
 
             return major;
@@ -1175,6 +1342,38 @@ public sealed class DarlingStoreUpgradeTests
         finally
         {
             await bootstrap.StopIfStartedByThisProcessAsync();
+        }
+    }
+
+    /// <summary>
+    /// The product's own store objects, built the way the worker's start path builds them (#3908): the migrations,
+    /// TimescaleDB enabled where the product enables it, then <see cref="DarlingWorker.StoreObjectConvergence"/>
+    /// in its order. Every step has to succeed: a fixture missing a policy would let an upgrade that breaks it
+    /// pass.
+    /// </summary>
+    private static async Task BuildProductStoreObjectsAsync(string ownerConnectionString, CancellationToken cancellationToken)
+    {
+        var connectionString = new NpgsqlConnectionStringBuilder(ownerConnectionString)
+        {
+            SearchPath = PgSchemaGenerator.SearchPath,
+            Pooling = false,
+            CommandTimeout = 600,
+        }.ConnectionString;
+
+        await using (var migrations = new NpgsqlConnection(connectionString))
+        {
+            await migrations.OpenAsync(cancellationToken);
+            await PgMigrations.MigrateAsync(migrations, NullLogger.Instance, cancellationToken);
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, NullLogger.Instance, cancellationToken),
+            "TimescaleDB could not be enabled on the fixture store.");
+
+        foreach (var step in DarlingWorker.StoreObjectConvergence)
+        {
+            await step.EnsureAsync(connection, NullLogger.Instance, cancellationToken);
         }
     }
 
@@ -1188,7 +1387,10 @@ public sealed class DarlingStoreUpgradeTests
         long PlanXmlLength,
         string LogChecksum,
         long CaggRows,
-        long CompressedChunks);
+        long CompressedChunks,
+        long Hypertables,
+        long ContinuousAggregates,
+        long Policies);
 
     /// <summary>
     /// The store's observable content, read identically before and after the upgrade. The checksum is an
@@ -1204,26 +1406,32 @@ public sealed class DarlingStoreUpgradeTests
         var major = await ReadServerMajorAsync(connection, cancellationToken);
         var timescale = await ScalarAsync<string>(
             connection, "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", cancellationToken);
-        var logRows = await ScalarLongAsync(connection, "SELECT count(*) FROM collect.collection_log", cancellationToken);
-        var planRows = await ScalarLongAsync(connection, "SELECT count(*) FROM collect.query_plans", cancellationToken);
+        var logRows = await ScalarLongAsync(connection, "SELECT count(*) FROM fixture.collection_log", cancellationToken);
+        var planRows = await ScalarLongAsync(connection, "SELECT count(*) FROM fixture.query_plans", cancellationToken);
         var planLength = await ScalarLongAsync(
-            connection, "SELECT COALESCE(sum(length(plan_xml)), 0) FROM collect.query_plans", cancellationToken);
+            connection, "SELECT COALESCE(sum(length(plan_xml)), 0) FROM fixture.query_plans", cancellationToken);
         var checksum = await ScalarAsync<string>(
             connection,
             """
             SELECT md5(string_agg(
                        collection_time::text || '|' || server_id || '|' || collector_name || '|' || status || '|' || rows_collected,
                        ',' ORDER BY collection_time, server_id, collector_name))
-            FROM collect.collection_log
+            FROM fixture.collection_log
             """,
             cancellationToken);
-        var caggRows = await ScalarLongAsync(connection, "SELECT count(*) FROM collect.collection_hourly", cancellationToken);
+        var caggRows = await ScalarLongAsync(connection, "SELECT count(*) FROM fixture.collection_hourly", cancellationToken);
         var compressed = await ScalarLongAsync(
             connection,
             "SELECT count(*) FROM timescaledb_information.chunks WHERE is_compressed",
             cancellationToken);
 
-        return new StoreSnapshot(major, timescale, logRows, planRows, planLength, checksum ?? string.Empty, caggRows, compressed);
+        var hypertables = await ScalarLongAsync(connection, "SELECT count(*) FROM timescaledb_information.hypertables", cancellationToken);
+        var aggregates = await ScalarLongAsync(connection, "SELECT count(*) FROM timescaledb_information.continuous_aggregates", cancellationToken);
+        /* User jobs only: job_id 1 is TimescaleDB's own telemetry job. */
+        var policies = await ScalarLongAsync(connection, "SELECT count(*) FROM timescaledb_information.jobs WHERE job_id >= 1000", cancellationToken);
+
+        return new StoreSnapshot(
+            major, timescale, logRows, planRows, planLength, checksum ?? string.Empty, caggRows, compressed, hypertables, aggregates, policies);
     }
 
     private static async Task<int> ReadServerMajorAsync(NpgsqlConnection connection, CancellationToken cancellationToken)

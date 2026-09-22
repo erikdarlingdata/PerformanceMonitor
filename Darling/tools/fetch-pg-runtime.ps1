@@ -30,8 +30,9 @@
 
   HASH PROVENANCE: the PostgreSQL pin was computed 2026-09-22 from the EDB PG18.6 zip at the
   exact URL pinned here (343,808,005 bytes); EDB publishes no checksum, so the pin is only as good
-  as the download it came from. The TimescaleDB pin was computed 2026-07-08 (2.28.1-for-PG18 zip,
-  7,794,443 bytes) and matches the sha256 digest GitHub publishes for that release asset.
+  as the download it came from. The TimescaleDB pins match the sha256 digests GitHub publishes for
+  those release assets: 2.30.1-for-PG18 (8,594,902 bytes, computed 2026-09-22) and the carried
+  2.28.1-for-PG18 (7,794,443 bytes, computed 2026-07-08).
   Bumping a version means updating URL + hash TOGETHER, from a fresh download you hashed yourself.
 
   WHY THESE VERSIONS (#3906): PostgreSQL 18.6 (2026-08-13; 18.5 was never released) fixes 23 CVEs
@@ -39,12 +40,23 @@
   pin tracks the newest minor of its major; the weekly runtime-currency workflow fails when it
   falls behind. A minor bump is safe for field stores: same data directory, no pg_upgrade.
 
-  TimescaleDB stays at 2.28.1 even though 2.29.1 fixed GHSA-hcfx-29v5-2rcw, because a TimescaleDB
-  bump is NOT yet safe for field stores. Every store's extension is pinned at its installed version,
-  and the store upgrade cannot move it. On the same-major swap, the post-start update probes the
-  extension before ALTER EXTENSION, which loads the missing old library and leaves every session in
-  the store database failing. On the pg_upgrade path, the bridge can only reach versions the OLD
-  runtime ships. #3908 fixes both; bump $tsVersion only together with that change.
+  TimescaleDB 2.30.1 (#3908): 2.29.1 fixed GHSA-hcfx-29v5-2rcw (missing permission checks in the
+  internal chunk functions). Moving it moves every field store's extension, which the store upgrade
+  does in a quiesced start before the store opens (DarlingStoreUpgrade).
+
+  CARRIED BUILDS ($tsCarried): the versioned libraries of every TimescaleDB release ANY Darling
+  release installed on this PostgreSQL major, and nothing else from those archives. The bundle's
+  own loader, control file (default_version = $tsVersion) and scripts are untouched. They exist for
+  two readers:
+    - pg_upgrade. A store upgraded from the previous major is restored at the version it had, and
+      `pg_upgrade --check` refuses unless that version's library is in the new runtime. The update
+      to $tsVersion follows, before the store opens. Measured: the two DLLs are enough, the
+      version's timescaledb--<v>.sql is not needed.
+    - Releases 3.3.x to 3.8.x, if an operator rolls back to one. They adopt an extracted runtime
+      whose first timescaledb-*.dll matches their own bundle instead of swapping it out (see
+      RuntimeStampFileName), and without the carried library they would swap back to a runtime
+      that cannot load the store's newer extension.
+  A carried version stays forever: dropping one breaks both readers for every store still on it.
 
 .PARAMETER OutputDirectory
   Where pg-runtime.zip lands. Defaults to Darling\artifacts (gitignored). Packaging copies or
@@ -89,9 +101,14 @@ $pgVersion = '18.6'
 $pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64-binaries.zip'
 $pgSha256 = 'FBE23DA234EE31547BF8A36D29DFD81E82B849DF2D2B78D2EECB43D360252F8C'
 
-$tsVersion = '2.28.1'
-$tsUrl = 'https://github.com/timescale/timescaledb/releases/download/2.28.1/timescaledb-postgresql-18-windows-amd64.zip'
-$tsSha256 = '533D1554F3EDFF1E0E86087E8A76A9EEFF253A9FEE17392FC17FAC1C85F7CF0F'
+$tsVersion = '2.30.1'
+$tsUrl = 'https://github.com/timescale/timescaledb/releases/download/2.30.1/timescaledb-postgresql-18-windows-amd64.zip'
+$tsSha256 = '297EA2C079FF39C1BA6EB310E44717EF60B67EE24DEEECEB34C0C362694B84A9'
+
+# Every TimescaleDB version a Darling release ever installed on PostgreSQL 18 (see CARRIED BUILDS).
+$tsCarried = @(
+    @{ Version = '2.28.1'; Url = 'https://github.com/timescale/timescaledb/releases/download/2.28.1/timescaledb-postgresql-18-windows-amd64.zip'; Sha256 = '533D1554F3EDFF1E0E86087E8A76A9EEFF253A9FEE17392FC17FAC1C85F7CF0F' }
+)
 # ----------------------------------------------------------------------------------------------
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -160,6 +177,15 @@ Write-Host "TimescaleDB $tsVersion (PG18, Windows x64):"
 $tsZip = Join-Path $downloadDirectory "timescaledb-$tsVersion-postgresql-18-windows-amd64.zip"
 Get-VerifiedDownload -Url $tsUrl -ExpectedSha256 $tsSha256 -Destination $tsZip
 
+foreach ($carried in $tsCarried) {
+    if ($carried.Version -eq $tsVersion) {
+        throw "The carried TimescaleDB list names $tsVersion, the bundle's own version; carried builds are the ones it replaced."
+    }
+    Write-Host "Carried TimescaleDB $($carried.Version) (PG18, Windows x64):"
+    $carried.Zip = Join-Path $downloadDirectory "timescaledb-$($carried.Version)-postgresql-18-windows-amd64.zip"
+    Get-VerifiedDownload -Url $carried.Url -ExpectedSha256 $carried.Sha256 -Destination $carried.Zip
+}
+
 Write-Host "Extracting..."
 $pgExtract = Join-Path $extractDirectory 'pg'
 $tsExtract = Join-Path $extractDirectory 'ts'
@@ -207,6 +233,23 @@ Copy-Item -Path (Join-Path $tsSource 'timescaledb*.dll') -Destination (Join-Path
 Copy-Item -Path (Join-Path $tsSource 'timescaledb.control') -Destination $extensionTarget
 Copy-Item -Path (Join-Path $tsSource 'timescaledb--*.sql') -Destination $extensionTarget
 
+# Carried builds: the two versioned libraries by EXACT name, nothing else. A glob here would also copy
+# that release's loader (timescaledb.dll) over the bundle's own, and its control file would move
+# default_version back; both are checked below.
+$carriedFiles = @()
+foreach ($carried in $tsCarried) {
+    $carriedExtract = Join-Path $extractDirectory "ts-carried-$($carried.Version)"
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($carried.Zip, $carriedExtract)
+    foreach ($name in @("timescaledb-$($carried.Version).dll", "timescaledb-tsl-$($carried.Version).dll")) {
+        $carriedSource = Join-Path $carriedExtract "timescaledb\$name"
+        if (-not (Test-Path $carriedSource)) {
+            throw "The carried TimescaleDB $($carried.Version) archive has no timescaledb\$name - its layout changed; update this script."
+        }
+        Copy-Item -Path $carriedSource -Destination (Join-Path $pgsqlTarget 'lib')
+        $carriedFiles += "lib\$name"
+    }
+}
+
 # Sanity: everything DarlingManagedPostgres and TimescaleSupport depend on must be present.
 $requiredFiles = @(
     'bin\initdb.exe',
@@ -221,11 +264,23 @@ $requiredFiles = @(
     "lib\timescaledb-tsl-$tsVersion.dll",
     'share\extension\timescaledb.control',
     "share\extension\timescaledb--$tsVersion.sql"
-)
+) + $carriedFiles
 foreach ($required in $requiredFiles) {
     if (-not (Test-Path (Join-Path $pgsqlTarget $required))) {
         throw "Assembled runtime is missing $required - refusing to package."
     }
+}
+
+# The bundle's identity survives the carried builds: its own loader, and a control file that still
+# installs and updates to $tsVersion.
+$bundledLoader = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $pgsqlTarget 'lib\timescaledb.dll')).Hash
+$pinnedLoader = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $tsSource 'timescaledb.dll')).Hash
+if ($bundledLoader -ne $pinnedLoader) {
+    throw "lib\timescaledb.dll is not the TimescaleDB $tsVersion loader - a carried build overwrote it."
+}
+$controlText = Get-Content -Raw -Path (Join-Path $pgsqlTarget 'share\extension\timescaledb.control')
+if ($controlText -notmatch "(?m)^\s*default_version\s*=\s*'$([regex]::Escape($tsVersion))'") {
+    throw "timescaledb.control's default_version is not $tsVersion - refusing to package."
 }
 
 $zipPath = Join-Path $OutputDirectory 'pg-runtime.zip'

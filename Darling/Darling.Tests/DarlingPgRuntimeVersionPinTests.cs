@@ -10,6 +10,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -81,6 +82,19 @@ public sealed class DarlingPgRuntimeVersionPinTests
            whose extension will not load at all (#1705's class of drift). */
         Assert.Contains($"postgresql-{ExpectedPostgresMajor}-windows-amd64", tsUrl, StringComparison.Ordinal);
         Assert.Contains($"/{tsVersion}/", tsUrl, StringComparison.Ordinal);
+
+        /* #3908: the carried builds. Each is an older release's PG18 build, never the bundle's own version, and
+           the list is never empty while any field store may be on a version other than the bundle's. */
+        var carried = CarriedTimescaleBuilds(script);
+        Assert.NotEmpty(carried);
+        Assert.Contains(carried, c => c.Version == "2.28.1");
+        foreach (var (version, url, sha256) in carried)
+        {
+            Assert.NotEqual(tsVersion, version);
+            Assert.Contains($"/{version}/", url, StringComparison.Ordinal);
+            Assert.Contains($"postgresql-{ExpectedPostgresMajor}-windows-amd64", url, StringComparison.Ordinal);
+            Assert.Matches("^[0-9A-F]{64}$", sha256);
+        }
     }
 
     [Fact]
@@ -113,15 +127,36 @@ public sealed class DarlingPgRuntimeVersionPinTests
         Assert.Equal(ExpectedPostgresMajor, actualMajor);
         Assert.Contains(pinnedPgVersion, reported, StringComparison.Ordinal);
 
-        /* The TimescaleDB payload has to match its pin too — the extension files are copied in by name,
-           so a stale assembly shows up as the previous version's .sql/.dll sitting in the tree. */
+        /* The TimescaleDB payload has to match its pin too. The extension files are copied in by name, so a
+           stale assembly shows up as a different version's install script and control default. Older versions'
+           LIBRARIES are expected since #3908 (the carried builds), so staleness is read from the script and the
+           control file, not from which DLLs are present. */
         var extensionDirectory = Path.Combine(runtimeRoot!, "pgsql", "share", "extension");
         Assert.True(File.Exists(Path.Combine(extensionDirectory, $"timescaledb--{pinnedTsVersion}.sql")),
             $"The assembled runtime has no timescaledb--{pinnedTsVersion}.sql — it was built from a different " +
             "TimescaleDB archive than fetch-pg-runtime.ps1 currently pins.");
+        Assert.Equal(pinnedTsVersion, DarlingStoreUpgrade.TryReadInstalledTimescaleVersion(Path.Combine(runtimeRoot!, "pgsql", "bin")));
         Assert.True(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "lib", $"timescaledb-{pinnedTsVersion}.dll")),
             $"The assembled runtime has no timescaledb-{pinnedTsVersion}.dll — same staleness, library side.");
+
+        /* Every carried build is present as both libraries, and as nothing else: its install script would let a
+           new database be created at the old, vulnerable version, and pg_upgrade does not need it (measured). */
+        foreach (var (version, _, _) in CarriedTimescaleBuilds(script))
+        {
+            Assert.True(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "lib", $"timescaledb-{version}.dll")),
+                $"The carried TimescaleDB {version} library is missing, so a store on {version} cannot be pg_upgraded (#3908).");
+            Assert.True(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "lib", $"timescaledb-tsl-{version}.dll")),
+                $"The carried TimescaleDB {version} TSL library is missing. pg_upgrade --check does not test it, so nothing else would notice.");
+            Assert.False(File.Exists(Path.Combine(extensionDirectory, $"timescaledb--{version}.sql")),
+                $"timescaledb--{version}.sql should not be carried: only the libraries are.");
+        }
     }
+
+    /// <summary>The <c>$tsCarried</c> entries of fetch-pg-runtime.ps1, one per line.</summary>
+    internal static (string Version, string Url, string Sha256)[] CarriedTimescaleBuilds(string script)
+        => Regex.Matches(script, @"@\{\s*Version\s*=\s*'(?<version>[^']+)';\s*Url\s*=\s*'(?<url>[^']+)';\s*Sha256\s*=\s*'(?<sha>[^']+)'\s*\}")
+            .Select(m => (m.Groups["version"].Value, m.Groups["url"].Value, m.Groups["sha"].Value))
+            .ToArray();
 
     /// <summary>
     /// #3906: an unstamped host is adopted only when its full PostgreSQL version equals the package's, and
