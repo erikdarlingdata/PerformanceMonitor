@@ -951,12 +951,29 @@ internal sealed class DarlingStoreUpgrade
             "The package ships a different Postgres runtime than the one extracted on this host — rescuing the current runtime to {Previous} and extracting the new one. This is the store runtime update (#1706); if the PostgreSQL major changed, an in-place pg_upgrade follows.",
             previousPgsql);
 
-        if (Directory.Exists(previousRoot))
+        try
         {
-            Directory.Delete(previousRoot, recursive: true);
-        }
+            if (Directory.Exists(previousRoot))
+            {
+                Directory.Delete(previousRoot, recursive: true);
+            }
 
-        Directory.CreateDirectory(previousRoot);
+            Directory.CreateDirectory(previousRoot);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* #3919: the rescue's rule below applies here too, and this used to sit outside it. A file held
+               open under the last update's rescued runtime (an antivirus scan, an operator shell sitting in
+               the folder) makes the delete throw. Re-creating the folder can fail too: a scanner still
+               holding the one just deleted leaves it delete-pending, and a stray file by that name blocks
+               it outright. Either way there is nowhere to rescue the current runtime to, which is a
+               reason to SKIP the update, never a reason to refuse to start. The live runtime has not been
+               touched and the stamp is not written, so the next start tries again. */
+            _logger.LogWarning(
+                "Could not clear the previous runtime at {PreviousRoot} to rescue the current one into it ({Message}). This is usually a file under it held open by an antivirus scan or a shell sitting in the folder. The store starts on its existing runtime and the update is retried on the next start.",
+                previousRoot, ex.Message);
+            return new RuntimeAdvance(false, null, zipHash);
+        }
 
         try
         {
