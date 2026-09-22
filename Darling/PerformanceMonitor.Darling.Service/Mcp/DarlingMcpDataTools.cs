@@ -1115,10 +1115,22 @@ public sealed class DarlingMcpDataTools
 
                    Composed from the shared classifier, like output_finding and note_summary above, so no
                    consumer re-derives either the predicate or the sentence differently. */
-                regressed_from_productive = r.RegressedFromProductive,
+                /* #3885 widened the flag from the skip class to EITHER regression class: a collector
+                   recording SUCCESS with zero rows on three consecutive runs after a productive history
+                   has stopped doing what it used to do just as surely as one reporting a skip word, and
+                   that class is strictly harder to see — its successes are fresh, so no staleness reading
+                   moves and the row read HEALTHY for a fortnight on 41 of 43 servers of the largest
+                   production store. One field, one finding slot, one fleet count, because the two classes
+                   are disjoint by construction and an operator asks one question of them.
+
+                   zero_row_success_runs rides unconditionally, like last_productive_at: "how many runs
+                   have stored nothing" is worth answering on every row, and on a HEALTHY row below the
+                   N=3 boundary it is exactly what says how close this collector is to it. */
+                regressed_from_productive = r.AnyRegression,
                 last_productive_at = r.LastProductiveTime?.ToString("o"),
-                rows_in_prior_7d = r.RegressedFromProductive ? r.RowsStored : (long?)null,
-                regression_finding = r.RegressedFinding,
+                rows_in_prior_7d = r.AnyRegression ? r.RowsStored : (long?)null,
+                regression_finding = r.AnyRegressionFinding,
+                zero_row_success_runs = r.TrailingZeroRowSuccessRuns,
                 /* #1837: what a NON-failing run reported — an enumeration that came back with 0 items,
                    items whose enumeration probe failed. note_count == total_runs means every run in the
                    window came back that way, which is the "collecting nothing for weeks" case that reads

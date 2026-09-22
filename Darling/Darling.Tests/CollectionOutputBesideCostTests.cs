@@ -429,18 +429,23 @@ public sealed class CollectionOutputBesideCostTests
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
             "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
 
-        /* The precondition. 29 columns since #3819's three - 16 at #2460, plus #2472's four fan-out
+        /* The precondition. 30 columns since #3885's one - 16 at #2460, plus #2472's four fan-out
            columns, #2804's abandoned_count, #3010's last_denied_time, #3017's two, #3240's
-           extension_missing_count, #3754's session_missing_count and #3819's current_status,
-           last_non_skip_time and last_productive_time. A parse that stopped finding them would
-           otherwise turn the comparison below into two empty maps agreeing. */
-        Assert.Equal(29, darling.Count);
-        Assert.Equal(29, lite.Count);
+           extension_missing_count, #3754's session_missing_count, #3819's current_status,
+           last_non_skip_time and last_productive_time, and #3885's trailing_zero_row_success_runs. A
+           parse that stopped finding them would otherwise turn the comparison below into two empty maps
+           agreeing.
 
-        /* No gaps and no duplicates: ordinals 0..28 exactly once each. A duplicate would let two fields
+           #3885 is the case this pin is FOR: the produced-then-stopped arm is not a Darling-only class -
+           both SKUs dedup on watermarks - so the column had to land on both readers at the same ordinal,
+           and this count is what would have failed had only one been widened. */
+        Assert.Equal(30, darling.Count);
+        Assert.Equal(30, lite.Count);
+
+        /* No gaps and no duplicates: ordinals 0..29 exactly once each. A duplicate would let two fields
            read one column while a third read nothing, which compiles and is silently wrong. */
-        Assert.Equal(Enumerable.Range(0, 29), darling.Values.OrderBy(o => o));
-        Assert.Equal(Enumerable.Range(0, 29), lite.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 30), darling.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 30), lite.Values.OrderBy(o => o));
 
         /* And the same field at the same ordinal on both sides. */
         Assert.Equal(

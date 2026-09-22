@@ -1679,8 +1679,223 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// How many consecutive SUCCESS-with-zero-rows runs make a productive collector's silence a
+        /// REGRESSION rather than a quiet cycle (#3885) — three.
+        ///
+        /// <para><b>Justified from the collectors' own cadence, not picked.</b> Every scheduled collector
+        /// in <c>CollectorScheduleDefaults</c> that stores rows on a periodic loop runs at 1–5 minutes, so
+        /// three consecutive runs is 3–15 minutes of a source returning nothing. A single empty cycle is
+        /// ordinary on nearly all of them (a quiet minute on <c>job_history</c>, <c>running_jobs</c>,
+        /// <c>waiting_tasks</c> — nothing ran, nothing waited); two is ordinary on a genuinely idle target
+        /// at 3 a.m. Three in a row on a collector that was producing earlier in the SAME window is the
+        /// shape that does not happen by accident, and 3–15 minutes is far below any window an operator
+        /// would call a gap.</para>
+        ///
+        /// <para><b>Why not higher.</b> The measured case ran 1,900+ consecutive zero-row successes over a
+        /// fortnight, so any N from 3 upward would have caught it; N is therefore chosen for the FALSE
+        /// POSITIVE floor rather than for detection, and the cost of a larger N is paid entirely in
+        /// time-to-notice on the next occurrence. Three is the smallest value that cannot be reached by one
+        /// idle minute plus a retry.</para>
+        /// </summary>
+        public const long ProductiveZeroRunStreak = 3;
+
+        /// <summary>
+        /// A collector that WAS producing rows and is now recording SUCCESS with ZERO rows, run after run,
+        /// has regressed just as surely as one reporting a named skip (#3885) — and until this arm existed
+        /// nothing on any health surface could say so.
+        ///
+        /// <para><b>The reading this exists to end.</b> <c>job_history</c> dedups on a numeric high-water
+        /// mark taken from the target's <c>sysjobhistory</c> identity. A weekly cleanup window on the
+        /// largest production store purges that table and regresses the identity, so the stored watermark
+        /// (millions) outlived the identity it was taken from (thousands) and the collector's filter matched
+        /// nothing, forever. The query was VALID and returned zero rows, so every run recorded SUCCESS:
+        /// 41 of 43 servers stopped storing job history for up to two weeks and the health surface banded
+        /// every one of them HEALTHY the whole time. #3819's regression arm could not see it, because that
+        /// one keys on the STATUS — a skip word — and this collector's status was the most reassuring word
+        /// the vocabulary has.</para>
+        ///
+        /// <para><b>Why a streak and not just "zero rows now".</b> Zero rows on one cycle is the ordinary
+        /// resting state of most polled snapshots: nothing ran, nothing blocked, nothing waited. What is
+        /// never ordinary is zero rows on EVERY cycle for <see cref="ProductiveZeroRunStreak"/> runs on a
+        /// collector that produced earlier in the same window — that is a reader whose source went away or
+        /// whose filter stopped matching, and it is a different fact from a collector that never produced
+        /// here.</para>
+        ///
+        /// <para><b>What stays benign, deliberately.</b> An event collector
+        /// (<see cref="IsEventCollector"/>) stores a row only when the monitored engine recorded an event,
+        /// so a fortnight of zeros is its DOCUMENTED resting state and it can never reach this arm however
+        /// long the streak runs — the same closed, fail-loud list <see cref="FormatOutputFinding"/> already
+        /// uses, reused rather than re-invented so one decision governs both sentences. An on-load
+        /// collector (<see cref="IsOnLoadCollector"/>) is excluded too: it runs on connect, not on a loop,
+        /// so three of its runs are three tab opens spanning any amount of time and "consecutive" carries
+        /// no cadence to read it against. And a collector that never produced inside the window has no
+        /// productivity to have regressed FROM, which is the null case the ordinary bands describe
+        /// correctly today.</para>
+        ///
+        /// <para><b>Bounded by the read's own window</b>, like <see cref="RegressedFromProductive"/>: the
+        /// productive history has to still be inside the seven days both reads take. Once the last
+        /// productive run ages out there is no evidence of a regression left to report, the collector
+        /// reverts to its ordinary band, and the persistent zero is then the OUTPUT FINDING's story
+        /// ("not an event-triggered collector … needs a look") rather than a WARNING that never expires.
+        /// The <c>last_productive_at</c> the surfaces already publish is the same instant this reads, so a
+        /// reader can always see how close to that bound the answer sits.</para>
+        ///
+        /// <para><b>Disjoint from <see cref="RegressedFromProductive"/> by construction.</b> That one
+        /// requires the newest run to be a named SKIP; this one requires the newest runs to be SUCCESSES
+        /// that stored nothing. One row cannot satisfy both, which is why the two can share the WARNING
+        /// floor, the <c>regressed_from_productive</c> flag and the fleet's one regressed count without
+        /// either double-counting or masking the other.</para>
+        /// </summary>
+        /// <param name="collectorName">
+        /// The collector's name, for the two exclusions above. Null is treated as neither event nor
+        /// on-load — absence of a name is not a claim about category — so an unnamed row is judged on its
+        /// numbers alone.
+        /// </param>
+        /// <param name="trailingZeroRowSuccessRuns">
+        /// How many runs, counting back from the newest, were SUCCESS with <c>rows_collected = 0</c> and
+        /// nothing else (<c>trailing_zero_row_success_runs</c>). A streak broken by an error, a denial, a
+        /// skip or a productive run counts zero, because what this measures is the collector's CURRENT
+        /// state and any of those is a different current state.
+        /// </param>
+        /// <param name="lastProductiveTimeUtc">
+        /// The newest run that stored rows (<c>last_productive_time</c>) — the same instant
+        /// <see cref="RegressedFromProductive"/> reads. Null means the window holds no productivity to
+        /// have regressed from, which is the never-produced-here case that stays benign.
+        /// </param>
+        public static bool ProducedThenStopped(
+            string? collectorName,
+            long trailingZeroRowSuccessRuns,
+            DateTime? lastProductiveTimeUtc)
+        {
+            if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns < ProductiveZeroRunStreak)
+            {
+                return false;
+            }
+
+            /* The two categories for which a zero-row run says nothing about health: an event capture at
+               rest, and an on-load read whose "consecutive runs" are tab opens rather than cycles. Both
+               are resolved through the existing predicates rather than a third name list, so a collector
+               cannot be an event capture for one sentence and a regression for another. */
+            return !IsEventCollector(collectorName) && !IsOnLoadCollector(collectorName);
+        }
+
+        /// <summary>
+        /// The width of the trailing zero-row-success streak ESTIMATED from two instants and the
+        /// collector's cadence (#3885) — for the one surface that cannot count the runs.
+        ///
+        /// <para><b>Why an estimate exists at all.</b> The per-server health read resolves the exact width
+        /// off a ranked subquery it already has. The fleet rollup has no subquery, groups the whole fleet's
+        /// seven days of <c>collection_log</c> with a hash aggregate, and #3735 memoized it precisely
+        /// because three concurrent copies crossed the store role's 15 s statement timeout — putting a
+        /// fleet-wide sort in front of that GROUP BY to buy one integer would spend the headroom that fix
+        /// bought. Two MAX()es are free there, and elapsed time over cadence converts them into the run
+        /// count the predicate needs.</para>
+        ///
+        /// <para><b>What it can get wrong, stated rather than hidden.</b> It assumes the collector ran on
+        /// its shipped cadence across the gap, so a server whose sweep was saturated (or whose service was
+        /// down) for part of it will read HIGH by however many cycles were skipped. That direction is the
+        /// deliberate one for a COUNT ON A CARD: the error is bounded by the gap itself, the per-server
+        /// read beside it is exact, and a fleet number that under-read would put this class back under
+        /// HEALTHY, which is the defect. At the N=3 boundary the two surfaces can therefore disagree for
+        /// one cadence; the card's own detail rows are where the disagreement is resolved, and they are
+        /// exact.</para>
+        ///
+        /// <para>Returns 0 for a cadence of 0 — an on-load or unknown collector, where elapsed time over
+        /// cadence is undefined and where <see cref="ProducedThenStopped"/> excludes the row anyway.</para>
+        /// </summary>
+        /// <param name="lastRunTimeUtc">The newest run of ANY status (<c>last_run_time</c>).</param>
+        /// <param name="lastStreakBreakTimeUtc">
+        /// The newest run that was NOT a zero-row success (<c>last_zero_row_streak_break_time</c>) — the
+        /// instant the current streak began after. Null means no run in the window breaks it, so every run
+        /// in the window is one, and the caller's own total is the answer.
+        /// </param>
+        /// <param name="totalRuns">Runs in the window — the answer when nothing breaks the streak.</param>
+        /// <param name="frequencyMinutes">The collector's shipped cadence in minutes.</param>
+        public static long EstimateTrailingZeroRowSuccessRuns(
+            DateTime? lastRunTimeUtc,
+            DateTime? lastStreakBreakTimeUtc,
+            long totalRuns,
+            int frequencyMinutes)
+        {
+            if (lastRunTimeUtc is null)
+            {
+                return 0;
+            }
+
+            /* Nothing in the window broke the streak, so the window IS the streak and no arithmetic is
+               needed -- this arm is also the only one that answers correctly for a collector whose cadence
+               is unknown. */
+            if (lastStreakBreakTimeUtc is null)
+            {
+                return totalRuns;
+            }
+
+            if (frequencyMinutes <= 0 || lastStreakBreakTimeUtc.Value >= lastRunTimeUtc.Value)
+            {
+                return 0;
+            }
+
+            /* Runs strictly AFTER the break: the elapsed span divided by the cadence counts the intervals
+               between the break and the newest run, and each of those intervals is closed by exactly one
+               run. No +1 - the interval count already excludes the breaking run and includes the newest
+               one, and adding one would count the break itself as part of the streak it ends. Floor rather
+               than round, so a partial interval cannot manufacture a run that has not happened. */
+            var elapsedMinutes = (lastRunTimeUtc.Value - lastStreakBreakTimeUtc.Value).TotalMinutes;
+            return (long)Math.Floor(elapsedMinutes / frequencyMinutes);
+        }
+
+        /// <summary>
+        /// The sentence a produced-then-stopped collector carries (#3885), or null when the row is not one.
+        /// States the same three facts in the same order <see cref="FormatRegressedFromProductiveFinding"/>
+        /// does — how much it produced, when it stopped, what it has said since — with the last of those
+        /// being the shape that makes this class invisible today: the runs since are SUCCESSES.
+        ///
+        /// <para>The closing clause is the general lesson rather than the measured cause, because the
+        /// causes are several and all of them present identically here: a dedup watermark whose source
+        /// identity regressed, a filter that stopped matching, a renamed or dropped source object, a
+        /// registration re-pointed at a different instance. What an operator needs from the sentence is
+        /// that the zero is not rest.</para>
+        ///
+        /// <para><paramref name="rowsInPriorWindow"/> is the row's <c>rows_stored</c> over the read's own
+        /// window. Unlike the skip case, that figure is NOT entirely pre-regression here in principle — a
+        /// zero-row SUCCESS adds nothing to it, so in practice it is, and it is taken from the same window
+        /// total for the same reason: a count from a second, differently-bounded aggregate could describe
+        /// different runs.</para>
+        /// </summary>
+        /// <param name="rowsInPriorWindow">Rows stored over the window (<c>rows_stored</c>).</param>
+        /// <param name="lastProductiveTimeUtc">When it last stored anything
+        /// (<c>last_productive_time</c>) — the instant it stopped producing.</param>
+        /// <param name="trailingZeroRowSuccessRuns">The streak's width
+        /// (<c>trailing_zero_row_success_runs</c>) — how many SUCCESS runs have stored nothing since.</param>
+        public static string? FormatProducedThenStoppedFinding(
+            long rowsInPriorWindow,
+            DateTime? lastProductiveTimeUtc,
+            long trailingZeroRowSuccessRuns)
+        {
+            if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns <= 0)
+            {
+                return null;
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "produced {0:N0} rows until {1} and has recorded SUCCESS with zero rows on {2:N0} runs "
+                + "since — a collector that stops producing is a different fact from one that never "
+                + "produced",
+                rowsInPriorWindow,
+                DateTime.SpecifyKind(lastProductiveTimeUtc.Value, DateTimeKind.Utc)
+                    .ToString("u", CultureInfo.InvariantCulture),
+                trailingZeroRowSuccessRuns);
+        }
+
+        /// <summary>
         /// The band a row carries once <see cref="RegressedFromProductive"/> is known: WARNING where the
         /// ladder said HEALTHY, and the ladder's own answer everywhere else (#3819).
+        ///
+        /// <para>#3885 widened what reaches this from the skip predicate alone to either regression class —
+        /// callers pass the OR of the two — so the floor, the flag and the fleet count stayed one decision
+        /// instead of growing a second parallel set. The parameter name is unchanged because the question
+        /// it asks is unchanged: has this collector stopped doing what it used to do.</para>
         ///
         /// <para><b>It can only ever make a row louder.</b> HEALTHY is the only band a regressed collector
         /// reaches that is quieter than WARNING — the two benign skip bands are unreachable for it (see

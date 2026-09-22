@@ -452,7 +452,30 @@ SELECT
     MAX(CASE WHEN status IS NULL
               OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
              THEN collection_time END) AS last_non_skip_time,
-    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+    -- #3885: the instant the current zero-row-SUCCESS streak began after -- the newest run that was NOT a
+    -- success storing nothing. With last_run_time above and the collector's shipped cadence, this is what
+    -- CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns turns into the run count the
+    -- produced-then-stopped predicate reads, so the fleet's regressed_collector_count includes a collector
+    -- that stopped PRODUCING and not only one that started SKIPPING. The measured case is the reason the
+    -- card needs it: job_history went dark on 41 of 43 servers, every run SUCCESS, and the number on the
+    -- card an install countersign reads stayed 0 for a fortnight.
+    --
+    -- ONE plain aggregate, deliberately, and an ESTIMATE downstream rather than the per-server read's exact
+    -- width: that one counts runs off a ranked subquery it already has, and this statement has none. Adding
+    -- one to hold a window function would put a sort of the fleet's whole 7-day collection_log in front of
+    -- a GROUP BY that hashes today -- and #3735 memoized this read precisely because three concurrent
+    -- copies of it crossed the mcp role's 15 s statement_timeout. The estimate's error direction and its
+    -- bound are documented on the classifier; it reads HIGH across a saturated sweep, never low, which is
+    -- the only direction safe for a count whose job is to stop this class hiding under HEALTHY.
+    --
+    -- The abandonment exclusion is success_count's own (#2926): a pre-#2803 abandoned cycle is stored as
+    -- SUCCESS with zero rows plus the budget note, and that is data loss rather than a quiet source.
+    -- APPENDED, read positionally.
+    MAX(CASE WHEN NOT (status = 'SUCCESS'
+                       AND COALESCE(rows_collected, 0) = 0
+                       AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+             THEN collection_time END) AS last_zero_row_streak_break_time
 FROM v_collection_log
 WHERE collection_time >= $1
 AND   server_id <> 0
@@ -1363,6 +1386,19 @@ GROUP BY server_id, collector_name";
                 LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
             };
 
+            /* #3885: the produced-then-stopped arm's input, set AFTER construction because it is derived
+               from two of this row's own members plus the cadence rather than read from a column. The
+               per-server twin reads an exact count off its ranked subquery; this one estimates, for the
+               statement-timeout reason FleetCollectionHealthSql gives. Left unset, the arm would read 0
+               here and the card's regressed count would stay silent on a collector that stopped producing
+               while get_collection_health called it WARNING -- the #2779/#2784 shape, and it would COMPILE,
+               because the default is silent. */
+            health.TrailingZeroRowSuccessRuns = CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+                health.LastRunTime,
+                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                health.TotalRuns,
+                health.FrequencyMinutes);
+
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
             counts[serverId] = new CollectorCounts(
@@ -1373,8 +1409,15 @@ GROUP BY server_id, collector_name";
                 /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
                    population. The band floor only moves a row that would have read HEALTHY; a collector
                    whose success clock has already run out reads FAILING and is regressed as well. Keyed
-                   on the band, this count would go quiet exactly when the regression got worse. */
-                existing.Regressed + (health.RegressedFromProductive ? 1 : 0),
+                   on the band, this count would go quiet exactly when the regression got worse.
+
+                   #3885: the SAME count, now over both regression classes -- stopped SKIPPING and stopped
+                   PRODUCING -- through the row's one AnyRegression member. One number, because an install
+                   countersign reads it as "collectors that stopped doing what they used to do" and a second
+                   parallel count would have to be learned, added, and never confused with the first. The
+                   two predicates are disjoint by construction (one needs the newest run to be a skip, the
+                   other needs it to be a success), so nothing is double-counted. */
+                existing.Regressed + (health.AnyRegression ? 1 : 0),
                 /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
                    kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
                    no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
