@@ -19,6 +19,12 @@ services:
   store:
     image: timescale/timescaledb:latest-pg17
     restart: unless-stopped
+    # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
+    # the store's queries the web viewer, the MCP tools and the service spend their time on). On the command
+    # line so it outranks both the image's generated postgresql.conf and any ALTER SYSTEM, with timescaledb
+    # kept in the list. track_utility=off keeps role DDL, which can carry a password literal, out of the view.
+    # The service creates the extension and its reader functions itself.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
     environment:
       POSTGRES_USER: darling
       POSTGRES_DB: darling

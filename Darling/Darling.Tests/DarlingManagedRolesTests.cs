@@ -439,4 +439,28 @@ public sealed class DarlingManagedRolesTests
         /* The shared builder emits the same CREATE + REVOKE the gated live proof test creates the function from. */
         Assert.Contains(DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), sql, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #3899: the two read identities log a statement past the slow-statement line, WITHOUT its bind parameters
+    /// (mcp also writes the alert settings, whose values include secrets), and the config writer (admin) is not
+    /// among them. The BYO script sets the same threshold on its one read identity, so the two paths agree.
+    /// </summary>
+    [Fact]
+    public void Provisioning_LogsSlowStatementsOnTheReadRolesOnly_WithoutParameters()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var threshold = DarlingManagedRoles.SlowStatementLogThreshold;
+
+        Assert.Equal("5s", threshold);
+        Assert.Contains($"ALTER ROLE viewer SET log_min_duration_statement = '{threshold}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    SET log_min_duration_statement = '{threshold}';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE admin  SET log_min_duration_statement", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE admin SET log_min_duration_statement", sql, StringComparison.Ordinal);
+
+        var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
+        Assert.Contains($"ALTER ROLE viewer SET log_min_duration_statement = '{threshold}';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
+    }
 }

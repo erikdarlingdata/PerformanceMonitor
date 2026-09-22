@@ -83,6 +83,13 @@ public class StoreLogClassifierTests
         "2026-09-05 14:07:00.918 UTC [5333] ERROR:  canceling statement due to statement timeout",
         "2026-09-05 14:07:00.918 UTC [5333] STATEMENT:  REFRESH MATERIALIZED VIEW collect.query_stats_hourly",
 
+        /* slow_statement (#3899) - a read identity's statement past the slow-statement line. PostgreSQL writes
+           the duration on the LOG line and the statement after it; the product's SQL opens with a newline, so
+           the statement arrives on tab-indented continuation lines, which the retained raw entry carries. */
+        "2026-09-05 14:07:15.402 UTC [5336] LOG:  duration: 5012.331 ms  execute <unnamed>: ",
+        "\tSELECT DISTINCT ON (server_id) server_id",
+        "\tFROM v_cpu_utilization_stats",
+
         /* lock_timeout, under the MANAGED prefix - proving the classifier does not care which family. */
         "2026-09-05 14:07:30 UTC:192.0.2.10(52345):app_user@app_db:[5334]:ERROR:  canceling statement due to lock timeout",
 
@@ -112,6 +119,30 @@ public class StoreLogClassifierTests
     ]);
 
     /// <summary>
+    /// A statement from a read identity that ran past the slow-statement line is RETAINED under
+    /// <c>slow_statement</c> with the statement in its raw entry, the continuation lines included (#3899). The
+    /// same words at ERROR are not a slow statement: the rule is LOG-scoped and anchored, and an ERROR that no rule
+    /// names stays in the retained residue.
+    /// </summary>
+    [Fact]
+    public void ASlowStatementIsRetainedWithItsStatement_AndOnlyAtLog()
+    {
+        var census = StoreLogClassifier.Classify(
+            DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: \n" +
+            "\tSELECT server_id, MAX(collection_time)\n" +
+            "\tFROM v_collection_log\n");
+
+        var slow = Assert.Single(census.Groups);
+        Assert.Equal("slow_statement", slow.EventClass);
+        Assert.Equal("LOG", slow.Severity);
+        Assert.StartsWith("duration: 6120.004 ms", slow.MessageText, StringComparison.Ordinal);
+        Assert.Contains("FROM v_collection_log", slow.SampleLine, StringComparison.Ordinal);
+
+        var atError = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  duration: 6120.004 ms is not a statement\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(atError.Groups).EventClass);
+    }
+
+    /// <summary>
     /// Every class this build classifies into is exercised by the fixture, asserted as a SET against the
     /// classifier's own list.
     ///
@@ -132,7 +163,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(13, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(14, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(

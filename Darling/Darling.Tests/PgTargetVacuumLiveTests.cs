@@ -164,13 +164,13 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal("appdb", backlog.Ranked[0].DatabaseName);
             Assert.Equal(5.0, backlog.Ranked[0].Value, precision: 6);
             Assert.Equal(5.0, backlog.Ranked[0].Figures![PgTargetScorer.BacklogRatioKey], precision: 6);
-            Assert.Equal(3.0, backlog.Ranked[0].Figures[PgTargetScorer.BacklogHoursKey], precision: 6);
-            Assert.Equal((5_250 - 2_000) / 3.0, backlog.Ranked[0].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
+            Assert.Equal(3.0, backlog.Ranked[0].Figures![PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal((5_250 - 2_000) / 3.0, backlog.Ranked[0].Figures![PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
             Assert.Equal("public.appendonly", backlog.Ranked[1].ObjectName);
             Assert.Equal(50_000 / 21_000.0, backlog.Ranked[1].Value, precision: 6);
             Assert.Equal(50_000 / 21_000.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogRatioKey], precision: 6);
-            Assert.Equal(2.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogHoursKey], precision: 6);
-            Assert.Equal((50_000 - 30_000) / 2.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
+            Assert.Equal(2.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal((50_000 - 30_000) / 2.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
 
             var wraparound = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WraparoundTrend);
             Assert.Equal("appdb", wraparound.DatabaseName);
@@ -415,7 +415,7 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal("public.hot", backlog.Ranked[1].ObjectName);
             Assert.Equal(2.0, backlog.Ranked[1].Value, precision: 6);
             Assert.Equal(6.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogHoursKey], precision: 6);
-            Assert.Equal(0.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
+            Assert.Equal(0.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
 
             /* Scored: the card at its flat band with lineage 1; the backlog at 4× (0.67) lifted by the reloption
                boost past it, so the backlog leads. */

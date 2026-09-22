@@ -305,6 +305,36 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
     }
 
     /// <summary>
+    /// The slow-statement line on the two read identities (#3899): a statement from <c>viewer</c> (the web viewer)
+    /// or <c>mcp</c> (MCP tools) that runs this long is written to the store's own log, where the store-log sweep
+    /// retains it under <c>slow_statement</c> with its text. A third of the 15 s <c>statement_timeout</c> beside
+    /// it, so a read that is drifting toward the kill is named while it still completes.
+    /// </summary>
+    public const string SlowStatementLogThreshold = "5s";
+
+    /// <summary>
+    /// The slow-statement logging on the <c>viewer</c> and <c>mcp</c> roles, as SQL (#3899).
+    ///
+    /// <para><c>log_parameter_max_length = 0</c> rides with it and is a privacy setting, not tuning: the line
+    /// would otherwise carry every bind parameter, and <c>mcp</c> also writes the alert settings, whose values
+    /// include webhook URLs and SMTP credentials. The statement text names the query, and that is what the line
+    /// is for. <c>admin</c> is deliberately NOT here: it is the config writer, and an operator's hand-typed
+    /// literal on that role must not reach a log a <c>viewer</c> can read through <c>get_store_log</c>. Its reads
+    /// still rank in <c>get_store_query_stats</c>, whose text is normalized. Both settings are superuser-only,
+    /// which the provisioning owner is. NOT a versioned migration, the section-1c reason.</para>
+    /// </summary>
+    public static string BuildSlowStatementLoggingSql()
+    {
+        const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string mcp = DarlingManagedPostgres.McpRoleName;
+
+        return $@"ALTER ROLE {viewer} SET log_min_duration_statement = '{SlowStatementLogThreshold}';
+ALTER ROLE {mcp}    SET log_min_duration_statement = '{SlowStatementLogThreshold}';
+ALTER ROLE {viewer} SET log_parameter_max_length = 0;
+ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
+    }
+
+    /// <summary>
     /// The <c>appliedSeconds</c> value meaning "provisioning did not write a <c>statement_timeout</c> this
     /// start, so the roles carry whatever they already had". Negative by construction so it can never equal
     /// a value that came through <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>,
@@ -627,6 +657,13 @@ ALTER ROLE {mcp}    LOGIN NOSUPERUSER PASSWORD '{mcpPassword}';
 --     a role statement_timeout has no probeable schema footprint, so tying it to StorageVersion would break the
 --     viewer's connect-time version gate.
 {composeTimeoutStatements}
+
+-- 1d. Slow-statement logging on the two read identities (#3899): a viewer or mcp statement that runs past
+--     the line is written to the store's own log, where the store-log sweep retains it with its text, so a
+--     slow web-viewer or MCP read is named instead of guessed at. Bind parameters are NOT logged (the mcp
+--     role also writes alert settings, whose values include secrets). admin is deliberately not here. Same
+--     non-migration reason as 1c.
+{BuildSlowStatementLoggingSql()}
 
 -- 2. Schema usage + SELECT everywhere (ALL TABLES covers tables AND views). collect holds no secrets,
 --    so admin+viewer read all of it. config: admin (the writer, and the Settings window's identity) reads

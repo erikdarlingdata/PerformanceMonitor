@@ -283,7 +283,7 @@ public sealed class StoreObjectConvergenceTests
     /// changed or failed — and the changed count can only come from a step whose return value IS a change
     /// count.
     ///
-    /// <para>That distinction is the honest half of this line. Six of the twelve ensures return how many
+    /// <para>That distinction is the honest half of this line. The ensure-shaped steps return how many
     /// objects are IN PLACE afterwards (51 of 51 hypertables on every pass, changed or not) because they were
     /// written to answer "is the store converged", which is what a start-path line asks. Reporting those as
     /// changes would make every hourly line claim the store had just been rebuilt; the pin holds the
@@ -303,7 +303,7 @@ public sealed class StoreObjectConvergenceTests
         Assert.Equal(1, CountOf(code, "tally.Failed.Add("));
 
         /* Cancellation is rethrown rather than recorded: the budget and shutdown must reach the pass's own
-           catches, not be reported as twelve failed steps. */
+           catches, not be reported as a failure of every step. */
         Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", step, StringComparison.Ordinal);
 
         /* Both signals are actually used — a pin that only ever saw one would not be measuring the
@@ -543,7 +543,7 @@ public sealed class StoreObjectConvergenceStepBehaviourTests
     /// <summary>
     /// Cancellation is RETHROWN rather than recorded as a step failure — so the pass's budget and a shutdown
     /// reach the pass's own catches (which say "cut short, the rest are retried next hour") instead of being
-    /// reported as twelve broken ensures, which is the diagnosis a reader would act on wrongly.
+    /// reported as every ensure broken, which is the diagnosis a reader would act on wrongly.
     /// </summary>
     [Fact]
     public async Task Cancellation_IsRethrown_NotCountedAsAStepFailure()
