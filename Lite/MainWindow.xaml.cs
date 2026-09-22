@@ -209,8 +209,14 @@ public partial class MainWindow : Window
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
             /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */
+            /* #3916 PR B: pages wait out a hold-back window, so the flush re-reads the mute registry — a mute
+               written inside the window drops the queued page. The read fails OPEN (logged, "not muted"): the
+               finding already passed the queue-time mute filter in FindingStore. */
+            var muteReadStore = new PerformanceMonitorLite.Analysis.FindingStore(_databaseInitializer);
             var analysisNotificationService = new AnalysisNotificationService(
-                _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+                _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
+                isStoryMuted: async (serverId, storyPathHash) =>
+                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,

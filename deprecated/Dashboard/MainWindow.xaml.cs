@@ -203,7 +203,22 @@ namespace PerformanceMonitorDashboard
                    Loaded); ShowNotification honors the notifications-enabled pref + marshals to the
                    UI thread, so it is safe to invoke from the analysis cycle. */
                 showTrayNotification: (title, message) =>
-                    _notificationService?.ShowNotification(title, message, NotificationType.Warning));
+                    _notificationService?.ShowNotification(title, message, NotificationType.Warning),
+                /* #3916 PR B: pages wait out a hold-back window, so the flush re-reads the mute registry — a
+                   mute written inside the window drops the queued page. Each server keeps its mutes in its own
+                   PerformanceMonitor database; the finding's id is the scheduler's deterministic name hash, so
+                   the server is found by that hash. Fails OPEN (a server gone mid-window, or an unreadable
+                   registry, is "not muted", logged in the store): the finding already passed the queue-time
+                   mute filter in SqlServerFindingStore. */
+                isStoryMuted: async (serverId, storyPathHash) =>
+                {
+                    var server = _serverManager.GetAllServers()
+                        .FirstOrDefault(s => ServerIdHelper.GetDeterministicHashCode(s.ServerName) == serverId);
+                    if (server is null)
+                        return false;
+                    var store = new Analysis.SqlServerFindingStore(server.GetConnectionString(_credentialService));
+                    return (await store.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash);
+                });
             _analysisScheduler = new AnalysisScheduler(
                 _serverManager, _credentialService, _preferencesService, _analysisNotificationService);
 

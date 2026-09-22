@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -114,7 +115,9 @@ public sealed class AnalysisPageCapLiveTests
 
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        using var cleanup = new NpgsqlCommand($"DELETE FROM config_alert_log WHERE server_id IN ({ServerA}, {ServerB});", connection);
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM config_alert_log WHERE server_id IN ({ServerA}, {ServerB}); DELETE FROM analysis_muted WHERE server_id IN ({ServerA}, {ServerB});",
+            connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 
@@ -215,6 +218,46 @@ public sealed class AnalysisPageCapLiveTests
 
             await PassAsync(service, pages);                          /* past it: re-attempted, not held */
             Assert.Equal((12L, 0L, 6L), await RowsAsync(connection));
+        });
+    }
+
+    /// <summary>
+    /// The mute seam's Darling read, live: the flush's re-check (DarlingWorker's <c>isStoryMuted</c>) reads
+    /// <see cref="PgFindingStore.GetMutedStoryHashesAsync"/>, which sees a mute written after the page was
+    /// queued — driven through the service, the queued page is dropped unsent and unrecorded. The read
+    /// fails OPEN on an unreachable store: an empty set, so the page is delivered, never suppressed.
+    /// </summary>
+    [Fact]
+    public async Task TheFlushMuteRead_SeesAMuteWrittenInsideTheWindow_AndFailsOpen()
+    {
+        await RunLiveAsync(async (store, connection) =>
+        {
+            var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG")!;
+            await using var postgres = NpgsqlDataSource.Create(connectionString);
+            var findings = new PgFindingStore(postgres);
+            var page = Page(ServerA, "c3d4e5f6mute3916");
+
+            using var endpoint = new CapturingWebhookEndpoint();
+            var config = new DarlingConfig();
+            config.Webhooks.GenericUrl = endpoint.Url;
+            var settings = new DarlingAlertSettings(config);
+            using var service = new AnalysisNotificationService(
+                Sender(settings, store), settings, f => f.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                NullLogger<AnalysisNotificationService>.Instance,
+                isStoryMuted: async (serverId, hash) => (await findings.GetMutedStoryHashesAsync(serverId)).Contains(hash));
+
+            Assert.Empty(await findings.GetMutedStoryHashesAsync(ServerA, Ct));
+            await service.NotifyAsync(new[] { page });                /* queued */
+            await findings.MuteStoryAsync(ServerA, page.StoryPathHash!, page.StoryPath, "3916 pin");
+            Assert.Contains(page.StoryPathHash!, await findings.GetMutedStoryHashesAsync(ServerA, Ct));
+
+            await service.FlushPendingAsync();
+            Assert.Empty(endpoint.Bodies);                             /* dropped at the flush */
+            Assert.Equal((0L, 0L, 0L), await RowsAsync(connection));   /* and unrecorded */
+
+            /* Fail-open: nothing listens on port 1. */
+            await using var dead = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x;Timeout=2");
+            Assert.Empty(await new PgFindingStore(dead).GetMutedStoryHashesAsync(ServerA, Ct));
         });
     }
 }
