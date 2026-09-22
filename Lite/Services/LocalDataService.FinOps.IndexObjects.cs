@@ -226,6 +226,13 @@ LIMIT {topN}";
     /// (<c>LocalDataService.FinOps.StorageGrowth.cs</c>) have always resolved it: ONE resolution path for the
     /// current set of databases, not two truths about which databases exist. Capture-time names stay in the
     /// store untouched — history is not rewritten, it is simply no longer read as the present.</para>
+    /// <para>#3880: <c>ios.collection_time</c> is projected on the ROW statement so <c>get_object_locking</c>
+    /// can publish the snapshot's <c>captured_at</c> — Erik's ruling on the judgment call Darling's twin
+    /// recorded in #3878/#3879, taken identically on both SKUs because Lite carries the same latest-read
+    /// stamp convention (its own <c>McpLatestSnapshotStampTests</c> roster). Never a second
+    /// <c>MAX(collection_time)</c> read for the stamp: that one can resolve to the NEXT capture. The grid
+    /// ignores the column; it costs the snapshot's own anchor value per row and buys the MCP surface a
+    /// truthful age on a DAILY-collected read.</para>
     /// </summary>
     public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null)
     {
@@ -237,6 +244,7 @@ LIMIT {topN}";
 
         command.CommandText = $@"
 SELECT
+    ios.collection_time,
     ios.database_name,
     ios.schema_name,
     ios.table_name,
@@ -280,24 +288,26 @@ LIMIT {topN}";
         {
             items.Add(new IndexLockingRow
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                TableName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                IndexName = reader.IsDBNull(3) ? "(heap)" : reader.GetString(3),
-                IndexTypeDesc = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                ReservedMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                TotalRows = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
-                RowLockCount = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
-                RowLockWaitCount = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
-                RowLockWaitInMs = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                PageLockCount = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                PageLockWaitCount = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
-                PageLockWaitInMs = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
-                IndexLockPromotionCount = reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
-                PageLatchWaitInMs = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
-                PageIoLatchWaitInMs = reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)),
-                PageLatchWaitCount = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
-                PageIoLatchWaitCount = reader.IsDBNull(17) ? 0L : Convert.ToInt64(reader.GetValue(17))
+                /* #3880: ordinal 0 is the read's own anchor column, the snapshot's stamp. */
+                CollectionTime = reader.GetDateTime(0),
+                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                SchemaName = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                TableName = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                IndexName = reader.IsDBNull(4) ? "(heap)" : reader.GetString(4),
+                IndexTypeDesc = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                ReservedMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
+                TotalRows = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
+                RowLockCount = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+                RowLockWaitCount = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+                RowLockWaitInMs = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
+                PageLockCount = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+                PageLockWaitCount = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+                PageLockWaitInMs = reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
+                IndexLockPromotionCount = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+                PageLatchWaitInMs = reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)),
+                PageIoLatchWaitInMs = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
+                PageLatchWaitCount = reader.IsDBNull(17) ? 0L : Convert.ToInt64(reader.GetValue(17)),
+                PageIoLatchWaitCount = reader.IsDBNull(18) ? 0L : Convert.ToInt64(reader.GetValue(18))
             });
         }
         return items;
@@ -649,6 +659,11 @@ public class IndexUsageRow
 /// <summary>Per-index locking/latch contention.</summary>
 public class IndexLockingRow
 {
+    /// <summary>The capture this row came from — the anchor <see cref="LocalDataService.GetIndexLockingAsync"/>
+    /// resolves the read on, projected since #3880 so <c>get_object_locking</c> can publish the snapshot's
+    /// <c>captured_at</c>. The grid does not bind it.</summary>
+    public DateTime CollectionTime { get; set; }
+
     public string DatabaseName { get; set; } = "";
     public string SchemaName { get; set; } = "";
     public string TableName { get; set; } = "";

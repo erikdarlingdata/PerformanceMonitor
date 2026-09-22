@@ -278,6 +278,12 @@ VALUES ($1, $2, $3, 'memory_stats', $4, 120, 'SUCCESS', NULL, 7, 90, 30)", _next
         (typeof(McpJobTools), "get_running_jobs"),
         (typeof(McpServerInfoTools), "get_server_properties"),
         (typeof(McpSessionTools), "get_session_stats"),
+        /* #3880 (Erik's ruling on the call #3878/#3879 recorded): the object-locking read anchors on the
+           server's newest capture since #3877 fixed this half of #3876, which made it ONE instant — and a read
+           that resolves one instant can say which instant, rather than sit on Darling's shrink-only roster of
+           latest-anchored reads that publish no stamp. Stamped on both SKUs in one lane, so this row exists
+           for the reason the comment above gives: a Lite-only edit must fail a LITE test. */
+        (typeof(McpObjectStatsTools), "get_object_locking"),
     ];
 
     [Fact]

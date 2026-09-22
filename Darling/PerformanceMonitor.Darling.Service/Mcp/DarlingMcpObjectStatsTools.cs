@@ -231,7 +231,7 @@ public sealed class DarlingMcpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart.")]
+    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -267,6 +267,15 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3880 (Erik's ruling on the judgment call #3878/#3879 recorded): captured_at, the #3637
+                   census's one spelling for a latest read's stamp - see GetDatabaseSizes below, and
+                   DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. Every
+                   row of this read comes from ONE capture (the anchor #3879 substituted for the immortal
+                   per-name MAX groups of #3876), so rows[0] IS the snapshot's stamp for all of them; the
+                   #3879 lane rostered the read as unstamped debt instead, and the ruling was to stamp it so
+                   the shrink-only roster shrinks. A daily-collected read most needs this: without it an
+                   agent reads a 23-hour-old contention picture as "now". */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 objects = result
             }, McpHelpers.JsonOptions);
         }

@@ -174,7 +174,7 @@ public sealed class McpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart.")]
+    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
     public static async Task<string> GetObjectLocking(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -213,6 +213,13 @@ public sealed class McpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3880: captured_at, the #3637 census's one spelling for a latest read's stamp - see
+                   McpServerInfoTools.GetServerProperties for why it is a cut-over and not an alias. Erik's
+                   ruling on the call Darling's twin recorded in #3878/#3879 (stamp it, do not roster it as
+                   unstamped debt), taken on BOTH SKUs in one lane: the two get_object_locking bodies mirror
+                   each other field-for-field, and #3876/#3877 fixed this half's anchor first. Every row
+                   comes from ONE capture, so rows[0] is the stamp for all of them. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 objects = result
             }, McpHelpers.JsonOptions);
         }

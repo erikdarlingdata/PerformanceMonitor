@@ -167,7 +167,7 @@ internal static class DarlingMcpInstructions
         | `get_trace_flags` | CURRENT active trace flags (latest snapshot) — flag number, enabled, global/session, as of `captured_at` (captured on connect) | `server_name` |
         | `get_table_index_sizes` | The 100 largest tables with size + growth from the latest daily snapshot. Growth spans only history the store holds: `history` says how many days exist and whether the 7d/30d baselines are reachable; `growth_7d_mb` / `growth_30d_mb` / `growth_pct_30d` are null (reason in `growth_note`) when their baseline does not exist — never re-measured over a shorter span under the same name — and `growth_over_available_history_*` spans exactly `growth_window_days` | `server_name` |
         | `get_index_usage` | Per-index usage classified Unused / Write-only / Active | `server_name` |
-        | `get_object_locking` | Per-index lock/latch contention, most contended first | `server_name` |
+        | `get_object_locking` | Per-index lock/latch contention, most contended first, at the newest index/object snapshot — `captured_at` is the instant it was collected, and the collection is DAILY, so on a healthy server the stamp is routinely hours old | `server_name` |
         | `get_database_sizes` | Per-file database sizes, space usage, and volume free space | `server_name` |
 
         ### Resource-contention + jobs data-read tools

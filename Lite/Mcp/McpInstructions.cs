@@ -141,7 +141,7 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_table_index_sizes` | The 100 largest tables with size, growth and row counts from the latest daily snapshot. Growth spans only history the store holds: `history` says how many days exist and whether the 7d/30d baselines are reachable; `growth_7d_mb` / `growth_30d_mb` / `growth_pct_30d` are null (reason in `growth_note`) when their baseline does not exist — never re-measured over a shorter span under the same name — and `growth_over_available_history_*` spans exactly `growth_window_days` | `server_name` |
         | `get_index_usage` | Per-index seeks/scans/lookups/updates with Unused/Write-only/Active classification (drop candidates first) | `server_name` |
-        | `get_object_locking` | Per-index lock/latch waits and lock escalations, top contended objects | `server_name` |
+        | `get_object_locking` | Per-index lock/latch waits and lock escalations, top contended objects, at the newest index/object snapshot — `captured_at` is the instant it was collected, and the collection is DAILY, so on a healthy server the stamp is routinely hours old | `server_name` |
 
         ### Performance Counter Tools
         | Tool | Purpose | Key Parameters |

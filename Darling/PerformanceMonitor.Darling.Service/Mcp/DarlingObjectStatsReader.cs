@@ -96,8 +96,14 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long UserSeeks, long UserScans, long UserLookups, long TotalReads,
         long UserUpdates, DateTime? LastUserAccessUtc, string Classification);
 
-    /// <summary>One per-index locking / latch-contention row.</summary>
+    /// <summary>One index's locking / latch contention at the server's latest capture.
+    /// <para><b>#3880: <c>CollectionTime</c> is the snapshot's own stamp</b>, projected on the row statement
+    /// (never re-read with a second <c>MAX()</c>, which could stamp the NEXT capture) so
+    /// <c>get_object_locking</c> can publish <c>captured_at</c> the way every other stamped latest read does.
+    /// It is first in the positional list for the same reason <see cref="DatabaseSizeRow"/> carries it first:
+    /// the stamp is a property of the capture, not of the index.</para></summary>
     public sealed record IndexLockingRow(
+        DateTime CollectionTime,
         string DatabaseName, string SchemaName, string TableName, string? IndexName, string? IndexTypeDesc,
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
@@ -402,9 +408,24 @@ internal static class DarlingObjectStatsReader
     /// always resolved it, and how <see cref="ObjectSizeGrowthSql"/>'s <c>boundaries</c> resolves its own:
     /// one instant, one answer about which databases exist. Capture-time names stay in the store as the
     /// history they honestly are — nothing is rewritten, it is only no longer read as the present.</para>
+    ///
+    /// <para><b>#3880 — the anchor column is PROJECTED, which is what lets the tool above stamp itself.</b>
+    /// Making this read a one-instant snapshot (above) is precisely what made it visible to the
+    /// latest-anchored-read census in <c>McpPayloadContractCensusTests</c>: a per-name MAX group inside a CTE
+    /// picks a SET, and that census deliberately ignores such an anchor, so the defect had been hiding the
+    /// read from the very rule it broke. #3879's lane answered the census's standing question by rostering
+    /// this constant on <c>LatestAnchoredReadsWithoutTheirStamp</c> beside the two <c>IndexUsage*</c> reads,
+    /// on the pre-existing-debt argument. <b>Erik ruled the other way:</b> stamp it, do not roster it — the
+    /// census is shrink-only by design, and a read that now resolves ONE instant can say which instant.
+    /// <c>ios.collection_time</c> therefore comes back on the ROW statement, the same shape
+    /// <see cref="DatabaseSizeLatestSql"/> below has always had; the roster entry is gone and
+    /// <c>get_object_locking</c> publishes <c>captured_at</c>. A second <c>MAX(collection_time)</c> read to
+    /// fetch the stamp would have been the dishonest alternative: it can resolve to the NEXT capture landing
+    /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read.</para>
     /// </summary>
     public const string IndexLockingSql = """
         SELECT
+            ios.collection_time,
             ios.database_name,
             ios.schema_name,
             ios.table_name,
@@ -447,20 +468,22 @@ internal static class DarlingObjectStatsReader
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new IndexLockingRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                /* #3880: ordinal 0 is the snapshot's stamp, the read's own anchor column. */
+                reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                reader.IsDBNull(13) ? 0 : reader.GetInt64(13)));
+                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                reader.IsDBNull(14) ? 0 : reader.GetInt64(14)));
         }
 
         return rows;
