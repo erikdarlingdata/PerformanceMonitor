@@ -217,6 +217,84 @@ CALL refresh_continuous_aggregate('collect.{TimescaleSupport.CollectionHealthHou
         Assert.Equal(after.Raw, after.Aggregate);
     }
 
+    /* ─────────── the materialization width (#3893, #3620's over-hold) ─────────── */
+
+    /// <summary>The width statement is gated on the catalog (a settled start calls nothing), names the view
+    /// through the registry, and refuses anything that is not an off-grid aggregate, because the registry
+    /// aggregates take their width from #3620's ensure.</summary>
+    [Fact]
+    public void OffGridWidth_IsCatalogGated_AndOnlyForOffGridAggregates()
+    {
+        var set = TimescaleSupport.SetOffGridMaterializationChunkIntervalSql(TimescaleSupport.CollectionHealthHourlyView);
+        Assert.Contains("SELECT set_chunk_time_interval(", set, StringComparison.Ordinal);
+        Assert.Contains($"INTERVAL '{TimescaleSupport.MaterializationChunkInterval}'", set, StringComparison.Ordinal);
+        Assert.Contains($"ca.view_name = '{TimescaleSupport.CollectionHealthHourlyView}'", set, StringComparison.Ordinal);
+        Assert.Contains(
+            $"EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds}",
+            set, StringComparison.Ordinal);
+        Assert.DoesNotContain("_materialized_hypertable", set, StringComparison.Ordinal);
+
+        Assert.True(TimescaleSupport.IsOffGridAggregate("collect." + TimescaleSupport.CollectionHealthHourlyView));
+        foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+        {
+            Assert.False(TimescaleSupport.IsOffGridAggregate(view), view);
+            Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.SetOffGridMaterializationChunkIntervalSql(view));
+        }
+        Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.SetOffGridMaterializationChunkIntervalSql("not_an_aggregate"));
+    }
+
+    /// <summary>
+    /// THE OVER-HOLD. Left at TimescaleDB's default, the materialization would chunk at ten raw chunks (10
+    /// days), and the 8-day retention (which drops only whole chunks) would hold 8 to 18 days. #3620's ensure
+    /// runs in a later stage than the policy's first run, so the creation sweep sets the width itself, before the
+    /// policy exists. Proven through the product path. After the ensure, the materialization reads one raw
+    /// chunk. After the first policy run (the backfill over more than the consumer window), EVERY chunk it
+    /// created spans exactly one raw chunk. A second ensure changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task Materialization_ChunksAtOneRawChunk_FromTheFirstPolicyRun_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live materialization-width test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+
+        var oneChunk = (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds;
+        Assert.Equal(oneChunk, await MaterializationWidthSecondsAsync(connection, ct));
+
+        await PlantAsync(connection, TimeSpan.FromDays(9), TimeSpan.FromMinutes(20), 60, 4_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        await using (var chunks = new NpgsqlCommand($@"
+SELECT count(*), count(*) FILTER (WHERE EXTRACT(EPOCH FROM c.range_end - c.range_start)::bigint <> {oneChunk})
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.chunks AS c
+  ON  c.hypertable_schema = ca.materialization_hypertable_schema
+  AND c.hypertable_name = ca.materialization_hypertable_name
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{TimescaleSupport.CollectionHealthHourlyView}'", connection))
+        {
+            await using var reader = await chunks.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var total = reader.GetInt64(0);
+            var wide = reader.GetInt64(1);
+            Assert.True(total >= 8, $"the backfill over 8 days should span at least 8 one-day chunks, found {total}");
+            Assert.Equal(0, wide);
+        }
+
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        Assert.Equal(oneChunk, await MaterializationWidthSecondsAsync(connection, ct));
+    }
+
+    private static async Task<long> MaterializationWidthSecondsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var read = new NpgsqlCommand(
+            "SELECT chunk_interval_seconds FROM (" + TimescaleSupport.MaterializationChunkIntervalStateSql +
+            $") w WHERE w.view_name = '{TimescaleSupport.CollectionHealthHourlyView}'", connection);
+        return await read.ExecuteScalarAsync(ct) is { } v and not DBNull ? Convert.ToInt64(v) : -1L;
+    }
+
     /* ─────────── the divergence pin (#3893 arm 2) ─────────── */
 
     /// <summary>The eleven aggregates' text, comments stripped and whitespace collapsed: from <c>COUNT(*) AS

@@ -5135,6 +5135,18 @@ WITH NO DATA";
                    below, instead of taking the whole sweep down before the first CREATE runs. */
                 var policySql = policyFor();
 
+                /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE
+                   its policy exists, because nothing later would be early enough. #3620's width ensure runs in
+                   the aggregate-compression step, a later convergence stage, and walks the compression targets
+                   only; the policy's first run is the seven-day backfill and creates the materialization's first
+                   chunks at whatever width the hypertable has at that moment. Catalog-gated, so a settled start
+                   calls nothing. See SetOffGridMaterializationChunkIntervalSql. */
+                if (IsOffGridAggregate(view))
+                {
+                    using var width = new NpgsqlCommand(SetOffGridMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await width.ExecuteNonQueryAsync(cancellationToken);
+                }
+
                 using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
                     await policy.ExecuteNonQueryAsync(cancellationToken);
@@ -8518,7 +8530,9 @@ WITH NO DATA";
     /// <para>Every converge that walks refresh jobs skips it by MEMBERSHIP: the #3012 window/phase converge
     /// reads <see cref="HourlyRefreshPhaseOrder"/>, the #3745 batching converge reads
     /// <see cref="DailyAggregates"/>, and the compression / chunk-interval ensures read
-    /// <see cref="AggregateCompressionTargets"/> — none of which contains it.</para>
+    /// <see cref="AggregateCompressionTargets"/> — none of which contains it. Its materialization WIDTH is
+    /// nonetheless #3620's one raw chunk, set by the creation sweep itself before this policy exists
+    /// (<see cref="SetOffGridMaterializationChunkIntervalSql"/> says why it cannot wait for #3620's ensure).</para>
     /// </summary>
     public static string AddCollectionHealthRefreshPolicySql()
         => AddContinuousAggregatePolicySql(
@@ -8540,6 +8554,57 @@ WITH NO DATA";
     {
         (CreateCollectionHealthHourlySql, CollectionHealthHourlyView, AddCollectionHealthRefreshPolicySql),
     };
+
+    /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of <see cref="OffGridAggregates"/>?</summary>
+    public static bool IsOffGridAggregate(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+        return OffGridAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Holds an off-grid aggregate's materialization at #3620's width, one raw chunk
+    /// (<see cref="MaterializationChunkInterval"/>), issuing <c>set_chunk_time_interval</c> ONLY when the catalog
+    /// reads another width, so a settled start calls nothing. Run by <see cref="EnsureContinuousAggregatesAsync"/>
+    /// between the aggregate's CREATE and its policy (#3893).
+    ///
+    /// <para><b>Why here, not in #3620's ensure.</b> Left alone, TimescaleDB gives a first-level aggregate's
+    /// materialization TEN raw chunks (10 days here), and <c>drop_chunks</c> removes a chunk only once its whole
+    /// range is past the horizon. The 8-day <see cref="CollectionHealthRetentionInterval"/> would then hold 8 to
+    /// 18 days, the over-hold #3620 removed from every other aggregate. #3620's ensure cannot catch this one in
+    /// time. It runs in the aggregate-compression step, a LATER convergence stage than this sweep, and
+    /// <c>set_chunk_time_interval</c> governs only chunks created after the call. This aggregate's policy carries
+    /// no <c>initial_start</c>, and its first run is the seven-day backfill, which creates the first chunks. The
+    /// aggregate is created <c>WITH NO DATA</c>, so a width set before the policy exists covers every chunk it
+    /// will ever have.</para>
+    /// </summary>
+    public static string SetOffGridMaterializationChunkIntervalSql(string view)
+    {
+        if (!IsOffGridAggregate(view))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not an off-grid continuous aggregate — it is not in OffGridAggregates; the registry aggregates take their width from #3620's EnsureMaterializationChunkIntervalAsync");
+        }
+
+        return $@"SELECT set_chunk_time_interval(
+    format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass,
+    INTERVAL '{MaterializationChunkInterval}')
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.dimensions AS d
+  ON  d.hypertable_schema = ca.materialization_hypertable_schema
+  AND d.hypertable_name = ca.materialization_hypertable_name
+  AND d.dimension_type = 'Time'
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'
+AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunkIntervalSpan.TotalSeconds}";
+    }
 
     /// <summary>The V23 non-catalog hypertable: the per-run observability log. Bare name — the connection's
     /// <c>collect,config,public</c> search path resolves it to <c>collect.collection_log</c>, exactly like the

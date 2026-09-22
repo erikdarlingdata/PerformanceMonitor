@@ -543,8 +543,9 @@ public sealed class TimescaleAggregateCompressionTests
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
                every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read
                so the change count below is asserted against what was actually wide, not against a version fact. */
-            /* #3893: counted over the compression TARGETS only — the ensure narrows exactly those, and the off-grid
-               collection-health aggregate is deliberately not one (it keeps the store's default width). */
+            /* #3893: counted over the compression TARGETS only, because that is the set this ensure narrows. The
+               off-grid collection-health aggregate is not one of them: the creation sweep has ALREADY set it to one
+               raw chunk, before its policy existed (CollectionHealthAggregateTests pins that). */
             var wideBefore = (await MaterializationChunkIntervalSecondsAsync(connection, ct))
                 .Count(kv => TimescaleSupport.IsAggregateCompressionTarget(kv.Key)
                     && kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
