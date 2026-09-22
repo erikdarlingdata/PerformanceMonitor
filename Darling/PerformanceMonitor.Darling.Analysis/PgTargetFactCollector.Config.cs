@@ -199,7 +199,27 @@ AND   c.name IN (
 
             /* ── Write-chain context (base 0): stated in the checkpoint-pressure advice, never a root. ── */
             if (TryMs(settings, "checkpoint_timeout", out var checkpointTimeout, out var ctRow))
-                facts.Add(ConfigFact(context, PgTargetFactKeys.ConfigCheckpointTimeout, checkpointTimeout / 1000.0, ctRow, snapshotAgeSeconds));
+            {
+                var fact = ConfigFact(context, PgTargetFactKeys.ConfigCheckpointTimeout, checkpointTimeout / 1000.0, ctRow, snapshotAgeSeconds);
+
+                /* #3868: the same stamp max_wal_size takes above, for the same reason and off the same flag.
+                   checkpoint_timeout is base 0 here, so nothing was grading it — but the composed advice tells
+                   an operator to tune it WITH max_wal_size, and on aurora-postgres that is a knob the storage
+                   layer ignores (lane 15 / #3691 §A4: sixty timed "checkpoints" an hour, requested share 0, on
+                   all fifty measured clusters). audit_config already rendered the pair not_applicable through an
+                   engine-side arm (#3867, rider 1 of Erik's ruling); this is the fact saying it too, so
+                   get_analysis_facts and every other reader agree with the tool. The value is still emitted —
+                   it is what the parameter group holds, and the write partial reads it off max_wal_size's
+                   metadata. Engine off the registry fact emitted before this method, through
+                   MonitoredEngineKind — never a column's presence (#2530). */
+                var registry = facts.Find(f => f.Key == PgTargetFactKeys.ServerMajorVersion);
+                if (registry is not null && registry.Metadata.GetValueOrDefault("is_aurora") > 0)
+                {
+                    fact.Metadata["not_applicable"] = 1;
+                    fact.Metadata["not_applicable_on_aurora"] = 1;
+                }
+                facts.Add(fact);
+            }
 
             if (settings.TryGetValue("wal_compression", out var walCompression) && walCompression.Setting is not null)
             {

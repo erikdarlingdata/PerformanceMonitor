@@ -492,6 +492,16 @@ public sealed class PgTargetWriteTests
                 Assert.Equal(1024, knob.GetProperty("value").GetDouble());
                 Assert.Equal(0, knob.GetProperty("base_severity").GetDouble());
                 Assert.Equal(1, knob.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
+
+                /* #3868: the SECOND knob rider 1 names takes the same stamp, off the same registry read — the value
+                   is still the parameter group's 300 s, the base is still 0 (it was never graded), and the pair now
+                   says not_applicable in the FACT, which is what get_analysis_facts and audit_config both read. */
+                var checkpointTimeout = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigCheckpointTimeout);
+                Assert.Equal(300, checkpointTimeout.GetProperty("value").GetDouble());
+                Assert.Equal(0, checkpointTimeout.GetProperty("base_severity").GetDouble());
+                Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
+                Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
+
                 var sharedBuffers = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
                 Assert.Equal(0.4, sharedBuffers.GetProperty("base_severity").GetDouble(), precision: 6);
             }
