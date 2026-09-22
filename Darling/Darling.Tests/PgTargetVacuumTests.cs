@@ -763,15 +763,21 @@ public sealed class PgTargetVacuumTests
         Assert.StartsWith("Turn autovacuum back on server-wide first", advice.Remediation, StringComparison.Ordinal);
     }
 
+    /// <summary>#3691 lane 43: the others are NAMED now. They used to ride as
+    /// <c>disabled_rank_{n}_ratio</c> / <c>_hours</c> — doubles without names, so this pin asserted
+    /// "2 more disabled tables have met the same gate (3.1× for 5 hours, 1.4× for 2 hours)". The same two
+    /// figures now travel on <c>Fact.Ranked</c> entries that carry their table names, and the clause reads
+    /// "; and two more: public.orders (3.1× for 5 hours), public.events (1.4× for 2 hours)" through the shared
+    /// <c>FactAdvice.NameTheRest</c>. The population count in front of it is unchanged.</summary>
     [Fact]
-    public void TheDisabledAdvice_StatesTheTableTheRatioTheHoursAndTheShapeOfTheOthers_AndOffersBothLeversWithTheirCosts()
+    public void TheDisabledAdvice_StatesTheTableTheRatioTheHoursAndNamesTheOthers_AndOffersBothLeversWithTheirCosts()
     {
         var disabled = Disabled(4.2, 7, hours: 6,
             (PgTargetScorer.BacklogDeadTuplesKey, 4_410), (PgTargetScorer.BacklogVacuumThresholdKey, 1_050), (PgTargetScorer.BacklogLiveTuplesKey, 10_000),
             (PgTargetScorer.BacklogTotalBytesKey, 8_192_000), (PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, 30),
-            (PgTargetScorer.AutovacuumDisabledTablesKey, 3),
-            (PgTargetScorer.AutovacuumDisabledRankRatioKey(2), 3.1), (PgTargetScorer.AutovacuumDisabledRankHoursKey(2), 5),
-            (PgTargetScorer.AutovacuumDisabledRankRatioKey(3), 1.4), (PgTargetScorer.AutovacuumDisabledRankHoursKey(3), 2));
+            (PgTargetScorer.AutovacuumDisabledTablesKey, 3));
+        Rank(disabled, "public.orders", 3.1, 5);
+        Rank(disabled, "public.events", 1.4, 2);
         var backlog = Backlog(4.2, 7, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1));
         backlog.DatabaseName = "appdb";
         backlog.ObjectName = "public.hot";
@@ -780,10 +786,20 @@ public sealed class PgTargetVacuumTests
         var block = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(backlog, disabled))!;
         Assert.Equal("public.hot in appdb has autovacuum_enabled = off and sits at 4.2× its own autovacuum trigger line for 6 hours", block.Headline);
         Assert.Contains("4,410 dead tuples against its own trigger line of 1,050", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("for 7 consecutive samples spanning 6 hours", block.Investigation, StringComparison.Ordinal);
+        /* The ranked clause rides on the SUBJECT's sentence, because Ranked[0] is the subject — so "two more"
+           can only mean "besides public.hot". Executed on macOS against the real composer, 2026-09-22. */
+        Assert.Contains(
+            "for 7 consecutive samples spanning 6 hours; and two more: public.orders (3.1× for 5 hours), public.events (1.4× for 2 hours). ",
+            block.Investigation,
+            StringComparison.Ordinal);
         Assert.Contains("autovacuum last ran on this table 30 hours before the window end", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("7.8 MB on disk", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("2 more disabled tables have met the same gate (3.1× for 5 hours, 1.4× for 2 hours)", block.Investigation, StringComparison.Ordinal);
+        /* The POPULATION sentence keeps its own count and its own pointer: the gate's population can exceed the
+           three rows the read returns, so the named clause above is deliberately a subset of this number. */
+        Assert.Contains(
+            "2 more disabled tables have met the same gate — get_pg_autovacuum_health names them all, disabled tables first. ",
+            block.Investigation,
+            StringComparison.Ordinal);
         Assert.Contains("PG_AUTOVACUUM_BACKLOG carries the grade", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("CONFIG_PG_AUTOVACUUM_OFF also fired", block.Investigation, StringComparison.Ordinal);
 
@@ -837,8 +853,25 @@ public sealed class PgTargetVacuumTests
             },
         };
         foreach (var (k, v) in extra) fact.Metadata[k] = v;
+        /* #3691 lane 43: the collector's Ranked[0] IS the subject, so a hand-built fact that ranks anything has
+           to start with its own name and value or FactRankedTests' invariant would (rightly) fail on it. Built
+           here rather than in each caller so every Disabled() fact that ranks is well-formed by construction. */
+        Rank(fact, "public.hot", ratio, hours);
         return fact;
     }
+
+    /// <summary>Appends one <c>Fact.Ranked</c> entry in the disabled read's own shape — the ratio and the run's
+    /// hours under the same metadata names the subject's figures ride under (#3691 lane 43).</summary>
+    private static void Rank(Fact fact, string objectName, double ratio, double hours) =>
+        fact.Ranked.Add(new RankedObject(
+            objectName,
+            fact.DatabaseName,
+            ratio,
+            new Dictionary<string, double>(StringComparer.Ordinal)
+            {
+                [PgTargetScorer.BacklogRatioKey] = ratio,
+                [PgTargetScorer.BacklogHoursKey] = hours,
+            }));
 
     private static void AssertNeverDisablesAutovacuum(AdviceBlock block)
     {

@@ -339,7 +339,15 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal(1, disabled.Metadata[PgTargetScorer.AutovacuumDisabledTablesKey]);
             Assert.Equal(0, disabled.Metadata[PgTargetScorer.AutovacuumDisabledServerOffKey]);
             Assert.False(disabled.Metadata.ContainsKey(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey));
-            Assert.False(disabled.Metadata.ContainsKey(PgTargetScorer.AutovacuumDisabledRankRatioKey(2)));
+            /* #3691 lane 43: one disabled table met the gate, so the read returned ONE row — Ranked holds the
+               subject alone (the [0] == ObjectName/Value invariant) and nothing else, which is the shape the
+               retired disabled_rank_2_ratio key used to prove by its absence. Below two entries the advice
+               clause is empty and the payload omits `ranked` entirely. */
+            var rankedDisabled = Assert.Single(disabled.Ranked);
+            Assert.Equal("public.frozen", rankedDisabled.ObjectName);
+            Assert.Equal(4.0, rankedDisabled.Value, precision: 6);
+            Assert.Equal(4.0, rankedDisabled.Figures![PgTargetScorer.BacklogRatioKey], precision: 6);
+            Assert.Equal(6.0, rankedDisabled.Figures[PgTargetScorer.BacklogHoursKey], precision: 6);
             Assert.DoesNotContain(facts, f => f.ObjectName == "public.quiet");
 
             /* The backlog fact ranks disabled tables first, so it names frozen too, and counts hot beside it. */

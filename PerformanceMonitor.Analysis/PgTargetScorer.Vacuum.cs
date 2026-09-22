@@ -134,8 +134,8 @@ public static partial class PgTargetScorer
     public const double AutovacuumDisabledBaseSeverity = 0.9;
 
     /// <summary>Metadata key: how many tables with <c>autovacuum_enabled = off</c> met the persistence gate
-    /// this pass (the fact names the worst by ratio in <see cref="Fact.ObjectName"/>; the others are
-    /// <c>get_pg_autovacuum_health</c>'s).</summary>
+    /// this pass (the fact names the worst by ratio in <see cref="Fact.ObjectName"/> and the top three in
+    /// <see cref="Fact.Ranked"/>; any beyond those are <c>get_pg_autovacuum_health</c>'s).</summary>
     public const string AutovacuumDisabledTablesKey = "disabled_tables_in_backlog";
 
     /// <summary>Metadata key: 1 when <c>CONFIG_PG_AUTOVACUUM_OFF</c> also reads off this pass (the launcher is
@@ -143,15 +143,11 @@ public static partial class PgTargetScorer
     /// off the config fact emitted earlier in the same pass (emission order: Config before Vacuum).</summary>
     public const string AutovacuumDisabledServerOffKey = "server_autovacuum_off";
 
-    /// <summary>The metadata key for the backlog ratio of the <paramref name="rank"/>-th worst disabled table
-    /// (2 and 3 — the worst is the fact itself and rides in <see cref="BacklogRatioKey"/>). Names cannot ride
-    /// in <see cref="Fact.Metadata"/> (doubles), so the advice states the shape of the others and sends the
-    /// reader to the tool for their names.</summary>
-    public static string AutovacuumDisabledRankRatioKey(int rank) => $"disabled_rank_{rank}_ratio";
-
-    /// <summary>The metadata key for how many hours the <paramref name="rank"/>-th worst disabled table has
-    /// been past its line (the run's own span, latest sample minus first sample of the run).</summary>
-    public static string AutovacuumDisabledRankHoursKey(int rank) => $"disabled_rank_{rank}_hours";
+    /* Ranks 2 and 3 used to ride here as disabled_rank_{n}_ratio / _hours — numbers without names, because
+       Fact.Metadata is doubles-only, so the advice could state their shape ("3.1× for 5 h") and not which table.
+       #3691 lane 43 moved them onto Fact.Ranked, where an entry carries its NAME with the same two figures
+       under BacklogRatioKey / BacklogHoursKey; the two key builders are gone rather than kept beside it,
+       because two places to read the same rank is how a card ends up disagreeing with itself. */
 
     /* ── PG_WRAPAROUND_TREND ── */
 
