@@ -4389,7 +4389,10 @@ WITH NO DATA";
     /// (<see cref="CompressionMinuteClearanceMinutes"/>): under the previous grid the three hypertables whose
     /// chunk-close runs were measured sat on minutes with 240 s, 180 s and 120 s of clearance against runs of
     /// 360 s, 198 s and 552 s, so every one of them ran past the refresh that followed it. On this grid the
-    /// same three hold minutes with <b>1,200 s</b>, <b>1,140 s</b> and <b>1,080 s</b>. A contiguous refresh
+    /// same three hold minutes with <b>960 s</b>, <b>480 s</b> and <b>1,440 s</b> — stated in the paragraph's
+    /// standing order (<c>query_stats</c>, <c>query_snapshots</c>, <c>query_store_stats</c>) rather than
+    /// descending, because since #3678 the largest run holds the band's widest minute and the three are no
+    /// longer in band order at all. A contiguous refresh
     /// band followed by a contiguous compression band puts most of the compression minutes a long way from
     /// the next refresh, where three chunks of a uniform grid put every compression minute within a guard
     /// band of one — so the re-derivation changed the axis the band actually ran through, as a consequence of
@@ -4454,6 +4457,158 @@ WITH NO DATA";
         HypertableTables.Select(t => t.TargetTable).Append(CollectionLogTable).ToArray();
 
     /// <summary>
+    /// The hypertables whose compression runs are long enough that WHICH minute of the band they hold is an
+    /// operational fact rather than bookkeeping — spread across the band by
+    /// <see cref="s_compressionPhaseSlots"/> instead of taking whatever three minutes their registry
+    /// positions happen to be adjacent to.
+    ///
+    /// <para><b>Measured, on one production store class, 2026-09-21 — the second night of the band at steady
+    /// state.</b> These are the three longest hourly compression runs and the three largest raw hypertables
+    /// this product has: <c>query_store_stats</c> at 552 s, <c>query_stats</c> at 360 s and
+    /// <c>query_snapshots</c> at 198 s (last-run readings, so no maximum question is answered by them —
+    /// #3119's caveat, and these are the same three readings <c>CompressionClearanceWatchTests</c> quotes).
+    /// Registry order put them at catalog indices 28, 29 and 30 — CONSECUTIVE — so an
+    /// <c>index % Count</c> assignment gave them
+    /// three CONSECUTIVE minutes of the band, they overlapped three-wide for about five minutes at the daily
+    /// chunk close, and eleven alert reads were cancelled inside four minutes. Three runs that each fit their
+    /// own clearance still convoy when they start one minute apart: that is the defect, and the minute
+    /// assignment is where it lives.</para>
+    ///
+    /// <para><b>ORDERED LONGEST-RUN FIRST, and the order is load-bearing rather than tidy.</b> Clearance
+    /// falls one minute per minute across the band (<see cref="CompressionMinuteClearanceMinutes"/>), so the
+    /// first entry takes the band's first slot — its widest clearance — and each later one takes the next
+    /// evenly spaced slot down. Longest first is therefore the only order that puts the most runtime where
+    /// the most space is: reversing this list hands <c>query_store_stats</c>' 552 s the band's tightest
+    /// evenly spaced slot, which <c>CompressionClearanceWatchTests</c> classifies
+    /// <see cref="CompressionClearanceBand.RefreshOverrun"/> and reddens, rather than accepting.</para>
+    ///
+    /// <para><b>A table joins this set by MEASUREMENT, recorded here.</b> No predicate over the catalog can
+    /// know which hypertables are big on a given install — row counts, column widths and collector cadence
+    /// all feed it and none is knowable at compile time — so membership is a recorded reading with the
+    /// reading beside it, the way <see cref="HeaviestHourlyRefreshView"/> names its view. A member that
+    /// leaves the catalog is caught by <c>CompressionPhaseAssignmentTests</c> rather than thrown for: a
+    /// static initializer on this type that throws takes every retention horizon and every compression
+    /// statement down with it for the life of the process (<see cref="LightBandHoldsUnboundedRefreshCount(int)"/>
+    /// argues that at length and measured it), so a misspelling degrades to the ordinary fill and goes red in
+    /// CI instead.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> HeaviestCompressionTables = new[]
+    {
+        "query_store_stats",
+        "query_stats",
+        "query_snapshots",
+    };
+
+    /// <summary>
+    /// Which SLOT of <see cref="CompressionPhaseMinutes"/> each hypertable's compression policy starts on,
+    /// computed once. <see cref="TryCompressionPhaseMinutesFor"/> is the only reader.
+    ///
+    /// <para><b>What this replaced, and what it kept.</b> The assignment was
+    /// <c>CompressionPhaseMinutes[index % Count]</c> over <see cref="CompressionPhaseOrder"/> — a pure
+    /// function of a table's REGISTRY POSITION, which is a fact about the order collectors were written in
+    /// and about nothing operational. The BAND is untouched: same start, same width, same minutes, same
+    /// <see cref="CompressionPhaseMaxPerMinute"/> ceiling, so every constant the grid is derived from
+    /// (<see cref="CompressionPhaseBandMinutes"/>, <see cref="HeaviestRefreshWindowMinutes"/>,
+    /// <see cref="AggregateCompressionBandMinute"/>) holds its value. Only WHICH hypertable holds which
+    /// minute moves.</para>
+    ///
+    /// <para><b>The spacing is the band divided by the set.</b> The Nth member of
+    /// <see cref="HeaviestCompressionTables"/> takes slot <c>N * Count / HeaviestCompressionTables.Count</c>
+    /// — for today's 24-minute band and three members, slots 0, 8 and 16: eight minutes apart rather than
+    /// one. Every other hypertable fills the remaining seats in registry order, advancing one slot per table
+    /// and skipping full ones, so the ordinary tables stay spread exactly as the modulus spread them and the
+    /// per-minute ceiling holds by CONSTRUCTION rather than by arithmetic that happens to divide: each slot
+    /// is given <see cref="CompressionPhaseMaxPerMinute"/> seats and a table is never placed in a slot with
+    /// none left.</para>
+    ///
+    /// <para><b>The overflow case degrades rather than throws</b>, for the reason the heaviest set's doc
+    /// gives. A catalog grown past <c>MaxPerMinute * BandMinutes</c> has no seat for its last tables; those
+    /// fall back to the modulus this map replaced, which is #3174's grid — a grid that shipped, not a new
+    /// one — and TimescaleSupportTests holds that overflow red in CI, where widening the band is a decision
+    /// someone makes deliberately out of the heaviest refresh's window.</para>
+    ///
+    /// <para>Declared HERE, after <see cref="CompressionPhaseMinutes"/> and
+    /// <see cref="CompressionPhaseOrder"/>, because a static field initializer runs in declaration order and
+    /// this one reads both.</para>
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, int> s_compressionPhaseSlots = BuildCompressionPhaseSlots();
+
+    private static Dictionary<string, int> BuildCompressionPhaseSlots()
+    {
+        var slots = CompressionPhaseMinutes.Count;
+        var assigned = new Dictionary<string, int>(CompressionPhaseOrder.Count, StringComparer.Ordinal);
+
+        if (slots <= 0)
+        {
+            return assigned;
+        }
+
+        var seats = new int[slots];
+
+        for (var slot = 0; slot < slots; slot++)
+        {
+            seats[slot] = CompressionPhaseMaxPerMinute;
+        }
+
+        /* The heaviest set first, at its evenly spaced slots, so the ordinary fill below sees their seats
+           already taken. A member that is not on the phase order — a misspelling, or a collector that left
+           the catalog — leaves its slot to the fill and is reported by test rather than thrown for. */
+        for (var index = 0; index < HeaviestCompressionTables.Count; index++)
+        {
+            var table = HeaviestCompressionTables[index];
+            var slot = index * slots / HeaviestCompressionTables.Count;
+
+            if (slot >= slots
+                || seats[slot] <= 0
+                || assigned.ContainsKey(table)
+                || !CompressionPhaseOrder.Contains(table, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            assigned[table] = slot;
+            seats[slot]--;
+        }
+
+        var cursor = 0;
+
+        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        {
+            var table = CompressionPhaseOrder[index];
+
+            if (assigned.ContainsKey(table))
+            {
+                continue;
+            }
+
+            var placed = false;
+
+            for (var probe = 0; probe < slots; probe++)
+            {
+                var slot = (cursor + probe) % slots;
+
+                if (seats[slot] <= 0)
+                {
+                    continue;
+                }
+
+                assigned[table] = slot;
+                seats[slot]--;
+                cursor = slot + 1;
+                placed = true;
+                break;
+            }
+
+            if (!placed)
+            {
+                assigned[table] = index % slots;
+            }
+        }
+
+        return assigned;
+    }
+
+    /// <summary>
     /// Which minute of the hour <paramref name="table"/>'s compression policy starts on; <c>false</c> when
     /// this product does not own the hypertable, in which case its schedule is none of this code's business
     /// beyond the <see cref="CompressScheduleInterval"/> tick #1778 already converges.
@@ -4474,13 +4629,12 @@ WITH NO DATA";
         var dot = table.LastIndexOf('.');
         var bare = dot >= 0 ? table[(dot + 1)..] : table;
 
-        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        /* The slot map, not the registry position: what a table's index used to decide, a measured-weight
+           aware assignment decides now (see s_compressionPhaseSlots). Unknown name is still FOREIGN. */
+        if (s_compressionPhaseSlots.TryGetValue(bare, out var slot) && slot < CompressionPhaseMinutes.Count)
         {
-            if (string.Equals(CompressionPhaseOrder[index], bare, StringComparison.Ordinal))
-            {
-                minutes = CompressionPhaseMinutes[index % CompressionPhaseMinutes.Count];
-                return true;
-            }
+            minutes = CompressionPhaseMinutes[slot];
+            return true;
         }
 
         return false;
@@ -4530,11 +4684,14 @@ WITH NO DATA";
     /// space the something has.</para>
     ///
     /// <para><b>What the shipped grid puts where, so the residual is named rather than left to be found.</b>
-    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:42</b> with
-    /// <b>1,080 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
-    /// any of the large hypertables has. Both figures follow from the catalog's ORDER, so a collector
-    /// registered ahead of either moves them; they are pinned as derived values rather than stated as facts
-    /// about those two tables, and the prose going stale is what reddens the pin.</para>
+    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:36</b> with
+    /// <b>1,440 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
+    /// any of the large hypertables has. The first of those follows from
+    /// <see cref="HeaviestCompressionTables"/> (#3678: it is that list's first member, so it takes the band's
+    /// widest minute by MEASUREMENT rather than by where its collector sits in the catalog); the second still
+    /// follows from the catalog's ORDER, so a collector registered ahead of it moves it. Both are pinned as
+    /// derived values rather than stated as facts about those two tables, and the prose going stale is what
+    /// reddens the pin.</para>
     ///
     /// <para><b>The measurement this exists because of, scoped (#3112).</b> In the <c>2026-09-08 00:00Z</c>
     /// hour on ONE store, three compression policies were read at <b>360 s</b> (<c>query_stats</c>),
@@ -4552,8 +4709,11 @@ WITH NO DATA";
     /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
     /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
     /// is that refresh — not the other two — whose runtime went to 160.4 s and then 226.8 s against a
-    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:40</c>, <c>:41</c> and
-    /// <c>:42</c>, where those readings are <b>30%</b>, <b>17%</b> and <b>51%</b> of their clearance.
+    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:44</c>, <c>:52</c> and
+    /// <c>:36</c>, where those readings are <b>38%</b>, <b>41%</b> and <b>38%</b> of their clearance —
+    /// eight minutes apart rather than consecutive, because #3678's
+    /// <see cref="HeaviestCompressionTables"/> places these three by measured weight and the rest of the
+    /// catalog fills in around them.
     /// <b>Nothing here reduces what midnight carries</b>, and the placement that absorbs it was not chosen
     /// for that: it is a consequence of #3174's re-derivation, which claimed neutrality on CONCENTRATION and
     /// was neutral on it. Clearance is a different axis and it moved.</para>
@@ -6295,6 +6455,17 @@ AND   j.hypertable_name = '{relation}'";
     /// is the envelope TimescaleSupportTests holds red. #3185 measured what stepping a band by member count
     /// does to per-group cost; this is the same lesson from the other side. So this family does not join that
     /// band, and its own minute is one the hourly grid already has and does not use.</para>
+    ///
+    /// <para><b>:35 is also the minute READERS read, and that overlap was measured and then decided
+    /// (#3781).</b> The monitoring tick read every store at <c>:35</c> until 2026-09-21, so a 7-day scan
+    /// issued at <c>:35:00</c> races one aggregate's daily compression start — one aggregate, one hour of
+    /// one day, and only the chunk being swapped. It is counted rather than moved: at steady state these
+    /// runs are about 68 s, the staged first lifts that reached 1,246 s end around 2026-10-12, and the alert
+    /// pass retries once (#3851), so the losing read is a retried read rather than a missed one. Moving the
+    /// minute would spend the one minute of the heaviest refresh's window this family has and put a daily
+    /// rewrite back into that window's tail, which is the trade the paragraph above declines. The bar to
+    /// REOPEN it is stated so it is checkable rather than remembered: more than two losing hours in a day
+    /// after the staged lifts end, or any alert-read kill attributed to an aggregate-compression run.</para>
     /// </summary>
     public static int AggregateCompressionBandMinute =>
         HeaviestRefreshStartMinute + HeaviestRefreshWindowMinutes - 1;
