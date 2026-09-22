@@ -536,13 +536,18 @@ public sealed class TimescaleAggregateCompressionTests
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count, created);
+            /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
+               targets (no compression band slot) — so the created count is the targets plus those. */
+            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count + TimescaleSupport.OffGridAggregates.Length, created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
                every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read
                so the change count below is asserted against what was actually wide, not against a version fact. */
+            /* #3893: counted over the compression TARGETS only — the ensure narrows exactly those, and the off-grid
+               collection-health aggregate is deliberately not one (it keeps the store's default width). */
             var wideBefore = (await MaterializationChunkIntervalSecondsAsync(connection, ct))
-                .Count(kv => kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
+                .Count(kv => TimescaleSupport.IsAggregateCompressionTarget(kv.Key)
+                    && kv.Value != (long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds);
 
             var firstLog = new CapturingTestLogger();
             var first = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, firstLog, ct);

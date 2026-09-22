@@ -2091,6 +2091,8 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
        armed policy behind on the shared fixture. 20 relations since Q12 (17 before). */
     .Concat(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Successor))
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
+    /* #3893: the off-grid fleet collection-health rollup carries its own 8-day leaf policy. 21 relations. */
+    .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
     .ToArray();
 
     /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>

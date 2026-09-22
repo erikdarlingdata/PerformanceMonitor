@@ -558,7 +558,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
            so the successors are created exactly as a store will create them, and the sweep's own count says
            every one built. */
         var ready = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length, ready);
+        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length, ready);
 
         foreach (var view in new[] { TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
         {

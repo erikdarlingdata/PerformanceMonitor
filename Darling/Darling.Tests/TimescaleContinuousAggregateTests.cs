@@ -1386,6 +1386,17 @@ public sealed class TimescaleContinuousAggregateTests
                        and its real consumer is the baseline computation, whose capture requirement is the
                        window. That is the comparison that means something here. */
                     leaves++;
+                    /* #3893: the fleet collection-health rollup is a leaf too, but its real consumer is the
+                       SEVEN-day fleet read, not the baseline computation — so its capture requirement is that
+                       window (plus the head bucket), which is the comparison that means something for it. */
+                    if (string.Equals(relation, TimescaleSupport.CollectionHealthHourlyView, StringComparison.Ordinal))
+                    {
+                        Assert.True(
+                            sourceHorizon > TimeSpan.FromDays(7) + TimescaleSupport.HourlyBucket,
+                            $"{relation} covers ITSELF; its consumer reads seven days, and it keeps {sourceHorizon.TotalDays}d.");
+                        continue;
+                    }
+
                     Assert.True(
                         sourceHorizon > TimeSpan.FromDays(BaselineMath.BaselineWindowDays),
                         $"{relation} covers ITSELF (the #1757 leaf rule), so its horizon has to exceed the " +
