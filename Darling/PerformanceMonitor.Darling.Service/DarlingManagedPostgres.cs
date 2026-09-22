@@ -478,6 +478,21 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV13 = "# Managed by PerformanceMonitor Darling (v13 statement statistics) -- do not remove this block";
 
     /// <summary>
+    /// The v14 marker (#3909): a <c>maintenance_work_mem</c> line PostgreSQL 17 will accept, appended to a data
+    /// directory still on 17 whose effective value is over 17's Windows limit of 2097151 kB. The v3/v7/v8
+    /// blocks derived 2048 MB on large hosts, which 18 accepts and 17 refuses at startup (FATAL), so a 17 store
+    /// that got those blocks, typically after a reverted upgrade, could no longer start.
+    ///
+    /// <para>Keyed on the VALUE, not on the marker: it is appended whenever the assignment in force is over the
+    /// limit, so it heals once and then finds its own line in force. Written from two places.
+    /// <see cref="HealLegacyMaintenanceWorkMem"/> runs before anything can start the cluster, the store
+    /// upgrade's old-cluster start included, which <see cref="EnsureConfAppended"/> runs too late for.
+    /// <see cref="EnsureConfAppended"/> covers every other start, the restart after a reverted upgrade
+    /// included. Carries no fingerprint or stamp line, so the v8 and v12 checks never see it.</para>
+    /// </summary>
+    public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -847,7 +862,13 @@ public sealed class DarlingManagedPostgres
         var effectiveCache = ram / 4 * 3;                          /* 75% RAM — planner hint, not an allocation */
         /* #1777: 5% RAM with a MEASURED 1.5 GB floor (compression throughput rose ~70% reaching it and
            plateaued there), guarded by 25% of RAM so the floor cannot overcommit a small host, and capped
-           at 2 GB where the field data showed nothing further to gain.
+           just under 2 GB, where the field data showed nothing further to gain.
+
+           The cap is 2047 MB, not 2048 (#3909). PostgreSQL 17 on Windows accepts at most 2097151 kB here,
+           one kB under 2 GB, and a conf line above that is FATAL at startup, not a warning. PostgreSQL 18
+           accepts 2048 MB, but a store can still be on 17 (it predates the 18 bundle, or its upgrade
+           reverted), so the one cap has to hold for both. 1 MB is noise against a benefit that plateaued
+           by 1.5 GB. A 17 conf that already carries 2048 MB is healed by the v14 block (ConfMarkerV14).
 
            THE CONSTRAINT THE SMALL-HOST LANDINGS REST ON: both of today's consumers allocate
            INCREMENTALLY — a tuplesort grows to fit its input and SPILLS past the ceiling rather than
@@ -857,7 +878,7 @@ public sealed class DarlingManagedPostgres
            maintenance_work_mem, that reasoning breaks and the small-host landings need revisiting here. */
         var maintenanceWorkMem = Math.Min(
             Math.Min(Math.Max(ram / 20, 1536 * oneMb), ram / 4),
-            2048 * oneMb);
+            MaintenanceWorkMemCapMb * oneMb);
         var workMem = Math.Clamp(ram / 512, 16 * oneMb, 64 * oneMb);
 
         return new MemorySettings(
@@ -908,6 +929,159 @@ public sealed class DarlingManagedPostgres
         builder.Append(ConfMarkerV7).Append('\n');
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         return builder.ToString();
+    }
+
+    /// <summary>The derived <c>maintenance_work_mem</c> cap in MB (#1777's 2 GB, less 1 MB for #3909).</summary>
+    internal const int MaintenanceWorkMemCapMb = 2047;
+
+    /// <summary>
+    /// The largest <c>maintenance_work_mem</c> PostgreSQL 17 accepts on Windows, in kB (#3909): 2097151,
+    /// one kB under 2 GB. Measured on 17.10, where <c>2048MB</c> is FATAL ("2097152 kB is outside the valid
+    /// range ... (64 kB .. 2097151 kB)"). PostgreSQL 18 accepts 2048 MB.
+    /// </summary>
+    internal const long LegacyMaintenanceWorkMemMaxKb = 2097151;
+
+    /// <summary>The setting the v14 block (#3909) caps.</summary>
+    internal const string MaintenanceWorkMemSetting = "maintenance_work_mem";
+
+    /// <summary>
+    /// A <c>maintenance_work_mem</c> value as <see cref="ReadConfAssignments"/> returns it (quotes and comment
+    /// already stripped), in kB: <c>2048MB</c>, <c>2GB</c>, <c>65536</c> (no unit means kB, the parameter's
+    /// base unit), with or without a space before the unit. Null for anything else, which the caller leaves
+    /// alone rather than guessing at. Pure.
+    /// </summary>
+    internal static long? ParseMaintenanceWorkMemKb(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var text = value.Trim();
+        var digits = 0;
+        while (digits < text.Length && char.IsAsciiDigit(text[digits]))
+        {
+            digits++;
+        }
+
+        if (digits == 0 || !long.TryParse(text[..digits], NumberStyles.None, CultureInfo.InvariantCulture, out var number))
+        {
+            return null;
+        }
+
+        return text[digits..].Trim().ToUpperInvariant() switch
+        {
+            "" or "KB" => number,
+            "B" => number / 1024,
+            "MB" => number * 1024,
+            "GB" => number * 1024 * 1024,
+            "TB" => number * 1024 * 1024 * 1024,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Whether the value in force would stop PostgreSQL 17 or earlier from starting (#3909): the major is known
+    /// and at most 17, and the value is over <see cref="LegacyMaintenanceWorkMemMaxKb"/>. An unknown major or an
+    /// unparsable value is left alone. Pure.
+    /// </summary>
+    internal static bool NeedsLegacyMaintenanceWorkMemCap(int? dataMajor, string? effectiveValue)
+    {
+        if (dataMajor is not (> 0 and <= 17))
+        {
+            return false;
+        }
+
+        /* A null (unparsable) value compares false, so it is left alone. */
+        return ParseMaintenanceWorkMemKb(effectiveValue) > LegacyMaintenanceWorkMemMaxKb;
+    }
+
+    /// <summary>
+    /// The <c>maintenance_work_mem</c> assignment a v14 block has to follow in this data directory, or null
+    /// when none is needed (#3909). It is the assignment in force, read the way PostgreSQL reads it:
+    /// postgresql.conf with its includes, then postgresql.auto.conf. An over-limit value set by
+    /// <c>ALTER SYSTEM</c> is in postgresql.auto.conf, which the server reads after postgresql.conf, so no
+    /// appended block can override it. That case is logged at Critical with the fix, and returns null.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private ConfAssignment? FindLegacyMaintenanceWorkMemOverLimit(string dataDirectory)
+    {
+        var major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory);
+        if (major is not (> 0 and <= 17))
+        {
+            return null;
+        }
+
+        var autoConfPath = Path.GetFullPath(Path.Combine(dataDirectory, "postgresql.auto.conf"));
+        var chain = ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), MaintenanceWorkMemSetting);
+        chain.AddRange(ReadConfAssignments(autoConfPath, MaintenanceWorkMemSetting));
+        if (chain.Count == 0 || !NeedsLegacyMaintenanceWorkMemCap(major, chain[^1].Value))
+        {
+            return null;
+        }
+
+        var inForce = chain[^1];
+        if (string.Equals(inForce.File, autoConfPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogCritical(
+                "maintenance_work_mem = {Value} in {File} (line {Line}) is over PostgreSQL {Major}'s limit of {LimitKb} kB, so the server will not start. It was set by ALTER SYSTEM, which is read after postgresql.conf, so the service cannot override it: delete that line (the server is not running to take ALTER SYSTEM RESET) and restart the service.",
+                inForce.Value, inForce.File, inForce.Line, major, LegacyMaintenanceWorkMemMaxKb);
+            return null;
+        }
+
+        return inForce;
+    }
+
+    private void LogLegacyMaintenanceWorkMemCap(ConfAssignment overLimit)
+        => _logger.LogWarning(
+            "maintenance_work_mem = {Value} ({File}, line {Line}) is over PostgreSQL 17's limit of {LimitKb} kB, which stops the server from starting. Appended maintenance_work_mem = {CapMb}MB after it (#3909).",
+            overLimit.Value, overLimit.File, overLimit.Line, LegacyMaintenanceWorkMemMaxKb, MaintenanceWorkMemCapMb);
+
+    /// <summary>
+    /// The v14 block (#3909): one <c>maintenance_work_mem</c> line at the cap, appended after whatever
+    /// assignment is over PostgreSQL 17's limit so it becomes the last occurrence. See
+    /// <see cref="ConfMarkerV14"/> for when it is written.
+    /// </summary>
+    internal static string BuildLegacyMaintenanceWorkMemCapConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV14).Append('\n');
+        builder.Append("maintenance_work_mem = ").Append(MaintenanceWorkMemCapMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Makes a PostgreSQL 17 (or earlier) data directory's conf one its server will open (#3909), before
+    /// anything starts that server: the store upgrade's old-cluster start, a reverted upgrade's restart, or a
+    /// plain start of a store still on 17. A 17 conf reaches an over-limit value because the v3/v7/v8 blocks
+    /// derived 2048 MB on hosts with 40 GB of RAM or more until this change, and they are written to whatever
+    /// data directory the service is running. Once that happened after a reverted upgrade, every start failed,
+    /// and a later release could not upgrade the store either, because its first step starts the old cluster.
+    ///
+    /// <para>The fix has to be in the file. A <c>-c maintenance_work_mem=...</c> on the command line does not
+    /// help: measured on 17.10, the server still validates the file's value and refuses to start. Appending a
+    /// later assignment does help, because PostgreSQL uses only the last occurrence. Never throws: the files
+    /// are only read and appended to, and an I/O failure leaves the store failing the way it already would
+    /// have, with a warning explaining why.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal void HealLegacyMaintenanceWorkMem(string dataDirectory)
+    {
+        try
+        {
+            if (FindLegacyMaintenanceWorkMemOverLimit(dataDirectory) is { } overLimit)
+            {
+                File.AppendAllText(Path.Combine(dataDirectory, "postgresql.conf"), BuildLegacyMaintenanceWorkMemCapConfAppend());
+                LogLegacyMaintenanceWorkMemCap(overLimit);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not check or fix maintenance_work_mem in {DataDirectory} ({Message}). On PostgreSQL 17, a value over {LimitKb} kB stops the server from starting.",
+                dataDirectory, ex.Message, LegacyMaintenanceWorkMemMaxKb);
+        }
     }
 
     /// <summary>
@@ -2093,6 +2267,10 @@ public sealed class DarlingManagedPostgres
                the package now ships. This is the only window in which an in-place major upgrade can run —
                nothing is connected, and both runtimes are on disk. It either upgrades, does nothing, or
                reverts and leaves the store exactly as it was. */
+            /* #3909: before ANYTHING can start this cluster on PostgreSQL 17 binaries (the upgrade's old-cluster
+               start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
+               sure its conf is one 17 will open. */
+            HealLegacyMaintenanceWorkMem(_dataDirectory);
             await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
         }
 
@@ -2466,7 +2644,7 @@ public sealed class DarlingManagedPostgres
             var v7RamBytes = GetTotalPhysicalMemoryBytes();
             File.AppendAllText(confPath, BuildCompressionMemoryConfAppend(v7RamBytes));
             _logger.LogInformation(
-                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
+                "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2047MB); TimescaleDB compression sorts on this setting)",
                 DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
         }
 
@@ -2642,6 +2820,16 @@ public sealed class DarlingManagedPostgres
             _logger.LogInformation(
                 "Appended v13 statement statistics to postgresql.conf (shared_preload_libraries = '{Libraries}', {Library}.track_utility = off): the store keeps per-statement timings, so a slow web-viewer or MCP read can be named by get_store_query_stats instead of guessed at. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
                 MergePreloadLibraries(effectivePreload), StatementStatisticsLibrary);
+        }
+
+        /* v14 (#3909): keyed on the effective VALUE, not on its marker, so it heals once and then finds its own line
+           in force. HealLegacyMaintenanceWorkMem runs the same check before the store upgrade's old-cluster start,
+           which this method runs too late for; here it covers every other start of a store still on 17, the
+           restart after a reverted upgrade included. Carries no fingerprint or stamp line for v8 or v12 to read. */
+        if (FindLegacyMaintenanceWorkMemOverLimit(dataDirectory) is { } v14OverLimit)
+        {
+            File.AppendAllText(confPath, BuildLegacyMaintenanceWorkMemCapConfAppend());
+            LogLegacyMaintenanceWorkMemCap(v14OverLimit);
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);

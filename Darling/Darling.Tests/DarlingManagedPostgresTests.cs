@@ -426,8 +426,9 @@ public sealed class DarlingManagedPostgresTests
         /* A positive control on the enumeration itself: an empty or one-element set would make every
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
-           thirteen as of #3899 (v13 statement statistics). */
-        Assert.Equal(13, markers.Length);
+           thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
+           maintenance_work_mem limit). */
+        Assert.Equal(14, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -1128,7 +1129,7 @@ public sealed class DarlingManagedPostgresTests
 
         Assert.Contains("shared_buffers = 1024MB", block, StringComparison.Ordinal);          /* capped at the 1 GB co-located ceiling (#1559) */
         Assert.Contains("effective_cache_size = 49152MB", block, StringComparison.Ordinal);   /* 75% of 64 GB, uncapped */
-        Assert.Contains("maintenance_work_mem = 2048MB", block, StringComparison.Ordinal);    /* capped at 2 GB (#1777) */
+        Assert.Contains("maintenance_work_mem = 2047MB", block, StringComparison.Ordinal);    /* capped just under 2 GB (#1777; 2047 for PostgreSQL 17, #3909) */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                  /* capped at 64 MB */
     }
 
@@ -1142,8 +1143,9 @@ public sealed class DarlingManagedPostgresTests
     /// SMALL-HOST GUARD wins (512 / 1024 MB — the floor is held back rather than overcommitting the box);
     /// at 8 GB and 16 GB the measured 1536 MB FLOOR wins (16 GB is the RAM class the field measurement came
     /// from, and it must land exactly on the 1536 MB capture point); at 32 GB the raw 5%-of-RAM term has
-    /// finally overtaken the floor and wins on its own (1638 MB); at 64 GB the 2 GB CAP wins (5% would be
-    /// 3276 MB, and the field data showed nothing to gain past 1536).</para>
+    /// finally overtaken the floor and wins on its own (1638 MB); at 64 GB the CAP wins (5% would be 3276 MB,
+    /// and the field data showed nothing to gain past 1536). The cap is 2047 MB, not 2048: 2048 is over
+    /// PostgreSQL 17's Windows limit and stops a 17 store from starting (#3909).</para>
     /// </summary>
     [Theory]
     [InlineData(2, 512, 1536, 512, 16)]      /* 2 GB: maintenance held to 25% of RAM by the small-host guard; work_mem at the 16 MB floor */
@@ -1151,7 +1153,7 @@ public sealed class DarlingManagedPostgresTests
     [InlineData(8, 1024, 6144, 1536, 16)]    /* 8 GB: shared_buffers hits the 1 GB co-located cap (#1559); maintenance at the measured floor; work_mem at the floor */
     [InlineData(16, 1024, 12288, 1536, 32)]  /* 16 GB: the field-measured class — maintenance lands exactly on the 1536 MB capture point; work_mem RAM/512 = 32 MB */
     [InlineData(32, 1024, 24576, 1638, 64)]  /* 32 GB: 5% of RAM has overtaken the floor and wins outright; work_mem hits the 64 MB ceiling */
-    [InlineData(64, 1024, 49152, 2048, 64)]  /* 64 GB: maintenance at the 2 GB cap; everything but effective_cache_size capped */
+    [InlineData(64, 1024, 49152, 2047, 64)]  /* 64 GB: maintenance at the 2047 MB cap; everything but effective_cache_size capped */
     public void DeriveMemorySettings_PerTier(long ramGb, int sharedBuffersMb, int effectiveCacheMb, int maintenanceMb, int workMemMb)
     {
         var settings = DarlingManagedPostgres.DeriveMemorySettings(ramGb * 1024 * 1024 * 1024);
@@ -1160,6 +1162,286 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(effectiveCacheMb, settings.EffectiveCacheSizeMb);
         Assert.Equal(maintenanceMb, settings.MaintenanceWorkMemMb);
         Assert.Equal(workMemMb, settings.WorkMemMb);
+    }
+
+    /// <summary>
+    /// #3909: no host size can derive a <c>maintenance_work_mem</c> PostgreSQL 17 refuses. The old 2048 MB cap
+    /// was 2097152 kB, one over 17's Windows limit, which is FATAL at startup.
+    /// </summary>
+    [Theory]
+    [InlineData(40)]
+    [InlineData(128)]
+    [InlineData(1024)]
+    public void DeriveMemorySettings_NeverExceedsPostgres17sLimit(long ramGb)
+    {
+        var settings = DarlingManagedPostgres.DeriveMemorySettings(ramGb * 1024 * 1024 * 1024);
+
+        Assert.True(settings.MaintenanceWorkMemMb * 1024L <= DarlingManagedPostgres.LegacyMaintenanceWorkMemMaxKb,
+            $"{ramGb} GB derives maintenance_work_mem = {settings.MaintenanceWorkMemMb}MB, over PostgreSQL 17's {DarlingManagedPostgres.LegacyMaintenanceWorkMemMaxKb} kB limit");
+    }
+
+    [Theory]
+    [InlineData("2048MB", 2097152L)]
+    [InlineData("2GB", 2097152L)]
+    [InlineData("2047MB", 2096128L)]
+    [InlineData("2047 MB", 2096128L)]
+    [InlineData("65536", 65536L)]
+    [InlineData("65536kB", 65536L)]
+    [InlineData("1TB", 1073741824L)]
+    [InlineData("2147483648B", 2097152L)]
+    [InlineData("lots", null)]
+    [InlineData("2048XB", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void ParseMaintenanceWorkMemKb_ReadsPostgresMemoryUnits(string? value, long? expectedKb)
+        => Assert.Equal(expectedKb, DarlingManagedPostgres.ParseMaintenanceWorkMemKb(value));
+
+    [Theory]
+    [InlineData(17, "2048MB", true)]
+    [InlineData(16, "3GB", true)]
+    [InlineData(18, "2048MB", false)]
+    [InlineData(17, "2047MB", false)]
+    [InlineData(17, "lots", false)]
+    [InlineData(null, "2048MB", false)]
+    public void NeedsLegacyMaintenanceWorkMemCap_OnlyForAnOverLimitValueOnPostgres17OrEarlier(int? major, string value, bool expected)
+        => Assert.Equal(expected, DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap(major, value));
+
+    [Fact]
+    public void LegacyMaintenanceWorkMemCapBlock_WritesTheCapAndCarriesNoV8OrV12Line()
+    {
+        var block = DarlingManagedPostgres.BuildLegacyMaintenanceWorkMemCapConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV14, block, StringComparison.Ordinal);
+        Assert.Equal($"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", LastSettingValue(block, "maintenance_work_mem"));
+        Assert.False(DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap(17, LastSettingValue(block, "maintenance_work_mem")));
+
+        /* The v8 and v12 heals key on the last line carrying their own prefixes; a block that carried either
+           would change what they read. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The heal on real files, without a server (#3909). It follows the value PostgreSQL would use: the last
+    /// assignment in postgresql.conf and its includes, then postgresql.auto.conf. It appends only for a
+    /// PostgreSQL 17 data directory whose value is over the limit, and only once. An over-limit ALTER SYSTEM
+    /// value cannot be overridden from postgresql.conf, so that case is left untouched and logged instead.
+    /// </summary>
+    [Theory]
+    [InlineData("17", "maintenance_work_mem = 2048MB\n", null, null, true)]
+    [InlineData("18", "maintenance_work_mem = 2048MB\n", null, null, false)]
+    [InlineData("17", "maintenance_work_mem = 1536MB\n", null, null, false)]
+    [InlineData("17", "include 'sizing.conf'\n", "maintenance_work_mem = '2GB'\n", null, true)]
+    [InlineData("17", "maintenance_work_mem = 1536MB\n", null, "maintenance_work_mem = '2048MB'\n", false)]
+    [InlineData("17", "maintenance_work_mem = 2048MB\n", null, "maintenance_work_mem = '1GB'\n", false)]
+    public void HealLegacyMaintenanceWorkMem_AppendsOnlyWhenTheValueInForceWouldStopPostgres17(
+        string pgVersion, string conf, string? includedConf, string? autoConf, bool expectAppend)
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("darling-v14-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), pgVersion + "\n");
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, conf);
+            if (includedConf is not null)
+            {
+                File.WriteAllText(Path.Combine(dataDirectory, "sizing.conf"), includedConf);
+            }
+
+            if (autoConf is not null)
+            {
+                File.WriteAllText(Path.Combine(dataDirectory, "postgresql.auto.conf"), autoConf);
+            }
+
+            var managed = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, DataDirectory = dataDirectory }, NullLogger.Instance);
+            managed.HealLegacyMaintenanceWorkMem(dataDirectory);
+
+            var healed = File.ReadAllText(confPath);
+            Assert.Equal(expectAppend ? 1 : 0, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV14));
+
+            /* Converged: a second pass finds the block's own value in force and appends nothing. */
+            managed.HealLegacyMaintenanceWorkMem(dataDirectory);
+            Assert.Equal(healed, File.ReadAllText(confPath));
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #3909: the heal runs BEFORE the store upgrade can start the old cluster. On a poisoned PostgreSQL 17 conf,
+    /// that start is the first thing to fail. EnsureConfAppended also carries the check, but it runs after
+    /// EnsureDataDirectoryMajorAsync, too late for the upgrade path. This is a wiring pin because no behavioral
+    /// test here runs pg_upgrade on a poisoned store.
+    /// </summary>
+    [Fact]
+    public void LegacyMaintenanceWorkMemHeal_RunsBeforeTheStoreUpgradeCanStartTheOldCluster()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
+        var method = source.IndexOf("public async Task<string> EnsureRunningAsync(", StringComparison.Ordinal);
+        Assert.True(method >= 0, "EnsureRunningAsync's signature moved, so this pin can no longer find it.");
+
+        var heal = source.IndexOf("HealLegacyMaintenanceWorkMem(_dataDirectory);", method, StringComparison.Ordinal);
+        var upgrade = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);", method, StringComparison.Ordinal);
+        Assert.True(heal > method, "EnsureRunningAsync no longer heals maintenance_work_mem before anything starts a PostgreSQL 17 cluster (#3909).");
+        Assert.True(upgrade > heal,
+            "The heal must run before EnsureDataDirectoryMajorAsync: the store upgrade's first step starts the old cluster on the data directory's own conf.");
+    }
+
+    /// <summary>
+    /// #3909 through the product's own bootstrap. A store on PostgreSQL 17 whose conf ends with the old 2048 MB
+    /// value (the shape a reverted upgrade left on a 40 GB+ host) comes back up through
+    /// <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> with the capped value in force. The 17 runtime is
+    /// the runtime here, with no package beside it, so nothing is upgraded: this is the store that stays on 17.
+    /// Gated on DARLING_TEST_PGRUNTIME_OLD.
+    /// </summary>
+    [Fact]
+    public async Task Postgres17Store_WithTheOldCapInItsConf_StartsThroughTheBootstrap_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
+            "Set DARLING_TEST_PGRUNTIME_OLD to an assembled PostgreSQL 17 pg-runtime (new-upgraded-store-fixture.ps1 builds one).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pg17boot-");
+        var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+        var source = Path.Combine(oldRuntime!, "pgsql");
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var target = Path.Combine(runtimeRoot, "pgsql", Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+
+        var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        DarlingManagedPostgres? first = null;
+        DarlingManagedPostgres? second = null;
+        try
+        {
+            first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+            Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+
+            await File.AppendAllTextAsync(confPath, "\n# written by a build before #3909\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+
+            second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var connectionString = await second.EnsureRunningAsync(timeout.Token);
+
+            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
+                connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
+            Assert.Equal(expected, live);
+            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV14));
+        }
+        finally
+        {
+            if (first is not null)
+            {
+                await first.StopIfStartedByThisProcessAsync();
+            }
+
+            if (second is not null)
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+
+            try
+            {
+                root.Delete(recursive: true);
+            }
+            catch (IOException)
+            {
+                /* A temp directory the OS still holds is not this test's failure. */
+            }
+        }
+    }
+
+    /// <summary>
+    /// #3909 on a real PostgreSQL 17 server. A 17 data directory whose conf carries the old 2048 MB value
+    /// refuses to start. After <see cref="DarlingManagedPostgres.HealLegacyMaintenanceWorkMem"/> it starts with
+    /// the capped value, and a second heal appends nothing. Gated on DARLING_TEST_PGRUNTIME_OLD, the
+    /// previous-major runtime new-upgraded-store-fixture.ps1 builds (the nightly sets it).
+    /// </summary>
+    [Fact]
+    public async Task Postgres17StoreWithTheOldCap_StartsAfterTheHeal_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
+            "Set DARLING_TEST_PGRUNTIME_OLD to an assembled PostgreSQL 17 pg-runtime (new-upgraded-store-fixture.ps1 builds one).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(oldRuntime!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pg17mwm-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var port = FindFreeTcpPort();
+        var pgCtl = Path.Combine(bin, "pg_ctl.exe");
+        var startArguments = $"-D \"{dataDirectory}\" -o \"-p {port} -c listen_addresses=127.0.0.1\" -w -t 60 start";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        var started = false;
+        try
+        {
+            var (initExit, initOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"), $"-D \"{dataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(initExit == 0, $"initdb failed: {initOutput}");
+            Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+
+            /* The shape a reverted upgrade left on a 40 GB+ host: a v7 block at the old 2048 MB cap. */
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            await File.AppendAllTextAsync(confPath,
+                "\n" + DarlingManagedPostgres.ConfMarkerV7 + "\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+
+            /* Control: PostgreSQL 17 refuses to start on it, which is the outage. */
+            var refused = await DarlingManagedPostgres.RunDetachingToolAsync(pgCtl, startArguments, TimeSpan.FromMinutes(2), timeout.Token);
+            Assert.NotEqual(0, refused);
+
+            var managed = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = port, DataDirectory = dataDirectory }, NullLogger.Instance, oldRuntime);
+            managed.HealLegacyMaintenanceWorkMem(dataDirectory);
+            var healed = await File.ReadAllTextAsync(confPath, timeout.Token);
+            Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV14));
+
+            var exit = await DarlingManagedPostgres.RunDetachingToolAsync(pgCtl, startArguments, TimeSpan.FromMinutes(2), timeout.Token);
+            Assert.True(exit == 0, "PostgreSQL 17 should start once the v14 block is the last maintenance_work_mem assignment");
+            started = true;
+
+            await using (var connection = new NpgsqlConnection($"Host=127.0.0.1;Port={port};Username=darling;Database=postgres;Pooling=false"))
+            {
+                await connection.OpenAsync(timeout.Token);
+                await using var show = new NpgsqlCommand("SELECT pg_size_bytes(current_setting('maintenance_work_mem'))", connection);
+                Assert.Equal(DarlingManagedPostgres.MaintenanceWorkMemCapMb * 1024L * 1024L,
+                    Convert.ToInt64(await show.ExecuteScalarAsync(timeout.Token), CultureInfo.InvariantCulture));
+            }
+
+            /* Converged: a second heal finds its own line in force and appends nothing. */
+            managed.HealLegacyMaintenanceWorkMem(dataDirectory);
+            Assert.Equal(healed, await File.ReadAllTextAsync(confPath, timeout.Token));
+        }
+        finally
+        {
+            if (started)
+            {
+                await DarlingManagedPostgres.RunToolAsync(pgCtl, $"stop -D \"{dataDirectory}\" -m fast -w -t 60", TimeSpan.FromMinutes(2), CancellationToken.None);
+            }
+
+            try
+            {
+                root.Delete(recursive: true);
+            }
+            catch (IOException)
+            {
+                /* A temp directory the OS still holds is not this test's failure. */
+            }
+        }
     }
 
     /// <summary>A zero/garbage RAM reading (the GlobalMemoryStatusEx failure path) falls back to a
