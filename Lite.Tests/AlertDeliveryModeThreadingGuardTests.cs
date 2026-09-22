@@ -52,8 +52,11 @@ public sealed class AlertDeliveryModeThreadingGuardTests
     /// of exclusions is asserted below so the rule is exercised rather than merely present — a
     /// discriminator that matches nothing would silently turn the whole sweep into a no-op over a set that
     /// includes the declaration and always fails, or worse, be loosened until it does not.
+    /// <para>#3916: the declaration returns <c>Task&lt;AlertDelivery?&gt;</c>, the disposition it recorded, so
+    /// the analysis page road can tell a delivery from a send that reached no one. The prefix names that return
+    /// type exactly; the floor of one declaration below is what catches the next signature change.</para>
     /// </summary>
-    private const string DeclarationPrefix = "Task ";
+    private const string DeclarationPrefix = "Task<AlertDelivery?> ";
 
     [Fact]
     public void EveryLiteAlertSend_StatesItsDeliveryMode()
