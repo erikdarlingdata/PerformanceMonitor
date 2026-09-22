@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -102,7 +103,7 @@ public class CollectionHealthAggregateTests
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        if (!await TimescaleSupport.TryEnableAsync(connection, null, ct))
+        if (!await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct))
         {
             await connection.DisposeAsync();
             await scratch.DisposeAsync();
@@ -214,6 +215,50 @@ CALL refresh_continuous_aggregate('collect.{TimescaleSupport.CollectionHealthHou
         await RunPolicyAsync(connection, jobId, ct);
         var after = await WindowRunsAsync(connection, ct);
         Assert.Equal(after.Raw, after.Aggregate);
+    }
+
+    /* ─────────── the divergence pin (#3893 arm 2) ─────────── */
+
+    /// <summary>The eleven aggregates' text, comments stripped and whitespace collapsed: from <c>COUNT(*) AS
+    /// total_runs</c> through <c>AS last_zero_row_streak_break_time</c>.</summary>
+    private static string AggregateExpressions(string sql)
+    {
+        var noComments = Regex.Replace(sql, @"--[^\n]*", string.Empty);
+        var flat = Regex.Replace(noComments, @"\s+", " ");
+        var start = flat.IndexOf("COUNT(*) AS total_runs", StringComparison.Ordinal);
+        const string last = "AS last_zero_row_streak_break_time";
+        var end = flat.IndexOf(last, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "aggregate list not found");
+        return flat[start..(end + last.Length)];
+    }
+
+    /// <summary>
+    /// THE DIVERGENCE PIN. The aggregate's CREATE restates the raw read's eleven aggregate expressions (a
+    /// continuous aggregate cannot select from a string another project owns), so the two can drift — and a
+    /// drift is silent: the composed read would band the fleet off one predicate while the raw fallback and
+    /// every per-server surface band it off another, and which one a caller got would depend on whether the
+    /// guards passed. This fails if the eleven ever differ, in text or in order. (It pins the SQL, not the
+    /// buckets already materialized: changing an expression still needs the aggregate rebuilt — the frozen
+    /// constants' comments say so.)
+    /// </summary>
+    [Fact]
+    public void CaggCreate_AndRawRead_CarryTheSameElevenAggregates()
+    {
+        var cagg = AggregateExpressions(TimescaleSupport.CreateCollectionHealthHourlySql);
+        var raw = AggregateExpressions(DarlingFleetReader.FleetCollectionHealthSql);
+        Assert.Equal(raw, cagg);
+        Assert.Equal(11, Regex.Matches(raw, @"\) AS [a-z_]+|COUNT\(\*\) AS [a-z_]+").Count);
+
+        /* Both read the same row population: the sentinel exclusion is in both. */
+        Assert.Contains("WHERE server_id <> 0", TimescaleSupport.CreateCollectionHealthHourlySql, StringComparison.Ordinal);
+        Assert.Contains("AND   server_id <> 0", DarlingFleetReader.FleetCollectionHealthSql, StringComparison.Ordinal);
+
+        /* The head slice is the raw read with exactly ONE inserted bound (derived by Replace: an anchor that
+           stopped matching would silently make the head slice the whole window). */
+        Assert.Single(Regex.Matches(DarlingFleetReader.FleetCollectionHealthSql, @"WHERE collection_time >= \$1"));
+        Assert.Equal(DarlingFleetReader.FleetCollectionHealthSql.Length + "\nAND   collection_time < $2".Length,
+            DarlingFleetReader.FleetCollectionHealthHeadSliceSql.Length);
+        Assert.Single(Regex.Matches(DarlingFleetReader.FleetCollectionHealthHeadSliceSql, @"collection_time < \$2"));
     }
 
     /* ─────────── the composed reader (#3893 arm 2): live parity, the two guards, the late row ─────────── */

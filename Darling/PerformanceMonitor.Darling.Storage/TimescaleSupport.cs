@@ -6324,9 +6324,9 @@ AND   j.hypertable_name = '{relation}'";
            pass's one Information line. */
         logger?.Log(
             pass == RetentionSweepPass.Startup ? LogLevel.Information : LogLevel.Debug,
-            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily; the daily history CAGGs carry no policy and are kept indefinitely)",
+            "TimescaleDB: {Applied}/{Total} retention policies in place, {Armed} armed this pass, {Held} held paused pending backfill, {Unchanged} already in the state coverage asks for, {Indeterminate} left as-is (coverage unreadable), {Converged} moved onto a new horizon (raw {Raw}, hourly history CAGGs {Hourly}, baseline CAGGs {Baseline}, internal interval-dedup tiers {Interval} hourly and {IntervalDaily} daily, collection-health rollup {CollectionHealth}; the daily history CAGGs carry no policy and are kept indefinitely)",
             applied, RetentionPolicies.Count, armed, held, unchanged, indeterminate, converged,
-            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval);
+            RawRetentionInterval, HourlyRetentionInterval, BaselineRetentionInterval, IntervalRetentionInterval, IntervalDailyRetentionInterval, CollectionHealthRetentionInterval);
 
         /* #3812, in the #3756 discipline: ONE Information line per evaluation, UNCONDITIONAL — written on the
            all-unchanged pass exactly as on the pass that armed something, because a check whose negative outcome

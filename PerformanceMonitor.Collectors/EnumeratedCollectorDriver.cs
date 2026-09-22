@@ -361,6 +361,16 @@ public static class EnumeratedCollectorDriver
     /// constraint, so no migration rung is needed. The self-alert's consecutive-failure fast path is
     /// server-scoped across every collector, so one collector abandoning among ~40 healthy ones cannot
     /// empty its success window.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This status word (through
+    /// <see cref="AbandonedRunPredicateSql"/>) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedStatus = "ABANDONED";
 
@@ -381,6 +391,16 @@ public static class EnumeratedCollectorDriver
     /// <c>query_stats</c> and <c>plan_correction</c> carry 120 s while <c>query_store</c> carries the 600 s
     /// <c>QueryStoreCollector.PerDatabaseWallClockBudget</c> - so equality against any one rendered sentence
     /// matches one collector and silently misses the rest.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This pattern (through
+    /// <see cref="AbandonedByNotePredicateSql"/>) is baked, at materialization time, into
+    /// <c>collect.collection_health_hourly</c> (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves
+    /// the fleet collection-health read. Changing it no longer changes only the SQL a read sends: a week of
+    /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
+    /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
+    /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
+    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string WholeCycleBudgetNoteSqlPattern = "wall-clock budget (%s) reached; cycle abandoned";
 
@@ -398,6 +418,15 @@ public static class EnumeratedCollectorDriver
     /// <para><c>COALESCE</c> rather than a bare <c>LIKE</c>: <c>NULL LIKE</c> is NULL, and this predicate is
     /// also used under a <c>NOT</c>, where a NULL would drop an ordinary empty run out of the success count
     /// instead of leaving it there.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This predicate (success_count, abandoned_count and
+    /// last_zero_row_streak_break_time) is baked, at materialization time, into <c>collect.collection_health_hourly</c>
+    /// (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves the fleet collection-health read.
+    /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
+    /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
+    /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
+    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
+    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedByNotePredicateSql =
         "(rows_collected = 0 AND COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "')";
@@ -412,6 +441,15 @@ public static class EnumeratedCollectorDriver
     /// drifted copy a build error rather than something a pin has to notice. What the pins still carry is
     /// the part no compiler can state: that every banding read selects the count at all, and that none of
     /// them has hand-rolled a status-only bucket beside the shared one.</para>
+    ///
+    /// <para><b>FROZEN INTO A MATERIALIZED AGGREGATE (#3893).</b> This predicate (abandoned_count) is baked, at
+    /// materialization time, into <c>collect.collection_health_hourly</c>
+    /// (<c>TimescaleSupport.CreateCollectionHealthHourlySql</c>), which serves the fleet collection-health read.
+    /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
+    /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
+    /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
+    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
+    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedRunPredicateSql =
         "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";
