@@ -185,6 +185,118 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// #3915's review: EVERY retained class keeps its entry with the values masked, not only slow_statement's.
+    /// An ERROR's STATEMENT line carries whatever the failed statement carried (a DBA's failed
+    /// <c>ALTER ROLE ... PASSWORD</c>), a value-quoting message carries the client's input, and a key DETAIL
+    /// carries the row. Identifiers after their noun, prose numbers, field names and the prefix stay, so the
+    /// entry still reads as the server's.
+    /// </summary>
+    [Fact]
+    public void EveryRetainedClass_KeepsItsEntryWithTheValuesMasked()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
+            DefaultPrefix + "STATEMENT:  ALTER ROLE admin LOGIN PASSWORD 'Leak3915a'",
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Leak3915b\"",
+            DefaultPrefix + "ERROR:  duplicate key value violates unique constraint \"t_pkey\"",
+            DefaultPrefix + "DETAIL:  Key (id)=(Leak3915c) already exists.",
+            DefaultPrefix + "STATEMENT:  INSERT INTO t VALUES ('Leak3915d')",
+            DefaultPrefix + "ERROR:  deadlock detected",
+            DefaultPrefix + "DETAIL:  Process 5360 waits for ShareLock on transaction 809; blocked by process 5361.",
+            "",
+        ]));
+
+        var retained = census.Groups.Where(g => g.MessageText is not null).ToList();
+        Assert.Equal(4, retained.Count);
+        foreach (var group in retained)
+        {
+            Assert.DoesNotContain("Leak3915", group.MessageText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Leak3915", group.SampleLine, StringComparison.Ordinal);
+        }
+
+        var timeout = retained.Single(g => g.EventClass == "statement_timeout");
+        Assert.Contains("STATEMENT:  ALTER ROLE admin LOGIN PASSWORD '?'", timeout.SampleLine, StringComparison.Ordinal);
+        Assert.Contains(retained, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
+        var duplicate = retained.Single(g => g.MessageText!.StartsWith("duplicate key", StringComparison.Ordinal));
+        Assert.Equal("duplicate key value violates unique constraint \"t_pkey\"", duplicate.MessageText);
+        Assert.Contains("DETAIL:  Key (id)=(?) already exists.", duplicate.SampleLine, StringComparison.Ordinal);
+        Assert.Contains("STATEMENT:  INSERT INTO t VALUES ('?')", duplicate.SampleLine, StringComparison.Ordinal);
+        Assert.Contains(
+            "DETAIL:  Process 5360 waits for ShareLock on transaction 809; blocked by process 5361.",
+            retained.Single(g => g.EventClass == "deadlock").SampleLine,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A statement cut inside a literal (a read boundary, the sample cap, a literal the entry never closes) is
+    /// WITHHELD, not kept as it stood: no mask can know what the cut hid (#3915's review).
+    /// </summary>
+    [Fact]
+    public void AStatementCutInsideALiteral_IsWithheld()
+    {
+        var timeout = Assert.Single(StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  canceling statement due to statement timeout\n"
+            + DefaultPrefix + "STATEMENT:  UPDATE notes SET body = 'token=Leak3915f\n").Groups);
+        Assert.Contains(StoreLogClassifier.WithheldStatement, timeout.SampleLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("Leak3915f", timeout.SampleLine, StringComparison.Ordinal);
+
+        var slow = Assert.Single(StoreLogClassifier.Classify(
+            DefaultPrefix + "LOG:  duration: 6000.000 ms  statement: UPDATE notes SET body = 'token=Leak3915g\n").Groups);
+        Assert.Equal("statement: " + StoreLogClassifier.WithheldStatement, slow.MessageText);
+        Assert.DoesNotContain("Leak3915g", slow.SampleLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A tab-leading line continues the entry above it whatever it holds (#3915's review): a statement whose
+    /// literal spans lines containing <c>ERROR:  </c> or <c>DETAIL:  </c> must neither open an unmasked entry of
+    /// its own nor cut the statement short.
+    /// </summary>
+    [Fact]
+    public void ATabContinuationLine_NeverOpensAnEntryOrEndsAStatement()
+    {
+        var census = StoreLogClassifier.Classify(
+            DefaultPrefix + "LOG:  duration: 6001.000 ms  execute <unnamed>: \n"
+            + "\tSELECT 'x\n"
+            + "\tERROR:  not an entry\n"
+            + "\tDETAIL:  not a field', 'Leak3915h'\n");
+
+        Assert.Equal(1, census.EntriesRead);
+        var slow = Assert.Single(census.Groups);
+        Assert.Equal(StoreLogClassifier.SlowStatementClass, slow.EventClass);
+        Assert.Equal("execute <unnamed>: SELECT '?', '?'", slow.MessageText);
+        Assert.DoesNotContain("Leak3915h", slow.SampleLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The re-mask of rows stored before this build (#3915): a raw row comes back masked, a first-#3899-build
+    /// slow-statement row comes back in this build's statement form, and a row already masked comes back
+    /// unchanged, which is what lets the sweep's pass run over the whole table.
+    /// </summary>
+    [Fact]
+    public void MaskStoredEvent_RemasksRawRows_AndIsIdempotent()
+    {
+        const string rawTimeout = DefaultPrefix + "ERROR:  canceling statement due to statement timeout\n"
+            + DefaultPrefix + "STATEMENT:  ALTER ROLE admin PASSWORD 'Leak3915i'";
+        var (timeoutMessage, timeoutSample) = StoreLogClassifier.MaskStoredEvent(
+            "statement_timeout", "canceling statement due to statement timeout", rawTimeout);
+        Assert.Equal("canceling statement due to statement timeout", timeoutMessage);
+        Assert.Contains("STATEMENT:  ALTER ROLE admin PASSWORD '?'", timeoutSample, StringComparison.Ordinal);
+        Assert.Equal((timeoutMessage, timeoutSample), StoreLogClassifier.MaskStoredEvent("statement_timeout", timeoutMessage, timeoutSample));
+
+        const string rawSlow = DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: \n\tSELECT a FROM t WHERE b = 'Leak3915j'";
+        var (slowMessage, slowSample) = StoreLogClassifier.MaskStoredEvent(
+            StoreLogClassifier.SlowStatementClass, "duration: 6120.004 ms  execute <unnamed>: ", rawSlow);
+        Assert.Equal("execute <unnamed>: SELECT a FROM t WHERE b = '?'", slowMessage);
+        Assert.DoesNotContain("Leak3915j", slowSample, StringComparison.Ordinal);
+        Assert.Equal((slowMessage, slowSample), StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowStatementClass, slowMessage, slowSample));
+
+        /* A first-build slow-statement row the rewrite cannot name a statement for keeps no text at all. */
+        Assert.Equal(((string?)null, (string?)null), StoreLogClassifier.MaskStoredEvent(
+            StoreLogClassifier.SlowStatementClass, "duration: 0.412 ms", DefaultPrefix + "LOG:  duration: 0.412 ms"));
+    }
+
+    /// <summary>
     /// One slow query is ONE row however often it ran (#3904's review): the first version grouped by the
     /// duration line, so a panel polled every minute filled the 20-row budget with one statement and pushed the
     /// real signal out as "40 further distinct messages". Two different statements stay two rows.

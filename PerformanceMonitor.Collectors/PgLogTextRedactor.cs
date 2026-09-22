@@ -35,9 +35,9 @@ namespace PerformanceMonitor.Collectors;
 /// a value (<c>WHERE id = 42</c>) or part of one; the pattern's own identifier guard is what keeps
 /// <c>transactionitems1</c> whole, exactly as it does inside a plan's <c>Filter</c>. The redacted text is
 /// what <see cref="Fingerprint"/> hashes, so one statement shape recurs to one fingerprint whatever it ran
-/// with — the plan hash's reasoning, over SQL text. <see cref="RedactStoredStatement"/> is the same with the
-/// dollar-quoted and <c>E''</c> forms added, for a surface that keeps the text instead of a
-/// hash.</description></item>
+/// with — the plan hash's reasoning, over SQL text. <see cref="RedactStoredStatement"/> is the stronger form
+/// for a surface that keeps the text instead of a hash: a single-pass lexer that masks every literal
+/// spelling and refuses a statement it cannot read to its end.</description></item>
 /// <item><description><see cref="RedactMessage"/> — <c>message</c>, <c>detail</c> and <c>hint</c>, which
 /// are PostgreSQL's prose. Quoted literals go. Bare numbers STAY, because in prose they are the
 /// evidence rather than the value: <c>process 1549 still waiting for ShareLock on transaction 809 after
@@ -163,45 +163,285 @@ public static class PgLogTextRedactor
         return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
     }
 
-    /* The two string-literal forms the quoted-literal pattern cannot see, for statement text that is KEPT.
-       A dollar-quoted string (`$$pw$$`, `$tag$pw$tag$`) has no single quote in it at all, and an escape
-       string's backslash-escaped quote (`E'pa\'ss'`) ends the plain pattern's match early, which would leave
-       the rest of the value standing as ordinary text. The tag group always participates (it captures the
-       empty string for `$$`) because a .NET backreference to a group that did not match fails rather than
-       matching empty. A `$1` placeholder is not an opener: a tag cannot start with a digit. An opener with no
-       close runs to the end of the text, the safe direction for a value the reader cannot bound. */
-    private static readonly Regex s_dollarQuoted = new(
-        @"\$(?<tag>(?:[A-Za-z_][A-Za-z_0-9]*)?)\$(?:.*?\$\k<tag>\$|.*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
-
-    private static readonly Regex s_escapeString = new(
-        @"(?<![A-Za-z0-9_$])[Ee]'(?:[^'\\]|''|\\.)*(?:'|$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
-
     /// <summary>
-    /// SQL text that is STORED rather than hashed: <see cref="RedactStatement"/> plus dollar-quoted and
-    /// <c>E''</c> escape strings, each replaced by the same <c>'?'</c> mark, with a positional parameter
-    /// (<c>$1</c>) kept, since it marks where a value was bound rather than carrying one. The log-event pipeline keeps only
-    /// <see cref="Fingerprint"/>'s hash of a statement, so it hashes <see cref="RedactStatement"/>'s output and
-    /// a <c>DO</c> body stays part of the shape it hashes; a surface that keeps the TEXT (the monitoring store's
-    /// own slow-statement entries, #3899) cannot leave a dollar-quoted password standing, so it runs the two
-    /// extra forms first. Null in, null out.
+    /// SQL text that is STORED rather than hashed (#3899, #3915): every literal masked, in ONE left-to-right
+    /// pass over PostgreSQL's own lexical rules, so no construct can make the masking lose its place. A
+    /// quoted literal of any spelling (<c>'...'</c> with <c>''</c>, <c>E'...'</c> / <c>B'...'</c> /
+    /// <c>X'...'</c> / <c>N'...'</c> / <c>U&amp;'...'</c>) and a dollar-quoted string (<c>$$...$$</c>,
+    /// <c>$tag$...$tag$</c>) becomes <c>'?'</c>; a numeric literal (<c>42</c>, <c>1.5e3</c>, <c>0x1F</c>,
+    /// <c>0o17</c>, <c>0b101</c>, <c>1_000</c>) becomes <c>?</c>; a positional parameter (<c>$1</c>), an
+    /// identifier (double-quoted ones included, apostrophes and all) and every operator are kept; comments,
+    /// nested ones included, are dropped; whitespace collapses to single spaces.
+    ///
+    /// <para><b>Backslash is an escape in every single-quoted literal</b>, not only in <c>E''</c>: a client
+    /// with <c>standard_conforming_strings</c> off writes <c>'it\'s'</c>, and reading that backslash as a
+    /// plain character would end the literal early and leave the rest standing. Wrong in the safe direction
+    /// on a standard string that ends in a backslash: the mask runs on to the next quote, or the text ends
+    /// inside a literal and is refused.</para>
+    ///
+    /// <para><b>Fails closed.</b> Null when the text ends inside a literal, a quoted identifier or a block
+    /// comment, which is what a statement cut at a cap or a read boundary looks like: no mask can be trusted
+    /// to have covered what the cut hid, so the caller keeps no statement at all. The regex pair this
+    /// replaced read <c>"owner's count"</c> as the opening of a literal and <c>/* a /* b */ it's */</c> as
+    /// ending at the first <c>*/</c>, and in both the following literal was left standing (#3915's review).</para>
+    ///
+    /// <para>The log-event pipeline keeps only <see cref="Fingerprint"/>'s hash of a statement, so it hashes
+    /// <see cref="RedactStatement"/>'s output and a <c>DO</c> body stays part of the shape it hashes; this is
+    /// for a surface that keeps the TEXT. Null in, null out.</para>
     /// </summary>
     public static string? RedactStoredStatement(string? statement)
     {
-        if (string.IsNullOrEmpty(statement))
+        if (statement is null)
         {
-            return statement;
+            return null;
         }
 
-        var scrubbed = s_dollarQuoted.Replace(statement, "'?'");
-        scrubbed = s_escapeString.Replace(scrubbed, "'?'");
-        scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(scrubbed, "'?'");
+        var text = statement;
+        var output = new StringBuilder(text.Length);
+        var pendingSpace = false;
+        var i = 0;
 
-        /* A positional parameter ($1) is not a value, it is where one was bound, so the bare-number pass leaves
-           the digits after a '$' alone: the SAME compiled pattern, asked per match. */
-        return PgPlanLogParser.s_bareNumber.Replace(scrubbed, m => m.Index > 0 && scrubbed[m.Index - 1] == '$' ? m.Value : "?");
+        void Emit(string token)
+        {
+            if (pendingSpace && output.Length > 0)
+            {
+                output.Append(' ');
+            }
+
+            pendingSpace = false;
+            output.Append(token);
+        }
+
+        while (i < text.Length)
+        {
+            var c = text[i];
+            var next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+            if (char.IsWhiteSpace(c))
+            {
+                pendingSpace = true;
+                i++;
+                continue;
+            }
+
+            if (c == '-' && next == '-')
+            {
+                var newline = text.IndexOf('\n', i);
+                i = newline < 0 ? text.Length : newline + 1;
+                pendingSpace = true;
+                continue;
+            }
+
+            if (c == '/' && next == '*')
+            {
+                var depth = 1;
+                i += 2;
+                while (i < text.Length && depth > 0)
+                {
+                    if (text[i] == '/' && i + 1 < text.Length && text[i + 1] == '*')
+                    {
+                        depth++;
+                        i += 2;
+                    }
+                    else if (text[i] == '*' && i + 1 < text.Length && text[i + 1] == '/')
+                    {
+                        depth--;
+                        i += 2;
+                    }
+                    else
+                    {
+                        i++;
+                    }
+                }
+
+                if (depth > 0)
+                {
+                    return null;
+                }
+
+                pendingSpace = true;
+                continue;
+            }
+
+            /* A double-quoted identifier, U&"..." included: kept whole, quotes and all, because an apostrophe
+               inside one is not a literal's opening. */
+            if (c == '"' || ((c == 'U' || c == 'u') && next == '&' && i + 2 < text.Length && text[i + 2] == '"'))
+            {
+                var open = c == '"' ? i : i + 2;
+                var close = open + 1;
+                while (true)
+                {
+                    close = text.IndexOf('"', close);
+                    if (close < 0)
+                    {
+                        return null;
+                    }
+
+                    if (close + 1 < text.Length && text[close + 1] == '"')
+                    {
+                        close += 2;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                Emit(text[i..(close + 1)]);
+                i = close + 1;
+                continue;
+            }
+
+            /* A quoted literal: a bare quote, or one of the prefixes that open a literal at a token start (an
+               identifier ending in one of those letters was consumed whole below, so it never reaches here). */
+            var literalOpen = c == '\'' ? i
+                : (c is 'E' or 'e' or 'B' or 'b' or 'X' or 'x' or 'N' or 'n') && next == '\'' ? i + 1
+                : (c == 'U' || c == 'u') && next == '&' && i + 2 < text.Length && text[i + 2] == '\'' ? i + 2
+                : -1;
+            if (literalOpen >= 0)
+            {
+                var j = literalOpen + 1;
+                var closed = false;
+                while (j < text.Length)
+                {
+                    if (text[j] == '\\')
+                    {
+                        j += 2;
+                        continue;
+                    }
+
+                    if (text[j] == '\'')
+                    {
+                        if (j + 1 < text.Length && text[j + 1] == '\'')
+                        {
+                            j += 2;
+                            continue;
+                        }
+
+                        closed = true;
+                        break;
+                    }
+
+                    j++;
+                }
+
+                if (!closed)
+                {
+                    return null;
+                }
+
+                Emit("'?'");
+                i = j + 1;
+                continue;
+            }
+
+            if (c == '$')
+            {
+                /* $1: a positional parameter, the place a value was bound, not a value. */
+                if (char.IsAsciiDigit(next))
+                {
+                    var end = i + 1;
+                    while (end < text.Length && char.IsAsciiDigit(text[end]))
+                    {
+                        end++;
+                    }
+
+                    Emit(text[i..end]);
+                    i = end;
+                    continue;
+                }
+
+                /* $tag$ or $$: a dollar-quoted string, closed by the same tag. */
+                var tagEnd = i + 1;
+                while (tagEnd < text.Length && IsIdentifierChar(text[tagEnd], first: tagEnd == i + 1))
+                {
+                    tagEnd++;
+                }
+
+                if (tagEnd < text.Length && text[tagEnd] == '$')
+                {
+                    var tag = text[i..(tagEnd + 1)];
+                    var close = text.IndexOf(tag, tagEnd + 1, StringComparison.Ordinal);
+                    if (close < 0)
+                    {
+                        return null;
+                    }
+
+                    Emit("'?'");
+                    i = close + tag.Length;
+                    continue;
+                }
+
+                Emit("$");
+                i++;
+                continue;
+            }
+
+            if (char.IsAsciiDigit(c) || (c == '.' && char.IsAsciiDigit(next)))
+            {
+                var end = i;
+                if (c == '0' && next is 'x' or 'X' or 'o' or 'O' or 'b' or 'B')
+                {
+                    end += 2;
+                    while (end < text.Length && (char.IsAsciiHexDigit(text[end]) || text[end] == '_'))
+                    {
+                        end++;
+                    }
+                }
+                else
+                {
+                    while (end < text.Length && (char.IsAsciiDigit(text[end]) || text[end] is '_' or '.'))
+                    {
+                        end++;
+                    }
+
+                    if (end < text.Length && text[end] is 'e' or 'E')
+                    {
+                        var exponent = end + 1;
+                        if (exponent < text.Length && text[exponent] is '+' or '-')
+                        {
+                            exponent++;
+                        }
+
+                        if (exponent < text.Length && char.IsAsciiDigit(text[exponent]))
+                        {
+                            end = exponent;
+                            while (end < text.Length && (char.IsAsciiDigit(text[end]) || text[end] == '_'))
+                            {
+                                end++;
+                            }
+                        }
+                    }
+                }
+
+                Emit("?");
+                i = end;
+                continue;
+            }
+
+            if (IsIdentifierChar(c, first: true))
+            {
+                var end = i + 1;
+                while (end < text.Length && (IsIdentifierChar(text[end], first: false) || text[end] == '$'))
+                {
+                    end++;
+                }
+
+                Emit(text[i..end]);
+                i = end;
+                continue;
+            }
+
+            Emit(c.ToString());
+            i++;
+        }
+
+        return output.ToString();
     }
+
+    /// <summary>PostgreSQL's identifier characters: a letter, an underscore or any non-ASCII character, and
+    /// after the first, a digit too.</summary>
+    private static bool IsIdentifierChar(char c, bool first) =>
+        char.IsAsciiLetter(c) || c == '_' || c >= '\u0080' || (!first && char.IsAsciiDigit(c));
 
     /// <summary>
     /// Identity of a statement SHAPE: SHA-256 over the REDACTED text, 32 hex characters, the plan hash's

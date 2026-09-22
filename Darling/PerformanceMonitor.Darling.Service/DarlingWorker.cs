@@ -832,6 +832,14 @@ public sealed class DarlingWorker : BackgroundService
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
 
+    /* #3915: the re-mask pass over store-log rows captured before this build. The cursor is where the last
+       hourly slice stopped; done once a slice reaches the table's end, and then not again this process (new
+       captures are masked on write, and the masking is idempotent, so the next process's pass is a no-op
+       re-read). */
+    private string? _storeLogRemaskCursor;
+
+    private bool _storeLogRemaskDone;
+
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
        self-alerts inherit its delivery/cooldown/restart-replay. Held as a field because the connection
@@ -6761,6 +6769,33 @@ LIMIT 1";
                     + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
                     + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
                     ex.Message);
+            }
+
+            /* #3915: rows stored before this build kept their entries unmasked (an ERROR's STATEMENT line, a
+               DETAIL's key values), for the capture's 400-day retention. Re-masked one bounded slice per tick
+               until the table's end, then not again this process; a new capture is masked on write. Its own
+               catch, like the capture's: a failure here must not cost the collector-cost flush below. */
+            if (!_storeLogRemaskDone)
+            {
+                try
+                {
+                    var (next, examined, rewritten) = await StoreLogSweep.RemaskStoredEventsAsync(
+                        connection, _storeLogRemaskCursor, budget.Token);
+                    _storeLogRemaskCursor = next;
+                    _storeLogRemaskDone = next is null;
+                    if (rewritten > 0)
+                    {
+                        _logger.LogInformation(
+                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their statement literals and quoted values no longer reach get_store_log{Remaining}.",
+                            rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(
+                        "Store log: re-masking rows captured before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
             }
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)

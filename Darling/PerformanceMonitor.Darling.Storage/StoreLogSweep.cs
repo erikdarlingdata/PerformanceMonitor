@@ -192,6 +192,83 @@ WHERE capture_time < $1";
     ///
     /// <para>Returns what was captured, per file, so the caller can log it and the tests can assert it.</para>
     /// </summary>
+    /// <summary>How many stored rows one re-mask pass examines (#3915): a bounded slice per hourly tick, so a
+    /// store with a long retained history finishes over a few ticks instead of overrunning one tick's
+    /// budget.</summary>
+    public const int MaxRemaskRowsPerPass = 5000;
+
+    /// <summary>One page of rows to re-mask, in physical order after <c>$1</c> (null for the start).</summary>
+    public const string RemaskPageSql = @"
+SELECT
+    e.ctid::text,
+    e.event_class,
+    e.message_text,
+    e.sample_line
+FROM collect.store_log_events AS e
+WHERE ($1::tid IS NULL OR e.ctid > $1::tid)
+AND   (e.message_text IS NOT NULL OR e.sample_line IS NOT NULL)
+ORDER BY e.ctid
+LIMIT $2";
+
+    /// <summary>Writes one row's re-masked text back, by the physical row it was read from.</summary>
+    public const string RemaskUpdateSql = @"
+UPDATE collect.store_log_events
+SET message_text = $1,
+    sample_line = $2
+WHERE ctid = $3::tid";
+
+    /// <summary>
+    /// Re-masks rows stored before this build (#3915), one bounded slice per call: rows written by an earlier
+    /// build kept the entry as the server wrote it, so an ERROR's STATEMENT line with a password literal, a
+    /// DETAIL's key values, and the first #3899 build's raw slow statements sit in
+    /// <c>collect.store_log_events</c> for the sweep's 400-day retention, readable by the viewer and mcp roles.
+    /// Each row goes through <see cref="StoreLogClassifier.MaskStoredEvent"/>, the same masking a new capture
+    /// gets, and is rewritten only if that changed it; the masking is idempotent, so rows this build wrote come
+    /// back unchanged and a pass that is cut short loses nothing. Returns the cursor to resume from, null once
+    /// the table's end is reached, with how many rows were examined and rewritten.
+    /// </summary>
+    public static async Task<(string? NextCursor, int Examined, int Rewritten)> RemaskStoredEventsAsync(
+        NpgsqlConnection connection, string? afterCursor, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var page = new List<(string Ctid, string EventClass, string? Message, string? Sample)>();
+        await using (var select = new NpgsqlCommand(RemaskPageSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            select.Parameters.AddWithValue(MaxRemaskRowsPerPass);
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                page.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+        }
+
+        var rewritten = 0;
+        foreach (var row in page)
+        {
+            var (message, sample) = StoreLogClassifier.MaskStoredEvent(row.EventClass, row.Message, row.Sample);
+            if (string.Equals(message, row.Message, StringComparison.Ordinal)
+                && string.Equals(sample, row.Sample, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            await using var update = new NpgsqlCommand(RemaskUpdateSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            update.Parameters.Add(new NpgsqlParameter { Value = (object?)message ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            update.Parameters.Add(new NpgsqlParameter { Value = (object?)sample ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            update.Parameters.AddWithValue(row.Ctid);
+            rewritten += await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var next = page.Count < MaxRemaskRowsPerPass ? null : page[^1].Ctid;
+        return (next, page.Count, rewritten);
+    }
+
     public static async Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,

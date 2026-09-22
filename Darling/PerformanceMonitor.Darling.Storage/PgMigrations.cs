@@ -4123,7 +4123,8 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// log's. That is deliberate: PostgreSQL renders <c>%m</c> in <c>log_timezone</c>, which
     /// <c>DarlingManagedPostgres</c>' v9 block leaves to the host (it pins the session <c>timezone</c> only,
     /// asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are host-local. The
-    /// server's own rendering survives verbatim inside <c>sample_line</c>, uninterpreted.</para>
+    /// server's own rendering survives inside <c>sample_line</c>, uninterpreted, with only its values masked
+    /// (#3915).</para>
     /// </summary>
     private const string V111Sql = @"
 CREATE TABLE IF NOT EXISTS collect.store_log_events

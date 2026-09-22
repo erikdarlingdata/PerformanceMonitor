@@ -463,7 +463,7 @@ public sealed class PgLogEventsPipelineTests
     {
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $$hunter2$$"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2$pw$"));
-        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2 cut off at the cap"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2 cut off at the cap"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD E'hun\\'ter2'"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD e'it''s'"));
         Assert.Equal(
@@ -475,6 +475,27 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("SELECT namee || '?' FROM t", PgLogTextRedactor.RedactStoredStatement("SELECT namee || 'v' FROM t"));
         Assert.Null(PgLogTextRedactor.RedactStoredStatement(null));
         Assert.Equal("", PgLogTextRedactor.RedactStoredStatement(""));
+
+        /* #3915's review, each a leak the regex chain had: an apostrophe inside a double-quoted identifier or a
+           nested comment opened a phantom literal and left the next real one standing; a standard string with a
+           backslash-escaped quote (a client with standard_conforming_strings off) ended early; a statement cut
+           inside a literal was kept as it stood. The lexer masks the first three and refuses the last. */
+        Assert.Equal(
+            "SELECT count(*) AS \"owner's count\" FROM t WHERE pw = '?'",
+            PgLogTextRedactor.RedactStoredStatement("SELECT count(*) AS \"owner's count\" FROM t WHERE pw = 'hunter2'"));
+        Assert.Equal("SELECT '?'", PgLogTextRedactor.RedactStoredStatement("/* a /* b */ Erik's note */ SELECT 'SECRET1'"));
+        Assert.Equal("SELECT '?' , '?'", PgLogTextRedactor.RedactStoredStatement("SELECT $$O'Brien$$ /* don't */, 'SECRET2'"));
+        Assert.Equal("SELECT '?', '?' , '?'", PgLogTextRedactor.RedactStoredStatement("SELECT E'it\\'s', 'x--y'\n, 'SECRET4'"));
+        Assert.Equal("SELECT '?', ?", PgLogTextRedactor.RedactStoredStatement("SELECT 'it\\'s SECRET5', 1"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT 'first line of SECRET6"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT 1 /* never closed"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT \"never closed"));
+
+        /* Every numeric spelling is a value; every other literal prefix is a literal. */
+        Assert.Equal("SELECT ?, ?, ?, ?, ?, ?", PgLogTextRedactor.RedactStoredStatement("SELECT 0x1F2A, 0o17, 0b101, 1_000_000, 1.5e3, .5"));
+        Assert.Equal(
+            "UPDATE t SET c = '?' WHERE \"a\"\"b\" = '?' AND d = '?'",
+            PgLogTextRedactor.RedactStoredStatement("UPDATE t SET c = U&'d\\0061t' WHERE \"a\"\"b\" = X'1F' AND d = N'nat'"));
 
         /* The hashed form is unchanged: a DO body stays part of the shape a fingerprint distinguishes. */
         Assert.Equal("DO $$ BEGIN PERFORM ?; END $$", PgLogTextRedactor.RedactStatement("DO $$ BEGIN PERFORM 1; END $$"));

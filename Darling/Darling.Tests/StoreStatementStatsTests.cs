@@ -28,7 +28,7 @@ public class StoreStatementStatsTests
     private static string Literal(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     [Fact]
-    public void TheReaderFunctions_AreDefinersWithAPinnedPathAndStringMode_RevokedFromPublic_AndRefuseSensitiveStatements()
+    public void TheReaderFunctions_AreDefinersWithAPinnedPathAndStringMode_RevokedFromPublic_AndShowOnlyNormalizedDmlText()
     {
         var sql = StoreStatementStats.BuildFunctionSql("config", "public");
 
@@ -42,8 +42,15 @@ public class StoreStatementStatsTests
         Assert.Contains($"REVOKE ALL ON FUNCTION \"config\".{StoreStatementStats.InfoFunctionName}() FROM PUBLIC;", sql, StringComparison.Ordinal);
         Assert.Contains("FROM \"public\".pg_stat_statements AS s", sql, StringComparison.Ordinal);
         Assert.Contains("FROM \"public\".pg_stat_statements_info AS i", sql, StringComparison.Ordinal);
-        Assert.Contains($"OR s.query !~* {Literal(StoreStatementStats.SensitiveStatementPattern)}", sql, StringComparison.Ordinal);
-        Assert.Contains("s.query IS NULL", sql, StringComparison.Ordinal);
+        /* #3915: an allowlist, and every row kept. Text is shown only for normalized DML the sensitive pattern
+           does not name; everything else keeps its timings and reads as withheld, and no row is filtered out on
+           its text any more. */
+        Assert.Contains($"WHEN s.query ~* {Literal(StoreStatementStats.ReadableStatementPattern)}", sql, StringComparison.Ordinal);
+        Assert.Contains($"AND s.query !~* {Literal(StoreStatementStats.SensitiveStatementPattern)}", sql, StringComparison.Ordinal);
+        Assert.Contains($"ELSE {Literal(StoreStatementStats.WithheldText)}", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN s.query IS NULL THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"WHEN s.query = {Literal(StoreStatementStats.InsufficientPrivilegeText)} THEN s.query", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("OR s.query !~*", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN pg_catalog.pg_roles AS r", sql, StringComparison.Ordinal);
         Assert.Contains("pg_catalog.current_database()", sql, StringComparison.Ordinal);
 
@@ -79,10 +86,35 @@ public class StoreStatementStatsTests
         var pattern = StoreStatementStats.SensitiveStatementPattern;
 
         Assert.DoesNotContain("\\", pattern, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);
+        foreach (var keyword in new[] { "select", "insert", "update", "delete", "merge", "with", "values", "table" })
+        {
+            Assert.Contains(keyword, StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);
+        }
+
         foreach (var family in new[] { "role", "user", "group", "subscription", "server", "password" })
         {
             Assert.Contains(family, pattern, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// A schema or role name can never close a body early (#3915's review): quoting protects an identifier's
+    /// double quotes, not a dollar sequence, so the dollar tags are chosen to occur in no body.
+    /// </summary>
+    [Fact]
+    public void TheDollarTags_NeverOccurInTheBodyTheyClose()
+    {
+        var plain = StoreStatementStats.BuildFunctionSql("config", "public");
+        Assert.Contains("AS $fn$", plain, StringComparison.Ordinal);
+
+        var hostile = StoreStatementStats.BuildFunctionSql("config", "ext$fn$odd");
+        Assert.Contains("AS $fn1$", hostile, StringComparison.Ordinal);
+        Assert.DoesNotContain("AS $fn$", hostile, StringComparison.Ordinal);
+
+        Assert.Contains("DO $do$", StoreStatementStats.BuildGrantSql("config", ["admin"]), StringComparison.Ordinal);
+        var grant = StoreStatementStats.BuildGrantSql("con$do$fig", ["admin", "x$do1$y"]);
+        Assert.Contains("DO $do2$", grant, StringComparison.Ordinal);
     }
 
     [Fact]
