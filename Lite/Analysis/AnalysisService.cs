@@ -226,6 +226,16 @@ public class AnalysisService
             LastCollectionFailures = context.CollectionFailures;
             LastCollectionFamilyCount = context.CollectionFamilyCount;
 
+            /* #3691 lane 45: the same two facts into the PROCESS-WIDE ledger, the twin of Darling's write.
+               This SKU keeps one analysis service for the app's life, so the instance properties above are
+               not blind here the way Darling's are — but get_collection_health reads ONE ledger on both
+               products, and a surface that exists on one SKU only is the parity defect the twin review
+               blocks. Recorded on EVERY pass, clean ones included: a clean pass is the only evidence that a
+               family recovered. */
+            CollectionCaveatLedger.Shared.Record(
+                context.ServerId, context.ServerName, DateTime.UtcNow,
+                context.CollectionFailures, context.CollectionFamilyCount);
+
             if (context.CollectionFailures.Count > 0)
             {
                 /* #3691: the per-site log lines above say each failure as it happened; this one line says
