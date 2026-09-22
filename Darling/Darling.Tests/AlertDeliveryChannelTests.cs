@@ -1006,6 +1006,7 @@ public sealed class AlertDeliveryChannelTests
             NullLogger<AnalysisNotificationService>.Instance);
 
         await notifier.NotifyAsync(new[] { CpuFinding() });
+        await notifier.FlushPendingAsync();
 
         var bodies = endpoint.Bodies;
         Assert.Equal(3, bodies.Count);
@@ -1054,6 +1055,7 @@ public sealed class AlertDeliveryChannelTests
             NullLogger<AnalysisNotificationService>.Instance);
 
         await notifier.NotifyAsync(new[] { CpuFinding() });
+        await notifier.FlushPendingAsync();
 
         /* The channel saw the facts once. */
         var body = Assert.Single(endpoint.Bodies);

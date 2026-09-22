@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -183,6 +184,44 @@ public class EmailAlertService : IFindingAlertSender
                AnalysisNotificationService), so an unconfigured finding's row is "unconfigured", not a
                "tray" row that reads Shown. */
             trayShown: false);
+    }
+
+    /// <summary>
+    /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
+    /// row per named page under its own metric name carrying the summary's delivery. No toast (Lite wires no
+    /// analysis tray sink), so trayChannelPresent is false as on the single-page path. Never throws.
+    /// </summary>
+    public async Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+    {
+        if (named is null || named.Count == 0)
+            return null;
+        try
+        {
+            var (serverName, currentValue, context) = FindingSummary.Compose(named);
+            var result = await _core.TrySendAsync(
+                FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
+                named[0].ServerId, context, attemptChannels: true);
+            /* No toast for a summary on Lite, the same answer the single-finding arm states: the local keeps
+               the one declared producer shape (trayChannelPresent: trayShown) the tray-channel pin reads. */
+            const bool trayShown = false;
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: trayShown);
+            foreach (var alert in named)
+            {
+                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                    alert.ServerId, alert.ServerName, alert.MetricName,
+                    alert.CurrentValue, alert.ThresholdValue,
+                    alert.Severity, alert.NotifyThreshold,
+                    delivery,
+                    false, FindingSummary.RowDetailText(alert, named.Count),
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+            }
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"SendFindingSummaryAsync error: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>

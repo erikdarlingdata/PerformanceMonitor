@@ -107,6 +107,13 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             Sent.Add(alert);
             return Task.FromResult<AlertDelivery?>(Delivery);
         }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
     }
 
     private (AnalysisNotificationService Notifier, CapturingSender Sender) MakeCapturingNotifier()
@@ -503,7 +510,9 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var finding = MakeFinding("samehash00000001", severity: 2.0);
 
         await notifier.NotifyAsync(new[] { finding });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[] { finding });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(1, await CountAlertLogRowsAsync());
     }
@@ -527,6 +536,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 2.0),
             MakeFinding("bbbb000000000002", severity: 2.0)
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, await CountAlertLogRowsAsync());
     }
@@ -538,6 +548,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var notifier = MakeNotifier();
         await notifier.NotifyAsync(new[] { MakeFinding("lowsev0000000001", severity: 1.0) });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(0, await CountAlertLogRowsAsync());
     }
@@ -552,6 +563,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var notifier = MakeNotifier(serverId => serverId == "1");
         await notifier.NotifyAsync(new[] { MakeFinding("silenced00000001", severity: 2.0, serverId: 1) });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(0, await CountAlertLogRowsAsync());
     }
@@ -571,6 +583,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 2.0, serverId: 1), // silenced — suppressed
             MakeFinding("bbbb000000000002", severity: 2.0, serverId: 2)  // not silenced — notifies
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(1, await CountAlertLogRowsAsync());
     }
@@ -593,6 +606,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         // Deliberately pass the lower-severity finding first — primary selection is by severity, not order.
         await notifier.NotifyAsync(new[] { secondary, primary });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(2.0, alert.Severity);            // the CPU_SPIKE primary leads the incident
@@ -612,6 +626,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var (notifier, sender) = MakeCapturingNotifier();
 
         await notifier.NotifyAsync(new[] { MakeFinding("solo000000000001", severity: 2.0, incidentId: "incident-1") });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.DoesNotContain(alert.Context.Details, d => d.Heading == "Co-fired in this incident");
@@ -633,7 +648,9 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var (notifier, sender) = MakeCapturingNotifier();
 
         await notifier.NotifyAsync(new[] { MakeFinding("aaaa000000000001", severity: 1.0, incidentId: "inc-9") });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[] { MakeFinding("bbbb000000000002", severity: 1.0, incidentId: "inc-9") });
+        await notifier.FlushPendingAsync();
 
         Assert.Single(sender.Sent); // one alert for the incident; the second below-critical finding is cooled down
     }
@@ -654,6 +671,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("dddd000000000001", severity: 1.0, rootFactKey: "BLOCKING_EVENTS",
                 category: "blocking", incidentId: "inc-esc")
         });
+        await notifier.FlushPendingAsync();
 
         // Cycle 2: a CRITICAL symptom joins the SAME incident (its own per-hash bucket is fresh).
         await notifier.NotifyAsync(new[]
@@ -663,6 +681,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("cccc000000000002", severity: 2.0, rootFactKey: "CPU_SPIKE",
                 category: "cpu_pressure", incidentId: "inc-esc")
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
         Assert.Equal(2.0, sender.Sent[1].Severity);                 // the fresh e-mail is led by the critical
@@ -685,6 +704,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 2.0, rootFactKey: "CPU_SPIKE",
                 category: "cpu_pressure", incidentId: "inc-2crit")
         });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[]
         {
             MakeFinding("aaaa000000000001", severity: 2.0, rootFactKey: "CPU_SPIKE",
@@ -692,6 +712,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("bbbb000000000002", severity: 1.7, rootFactKey: "BLOCKING_EVENTS",
                 category: "blocking", incidentId: "inc-2crit")
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
         Assert.Equal(1.7, sender.Sent[1].Severity);                 // led by the newly-joined critical
@@ -714,7 +735,9 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             rootFactKey: "BLOCKING_EVENTS", category: "blocking", incidentId: "inc-mix"));
 
         await notifier.NotifyAsync(new[] { critical(), belowCritical() });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[] { critical(), belowCritical() });
+        await notifier.FlushPendingAsync();
 
         var only = Assert.Single(sender.Sent);                      // one e-mail total across both cycles
         Assert.Equal(2.0, only.Severity);                           // led by the critical
@@ -733,8 +756,11 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var crit = MakeFinding("aaaa000000000001", severity: 2.0, incidentId: "inc-lone");
         await notifier.NotifyAsync(new[] { crit });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[] { crit });
+        await notifier.FlushPendingAsync();
         await notifier.NotifyAsync(new[] { crit });
+        await notifier.FlushPendingAsync();
 
         Assert.Single(sender.Sent);
     }
@@ -754,6 +780,13 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             Sent.Add(alert);
             return Task.FromResult<AlertDelivery?>(Delivery);
         }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
     }
 
     [Fact]
@@ -770,6 +803,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
 
         await notifier.NotifyAsync(new[] { MakeFinding("ambient000000001", severity: 1.5, incidentId: "inc-ambient") });
+        await notifier.FlushPendingAsync();
 
         Assert.Empty(sender.Sent);
     }
@@ -786,6 +820,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
 
         await notifier.NotifyAsync(new[] { MakeFinding("worsened00000001", severity: 1.8, incidentId: "inc-worse") });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(1.8, alert.Severity);
@@ -804,6 +839,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
 
         await notifier.NotifyAsync(new[] { MakeFinding("recentworse00001", severity: 1.9, incidentId: "inc-recent") });
+        await notifier.FlushPendingAsync();
 
         Assert.Empty(sender.Sent);
     }
@@ -822,6 +858,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 2.0, incidentId: "inc-A"),
             MakeFinding("bbbb000000000002", severity: 2.0, incidentId: "inc-B")
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
     }
@@ -841,6 +878,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 1.0),  // empty IncidentId, below-critical
             MakeFinding("bbbb000000000002", severity: 1.0)   // empty IncidentId, different hash
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
     }
@@ -859,6 +897,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             MakeFinding("aaaa000000000001", severity: 2.0),  // empty IncidentId
             MakeFinding("bbbb000000000002", severity: 2.0)   // empty IncidentId, different hash
         });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
     }
@@ -875,6 +914,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var notifier = MakeNotifier(showTrayNotification: (t, m) => balloons.Add((t, m)));
 
         await notifier.NotifyAsync(new[] { MakeFinding("tray000000000001", severity: 2.0, category: "cpu_pressure") });
+        await notifier.FlushPendingAsync();
 
         var balloon = Assert.Single(balloons);
         Assert.Contains("cpu_pressure", balloon.Title);
@@ -891,6 +931,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var notifier = MakeNotifier(showTrayNotification: (t, m) => balloons.Add((t, m)));
 
         await notifier.NotifyAsync(new[] { MakeFinding("traylow000000001", severity: 1.0) });
+        await notifier.FlushPendingAsync();
 
         Assert.Empty(balloons);   // sub-threshold finding -> no email, no tray
     }
@@ -905,6 +946,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         var notifier = MakeNotifier(serverId => serverId == "1", showTrayNotification: (t, m) => balloons.Add((t, m)));
 
         await notifier.NotifyAsync(new[] { MakeFinding("traysilenced0001", severity: 2.0, serverId: 1) });
+        await notifier.FlushPendingAsync();
 
         Assert.Empty(balloons);   // silenced server -> no tray either
     }
