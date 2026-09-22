@@ -482,6 +482,11 @@ public sealed class PgTargetBloatTests
         if (dead.HasValue)
             figures[PgTargetScorer.BloatDeadTuplesKey] = dead.Value;
         fact.Ranked.Add(new RankedObject(objectName, fact.DatabaseName, growthBytes, figures));
+        /* #3691 lane 43, the invariant census: every fixture that ranks is checked the moment it ranks — cap,
+           subject-first by name AND by value, distinct non-empty names. Here rather than in each pin because
+           this helper is the single funnel every bloat and index fixture's ranked entries pass through, so a
+           fixture cannot rank its way around the rule the collectors are held to. */
+        FactRankedTests.AssertInvariant(fact);
     }
 
     private static Fact Index(string objectName, long indexBytes, long earlier, long growth, long samples, params (string Key, double Value)[] extra)

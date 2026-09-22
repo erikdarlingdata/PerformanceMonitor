@@ -581,6 +581,8 @@ public sealed class PgTargetGrowthTests
                 [PgTargetScorer.BloatGrowthBytesKey] = 400 * MiB,
                 [PgTargetScorer.BloatGrowthPctKey] = 400.0,
             }));
+        /* #3691 lane 43, the invariant census — see FactRankedTests.AssertInvariant. */
+        FactRankedTests.AssertInvariant(fact);
         return fact;
     }
 

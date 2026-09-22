@@ -874,7 +874,8 @@ public sealed class PgTargetVacuumTests
 
     /// <summary>Appends one <c>Fact.Ranked</c> entry in the disabled read's own shape — the ratio and the run's
     /// hours under the same metadata names the subject's figures ride under (#3691 lane 43).</summary>
-    private static void Rank(Fact fact, string objectName, double ratio, double hours) =>
+    private static void Rank(Fact fact, string objectName, double ratio, double hours)
+    {
         fact.Ranked.Add(new RankedObject(
             objectName,
             fact.DatabaseName,
@@ -884,6 +885,10 @@ public sealed class PgTargetVacuumTests
                 [PgTargetScorer.BacklogRatioKey] = ratio,
                 [PgTargetScorer.BacklogHoursKey] = hours,
             }));
+        /* #3691 lane 43, the invariant census — see FactRankedTests.AssertInvariant. Block-bodied so the census
+           call is a statement beside the add rather than a comma operator smuggled into an expression. */
+        FactRankedTests.AssertInvariant(fact);
+    }
 
     /// <summary>The backlog read's ranked shape (#3691 lane 43, M3): the disabled read's two figures plus the
     /// run's slope per hour, which is ABSENT — not zero — when the run has no span to divide by, the way the
@@ -898,6 +903,9 @@ public sealed class PgTargetVacuumTests
         if (slope.HasValue)
             figures[PgTargetScorer.BacklogSlopePerHourKey] = slope.Value;
         fact.Ranked.Add(new RankedObject(objectName, fact.DatabaseName, ratio, figures));
+        /* #3691 lane 43, the invariant census — see the note on FactRankedTests.AssertInvariant. Both of this
+           class's ranking funnels call it, so every planted vacuum-family fixture is checked as it is built. */
+        FactRankedTests.AssertInvariant(fact);
     }
 
     private static void AssertNeverDisablesAutovacuum(AdviceBlock block)

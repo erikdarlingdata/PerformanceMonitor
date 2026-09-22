@@ -291,7 +291,6 @@ public static partial class PgTargetAdvice
         inv.Append($"{Pct(100.0 * share)} of the indexes seen were skipped at their latest sample{(share >= 0.5 ? " — a majority" : string.Empty)}, across {reasons:0} distinct reason{(reasons == 1 ? string.Empty : "s")} (counts only; get_pg_index_bloat shows the reasons); pgstattuple is {(pgstattuple ? "installed, so pgstatindex can measure any of them exactly" : "not installed, so the exact route is closed until it is")}. ");
     }
 
-    /// <summary>The named objects a bloat fact carries under <paramref name="prefix"/>, largest value first.</summary>
     /// <summary>
     /// The "Next by growth: …" sentence both bloat cards carry, off <see cref="Fact.Ranked"/> through the shared
     /// <see cref="FactAdvice.NameTheRest"/> grammar (#3691 lane 43). Returns the empty string when the fact ranks

@@ -158,6 +158,7 @@ public sealed class PgTargetVacuumLiveTests
                subject's: a shared arm would have put appendonly's dead tuples under a slope its line never
                governed. Figures are the un-prefixed backlog metadata names, so a reader who knows the fact's
                metadata knows these. */
+            FactRankedTests.AssertInvariant(backlog);
             Assert.Equal(2, backlog.Ranked.Count);
             Assert.Equal("public.hot", backlog.Ranked[0].ObjectName);
             Assert.Equal("appdb", backlog.Ranked[0].DatabaseName);
@@ -255,6 +256,24 @@ public sealed class PgTargetVacuumLiveTests
                 Assert.Contains("PG_XMIN_HOLD co-fired", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("Resolve PG_XMIN_HOLD first", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("Never switch autovacuum off", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
+
+                /* ── #3691 lane 43: the payload half, through the REAL tool. The backlog root ranked two
+                   tables, so root_fact carries `ranked` — the machine-readable twin of the advice clause
+                   asserted above, with each entry's own figures under the family's own metadata names. */
+                var ranked = chain.GetProperty("root_fact").GetProperty("ranked").EnumerateArray().ToList();
+                Assert.Equal(2, ranked.Count);
+                Assert.Equal("public.hot", ranked[0].GetProperty("object_name").GetString());
+                Assert.Equal("appdb", ranked[0].GetProperty("database_name").GetString());
+                Assert.Equal(5.0, ranked[0].GetProperty("value").GetDouble(), precision: 6);
+                Assert.Equal(5.0, ranked[0].GetProperty("figures").GetProperty(PgTargetScorer.BacklogRatioKey).GetDouble(), precision: 6);
+                Assert.Equal("public.appendonly", ranked[1].GetProperty("object_name").GetString());
+
+                /* BYTE-IDENTITY, the other arm: the wraparound hop and the xmin-hold LEAF are non-migrated
+                   families whose facts rank nothing, and their payload objects carry no `ranked` key at all —
+                   not a null. The whole finding holds exactly ONE, the root's, which is what "attached only
+                   when owed" means in bytes rather than in prose. */
+                Assert.False(chain.GetProperty("leaf_fact").TryGetProperty("ranked", out _));
+                Assert.Equal(1, CountOf(chain.GetRawText(), "\"ranked\""));
 
                 /* The next_tools are PostgreSQL reads, never a SQL Server one. */
                 var tools = chain.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
@@ -371,6 +390,7 @@ public sealed class PgTargetVacuumLiveTests
                subject alone (the [0] == ObjectName/Value invariant) and nothing else, which is the shape the
                retired disabled_rank_2_ratio key used to prove by its absence. Below two entries the advice
                clause is empty and the payload omits `ranked` entirely. */
+            FactRankedTests.AssertInvariant(disabled);
             var rankedDisabled = Assert.Single(disabled.Ranked);
             Assert.Equal("public.frozen", rankedDisabled.ObjectName);
             Assert.Equal(4.0, rankedDisabled.Value, precision: 6);
@@ -388,6 +408,7 @@ public sealed class PgTargetVacuumLiveTests
                autovacuum_disabled first) and hot rides second, so the backlog card names it. hot's dead tuples
                are flat across its run, which is a ZERO slope and says so — an absent slope figure means the run
                had no span to divide by, and the two must not read alike. */
+            FactRankedTests.AssertInvariant(backlog);
             Assert.Equal(2, backlog.Ranked.Count);
             Assert.Equal("public.frozen", backlog.Ranked[0].ObjectName);
             Assert.Equal(4.0, backlog.Ranked[0].Value, precision: 6);
@@ -432,6 +453,16 @@ public sealed class PgTargetVacuumLiveTests
                    outside it: six samples in the tool's window, seven in the collector context above. */
                 Assert.Equal("public.frozen in appdb carries 4,200 dead tuples, 4× its own autovacuum trigger line, for 6 consecutive samples", advice.GetProperty("headline").GetString());
                 Assert.Contains("ALTER TABLE public.frozen SET (autovacuum_enabled = true);", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
+
+                /* #3691 lane 43: the backlog root ranked frozen and hot, so root_fact names them; the
+                   DISABLED leaf ranked only its own subject (one disabled table met the gate), so its payload
+                   carries no `ranked` at all — the two-or-more rule, proved on one response. */
+                Assert.Equal(
+                    new[] { "public.frozen", "public.hot" },
+                    chain.GetProperty("root_fact").GetProperty("ranked").EnumerateArray()
+                        .Select(o => o.GetProperty("object_name").GetString()!).ToArray());
+                Assert.False(chain.GetProperty("leaf_fact").TryGetProperty("ranked", out _));
+                Assert.Equal(1, CountOf(chain.GetRawText(), "\"ranked\""));
 
                 var tools = chain.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();
                 Assert.Contains("get_pg_autovacuum_health", tools);
@@ -530,6 +561,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)detail ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         command.Parameters.AddWithValue(isWinner);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Occurrences of <paramref name="needle"/> in <paramref name="text"/> — for the #3691 lane 43
+    /// byte-identity arm, which is a claim about how many times a KEY appears in a response and cannot be made
+    /// with an Assert.Contains.</summary>
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
