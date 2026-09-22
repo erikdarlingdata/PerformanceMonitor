@@ -1698,13 +1698,22 @@ internal static class DarlingDataReader
     /// bought. So the honest shape here is #3856's first: the same primitive, the same lifetime, keyed per
     /// server.</para>
     ///
-    /// <para>The memo is keyed on (server, window start) and the window start is the KEY rather than an
-    /// argument the memo ignores, which is the guard #3856 asked for in the derivation's place. Both of this
-    /// method's production callers pass the fixed trailing seven days, so in production there is one key per
-    /// server and the memo holds; a caller that ever asks for a DIFFERENT window gets its own key and its own
-    /// statement rather than being served a reading cut from someone else's window, which is the falling-
-    /// through the issue required — the direct read stays alive, it is just never reached with a key that
-    /// would lie. Cited: #3735 / #3738 (the fleet twin), #3856 (this one).</para>
+    /// <para>The memo is keyed on (server, window LENGTH) — the window is part of the key rather than an
+    /// argument the memo ignores, which is the guard #3856 asked for in the derivation's place, but it is the
+    /// length and not the start. #3894 is why: this method's production caller cuts
+    /// <c>DateTime.UtcNow.AddDays(-7)</c>, so the START moved by however many ticks had elapsed on every
+    /// call, the key differed every time, and the memo never hit once in production while its dictionary grew
+    /// a permanent entry per call. The doc that used to sit here asserted the opposite — "one key per server
+    /// and the memo holds" — and that sentence was the bug's alibi: the LENGTH is what every caller fixes,
+    /// the start is what every caller moves. The always-zero <c>collection_health_age_seconds</c> on the
+    /// payload was the tell, and nobody (this author included) read it.</para>
+    ///
+    /// <para>Keying on the length is honest because the age stamp is the disclosure: two calls a few seconds
+    /// apart asking for the same seven days are served one scan, and the payload says how many seconds old
+    /// that reading is. A caller asking for a genuinely DIFFERENT window still gets its own key and its own
+    /// statement rather than a reading cut from someone else's span — the fall-through the issue required.
+    /// This is the shape the fleet twin already had by keeping a single slot for its one fixed window.
+    /// Cited: #3735 / #3738 (the fleet twin), #3856 (this one), #3894 (the key).</para>
     /// </summary>
     internal static async Task<(List<CollectorHealth> Rows, int AgeSeconds)> GetCollectionHealthMemoizedAsync(
         NpgsqlDataSource postgres,
@@ -1842,15 +1851,24 @@ internal static class DarlingDataReader
         {
             public Task<ScanOutcome>? InFlight;
             public PerServerCollectionHealthScan? Latest;
+
+            /// <summary>When this key was last ASKED for — the axis eviction runs on (#3894). Deliberately
+            /// not the reading's own age: a reading that has aged past the lifetime is still the thing a
+            /// failed re-read must not destroy, which is a contract
+            /// <c>AFailedReRead_DoesNotEvictTheLastGoodReading</c> pins and which the first version of this
+            /// sweep broke.</summary>
+            public DateTime LastTouchedUtc;
         }
 
         private readonly object _gate = new();
 
-        /// <summary>Per (server, window start). Guarded by <c>_gate</c>, like every field on the fleet twin —
-        /// nothing here is read or written outside it, so a plain Dictionary is correct and a concurrent one
-        /// would buy nothing but the illusion that the compound check-and-start below was atomic without
-        /// it.</summary>
-        private readonly Dictionary<(int ServerId, DateTime WindowStartUtc), KeyState> _byKey = new();
+        /// <summary>Per (server, window LENGTH) — see <see cref="GetCollectionHealthMemoizedAsync"/> for why
+        /// the length rather than the start (#3894: a moving start made every call its own key, so the memo
+        /// never hit and this dictionary never stopped growing). Guarded by <c>_gate</c>, like every field on
+        /// the fleet twin — nothing here is read or written outside it, so a plain Dictionary is correct and a
+        /// concurrent one would buy nothing but the illusion that the compound check-and-start below was
+        /// atomic without it.</summary>
+        private readonly Dictionary<(int ServerId, TimeSpan WindowLength), KeyState> _byKey = new();
 
         private int _scansStarted;
 
@@ -1864,6 +1882,20 @@ internal static class DarlingDataReader
                 lock (_gate)
                 {
                     return _scansStarted;
+                }
+            }
+        }
+
+        /// <summary>How many keys this memo is currently holding — the figure #3894's eviction pin reads,
+        /// because "the dictionary grows forever" is otherwise only observable as host memory. Diagnostic;
+        /// nothing reads it in production.</summary>
+        internal int TrackedKeys
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _byKey.Count;
                 }
             }
         }
@@ -1888,17 +1920,34 @@ internal static class DarlingDataReader
         {
             ArgumentNullException.ThrowIfNull(scan);
 
-            var key = (serverId, windowStartUtc);
+            /* #3894: the LENGTH, at the grain callers specify it — never a raw instant.
+
+               A START key misses on every production call: the tool cuts its window from a fresh UtcNow, so
+               the start moves by ticks each time, and that is the defect this issue was filed for. But the
+               RAW length (nowUtc - windowStartUtc) fails the mirror-image way: a caller that holds its window
+               start while its clock advances drifts the length by the elapsed seconds and misses too. Both are
+               the same mistake — keying on an instant — applied to the two ends of the window.
+
+               What identifies "the same question" is the span the caller ASKED for, and every caller asks in
+               whole hours: the tool for a trailing seven days, the endpoints for an integer hours_back. So the
+               length is rounded to the nearest hour, which absorbs any clock-read drift inside the 60 s
+               lifetime (worst case well under a minute) while keeping every genuinely different window its own
+               key — a one-day window and a seven-day window are 144 hours apart and cannot round together. */
+            var key = (serverId, WindowLength: RoundToWholeHours(nowUtc - windowStartUtc));
 
             Task<ScanOutcome> shared;
             TaskCompletionSource<ScanOutcome>? lead = null;
             lock (_gate)
             {
+                PruneUntouched(nowUtc);
+
                 if (!_byKey.TryGetValue(key, out var state))
                 {
                     state = new KeyState();
                     _byKey[key] = state;
                 }
+
+                state.LastTouchedUtc = nowUtc;
 
                 if (state.Latest is { } latest && nowUtc - latest.ReadAtUtc < CollectionHealthMemoLifetime)
                 {
@@ -1925,7 +1974,7 @@ internal static class DarlingDataReader
                    runs under it, and deliberately not awaited here: this caller is one waiter among any
                    number, and its own cancellation below must not be the scan's. RunScanAsync completes the
                    source in both arms and never throws, so the discarded task cannot fault. */
-                _ = RunScanAsync(lead, key, nowUtc, scan);
+                _ = RunScanAsync(lead, key, windowStartUtc, nowUtc, scan);
             }
 
             var outcome = await shared.WaitAsync(cancellationToken);
@@ -1934,15 +1983,73 @@ internal static class DarlingDataReader
             return (read.Rows, AgeSeconds(nowUtc, read));
         }
 
+        /// <summary>A window length at the grain its callers ask in (#3894). Nearest rather than floor, so a
+        /// length that drifted a few seconds either side of a whole hour still lands on that hour instead of
+        /// splitting one question across two keys at the boundary.</summary>
+        private static TimeSpan RoundToWholeHours(TimeSpan length) =>
+            TimeSpan.FromHours(Math.Round(length.TotalHours, MidpointRounding.AwayFromZero));
+
+        /// <summary>How long a key nobody has asked for is kept before it is dropped — ten times the reading
+        /// lifetime, so a key in any kind of active use is never yanked out from under a caller and the
+        /// dictionary still cannot accumulate history.</summary>
+        private static TimeSpan KeyRetention => CollectionHealthMemoLifetime * 10;
+
+        /// <summary>Drops keys that NOBODY HAS ASKED FOR inside <see cref="KeyRetention"/> and that have no
+        /// statement in flight.
+        ///
+        /// <para>#3894: this dictionary had no eviction of any kind — no Remove, no cap, no sweep — which was
+        /// survivable only while the key space was believed to be one entry per server. It was not: a moving
+        /// window start made every call its own key, so a long-lived MCP host accumulated one KeyState, and
+        /// the rows list it holds, per call forever. Length-keying alone bounds the space to (servers ×
+        /// distinct windows asked); this sweep bounds it in TIME as well, so a window asked for once never
+        /// occupies the host for its lifetime.</para>
+        ///
+        /// <para><b>On the axis, which the first version of this sweep got wrong.</b> Evicting on the
+        /// READING's age looks equivalent and is not: an aged-out reading is still the last good one, and the
+        /// memo's documented contract is that a failed re-read must not destroy it — a caller whose clock
+        /// lands back inside the lifetime is still served it. Sweeping on staleness deleted exactly that, and
+        /// <c>AFailedReRead_DoesNotEvictTheLastGoodReading</c> caught it by hanging. Eviction is therefore
+        /// about whether the KEY is in use, never about whether its reading is servable.</para></summary>
+        private void PruneUntouched(DateTime nowUtc)
+        {
+            if (_byKey.Count == 0)
+            {
+                return;
+            }
+
+            /* Materialized before removing: a Dictionary cannot be mutated while it is being enumerated, and
+               the count here is bounded by the live key space rather than by history. */
+            var untouched = new List<(int ServerId, TimeSpan WindowLength)>();
+            foreach (var (key, state) in _byKey)
+            {
+                var scanning = state.InFlight is { IsCompleted: false };
+                var idleFor = nowUtc - state.LastTouchedUtc;
+
+                if (!scanning && idleFor >= KeyRetention)
+                {
+                    untouched.Add(key);
+                }
+            }
+
+            foreach (var key in untouched)
+            {
+                _byKey.Remove(key);
+            }
+        }
+
         private async Task RunScanAsync(
             TaskCompletionSource<ScanOutcome> lead,
-            (int ServerId, DateTime WindowStartUtc) key,
+            (int ServerId, TimeSpan WindowLength) key,
+            DateTime windowStartUtc,
             DateTime nowUtc,
             Func<int, DateTime, CancellationToken, Task<List<CollectorHealth>>> scan)
         {
             try
             {
-                var rows = await scan(key.ServerId, key.WindowStartUtc, CancellationToken.None);
+                /* The window start comes from the caller that LED this scan, not from the key: the key
+                   carries the length, and the rows are honestly the leader's span. A joiner a few seconds
+                   later is served these rows with collection_health_age_seconds saying how old they are. */
+                var rows = await scan(key.ServerId, windowStartUtc, CancellationToken.None);
                 var read = new PerServerCollectionHealthScan(rows, nowUtc);
                 lock (_gate)
                 {
