@@ -283,11 +283,52 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// that throws the exact exception shapes the rig measured, on a fake delay — the alternative is a pin
     /// that needs a live store to stall on demand, which is the shape that gets skipped in CI and then
     /// stops being evidence. The twelve production callers are all in this file.
+    ///
+    /// <para>The body is the static overload below, which <c>DarlingSelfAlertEvaluator</c>'s seven reads
+    /// also hold (#3854) — see there for why ONE seam serves both types rather than each carrying a copy
+    /// of the retry decision.</para>
     /// </remarks>
-    internal async Task<T> ExecuteWithOneRetryAsync<T>(
+    internal Task<T> ExecuteWithOneRetryAsync<T>(
         Func<CancellationToken, Task<T>> read,
         string serverKey,
         string readName,
+        CancellationToken passToken)
+        => ExecuteWithOneRetryAsync(read, serverKey, readName, _readFailures, _delay, passToken);
+
+    /// <summary>
+    /// The seam's body, with the counter and the pause passed in rather than read off an instance (#3854).
+    ///
+    /// <para><b>One seam for BOTH alert-pass types, not two truths.</b> #3848 put the retry decision on this
+    /// adapter's twelve reads; the same alert pass issues seven more store reads that were not on this type
+    /// at all — six on <c>DarlingSelfAlertEvaluator</c> and the worker's latest-CPU read — running on this
+    /// same <see cref="AlertPassCommandTimeoutSeconds"/> deadline and counted on the same
+    /// <see cref="AlertReadFailureCounter"/>. Giving those a seam of their OWN would put two copies of one
+    /// decision in the tree, free to disagree the moment either grew an arm: exactly the argument the
+    /// summary above makes against fourteen copies inside this file, one scope out. So the discrimination,
+    /// the ordering of the cancellation arm ahead of the filter, the single attempt-pair count, and the
+    /// honouring of the pass token during the pause are all defined HERE, once, and every retried read in
+    /// the service — whichever type holds it — reaches this method.</para>
+    ///
+    /// <para>Static rather than an interface or a base class because the two callers share nothing else:
+    /// one is a read adapter over a fleet of SQL Server targets, the other is the store's own self-alert
+    /// evaluator, and a shared base would exist solely to carry four lines. The instance overload above
+    /// stays as the adapter's twelve reads' entry point so their forwarder shape — and the census pin that
+    /// derives from it — is untouched.</para>
+    /// </summary>
+    /// <param name="readFailures">
+    /// Where the retry is tallied, or null when nothing is counting. Passed explicitly so a caller whose
+    /// counter lives on its own instance does not have to route its reads through this type to be counted.
+    /// </param>
+    /// <param name="delay">
+    /// The pause between the two attempts, injected for the same reason the instance one is: a pin asserts
+    /// the seam WAITED <see cref="AlertPassRetryDelaySeconds"/> as a value rather than by sleeping.
+    /// </param>
+    internal static async Task<T> ExecuteWithOneRetryAsync<T>(
+        Func<CancellationToken, Task<T>> read,
+        string? serverKey,
+        string readName,
+        AlertReadFailureCounter? readFailures,
+        Func<TimeSpan, CancellationToken, Task> delay,
         CancellationToken passToken)
     {
         try
@@ -312,13 +353,13 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
                after the wait would drop every retry that a shutdown interrupts; recorded only on success
                would understate the bands' cost by exactly the episodes where the band was worst, and the
                surface's own note commits to counting both outcomes here. */
-            _readFailures?.RecordRetriedRead(serverKey, readName);
+            readFailures?.RecordRetriedRead(serverKey, readName);
 
             /* The pause, on the PASS's token: a service stopping mid-band must not spend two seconds per
                in-flight read waiting to re-ask a store it is shutting down. A trip here throws
                TaskCanceledException (measured), which is an OperationCanceledException — so the caller's
                own cancellation arm sees a cancellation, and no second attempt is made. */
-            await _delay(TimeSpan.FromSeconds(AlertPassRetryDelaySeconds), passToken);
+            await delay(TimeSpan.FromSeconds(AlertPassRetryDelaySeconds), passToken);
 
             /* The SAME read, re-invoked whole, under the SAME deadline its command carries. A failure on
                this attempt propagates: the caller's fault arm records it as today's single read failure,

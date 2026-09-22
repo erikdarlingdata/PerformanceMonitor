@@ -1026,7 +1026,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<double>? retentionHoldCriticalRatio = null,
         AlertReadFailureCounter? readFailures = null,
         string? storeName = null,
-        ISelfAlertDeliveryStampStore? deliveryStamps = null)
+        ISelfAlertDeliveryStampStore? deliveryStamps = null,
+        Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -1065,7 +1066,58 @@ internal sealed class DarlingSelfAlertEvaluator
            behavior, and what every test harness that does not care about restarts gets. Production
            passes the store-backed stamps. */
         _deliveryStamps = deliveryStamps;
+        /* #3854: the retry pause, injectable for the reason the adapter's is — a pin asserts the seam
+           waited AlertPassRetryDelaySeconds as a VALUE rather than by spending two real seconds. Production
+           gets Task.Delay, which is what the adapter defaults to as well. */
+        _retryDelay = retryDelay ?? Task.Delay;
     }
+
+    /// <summary>
+    /// The pause between a retried store read's two attempts (#3854), injectable so the seam's pins cost no
+    /// wall-clock time. See <see cref="DarlingAlertReadAdapter.ExecuteWithOneRetryAsync{T}(Func{CancellationToken, Task{T}}, string, string, AlertReadFailureCounter, Func{TimeSpan, CancellationToken, Task}, CancellationToken)"/>.
+    /// </summary>
+    private readonly Func<TimeSpan, CancellationToken, Task> _retryDelay;
+
+    /// <summary>
+    /// Runs one of this type's store reads through the alert pass's SHARED retry seam (#3854): on a command
+    /// timeout and nothing else, the read is re-asked once, <see cref="DarlingAlertReadAdapter.AlertPassRetryDelaySeconds"/>
+    /// later, and the retry is tallied on this evaluator's own <see cref="_readFailures"/>.
+    ///
+    /// <para><b>The seam is the adapter's, deliberately — one truth, not two.</b> #3848 gave the twelve reads
+    /// on <see cref="DarlingAlertReadAdapter"/> a retry; the seven reads this alert pass issues outside that
+    /// type — the six below and the worker's latest-CPU read — run on the SAME
+    /// <see cref="DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds"/> deadline and are counted on the
+    /// same <see cref="AlertReadFailureCounter"/>, so they want the same retry rather than their own. A
+    /// second seam here would be a second copy of one decision, free to disagree with the first the moment
+    /// either grew an arm — the argument #3848 already makes against fourteen copies inside one file,
+    /// applied one scope out. So this forwards to the adapter's static overload and adds nothing but this
+    /// type's counter and pause.</para>
+    ///
+    /// <para><b>What the shared discrimination deliberately excludes</b>, and why these reads want exactly
+    /// that: <see cref="DarlingAlertReadAdapter.IsCommandTimeout"/> is true for a
+    /// <see cref="TimeoutException"/> anywhere in the chain and for NOTHING else. It is false for a
+    /// <see cref="Npgsql.PostgresException"/> at every level — the store's own <c>statement_timeout</c> at
+    /// SQLSTATE <c>57014</c> is the backend ANSWERING, and an identical second attempt buys an identical
+    /// answer — false for a cancellation through the pass token, because a retry that outlives an orderly
+    /// stop while holding a fleet-sweep permit is guaranteed useless, and false for a reset socket or a torn
+    /// stream, which are connection faults rather than a read taking too long and which this pass's count
+    /// should keep saying out loud. The population the retry is FOR is this store's own write bands: a
+    /// Collection Signals or Agent Status read that crosses ten seconds inside a checkpoint fsync tail or a
+    /// compression band, which used to skip one cycle unretried.</para>
+    ///
+    /// <para>Every read below is a thin non-async forwarder over a private <c>…CoreAsync</c> sibling holding
+    /// its body verbatim, the shape <c>EveryStoreReadOnTheEvaluator_GoesOutThroughTheSeam</c> derives from
+    /// source — so an eighth read written in the old shape reds on the day it is written rather than
+    /// shipping unretried and silently blind.</para>
+    /// </summary>
+    /// <param name="serverId">
+    /// The server whose bucket a retry lands in, keyed exactly as <see cref="Key(int)"/> spells it for this
+    /// type's failure counts, so one read cannot carry two spellings across the two figures.
+    /// </param>
+    private Task<T> ReadWithOneRetryAsync<T>(
+        Func<CancellationToken, Task<T>> read, int serverId, string readName, CancellationToken passToken)
+        => DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(
+            read, Key(serverId), readName, _readFailures, _retryDelay, passToken);
 
     /// <summary>
     /// Where the two daily documents' DELIVERED-TODAY stamps live across restarts (#3580), or null when the
@@ -1137,7 +1189,7 @@ internal sealed class DarlingSelfAlertEvaluator
             catch (Exception ex)
             {
                 _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert", collectionReadClock.ElapsedMilliseconds);
+                _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -1160,7 +1212,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert", captureReadClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(Key(serverId), MissingCaptureSessionsReadName, captureReadClock.ElapsedMilliseconds);
         }
 
         var agentReadClock = Stopwatch.StartNew();
@@ -1205,7 +1257,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert", agentReadClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -1245,7 +1297,7 @@ internal sealed class DarlingSelfAlertEvaluator
             catch (Exception ex)
             {
                 _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert", agReadClock.ElapsedMilliseconds);
+                _readFailures?.RecordReadFailure(Key(serverId), AgStateReadName, agReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -5949,6 +6001,31 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /* ---------------- store reads ---------------- */
 
+    /* #3854: the name each of these reads is given AT THE SEAM is the same one its condition's catch arm
+       records a failure under, taken from one constant rather than spelled twice — so a read cannot carry
+       one name into the retry count and a different one into the failure count, which is the two-spellings
+       hazard AlertReadFailureSurfaceTests pins for the per-server bucket. The granularity is the CATCH
+       arm's, not the method's: the agent condition issues two reads inside one try and the AG condition
+       two, so each pair shares its condition's name exactly as its failures already do. */
+
+    /// <summary>The counter's name for the collection-stopped condition's read (#3013's spelling).</summary>
+    internal const string CollectionSignalsReadName = "collection-health self-alert";
+
+    /// <summary>The counter's name for the capture-down condition's read.</summary>
+    internal const string MissingCaptureSessionsReadName = "capture-down self-alert";
+
+    /// <summary>
+    /// The counter's name for the agent-not-running condition's TWO reads — the latest status and the
+    /// ever-seen-running capability probe share it because they share one catch arm and one condition.
+    /// </summary>
+    internal const string AgentStatusReadName = "agent-not-running self-alert";
+
+    /// <summary>
+    /// The counter's name for the Availability-Group condition's TWO reads, on the same reasoning: the
+    /// replica grain and the database grain are separately freshness-gated but failure-isolated together.
+    /// </summary>
+    internal const string AgStateReadName = "Availability-Group self-alert";
+
     /// <summary>
     /// One round trip for the collection-stopped signals: the newest SUCCESS/SKIPPED time across all of the
     /// server's collectors (a SKIPPED is a healthy no-op, matching the viewer's GetCollectionHealthAsync),
@@ -5980,7 +6057,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// 221 ms while the cold/contended excursions clocked 12.0–12.1 s and were swallowed as
     /// <c>instance_read_failures</c>.</para>
     /// </summary>
-    internal static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
+    internal Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
+        NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadCollectionSignalsCoreAsync(postgres, serverId, recentWindow, token),
+            serverId, CollectionSignalsReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsCoreAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -6068,7 +6152,14 @@ ORDER BY x.collector_name";
     /// server's whole newest chunk (1,158 buffers) instead of stopping at its first hit (5).</para>
     /// </summary>
 
-    internal static async Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
+    internal Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadMissingCaptureSessionsCoreAsync(postgres, serverId, token),
+            serverId, MissingCaptureSessionsReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<IReadOnlyList<string>> ReadMissingCaptureSessionsCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var missing = new List<string>();
@@ -6100,7 +6191,14 @@ ORDER BY x.collector_name";
     /// has not run once in the whole retained window is, for alerting purposes, a server that does not use Agent.
     /// It re-arms by itself the moment Agent runs again.</para>
     /// </summary>
-    internal static async Task<bool> HasAgentEverBeenSeenRunningAsync(
+    internal Task<bool> HasAgentEverBeenSeenRunningAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => HasAgentEverBeenSeenRunningCoreAsync(postgres, serverId, token),
+            serverId, AgentStatusReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<bool> HasAgentEverBeenSeenRunningCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -6123,7 +6221,14 @@ SELECT EXISTS
     /// that as "no signal" and does not judge. Static + parameterized so the gated live test can seed a row
     /// and assert the raw signal.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
+    internal Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, token),
+            serverId, AgentStatusReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -6167,7 +6272,14 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
     /// is the NORMAL result on a server with no Availability Groups.</para>
     /// Static + parameterized so a gated live test can seed rows and assert the raw signals.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
+    internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, token),
+            serverId, AgStateReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var replicas = new List<AgReplicaReading>();
@@ -6210,7 +6322,14 @@ ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAl
     /// for its stale rows, which would keep re-firing "AG Sync Fell Behind" off days-old lag readings.
     /// Same NULL-identity drop and same one-statement-per-command rule as the replica read.
     /// </summary>
-    internal static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
+    internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        => ReadWithOneRetryAsync(
+            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, token),
+            serverId, AgStateReadName, cancellationToken);
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var databases = new List<AgDatabaseReading>();
