@@ -122,6 +122,12 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.InRange(blocking.Metadata["observed_hours"], 0.99, 1.01);
         Assert.Equal(4.0, blocking.Metadata["period_hours"], precision: 6);
 
+        /* #3871's ≤4h degeneracy on this fixture too: a 4-hour window is one bucket under the
+           window-start origin, and the peak divides by min(4, observed) = the one observed hour, so the
+           graded value is exactly the 40/hr this pin has always asserted. */
+        Assert.InRange(blocking.Metadata["events_per_hour_peak_4h"], 39.5, 40.5);
+        Assert.Equal(40.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+
         var deadlocks = facts.First(f => f.Key == "DEADLOCKS");
         Assert.InRange(deadlocks.Value, 7.9, 8.1);
         Assert.InRange(deadlocks.Metadata["observed_hours"], 0.99, 1.01);

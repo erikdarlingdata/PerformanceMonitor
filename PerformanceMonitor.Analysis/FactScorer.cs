@@ -260,19 +260,22 @@ public class FactScorer
     /// </summary>
     private static double ScoreBlockingFact(Fact fact)
     {
-        var value = fact.Value; // events per hour
+        var value = fact.Value; // events per hour, over the busiest 4-hour sub-window since #3871
         if (value <= 0) return 0.0;
 
         return fact.Key switch
         {
-            // Blocking: concerning >10/hr, critical >50/hr. Inherited, not measured here. The alerting
-            // layer's blocking band (ServerHealthThresholds.BlockingWarnPerHour / BlockingCriticalPerHour
-            // in PerformanceMonitor.Common/ServerHealthBands.cs, #3539 A3) measured 14 days of
-            // blocked_process_reports on the same 43-server fleet and placed its WARNING at 5/hr and
-            // CRITICAL at 20/hr; this pair sits 2-2.5x above it and was deliberately NOT moved in the
-            // #3538 A5 pass — the scorer's blocking story reaches CRITICAL through its amplifiers
-            // (sleeping head blocker, lock waits, deadlocks) rather than on the count alone, so the two ladders
-            // are not the same instrument and aligning them is a decision on its own evidence.
+            // Blocking: concerning >10/hr, critical >50/hr — MEASURED, at the 4-hour grain, and the value
+            // graded here is that grain's: the busiest 4-hour sub-window of the pass, computed by the
+            // collectors (#3871), with the whole-window average kept beside it as events_per_hour context.
+            // Lineage: the primary production fleet's 14-day read (#3653 box (a), 2026-09-22) put non-zero
+            // 4-HOUR windows at p99 = 59 events/h with five windows >= 50, so the pair sits on the storm
+            // mode at the grain it was measured on — which is exactly why the value had to become the peak:
+            // graded as a 24-hour average the same storm read Information, graded at its own grain it reads
+            // CRITICAL on any pass length. (This paragraph supersedes the earlier "inherited, not measured"
+            // note: the #3539 A3 alerting band at 5/20 remains a different instrument — the scorer's story
+            // still reaches CRITICAL through its amplifiers — but the pair itself is now measured, not
+            // inherited.)
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
             // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
             // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448

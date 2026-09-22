@@ -71,10 +71,14 @@ public static class AnomalyThresholds
     /// <summary>
     /// Default ratio threshold for the wait-profile detector (peak window all-types ms/sec ÷ baseline
     /// mean). On the HONEST per-second scale now, so far below the old 5.0 that assumed a ~240x-inflated
-    /// input; matches the FactScorer WaitProfileRatioFloor. Still uncalibrated as of the 2026-09 dogfood
-    /// measurement (#3538 A5), which read each wait TYPE's fraction of a 4-hour window and not the
-    /// all-types ms/sec peak-over-baseline ratio this cutoff gates; the read that would calibrate it is
-    /// that ratio's own distribution over the fleet, one more column on the same pass.
+    /// input; matches the FactScorer WaitProfileRatioFloor.
+    ///
+    /// <para>MEASURED, 2026-09-22 (#3871 rider; the read #3538 A5 said would calibrate it): the ratio's
+    /// own distribution over 3,655 non-zero windows across two store classes over 14 days reads
+    /// p99 = 3.14 and p99.9 = 28.3, with 0.63% of windows above this bar — so 4.0 sits just past the
+    /// p99 and the bar's population is the storm tail it was guessed for. VALUE UNCHANGED by the
+    /// measurement; facts that gate on it stamp <c>threshold_lineage = 1</c> so a reader can tell a
+    /// measured bar from an inherited one.</para>
     /// </summary>
     public const double DefaultRatioThreshold = 4.0;
 
