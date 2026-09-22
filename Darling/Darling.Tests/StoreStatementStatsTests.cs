@@ -317,10 +317,11 @@ public class StoreStatementStatsTests
         var notLoaded = DarlingMcpStoreQueryStatsTools.PreconditionReason(State(loaded: false));
         Assert.Contains("installed but not loaded", notLoaded, StringComparison.Ordinal);
 
-        /* The cadence the remedies cite is the real one: hourly only on a TimescaleDB store. */
+        /* The cadence the remedies cite is the real one: every start and every hour, on every store shape
+           since #3913. */
         foreach (var reason in new[] { notInstalled, dropped, old, notBuilt, notGranted })
         {
-            Assert.Contains("hourly on a TimescaleDB store", reason, StringComparison.Ordinal);
+            Assert.Contains("at every start and again every hour", reason, StringComparison.Ordinal);
         }
     }
 

@@ -32,8 +32,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// must work with or without the module, so nothing here bumps the schema version or gates a viewer. The
 /// managed store preloads the library through the conf's v13 block. <see cref="EnsureAsync"/> is a step of the
 /// store-object convergence list (#3817), so it runs at every start and again on the hourly store-maintenance
-/// tick of a TimescaleDB store (that tick is gated on TimescaleDB, so a plain-PostgreSQL store re-runs it at its
-/// next start). It is idempotent, and it leaves any store that cannot have the module in a named state that
+/// tick, on every store shape (#3913). It is idempotent, and it leaves any store that cannot have the module in a named state that
 /// <c>get_store_query_stats</c> reports with its remedy.</para>
 ///
 /// <para><b>Why a SECURITY DEFINER function.</b> The view shows every role's statement statistics to anyone,

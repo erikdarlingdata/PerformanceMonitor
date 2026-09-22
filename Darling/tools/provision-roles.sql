@@ -111,7 +111,7 @@ ALTER ROLE viewer SET statement_timeout = '15s';
 --          also lets that login read every session's query text and every database's statements on the
 --          cluster, and in bring-your-own mode the web dashboard and MCP server connect as that login. On a
 --          cluster shared with other applications, leave it out.
---     The service builds its reader functions at its next start (and hourly on a TimescaleDB store).
+--     The service builds its reader functions at its next start, and then within the hour.
 ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
 ALTER ROLE viewer SET log_parameter_max_length = 0;
 
