@@ -151,6 +151,26 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal(2, backlog.Metadata[PgTargetScorer.BacklogTablesKey]);
             Assert.InRange(backlog.Metadata[PgTargetScorer.BacklogHoursSinceLastAutovacuumKey], 0.3, 0.4);
 
+            /* #3691 lane 43 (M3): the read returns three rows now, so the two tables that met the gate both ride
+               on Ranked in the read's own ORDER BY — and [0] IS the subject, same name and same value as the
+               fact's, which is the invariant FactRankedTests pins. appendonly is ranked on its INSERT arm (its
+               dead-tuple ratio is zero), which is why each row re-derives its own arm rather than inheriting the
+               subject's: a shared arm would have put appendonly's dead tuples under a slope its line never
+               governed. Figures are the un-prefixed backlog metadata names, so a reader who knows the fact's
+               metadata knows these. */
+            Assert.Equal(2, backlog.Ranked.Count);
+            Assert.Equal("public.hot", backlog.Ranked[0].ObjectName);
+            Assert.Equal("appdb", backlog.Ranked[0].DatabaseName);
+            Assert.Equal(5.0, backlog.Ranked[0].Value, precision: 6);
+            Assert.Equal(5.0, backlog.Ranked[0].Figures![PgTargetScorer.BacklogRatioKey], precision: 6);
+            Assert.Equal(3.0, backlog.Ranked[0].Figures[PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal((5_250 - 2_000) / 3.0, backlog.Ranked[0].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
+            Assert.Equal("public.appendonly", backlog.Ranked[1].ObjectName);
+            Assert.Equal(50_000 / 21_000.0, backlog.Ranked[1].Value, precision: 6);
+            Assert.Equal(50_000 / 21_000.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogRatioKey], precision: 6);
+            Assert.Equal(2.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal((50_000 - 30_000) / 2.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
+
             var wraparound = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WraparoundTrend);
             Assert.Equal("appdb", wraparound.DatabaseName);
             Assert.Equal(220_000_000, wraparound.Value);
@@ -223,6 +243,14 @@ public sealed class PgTargetVacuumLiveTests
                 var advice = chain.GetProperty("advice");
                 Assert.Contains("public.hot in appdb carries 5,250 dead tuples, 5× its own autovacuum trigger line, for 4 consecutive samples", advice.GetProperty("headline").GetString(), StringComparison.Ordinal);
                 Assert.Contains("rose at 1,083 per hour", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
+                /* #3691 lane 43 (M3): the clause the retired one-row limit could not write. Before it the card
+                   said "1 other table is persistently past their line too" and the operator had to call
+                   get_pg_autovacuum to learn which; the population sentence still says that, and now the
+                   persistence sentence names the table with its own ratio, span and slope. */
+                Assert.Contains(
+                    "; and one more: public.appendonly (2.4× for 2 hours, 10,000/h and rising). ",
+                    advice.GetProperty("investigation").GetString(),
+                    StringComparison.Ordinal);
                 Assert.Contains("autovacuum ran on the table 2 times", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("PG_XMIN_HOLD co-fired", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("Resolve PG_XMIN_HOLD first", advice.GetProperty("remediation").GetString(), StringComparison.Ordinal);
@@ -355,6 +383,18 @@ public sealed class PgTargetVacuumLiveTests
             Assert.Equal("public.frozen", backlog.ObjectName);
             Assert.Equal(1, backlog.Metadata[PgTargetScorer.BacklogTableAutovacuumDisabledKey]);
             Assert.Equal(2, backlog.Metadata[PgTargetScorer.BacklogTablesKey]);
+
+            /* #3691 lane 43 (M3): the disabled table leads the rank (the read's ORDER BY puts
+               autovacuum_disabled first) and hot rides second, so the backlog card names it. hot's dead tuples
+               are flat across its run, which is a ZERO slope and says so — an absent slope figure means the run
+               had no span to divide by, and the two must not read alike. */
+            Assert.Equal(2, backlog.Ranked.Count);
+            Assert.Equal("public.frozen", backlog.Ranked[0].ObjectName);
+            Assert.Equal(4.0, backlog.Ranked[0].Value, precision: 6);
+            Assert.Equal("public.hot", backlog.Ranked[1].ObjectName);
+            Assert.Equal(2.0, backlog.Ranked[1].Value, precision: 6);
+            Assert.Equal(6.0, backlog.Ranked[1].Figures![PgTargetScorer.BacklogHoursKey], precision: 6);
+            Assert.Equal(0.0, backlog.Ranked[1].Figures[PgTargetScorer.BacklogSlopePerHourKey], precision: 6);
 
             /* Scored: the card at its flat band with lineage 1; the backlog at 4× (0.67) lifted by the reloption
                boost past it, so the backlog leads. */
