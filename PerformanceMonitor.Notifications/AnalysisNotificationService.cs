@@ -79,8 +79,11 @@ public sealed class AnalysisNotificationService
 
     /// <summary>One bucket's memory: when it last notified, at what severity, and when its story was
     /// last SEEN (notified or held — the prune horizon runs on this, so a persisting story cannot age
-    /// back into freshness while it keeps firing).</summary>
-    private sealed record BucketState(DateTime LastNotified, double LastNotifiedSeverity, DateTime LastSeen);
+    /// back into freshness while it keeps firing), and whether that notification was DELIVERED.
+    /// <para>#3916: <c>Delivered</c> is what arms the #2054 steady-severity hold. A hold must be earned by a
+    /// delivery — a bucket stamped by a send that reached no one throttles re-attempts to one per
+    /// cooldown but does not hold the story silent.</para></summary>
+    private sealed record BucketState(DateTime LastNotified, double LastNotifiedSeverity, DateTime LastSeen, bool Delivered);
 
     /// <summary>
     /// How much a story's severity must rise over its last-notified level to re-notify while it keeps
@@ -248,16 +251,21 @@ public sealed class AnalysisNotificationService
             }
 
             /* Seed each not-yet-known PAGE bucket from the alert log on first lookup so a symptom that
-               fired shortly before an app restart is not re-fired afterward. The persisted equivalent
-               is the latest row for that member's metric_name (which embeds the finding's hash).
+               was DELIVERED shortly before an app restart is not re-fired afterward. The persisted
+               equivalent is the latest DELIVERED-page row for that member's metric_name (which embeds the
+               finding's hash) — #3916: a hold must be earned by a delivery. The seed used to read the
+               latest row regardless of delivery, and a month-old undelivered row (no channel reached
+               anyone) held one production story silent for 35 days; a row that reached no one now seeds
+               nothing, so the story is heard on its next firing. Seeded buckets are Delivered by
+               construction, because the read admits only delivered rows.
                History carries no severity, so the seed conservatively assumes the notify threshold —
                the minimum a notified finding can have had — and the first post-restart re-notify needs
                threshold + WorseningStep (#2054). Below-critical members share one bucket, so only the
                first (highest-severity) below-critical member — the one that would lead a
                below-critical e-mail — is looked up.
 
-               #3712: the store's seed read EXCLUDES digest-routed rows (IAlertHistoryStore.GetLastAlertTimeAsync,
-               both SKUs), so a digest entry written before a restart cannot seed the page bucket of the
+               #3712: the store's seed read EXCLUDES digest-routed rows (IAlertHistoryStore.GetLastDeliveredPageUtcAsync,
+               every SKU), so a digest entry written before a restart cannot seed the page bucket of the
                escalation that follows it. The DIGEST namespace is deliberately NOT seeded: there is no
                route-filtered seed on the sender seam, and the cost of not having one is bounded and
                channel-free — after a restart a standing single is re-recorded in the ledger once, no
@@ -272,7 +280,7 @@ public sealed class AnalysisNotificationService
                         continue;
                     var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
                     if (lastPersisted.HasValue)
-                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
+                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now, Delivered: true));
                 }
             }
 
@@ -286,6 +294,11 @@ public sealed class AnalysisNotificationService
                fleet truth notifies once per server, not once per cooldown expiry. The whole incident
                is held only when EVERY member holds (send-if-any-fresh, unchanged).
 
+               #3916: the steady-severity arm applies only to a bucket whose last send was DELIVERED. An
+               undelivered story re-attempts once per cooldown (floor 30 min), not every cycle: every
+               cycle would write a history row per story per analysis interval on a store with no channel
+               configured — a row flood — and once per cooldown is the email family's effective bound.
+
                #3712: on the page road only a PAGE-routed member may lead — a digest-routed single in a
                paging incident is named as co-fired, never put at the head of a page it did not earn.
                On the digest road every member is digest-routed and any may lead. */
@@ -295,7 +308,7 @@ public sealed class AnalysisNotificationService
                 if (route == FindingRoute.Page && decisions[m].Route != FindingRoute.Page)
                     continue;
                 if (_cooldowns.TryGetValue(BucketKey(m), out var state)
-                    && (now - state.LastNotified < cooldown || m.Severity < state.LastNotifiedSeverity + WorseningStep))
+                    && (now - state.LastNotified < cooldown || (state.Delivered && m.Severity < state.LastNotifiedSeverity + WorseningStep)))
                     continue;
                 lead = m;
                 break;
@@ -340,12 +353,13 @@ public sealed class AnalysisNotificationService
                     context.Details.Add(new AlertDetailItem { Heading = "Co-fired in this incident", Body = coFired });
 
                 /* SendFindingAlertAsync fans out to email + Slack + Teams and records the
-                   alert per this app's cadence. It returns no success/failure signal, so the
-                   buckets are stamped regardless — a symptom whose delivery failed is
-                   suppressed for the full cooldown (accepted best-effort behavior). On the digest
-                   road (#3712) the sender consults no channel and records the row with the digest
+                   alert per this app's cadence, and returns the AlertDelivery the row recorded
+                   (#3916; null = the sender caught). Every send stamps the buckets' cooldown below —
+                   that throttles a no-channel store to one re-attempt per cooldown rather than a row
+                   per cycle — but only a DELIVERED send arms the #2054 hold. On the digest road
+                   (#3712) the sender consults no channel and records the row with the digest
                    disposition; the same call, so the two roads cannot drift in what they persist. */
-                await _sender.SendFindingAlertAsync(new FindingAlert(
+                var delivery = await _sender.SendFindingAlertAsync(new FindingAlert(
                     FindingMessageFormatter.MetricName(lead),
                     lead.ServerName,
                     FindingMessageFormatter.CurrentValue(lead),
@@ -387,12 +401,22 @@ public sealed class AnalysisNotificationService
                    (lower) members must not overwrite it downward, or a mid-severity member would
                    spuriously "worsen" past the lowest next cycle. Stamped in the namespace of the road
                    taken (BucketKey), so a digest entry never occupies a page bucket. */
+                /* #3916: what the hold is earned by. The page road is delivered when a channel sent
+                   (email/webhook) OR a tray sink is wired — a wired sink is Dashboard's toast, raised just
+                   above, and Dashboard is the only host that wires one (Lite and Darling wire none, so
+                   there only a sent channel counts). The digest road is Delivered: its delivery IS the
+                   ledger record — it never reaches a channel by design — and an undelivered digest bucket
+                   would re-record a standing single every cooldown. */
+                var delivered = route == FindingRoute.Digest
+                    || delivery?.Sent == true
+                    || _showTrayNotification is not null;
+
                 var stamped = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var m in members)
                 {
                     var key = BucketKey(m);
                     if (stamped.Add(key))
-                        _cooldowns[key] = new BucketState(now, m.Severity, now);
+                        _cooldowns[key] = new BucketState(now, m.Severity, now, delivered);
                 }
             }
             catch (Exception ex)
