@@ -99,11 +99,20 @@ public sealed class McpLatestSnapshotStampTests
     ];
 
     /// <summary>
-    /// The latest reads this lane did NOT reach: the object-stats family reads the latest DAILY snapshot per
-    /// database (<c>DarlingObjectStatsReader.IndexLockingSql</c> takes MAX per database, not one instant) and
+    /// The latest reads this lane did NOT reach: the object-stats family reads the latest DAILY snapshot and
     /// publishes no stamp at all on either SKU. Named here so the census fails the day one of them gains
     /// <c>captured_at</c> without leaving this list, and so the gap is on the record rather than invisible.
     /// Reported to #3541 as the A10 residual.
+    ///
+    /// <para><b>The parenthetical this comment used to carry is now false, and its correction is a reason the
+    /// residual is easier to close than it was.</b> It said
+    /// <c>DarlingObjectStatsReader.IndexLockingSql</c> "takes MAX per database, not one instant" — true when
+    /// written, and the defect #3878 removed: a per-<c>database_name</c> MAX group is not one instant, which
+    /// is precisely why it kept returning databases renamed away a month earlier (#3876). All four Darling
+    /// locking reads now anchor on <c>(SELECT MAX(collection_time) … WHERE server_id = $1)</c>, so this read
+    /// IS one instant, like the rest of the family — exactly the property a <c>captured_at</c> stamp needs to
+    /// be truthful about. It stays on this list because it is still UNSTAMPED, which is the only thing the
+    /// list claims; nothing about the anchor exempts it from the sweep below.</para>
     /// </summary>
     public static readonly string[] UnstampedLatestReadsPendingA10 =
     [
