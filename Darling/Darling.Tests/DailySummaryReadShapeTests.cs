@@ -377,7 +377,7 @@ public sealed class DailySummaryReadShapeLiveTests
 
         /* The legacy hourly's ceiling is D5 (the seed materializes D0, D3, D4 and D5); every window day at or
            below it is a candidate, and the ones the rollup holds no row for are probed at the source. */
-        var candidates = Enumerable.Range(0, (days[5] - from).Days + 1).Count();
+        var candidates = (days[5] - from).Days + 1;
         var rollupEmpty = candidates - 4;
 
         var candidateDays = inQueries.Single(n => NodeType(n) == "Function Scan"
@@ -434,14 +434,7 @@ public sealed class DailySummaryReadShapeLiveTests
 
     /* ───────────────────────────── seed ───────────────────────────── */
 
-    /// <summary>
-    /// Nine whole UTC days, D0 thirteen days back, all past RawMaxAge and below every refresh policy's window,
-    /// so a background policy run cannot materialize what the seed leaves unmaterialized. D0: 3 hashes. D1:
-    /// nothing. D2: 5 hashes, skipped by the hourly and the daily (the hole). D3: 4 hashes and a NULL-hash row.
-    /// D4: one restart row (interval 0). D5: 6. D6: 2. D7: 3. D8: 1. Refreshed: the legacy hourly over D0-D1 and
-    /// D3-D5 (ceiling D5); the successor over D0 and D3 (ceiling D3; it rejects D4's restart row); the daily over
-    /// D0 and D3 (ceiling D3).
-    /// </summary>
+    /// <summary>A seeded scratch store: its open connection and the seed's days, disposed together.</summary>
     private sealed class Seeded(ScratchPostgres scratch, NpgsqlConnection connection, DateTime[] days) : IAsyncDisposable
     {
         public NpgsqlConnection Connection { get; } = connection;
@@ -455,6 +448,14 @@ public sealed class DailySummaryReadShapeLiveTests
         }
     }
 
+    /// <summary>
+    /// Nine whole UTC days, D0 thirteen days back, all past RawMaxAge and below every refresh policy's window,
+    /// so a background policy run cannot materialize what the seed leaves unmaterialized. D0: 3 hashes. D1:
+    /// nothing. D2: 5 hashes, skipped by the hourly and the daily (the hole). D3: 4 hashes and a NULL-hash row.
+    /// D4: one restart row (interval 0). D5: 6. D6: 2. D7: 3. D8: 1. Refreshed: the legacy hourly over D0-D1 and
+    /// D3-D5 (ceiling D5); the successor over D0 and D3 (ceiling D3; it rejects D4's restart row); the daily over
+    /// D0 and D3 (ceiling D3).
+    /// </summary>
     private static async Task<Seeded> SeedAsync(string what)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -464,39 +465,45 @@ public sealed class DailySummaryReadShapeLiveTests
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        if (!await TimescaleSupport.TryEnableAsync(connection, null, ct))
+        try
         {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            Assert.SkipWhen(!await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
+                $"{what} needs TimescaleDB: a rollup tier exists only as a continuous aggregate.");
+
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            await RegisterServerAsync(connection, ct);
+
+            var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-13), DateTimeKind.Unspecified);
+            var days = Enumerable.Range(0, 9).Select(n => d0.AddDays(n)).ToArray();
+            Assert.True(DateTime.UtcNow - days[^1].AddDays(1) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
+
+            foreach (var (day, hashes) in new[] { (0, 3), (2, 5), (3, 4), (5, 6), (6, 2), (7, 3), (8, 1) })
+            {
+                await PlantDayAsync(connection, days[day], hashes, ct);
+            }
+
+            await PlantRowAsync(connection, days[3].AddHours(12), queryHash: null, intervalSeconds: 1200, ct);
+            await PlantRowAsync(connection, days[4].AddHours(6), queryHash: "0xRESTART", intervalSeconds: 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[0], days[2], ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[3], days[6], ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, days[0], days[1], ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, days[3], days[5], ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, days[0], days[1], ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, days[3], days[4], ct);
+
+            return new Seeded(scratch, connection, days);
+        }
+        catch
+        {
+            /* A skip is an exception too: the scratch database goes with it either way. */
             await connection.DisposeAsync();
             await scratch.DisposeAsync();
-            Assert.Skip($"{what} needs TimescaleDB: a rollup tier exists only as a continuous aggregate.");
+            throw;
         }
-
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        await RegisterServerAsync(connection, ct);
-
-        var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-13), DateTimeKind.Unspecified);
-        var days = Enumerable.Range(0, 9).Select(n => d0.AddDays(n)).ToArray();
-        Assert.True(DateTime.UtcNow - days[^1].AddDays(1) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
-
-        foreach (var (day, hashes) in new[] { (0, 3), (2, 5), (3, 4), (5, 6), (6, 2), (7, 3), (8, 1) })
-        {
-            await PlantDayAsync(connection, days[day], hashes, ct);
-        }
-
-        await PlantRowAsync(connection, days[3].AddHours(12), queryHash: null, intervalSeconds: 1200, ct);
-        await PlantRowAsync(connection, days[4].AddHours(6), queryHash: "0xRESTART", intervalSeconds: 0, ct);
-
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[0], days[2], ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[3], days[6], ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, days[0], days[1], ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, days[3], days[5], ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, days[0], days[1], ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, days[3], days[4], ct);
-
-        return new Seeded(scratch, connection, days);
     }
 
     private static async Task PlantDayAsync(NpgsqlConnection connection, DateTime day, int hashes, CancellationToken ct)
