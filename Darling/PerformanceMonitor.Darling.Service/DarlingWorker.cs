@@ -2140,11 +2140,17 @@ public sealed class DarlingWorker : BackgroundService
                 }
             },
             _logger);
+        /* #3916 PR B: pages wait out a hold-back window, so the flush re-reads the mute registry — a mute
+           written inside the window drops the queued page. The read fails OPEN (logged, "not muted"): the
+           finding already passed the queue-time mute filter in PgFindingStore. */
+        var muteReadStore = new PgFindingStore(postgres, _logger);
         var notificationService = new AnalysisNotificationService(
             new DarlingFindingAlertSender(alertSettings, historyStore, webhookAlertService, _logger),
             alertSettings,
             finding => finding.ServerId.ToString(CultureInfo.InvariantCulture),
-            _loggerFactory.CreateLogger<AnalysisNotificationService>());
+            _loggerFactory.CreateLogger<AnalysisNotificationService>(),
+            isStoryMuted: async (serverId, storyPathHash) =>
+                (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a

@@ -799,6 +799,28 @@ ORDER BY local_bucket, story_path_hash";
     }
 
     /// <summary>
+    /// #3916 PR B: the muted story hashes for one server under its own read lock and connection — the read
+    /// the shared <c>AnalysisNotificationService</c> re-checks at its hold-back flush, so a mute applied
+    /// inside the window drops the queued page. Fails OPEN (an empty set, logged): the finding already
+    /// passed the queue-time mute filter, so an unreadable registry means "not muted".
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetMutedStoryHashesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            return await GetMutedHashesAsync(connection, serverId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("FindingStore", $"GetMutedStoryHashesAsync failed (treated as not muted): {ex.Message}");
+            return new HashSet<string>();
+        }
+    }
+
+    /// <summary>
     /// Reads muted story hashes on an already-open connection. The caller owns the read
     /// lock and connection (NoRecursion lock — do not re-acquire here). Used by
     /// FilterMutedFindingsAsync so the mute-filter read reuses that phase's connection.
