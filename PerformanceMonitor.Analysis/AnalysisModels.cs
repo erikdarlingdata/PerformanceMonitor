@@ -4,6 +4,43 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
+/// One object a summary fact RANKS, in that fact's own units (#3691 lane 43). A summary card names its top
+/// few; the list of every object is a tool's job, which is why this is capped at
+/// <see cref="FactRanked.MaxObjects"/> and not a page of rows.
+///
+/// <para><b>The invariant.</b> Entry <c>[0]</c> IS the fact's own subject — <see cref="Fact.ObjectName"/> and
+/// <see cref="Fact.Value"/> — so a card has ONE truth about what it is about and the advice never has to
+/// decide between two spellings of the worst object. The order is the collector's rank (its read's ORDER BY),
+/// never re-sorted here; <c>FactRankedTests</c> pins all of it over the collectors' planted fixtures.</para>
+///
+/// <para><b>Why <see cref="Figures"/> is a dictionary and not fields.</b> Each family ranks on its own
+/// quantity and states its own figures — a ratio and hours for the autovacuum-disabled card, growth bytes /
+/// percent / dead tuples for the bloat trend — and a shared record cannot name them all without becoming a
+/// union of every family that ever ranks. Doubles for the same reason <see cref="Fact.Metadata"/> is doubles:
+/// figures are numbers, names are the record's own <see cref="ObjectName"/>. Null when the rank needs no
+/// figures beyond <see cref="Value"/>. The keys are the family's UN-PREFIXED metadata names, so a reader who
+/// knows the fact's metadata knows these.</para>
+/// </summary>
+public sealed record RankedObject(
+    string ObjectName,
+    string? DatabaseName,
+    double Value,
+    IReadOnlyDictionary<string, double>? Figures = null);
+
+/// <summary>
+/// The cap on <see cref="Fact.Ranked"/>, in one place because it is a DESIGN decision rather than a per-family
+/// preference: three is the number #3761's autovacuum-disabled read already chose, and the argument is that the
+/// card is a summary, not the list — a collector that wants more rows is asking for a drill-down or a tool
+/// (<c>get_pg_autovacuum_health</c>, <c>get_pg_index_usage</c>), both of which exist. Ruled by the maintainer,
+/// 2026-09-22.
+/// </summary>
+public static class FactRanked
+{
+    /// <summary>How many objects a fact may rank, entry [0] (the fact's own subject) included.</summary>
+    public const int MaxObjects = 3;
+}
+
+/// <summary>
 /// A scored observation from collected data.
 /// </summary>
 public class Fact
@@ -19,9 +56,24 @@ public class Fact
     /// <summary>
     /// Optional object name (schema.table, optionally with an index) for object-scoped facts such as
     /// the ANOMALY_OBJECT_* anomalies — the name the source query selected but the doubles-only
-    /// <see cref="Metadata"/> cannot carry.
+    /// <see cref="Metadata"/> cannot carry. A fact whose read ranked several objects carries the rest of
+    /// them, with their own figures, in <see cref="Ranked"/> — this name is that list's first entry.
     /// </summary>
     public string? ObjectName { get; set; }
+
+    /// <summary>
+    /// The objects this fact ranks, worst first, entry [0] being the fact's own subject
+    /// (<see cref="ObjectName"/> / <see cref="Value"/>) — see <see cref="RankedObject"/> for the invariant and
+    /// the cap. Empty for the overwhelming majority of facts: a fact about a server, a setting or a single
+    /// object ranks nothing, and an empty list is what byte-identity rests on (the payloads emit
+    /// <c>ranked</c> only at two or more entries, and no SQL Server collector sets this at all).
+    ///
+    /// <para><b>Ephemeral by construction.</b> Only <see cref="AnalysisFinding"/> is persisted;
+    /// <c>Fact</c> lives for one pass and <c>get_analysis_facts</c> re-runs the collect+score to answer.
+    /// So this needed no migration rung and no store column — the difference between naming the top few on a
+    /// card and reading them back later, which is the drill-down's job.</para>
+    /// </summary>
+    public List<RankedObject> Ranked { get; set; } = [];
 
     /// <summary>
     /// Raw metric values for analysis and audit trail.

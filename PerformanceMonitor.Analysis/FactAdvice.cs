@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -53,6 +54,59 @@ public static class FactAdvice
     /// reason.
     /// </summary>
     public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+
+    /// <summary>
+    /// The ONE clause a card gains when its fact ranked more objects than its own subject (#3691 lane 43):
+    /// <c>"; and two more: public.orders (3.1× for 5 hours), public.events (1.4× for 2 hours)"</c>. Appends to
+    /// the sentence that states the SUBJECT's figures, because <see cref="Fact.Ranked"/>[0] IS the subject — so
+    /// "two more" is literally "besides the one just described" and can never be read as two more than the
+    /// population count a card states separately.
+    ///
+    /// <para><b>Empty string below two ranked objects</b>, which is the byte-identity arm and the reason this
+    /// returns a clause rather than composing a sentence: a caller interpolates it into the prose it already
+    /// had, so every fact that ranks nothing (nearly all of them, and every SQL Server fact — no SQL Server
+    /// collector sets <see cref="Fact.Ranked"/>) renders the characters it rendered before. Pinned by
+    /// <c>FactRankedTests</c>.</para>
+    ///
+    /// <para><b>Why the figures come from a callback.</b> Each family states its rank in its own units and its
+    /// own words — a ratio and a duration here, bytes and a percentage there — and the numbers live in
+    /// <see cref="RankedObject.Figures"/> under that family's own metadata names. A shared formatter would
+    /// either have to know every family or print raw doubles, so the family passes its own one-line formatter
+    /// and this owns only the grammar. Return an empty string from it for an object whose name is the whole
+    /// statement and the parentheses are omitted.</para>
+    ///
+    /// <para>Lives in this shared file rather than in <c>PgTargetAdvice</c> because the seam it reads is shared:
+    /// <see cref="Fact.Ranked"/> is on <see cref="Fact"/>, and the first SQL Server family that ranks objects
+    /// must not have to grow a second copy of this grammar to say the same thing. Today's three callers are all
+    /// PostgreSQL-target.</para>
+    /// </summary>
+    public static string NameTheRest(Fact fact, Func<RankedObject, string> figures)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        ArgumentNullException.ThrowIfNull(figures);
+
+        if (fact.Ranked.Count < 2)
+            return string.Empty;
+
+        var rest = fact.Ranked.Skip(1).ToList();
+        var named = rest.Select(o =>
+        {
+            var text = figures(o) ?? string.Empty;
+            return text.Length == 0 ? o.ObjectName : $"{o.ObjectName} ({text})";
+        });
+
+        /* Spelled out to three, which is FactRanked.MaxObjects — the numeral arm exists so a cap raised without
+           touching this file reads as English rather than as "and 4 more" beside spelled-out siblings. */
+        var count = rest.Count switch
+        {
+            1 => "one",
+            2 => "two",
+            3 => "three",
+            _ => rest.Count.ToString(CultureInfo.InvariantCulture),
+        };
+
+        return $"; and {count} more: {string.Join(", ", named)}";
+    }
 
     /// <summary>
     /// Looks up advice for a fact-key. Returns null if the key is unknown.
