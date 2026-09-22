@@ -12,7 +12,8 @@ namespace PerformanceMonitor.Analysis;
 
 /// <summary>
 /// <c>pg_memory</c> — the memory-composition family (filled by lane 32 of #3691, design §4b): does the configuration
-/// FIT the host? Two facts. <c>CONFIG_PG_MEMORY_OVERCOMMIT</c> is the configured worst case —
+/// FIT the host? Two facts. <c>CONFIG_PG_MEMORY_OVERCOMMIT</c> is the worst case (since lane 47, formed at the window's
+/// peak backend count when one was sampled — <see cref="MemoryOvercommitBasisKey"/> — the configured figure stated beside it) —
 /// <c>shared_buffers + max_connections × work_mem × (1 + max_parallel_workers_per_gather) + autovacuum_max_workers ×
 /// maintenance_work_mem + wal_buffers</c>, every term read from the latest <c>pg_server_config</c> snapshot through
 /// <c>PgSettingValue</c> — as a RATIO of the host's <c>memory_total_bytes</c>, which rides <c>pg_cpu_utilization</c>'s
@@ -59,7 +60,8 @@ public static partial class PgTargetScorer
     /// and <c>autovacuum_max_workers × (autovacuum_work_mem or maintenance_work_mem)</c>.</summary>
     public const string MemoryBackendTermBytesKey = "backend_term_bytes";
     public const string MemoryAutovacuumTermBytesKey = "autovacuum_term_bytes";
-    /// <summary>The whole sum in bytes — the numerator of the ratio.</summary>
+    /// <summary>The whole configured sum in bytes — the numerator of <see cref="MemoryConfiguredOvercommitRatioKey"/>, and of
+    /// the graded ratio only when no concurrency was observed (basis 0).</summary>
     public const string MemoryWorstCaseBytesKey = "configured_worst_case_bytes";
     /// <summary>The host's <c>memory_total_bytes</c> over the window's memory-carrying samples: the MINIMUM is the
     /// denominator (the tightest box the window saw), the maximum is stated so a Serverless reader sees the range.</summary>
@@ -69,8 +71,26 @@ public static partial class PgTargetScorer
     /// NULL on a provisioned class), 0 otherwise; the minimum configured figure rides beside it when 1.</summary>
     public const string MemoryIsServerlessKey = "is_serverless";
     public const string MemoryConfiguredMinBytesKey = "configured_memory_min_bytes";
-    /// <summary>The fact's value, repeated by name: the sum over the minimum total.</summary>
+    /// <summary>The fact's value, repeated by name, and the ratio the scorer grades: the worst case over the minimum total —
+    /// at the window's peak backend count when <see cref="MemoryOvercommitBasisKey"/> is 1, the configured worst case when
+    /// it is 0.</summary>
     public const string MemoryOvercommitRatioKey = "overcommit_ratio";
+    /// <summary>Which worst case <see cref="MemoryOvercommitRatioKey"/> carries (#3691 lane 47, Erik's ruling on the D2
+    /// read): 1 = observed — the backend term formed from the window's peak <c>pg_database_stats.numbackends</c>, clamped to
+    /// <c>max_connections</c>; 0 = configured — no instant in the window sampled the level (a pre-V133 store, an empty
+    /// <c>pg_database_stats</c> window), so the permission is the only statement the store supports and is what was graded.</summary>
+    public const string MemoryOvercommitBasisKey = "overcommit_basis";
+    /// <summary>The configured worst case over the minimum total — every <c>max_connections</c> slot sorting at once. Always
+    /// stamped; stated, and graded only at basis 0.</summary>
+    public const string MemoryConfiguredOvercommitRatioKey = "configured_overcommit_ratio";
+    /// <summary>The window's peak <c>numbackends</c> summed across databases at one instant, as read (a peak above
+    /// <c>max_connections</c> stays visible here; the clamp lives in the observed term), and how many sampled instants the
+    /// window had. The peak is absent, never 0, when no instant sampled it; the sample count is always stamped.</summary>
+    public const string MemoryPeakBackendsKey = "peak_backends";
+    public const string MemoryPeakBackendsSamplesKey = "peak_backends_samples";
+    /// <summary>The backend term and the whole worst case at the observed concurrency, in bytes — present only at basis 1.</summary>
+    public const string MemoryObservedBackendTermBytesKey = "observed_backend_term_bytes";
+    public const string MemoryObservedWorstCaseBytesKey = "observed_worst_case_bytes";
     /// <summary>1 when the ratio is at or past <see cref="OvercommitCriticalRatio"/> — stated, and read by the band amplifier.</summary>
     public const string MemoryOvercommitCriticalBandKey = "overcommit_critical_band";
     /// <summary>The planner's <c>effective_cache_size</c> in bytes and whether it exceeds the host's MINIMUM total — the
@@ -112,7 +132,9 @@ public static partial class PgTargetScorer
        per-backend allocation model (shared_buffers once; work_mem per sort/hash node per backend, and per parallel
        worker; maintenance_work_mem or autovacuum_work_mem per autovacuum worker; wal_buffers once), and "the sum
        exceeds the box" is arithmetic, not a judgment. At or past it the configuration CAN exceed physical memory if
-       every backend spills once — which is what the advisory says, no more. */
+       every backend spills once — which is what the advisory says, no more. Since lane 47 of #3691 (Erik's ruling on
+       the D2 read) the line is applied to the OBSERVED ratio — the worst case at the window's peak backend count, basis 1
+       — and to the configured ratio only when no concurrency was observed (basis 0). */
     public const double OvercommitRatioLine = 1.0;
 
     /* unmeasured: chosen, not measured — calibrate against pg_server_config × pg_cpu_utilization before the next
