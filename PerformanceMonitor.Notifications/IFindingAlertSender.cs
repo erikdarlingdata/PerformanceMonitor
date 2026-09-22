@@ -82,20 +82,26 @@ public static class FindingSummary
     /// <summary>The fingerprint kind each named page carries on the summary's context.</summary>
     public const string IncidentKind = "analysis";
 
-    /// <summary>Composes the one summary message: a server label, a headline value, and a context with one
-    /// detail item and one dedup incident per named page, so the send core's per-fingerprint cooldown
-    /// (#1154) and repeat budget (#3430) treat each named page individually.</summary>
+    /// <summary>Composes the one summary message. The headline says how many incidents across how many
+    /// servers; one detail item per named page names its server, story and severity, in the order given —
+    /// the analysis service hands the list over newest first by AnalysisTime, then by severity, so every
+    /// SKU renders the same order. The context carries one dedup incident per named page, so the send
+    /// core's per-fingerprint cooldown (#1154) and repeat budget (#3430) treat each page individually.</summary>
     public static (string ServerName, string CurrentValue, AlertContext Context) Compose(IReadOnlyList<FindingAlert> named)
     {
         var servers = named.Select(a => a.ServerName).Distinct(StringComparer.Ordinal).ToList();
         var serverName = servers.Count == 1 ? servers[0] : $"{servers.Count} servers";
-        var currentValue = $"{named.Count} analysis findings held in one window";
+        var currentValue = Heading(named.Count, servers.Count);
         var context = new AlertContext { Incidents = new List<AlertIncident>() };
         foreach (var a in named)
         {
-            var item = new AlertDetailItem { Heading = $"{a.ServerName} — {a.MetricName}" };
+            var story = StoryOf(a);
+            var item = new AlertDetailItem { Heading = $"{a.ServerName} — {story}" };
+            item.Fields.Add(("Server", a.ServerName));
+            item.Fields.Add(("Story", story));
             item.Fields.Add(("Severity", a.Severity.ToString("F2", CultureInfo.InvariantCulture)));
             item.Fields.Add(("Finding", a.CurrentValue));
+            item.Fields.Add(("Alert", a.MetricName));
             context.Details.Add(item);
             var incident = AlertFingerprint.ForKey(a.ServerName, IncidentKind, $"{a.ServerId}:{a.MetricName}",
                 new[] { a.MetricName });
@@ -103,6 +109,21 @@ public static class FindingSummary
                 context.Incidents.Add(incident);
         }
         return (serverName, currentValue, context);
+    }
+
+    /// <summary>"N incidents across M servers", singular-aware.</summary>
+    public static string Heading(int incidents, int servers) =>
+        $"{incidents} {(incidents == 1 ? "incident" : "incidents")} across {servers} {(servers == 1 ? "server" : "servers")}";
+
+    /// <summary>The page's story path, read from the "Story" field its composed context already carries
+    /// (the Diagnosis item); the metric name when a page has none.</summary>
+    private static string StoryOf(FindingAlert alert)
+    {
+        foreach (var item in alert.Context?.Details ?? new List<AlertDetailItem>())
+            foreach (var (label, value) in item.Fields)
+                if (string.Equals(label, "Story", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(value))
+                    return value;
+        return alert.MetricName;
     }
 
     /// <summary>The detail text a named page's own row persists: its own prose, noting the summary.</summary>

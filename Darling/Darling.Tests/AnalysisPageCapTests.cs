@@ -133,6 +133,57 @@ public sealed class AnalysisPageCapTests
         new(sender, new Settings(), f => f.ServerId.ToString(), NullLogger<AnalysisNotificationService>.Instance,
             isServerSilenced: silenced, isStoryMuted: muted);
 
+    /// <summary>The summary's rendering, shared by all three SKUs: the heading counts incidents and servers,
+    /// and every incident is named with its server, story and severity — newest first, then by severity.</summary>
+    [Fact]
+    public async Task TheSummary_NamesEveryIncident_NewestFirstThenSeverity_UnderACountingHeading()
+    {
+        var sender = new Sender();
+        using var service = Service(sender);
+        /* One clock for every page: Page() reads UtcNow per call, and equal times must tie exactly so the
+           severity tie-break is what orders them. */
+        var now = DateTime.UtcNow;
+        AnalysisFinding At(int serverId, string hash, double severity, int minutesAgo)
+        {
+            var f = Page(serverId, hash, severity);
+            f.AnalysisTime = now.AddMinutes(-minutesAgo);
+            return f;
+        }
+        var pages = new List<AnalysisFinding>
+        {
+            At(1, "0000000aoldest00", 1.9, 30),
+            At(2, "0000000bnewlow00", 1.6, 0),
+            At(1, "0000000cnewhigh0", 1.8, 0),
+            At(2, "0000000dmiddle00", 1.7, 10),
+            At(1, "0000000emiddle00", 1.6, 10),
+            At(2, "0000000foldest00", 1.6, 30),
+        };
+        foreach (var server in pages.GroupBy(p => p.ServerId))
+            await service.NotifyAsync(server.ToList());
+        await service.FlushPendingAsync();
+
+        var named = Assert.Single(sender.Summaries);
+        var (serverName, headline, context) = FindingSummary.Compose(named);
+
+        Assert.Equal("6 incidents across 2 servers", headline);
+        Assert.Equal("2 servers", serverName);
+        Assert.Equal("1 incident across 1 server", FindingSummary.Heading(1, 1));
+        Assert.Equal(6, context.Details.Count);
+        Assert.Equal(6, context.Incidents!.Count);
+
+        /* newest first, then severity: 0 min (1.8, 1.6), 10 min (1.7, 1.6), 30 min (1.9, 1.6) */
+        Assert.Equal(new[] { "1.80", "1.60", "1.70", "1.60", "1.90", "1.60" },
+            context.Details.Select(d => d.Fields.Single(f => f.Label == "Severity").Value).ToArray());
+        foreach (var item in context.Details)
+        {
+            var server = item.Fields.Single(f => f.Label == "Server").Value;
+            var story = item.Fields.Single(f => f.Label == "Story").Value;
+            Assert.StartsWith("server-", server, StringComparison.Ordinal);
+            Assert.Equal("ANOMALY_CPU_SPIKE → PLAN_REGRESSION", story);
+            Assert.Equal($"{server} — {story}", item.Heading);
+        }
+    }
+
     /// <summary>Pin 1: six fresh pages across two servers in one window → ONE message naming all six, and
     /// every named story is held on the next pass (its bucket was stamped Delivered by the summary).</summary>
     [Fact]
