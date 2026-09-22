@@ -33,8 +33,12 @@ public sealed record RankedObject(
 /// card is a summary, not the list — a collector that wants more rows is asking for a drill-down or a tool
 /// (<c>get_pg_autovacuum_health</c>, <c>get_pg_index_usage</c>), both of which exist. Ruled by the maintainer,
 /// 2026-09-22.
+///
+/// <para><c>partial</c> because the PAYLOAD half of this seam — how a ranked list reaches an MCP caller — lives
+/// in <c>FactRankedPayload.cs</c>: this file is models, and that half knows about <c>JsonObject</c> and the
+/// tools' serializer options.</para>
 /// </summary>
-public static class FactRanked
+public static partial class FactRanked
 {
     /// <summary>How many objects a fact may rank, entry [0] (the fact's own subject) included.</summary>
     public const int MaxObjects = 3;
@@ -174,6 +178,17 @@ public class AnalysisStory
     public Dictionary<string, double>? RootFactMetadata { get; set; }
 
     /// <summary>
+    /// The root fact's <see cref="Fact.Ranked"/> list, carried through so <c>analyze_server</c>'s
+    /// <c>root_fact</c> can name the objects the card's prose names (#3691 lane 43). Ephemeral like
+    /// <see cref="RootFactMetadata"/> beside it and for the same reason: <c>Fact</c> lives for one pass, the
+    /// rank is a projection of that pass's read, and a finding read back from <c>analysis_findings</c> carries
+    /// none here — the names that PERSIST are the ones <c>FactAdvice</c> composed into
+    /// <see cref="StoryText"/>. Empty for nearly every story, which is what the payload's two-or-more rule
+    /// rests on (<see cref="FactRanked.Attach"/>).
+    /// </summary>
+    public List<RankedObject> RootFactRanked { get; set; } = [];
+
+    /// <summary>
     /// Database the root fact pertains to, if any (e.g. BAD_ACTOR_* facts). Copied onto the
     /// finding so recommendation cards can show a database. Null for server-scope stories.
     /// </summary>
@@ -293,6 +308,14 @@ public class AnalysisFinding
     /// In practice this is anomaly-detector baseline context: mean, stddev, tier, hour, dow.
     /// </summary>
     public Dictionary<string, double>? RootFactMetadata { get; set; }
+
+    /// <summary>
+    /// The root fact's ranked objects, carried in from <see cref="AnalysisStory.RootFactRanked"/> (#3691 lane
+    /// 43) so <c>analyze_server</c>'s <c>root_fact</c> can carry the <c>ranked</c> array beside the advice that
+    /// names them. Ephemeral like <see cref="RootFactMetadata"/>: no <c>analysis_findings</c> column, so a
+    /// read-back finding carries none and its card states the names through <see cref="StoryText"/> alone.
+    /// </summary>
+    public List<RankedObject> RootFactRanked { get; set; } = [];
 }
 
 /// <summary>
