@@ -397,6 +397,10 @@ ORDER BY local_bucket, story_path_hash";
                     /* #3691: the config levers the greedy walk skipped, so analyze_server can render their cards
                        beside this chain. In memory only, like the two above. */
                     SideLeafKeys = story.SideLeafKeys,
+                    /* #3859: the typed chain beside the levers, in memory only like them — the drill-down
+                       collectors and next_tools read THIS instead of splitting the rendered StoryPath on the
+                       arrow, which is the six-site corruption surface the issue names. StoryPath is unchanged. */
+                    PathKeys = story.Path,
                     /* Carried in-memory only; no analysis_findings column for it. */
                     RootFactMetadata = story.RootFactMetadata,
                     /* #3691 lane 43: the root fact's ranked objects, in memory only like the metadata above —

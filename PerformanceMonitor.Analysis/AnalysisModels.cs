@@ -283,6 +283,23 @@ public class AnalysisFinding
     public List<string> SideLeafKeys { get; set; } = [];
 
     /// <summary>
+    /// The fact keys ON this finding's chain, root first, carried in from <see cref="AnalysisStory.Path"/>
+    /// (#3859) — the typed path the story already had, which used to be dropped here. Ephemeral like
+    /// <see cref="SideLeafKeys"/> above and for the same reasons: no <c>analysis_findings</c> column, none added,
+    /// so a finding read back from the store carries none and the persisted, read-back spelling of the chain
+    /// stays the rendered <see cref="StoryPath"/> string.
+    ///
+    /// <para><b>What this retired.</b> Six consumers used to recover this list by splitting the RENDERED path on
+    /// <c>" → "</c> — the two <c>ToolRecommendations.GetForStoryPath</c> bodies and the three drill-down
+    /// collectors, on both SKUs — so a fact key that ever contained the arrow, or any change to the join string in
+    /// <c>InferenceEngine.BuildStory</c> / <c>SameStatementPileupDetector</c>, would have corrupted all six at once
+    /// and said nothing. The producer had the typed list; only the string crossed. Now the list crosses and
+    /// nothing parses it. See <see cref="StoryKeys"/>, which pairs it with the levers for the consumers that want
+    /// both.</para>
+    /// </summary>
+    public List<string> PathKeys { get; set; } = [];
+
+    /// <summary>
     /// Drill-down data collected after graph traversal. Ephemeral — not persisted.
     /// Contains supporting detail keyed by category (e.g., "top_deadlocks", "queries_at_spike").
     /// </summary>
