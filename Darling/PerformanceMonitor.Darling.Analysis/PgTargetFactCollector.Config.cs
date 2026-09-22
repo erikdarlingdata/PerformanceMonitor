@@ -64,6 +64,16 @@ AND   c.collection_time = (
           WHERE server_id = $1
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+/* V138 (#3691): the SERVER-WIDE population only. pg_server_config now also holds the per-database and
+   per-role overrides out of pg_db_role_setting, which repeat a setting's NAME under a different scope -
+   and the C# below loads these rows into a dictionary keyed by name, so an override row would either
+   shadow the server-wide value or throw on the duplicate key. The CONFIG_PG_* facts stay server-wide in
+   this lane by ruling: a per-database fact family needs a database dimension on the fact and an answer to
+   ""which database's work_mem is the server's work_mem"", which is a later brief. Only the OUTER select
+   needs this - the MAX(collection_time) subquery above is per SERVER, not per name, so an override row
+   cannot move the anchor. */
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
 AND   c.name IN (
           'shared_buffers', 'max_wal_size', 'min_wal_size', 'effective_cache_size', 'random_page_cost',
           'track_io_timing', 'checkpoint_timeout', 'checkpoint_completion_target', 'wal_compression',

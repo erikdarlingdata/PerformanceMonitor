@@ -142,6 +142,16 @@ public static class DarlingPgServerConfigReader
                   FROM pg_server_config
                   WHERE server_id = $1)
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+        /* V138 (#3691): the SERVER-WIDE population. pg_server_config also holds the per-database and
+           per-role overrides now, and this read is the one an operator reads as "the server's
+           configuration" - a work_mem override on one database appearing in it as a second work_mem row
+           would read as two conflicting server settings, and the ordering (pending first, then non-default,
+           then name) would interleave them. The overrides are published separately, by the
+           database_overrides section get_pg_server_config gained from OverrideSql below. Only the outer
+           select needs the predicate: the MAX(collection_time) subquery above is per SERVER, not per name,
+           so an override row cannot move the anchor. */
+        AND   c.database_name IS NULL
+        AND   c.role_name IS NULL
         /* #3653: the default view's population, decided here rather than after the cut. */
         AND   ($2::boolean
                OR coalesce(c.source, 'default') <> 'default'
@@ -182,6 +192,14 @@ public static class DarlingPgServerConfigReader
             AND   c.collection_time >= $2
             AND   c.collection_time <= $3
             AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+            /* V138 (#3691): server-wide rows only, and here the reason is the WINDOW FUNCTION rather than a
+               dictionary. LAG partitions by name alone, so an override row for the same setting would land
+               in the server-wide row's partition and the ordering between two rows sharing a
+               collection_time is arbitrary - every snapshot would then manufacture a change from the
+               server value to the override's and back. A per-scope change feed (partition by name,
+               database_name, role_name) is a later brief; this read answers what the SERVER's value did. */
+            AND   c.database_name IS NULL
+            AND   c.role_name IS NULL
         )
         SELECT
             collection_time,
@@ -245,6 +263,105 @@ public static class DarlingPgServerConfigReader
         }
 
         return new PgConfigPage(rows, snapshotNonDefaultCount);
+    }
+
+    /// <summary>
+    /// One per-database or per-role override in the newest snapshot (#3691, V138): the scope it belongs to,
+    /// the setting's name and the text value that scope was given.
+    ///
+    /// <para>Both scope fields are nullable because <c>pg_db_role_setting</c> has three shapes and the
+    /// collector stores all of them: a database with no role (<c>ALTER DATABASE … SET</c>), a role with no
+    /// database (<c>ALTER ROLE … SET</c>, cluster-wide for that role), and both (<c>ALTER ROLE … IN
+    /// DATABASE … SET</c>). A row with neither cannot exist here — that is a server-wide
+    /// <c>pg_settings</c> row, which the read below excludes by the same predicate every other reader
+    /// uses.</para>
+    ///
+    /// <para><see cref="CollectionTime"/> is the snapshot the row came from — the same newest capture the
+    /// server-wide page read anchors on, projected here because every latest-anchored read in this store
+    /// projects its anchor (<c>McpPayloadContractCensusTests.EveryLatestAnchoredRead_ProjectsItsAnchorColumn_OrIsRostered</c>):
+    /// a row that says WHEN it was true can never be mistaken for the current state after the collector has
+    /// stopped, and the live pin asserts it equals the page's <c>captured_at</c>.</para>
+    /// </summary>
+    public readonly record struct PgConfigOverrideRow(
+        string? DatabaseName,
+        string? RoleName,
+        string Name,
+        string? Setting,
+        DateTime CollectionTime);
+
+    /// <summary>
+    /// The newest snapshot's per-database and per-role setting overrides (#3691, V138) — the ONE read in the
+    /// repo that asks for the rows every other <c>pg_server_config</c> read filters out.
+    ///
+    /// <para><b>Why this is a second statement rather than a relaxed filter on <see cref="CurrentConfigSql"/>.</b>
+    /// That read is paged, ordered by "what somebody chose" and read as the SERVER's configuration; an
+    /// override is a different subject with a different key (scope + name, not name), and mixing them would
+    /// put two rows named <c>work_mem</c> on one page with nothing but a column to say they are not both the
+    /// server's. Separate statement, separate section in the tool's answer, no ambiguity — and
+    /// <c>get_pg_server_config</c>'s existing counts stay counts of the server-wide population, which is
+    /// what their names have always promised.</para>
+    ///
+    /// <para><b>Anchored on the same <c>MAX(collection_time)</c> as the server-wide read</b>, and
+    /// deliberately as its own subquery rather than a parameter passed in from the caller: both statements
+    /// run against the same snapshot because they ask the same store for its newest one, and a caller that
+    /// threaded an instant between them could pin a snapshot that no longer exists after retention. The
+    /// snapshot is a few hundred rows behind the <c>(server_id, collection_time)</c> index, so this is a
+    /// second cheap read on a tool path, not on the alert path.</para>
+    ///
+    /// <para>No session-source exclusion: an override row's <c>source</c> is the collector's own scope
+    /// spelling (<c>database</c> / <c>role</c> / <c>database+role</c>), never a <c>pg_settings</c> backend
+    /// source, so there is nothing session-scoped in this population to exclude. Ordered by scope then name
+    /// so a tenant's overrides read together. NOT NULL on <c>name</c> is asserted rather than assumed:
+    /// <c>split_part</c> cannot return NULL, but the column is nullable in the schema like every payload
+    /// column, and a NULL name here would be an unusable row.</para>
+    ///
+    /// <para>$1 server_id.</para>
+    /// </summary>
+    public const string OverrideSql = """
+        SELECT
+            c.database_name,
+            c.role_name,
+            c.name,
+            c.setting,
+            c.collection_time
+        FROM pg_server_config AS c
+        WHERE c.server_id = $1
+        AND   c.collection_time = (
+                  SELECT MAX(collection_time)
+                  FROM pg_server_config
+                  WHERE server_id = $1)
+        AND   (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)
+        AND   c.name IS NOT NULL
+        ORDER BY c.database_name NULLS LAST, c.role_name NULLS LAST, c.name
+        """;
+
+    /// <summary>
+    /// The newest snapshot's overrides (#3691). Empty on every store whose cluster has no
+    /// <c>pg_db_role_setting</c> row and on every snapshot taken before V138 — which the tool publishes as
+    /// the ABSENCE of its section rather than as an empty list, because "no overrides" and "this snapshot
+    /// predates the collector reading them" are both honestly reported by saying nothing.
+    /// </summary>
+    public static async Task<List<PgConfigOverrideRow>> GetOverridesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var rows = new List<PgConfigOverrideRow>();
+        await using var command = postgres.CreateCommand(OverrideSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PgConfigOverrideRow(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.GetDateTime(4)));
+        }
+
+        return rows;
     }
 
     public static async Task<List<PgConfigChangeRow>> GetConfigChangesAsync(

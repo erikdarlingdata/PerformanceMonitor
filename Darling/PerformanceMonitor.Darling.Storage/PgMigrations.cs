@@ -217,6 +217,7 @@ public static class PgMigrations
         new Migration(135, "lrq-exclusion-knob", V135Sql),
         new Migration(136, "pg-database-size-and-host-memory", V136Sql),
         new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
+        new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
     };
 
     /// <summary>
@@ -1664,6 +1665,85 @@ ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS checkpoint_write_ms bigint,
     ADD COLUMN IF NOT EXISTS checkpoint_sync_ms bigint,
     ADD COLUMN IF NOT EXISTS checkpoints_requested bigint;";
+
+    /// <summary>
+    /// V138 — two nullable columns on <c>collect.pg_server_config</c> so a setting row can say WHOSE setting
+    /// it is (#3691, the "per-database settings" collector line). Server-wide rows leave both NULL, which is
+    /// every row this table has ever held; an override row carries a database name, a role name, or both.
+    /// No new table, no new hypertable (<c>TimescaleSupport.HypertableCount</c> stays 72 — the V136 doc says
+    /// what a 73rd would cost the compression grid), no DEFAULT, no backfill, no passthrough refresh.
+    /// <b>No Lite twin</b>: Lite has no PostgreSQL collectors at all, so there is nothing on the DuckDB side
+    /// to port — <c>pg_server_config</c> is Darling-only, as is every <c>pg_*</c> collector table.
+    ///
+    /// <para><b>The lie this ends.</b> <c>pg_settings</c> is the RESOLVED view for the collector's own
+    /// backend, and the collector connects to one database as one role — so what it stores is what that
+    /// session sees, which the <c>CONFIG_PG_*</c> facts and <c>get_pg_server_config</c> then present as "the
+    /// server's configuration". A cluster where one database carries
+    /// <c>ALTER DATABASE … SET work_mem = '256MB'</c>, or one role carries
+    /// <c>ALTER ROLE … SET statement_timeout = 0</c>, is invisible today: the override lives in
+    /// <c>pg_db_role_setting</c>, which nothing read, and the fact grades a value that database's or that
+    /// role's sessions never use. That is the worst shape an advisory number can take — confidently right
+    /// about a value nobody runs. The collector now reads that catalog beside <c>pg_settings</c> and these
+    /// two columns are what distinguish the two populations in the stored rows.</para>
+    ///
+    /// <para><b>Why columns on this table rather than a table of its own.</b> An override IS a setting: same
+    /// name, same text value, same server, same hourly snapshot clock, and the question an operator asks is
+    /// "what is <c>work_mem</c> here" — which needs the server-wide value and the overrides in one answer,
+    /// ordered and stamped together. A second table would need its own index, its own hypertable decision
+    /// (the 73rd, which V136 argued against on compression-grid grounds), its own retention rung, and every
+    /// read that wants both would become a join across two snapshots whose <c>collection_time</c>s are only
+    /// approximately equal. Two nullable columns cost the existing table nothing and make the
+    /// discriminator a predicate.</para>
+    ///
+    /// <para><b>NULL is a value here, and it means server-wide.</b> Both columns are nullable with no
+    /// DEFAULT for the reason every column-adding rung is: a nullable, default-less <c>ADD COLUMN</c> on a
+    /// compressed hypertable is catalog-only on TimescaleDB 2.28.1 (the V127/V128/V132/V133/V134/V137
+    /// shape), so an upgraded store rewrites nothing. It also means every pre-rung row reads as server-wide
+    /// the moment the migration lands, which is exactly what those rows ARE: the collector could not have
+    /// stored an override before this rung existed. <c>pg_db_role_setting</c> itself spells the same thing
+    /// the same way — <c>setdatabase = 0</c> means all databases and <c>setrole = 0</c> means all roles, and
+    /// the collector's <c>LEFT JOIN</c> turns both zeros into the NULLs this table stores.</para>
+    ///
+    /// <para><b>The reads are the correctness edge, not this rung.</b> Every shipped read of this table is a
+    /// "latest snapshot, one row per setting name" shape, several of them loading a dictionary keyed by
+    /// <c>name</c> — so an override row arriving with a duplicate name would either shadow the server-wide
+    /// value or throw on the duplicate key. That is why this lane's commit puts
+    /// <c>AND database_name IS NULL AND role_name IS NULL</c> on the OUTER row select of every one of them
+    /// (the inner <c>MAX(collection_time)</c> subqueries are per SERVER, not per name, so an override row
+    /// cannot move the anchor and they need no predicate), and why exactly ONE read — the override section
+    /// <c>get_pg_server_config</c> gained — selects the rows where those columns are NOT NULL. A census pin
+    /// asserts that set: every <c>pg_server_config</c> read in the repo either filters the overrides out or
+    /// is the one that asks for them.</para>
+    ///
+    /// <para><b>The V101 rule applies</b>, so V102's CREATE text carries both columns too: a fresh store
+    /// builds the table from the generated schema at V1 (the generator walks
+    /// <c>PgServerConfigCollector.PayloadColumns</c>, where the two are appended LAST so the positional COPY
+    /// writer and an upgraded store's ALTER agree on where they sit) and this ALTER no-ops, while a store
+    /// that climbed through V102 before V138 existed gets them from the ALTER.
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires V102's text
+    /// to be the generator's output column for column, so neither place is redundant. No passthrough
+    /// refresh: <c>pg_server_config</c> has no <c>v_</c> view (<c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees — it is not in <c>PostV8ViewCollectors</c> and V102 creates none), so the V14 frozen-column-list
+    /// problem cannot arise. No index either: the existing <c>(server_id, collection_time)</c> index is what
+    /// every read anchors on, and the override predicate is a cheap filter inside a snapshot that holds a few
+    /// hundred rows.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not make the <c>CONFIG_PG_*</c> facts
+    /// per-database — they stay server-wide in this lane, and a per-database fact family (which needs a
+    /// database dimension on the fact, a per-database grading policy, and an answer to "which database's
+    /// <c>work_mem</c> is the server's work_mem") is a later brief. It adds no alert, no Viewer column and no
+    /// threshold. It does not store the ROLE's effective settings resolved against the database's — PostgreSQL
+    /// resolves those per session at connect time, and the catalog stores only what was SET.</para>
+    /// </summary>
+    private const string V138Sql = @"
+/* Nullable, no DEFAULT, no backfill: catalog-only on a compressed hypertable (the V127/V128/V132/V133/V134/
+   V137 shape on 2.28.1), and NULL already means what every pre-rung row is — a server-wide pg_settings row.
+   pg_server_config has no v_ passthrough (V102 creates none, PgSchemaGenerator.AllPassthroughViews agrees),
+   so the V14 frozen-column-list refresh does not apply here. Appended LAST, matching the collector's payload
+   order, so the positional COPY writer and an upgraded store's column order agree. */
+ALTER TABLE collect.pg_server_config
+    ADD COLUMN IF NOT EXISTS database_name text,
+    ADD COLUMN IF NOT EXISTS role_name text;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -4537,7 +4617,9 @@ CREATE TABLE IF NOT EXISTS collect.pg_server_config (
     sourcefile text,
     sourceline integer,
     pending_restart boolean,
-    short_desc text
+    short_desc text,
+    database_name text,
+    role_name text
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_server_config_time

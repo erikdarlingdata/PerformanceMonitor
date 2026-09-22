@@ -90,6 +90,12 @@ AND   c.collection_time = (
           WHERE server_id = $1
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+/* V138 (#3691): server-wide rows only. pg_server_config now also holds the per-database and per-role
+   overrides, which repeat a setting's NAME under a different scope; this read is keyed on the name, so an
+   override row would shadow the server-wide value. The inner MAX(collection_time) is per SERVER and needs
+   no predicate. */
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
 AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
 
     /// <summary>

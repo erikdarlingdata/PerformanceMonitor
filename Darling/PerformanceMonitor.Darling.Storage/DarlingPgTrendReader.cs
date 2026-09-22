@@ -853,6 +853,15 @@ public static class DarlingPgTrendReader
         WHERE server_id = $1
         AND   name = 'track_io_timing'
         AND   collection_time <= $2
+        /* V138 (#3691): the SERVER's track_io_timing, not one database's or one role's override of it.
+           pg_server_config also holds pg_db_role_setting's rows now, and this read takes ONE row by
+           ORDER BY collection_time DESC LIMIT 1 - with two rows sharing the newest collection_time the
+           choice between them is arbitrary, so an override could decide whether the whole trend read
+           publishes I/O times or suppresses them. track_io_timing is overridable per database (it is
+           superuser-context, not postmaster), which makes this a real collision. This read has no inner
+           MAX(collection_time) subquery to consider - the ORDER BY is its anchor. */
+        AND   database_name IS NULL
+        AND   role_name IS NULL
         ORDER BY collection_time DESC
         LIMIT 1
         """;

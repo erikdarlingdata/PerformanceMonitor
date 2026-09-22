@@ -66,6 +66,15 @@ public sealed partial class PgTargetFactCollector
                   FROM pg_server_config
                   WHERE server_id = $1)
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+        /* V138 (#3691): server-wide rows only. pg_server_config now also holds the per-database and
+           per-role overrides, which repeat a setting's NAME under a different scope, and a posture fact is
+           emitted per setting NAME - an override row would emit a second fact for the same setting or
+           shadow the server-wide one. All three of these are postmaster/sighup-context settings that
+           cannot legally be set per database or per role, so in practice the overrides never carry them;
+           the filter is spelled anyway because a read whose correctness depends on which settings happen
+           to be overridable is a read nobody can check. The inner MAX(collection_time) is per SERVER. */
+        AND   c.database_name IS NULL
+        AND   c.role_name IS NULL
         AND   c.name IN ('fsync', 'full_page_writes', 'synchronous_commit')
         """;
 

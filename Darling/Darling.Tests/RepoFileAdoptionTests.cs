@@ -145,6 +145,11 @@ public sealed class RepoFileAdoptionTests
         "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
         "PgLoggingCollectorOffTests.cs",
+        /* #3691 (V138): its V102-restatement pin anchors the generated column tail across two line breaks
+           (`short_desc text,` / `database_name text,` / `role_name text`), its tool pin anchors the override
+           section's null else-arm on the key that follows it on the next line, and its rung-doc and
+           reader-census arms slice LF-normalised source. */
+        "PgServerConfigScopeRungTests.cs",
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
         "PgTargetMeasuredLineageTests.cs",

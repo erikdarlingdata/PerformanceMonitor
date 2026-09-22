@@ -93,6 +93,15 @@ public static class DarlingPgLoggingAuditReader
                   WHERE server_id = $1)
         AND   c.name IS NOT NULL
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+        /* V138 (#3691): server-wide rows only. pg_server_config also holds the per-database and per-role
+           overrides now, and the judgment code below looks each logging setting up BY NAME in the rows this
+           returns - a second row named log_min_duration_statement from one database's override would either
+           shadow the server's value or make the lookup order-dependent, and the audit's whole claim is
+           about what the SERVER logs. Several of these ARE overridable per database
+           (log_min_duration_statement, log_lock_waits, log_temp_files), so this is a live collision, not a
+           theoretical one. The inner MAX(collection_time) is per SERVER and needs no predicate. */
+        AND   c.database_name IS NULL
+        AND   c.role_name IS NULL
         ORDER BY c.name
         """;
 

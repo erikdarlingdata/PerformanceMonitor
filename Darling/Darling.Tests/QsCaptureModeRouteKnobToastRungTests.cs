@@ -80,7 +80,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
     private const int RungVersion = 137;
     private const int PreviousVersion = 136;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V138 (#3691,
+    /// the pg_server_config scope columns) appended its own — so this is a position within the signature
+    /// rather than its end, the handoff <see cref="PgDatabaseSizeStatsAndHostMemoryRungTests"/> made to this
+    /// file one rung ago.</summary>
     private const int ProbeOrdinal = 112;
 
     private const string HealthTable = "query_store_health";
@@ -106,7 +109,10 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         Assert.Equal("qs-capture-mode-route-knob-toast-utilisation", V137.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V138 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -422,7 +428,9 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* The "nothing past me" half of this claim moved to V138's test with the top ordinal; what stays is
+           that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
+           right column. */
         Assert.Contains("hasQsCaptureModeRouteKnobToast", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -430,8 +438,9 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V138 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
@@ -448,9 +457,11 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         var previousArm = viewer.IndexOf("if (hasPgDatabaseSizeStatsAndHostMemory)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V137 sentinel arm — a fully-migrated store would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V137 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V137 arm sits below the previous rung's, so a V137 store maps one rung low");
+        /* This rung's own literal, not the build's version: the "returns StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to V138's test with the top. */
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
@@ -529,7 +540,9 @@ public sealed class QsCaptureModeRouteKnobToastLivePostgresTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS toast_bytes, DROP COLUMN IF EXISTS toast_live_bytes, DROP COLUMN IF EXISTS checkpoint_write_ms, DROP COLUMN IF EXISTS checkpoint_sync_ms, DROP COLUMN IF EXISTS checkpoints_requested");
 
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 137");
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            /* Every rung from this one up, not literally one: V138 (#3691) landed above it, and its two
+               nullable columns are re-added by the same climb (IF NOT EXISTS, so the store keeps them). */
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 137), await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
