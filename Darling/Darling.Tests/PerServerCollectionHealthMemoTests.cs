@@ -30,9 +30,11 @@ namespace Darling.Tests;
 ///
 /// <para>These pins hold what the fix promises: N concurrent callers of one server cost ONE statement even
 /// with a fleet call racing beside them, a call inside the minute is a memo hit whose
-/// <c>collection_health_age_seconds</c> is above zero, the window start is in the KEY so a different window
-/// falls through to its own read rather than being served someone else's, and the two servers' readings never
-/// cross. Style, primitive and seam are <see cref="FleetCollectionHealthMemoTests"/>' deliberately: the memo
+/// <c>collection_health_age_seconds</c> is above zero, the window LENGTH is in the KEY so a genuinely
+/// different window falls through to its own read rather than being served someone else's, and the two
+/// servers' readings never cross. The key is the length and not the start since #3894 — as the start, it
+/// differed by ticks on every production call, so the memo never hit once and its dictionary never evicted;
+/// the last two pins in this file are the ones that would have caught that and did not exist. Style, primitive and seam are <see cref="FleetCollectionHealthMemoTests"/>' deliberately: the memo
 /// is exercised through its <c>Func</c> seam with a counting scan rather than a mocked Npgsql, and the seam is
 /// the SAME object the reader routes through, so a count here IS the number of statements the store would have
 /// seen.</para>
@@ -41,7 +43,9 @@ public sealed class PerServerCollectionHealthMemoTests
 {
     private static readonly DateTime T0 = new(2026, 9, 21, 21, 34, 17, DateTimeKind.Utc);
 
-    /// <summary>The fixed trailing window both production call sites cut — the memo key's second half.</summary>
+    /// <summary>The fixed trailing window both production call sites cut. Its LENGTH is the memo key's second
+    /// half (#3894); its start moves with whatever clock the caller read, which is exactly why the start
+    /// cannot be the key.</summary>
     private static DateTime WindowFrom(DateTime now) => now.AddDays(-7);
 
     /// <summary>A scan that counts how often it was invoked, records the key and token it was handed, and
@@ -181,10 +185,12 @@ public sealed class PerServerCollectionHealthMemoTests
     /* ───────────────────────── the key ───────────────────────── */
 
     /// <summary>
-    /// The window start is in the KEY, which is the guard #3856 asked for in place of the derivation it
-    /// preferred: a caller asking for a DIFFERENT window gets its own statement rather than a reading cut from
-    /// somebody else's window. Both production callers pass the fixed trailing seven days, so production holds
-    /// one key per server — and this is what keeps the direct read alive without letting the memo lie.
+    /// The window is in the KEY, which is the guard #3856 asked for in place of the derivation it preferred: a
+    /// caller asking for a DIFFERENT window gets its own statement rather than a reading cut from somebody
+    /// else's window. This arm holds `now` fixed and varies the SPAN — seven days against one — so it pins the
+    /// fall-through on the axis that still discriminates after #3894 moved the key from the window's start to
+    /// its length. Both production callers ask for a trailing seven days, so production holds one key per
+    /// server; before #3894 it held one per CALL, which is the defect the next two pins exist for.
     /// </summary>
     [Fact]
     public async Task ADifferentWindow_FallsThroughToItsOwnRead()
@@ -233,6 +239,108 @@ public sealed class PerServerCollectionHealthMemoTests
         Assert.Equal(new[] { 7, 9 }, scan.KeysSeen.Select(k => k.ServerId).ToArray());
     }
 
+    /* ───────────────────── #3894: the two pins that did not exist ───────────────────── */
+
+    /// <summary>
+    /// TWO CALLS ON TWO CLOCKS, which is the only shape production ever takes — and the shape every pin above
+    /// avoids by construction.
+    ///
+    /// <para>#3894: the tool reads <c>DateTime.UtcNow</c> fresh on every call and cuts its window from it, so
+    /// consecutive calls differ in the window's START by however many ticks elapsed between them. While the
+    /// START was the key, that made every call its own key: the memo never hit once in production, every
+    /// <c>get_collection_health</c> ran its own seven-day scan during the write band #3856 existed to
+    /// survive, and the payload's <c>collection_health_age_seconds</c> read 0 forever — which was the tell,
+    /// sitting in the response the whole time.</para>
+    ///
+    /// <para>Every arm above passes a window start held constant across calls (a fixed <c>WindowFrom(T0)</c>
+    /// while only <c>now</c> advances), so they prove the memo works when handed the same key and can never
+    /// prove production hands it one. This arm moves BOTH clocks the way the caller does. It fails on the
+    /// pre-#3894 key and passes on the length key, which is the whole reason to write it.</para>
+    /// </summary>
+    [Fact]
+    public async Task TwoCallsOnTwoClocks_AsTheToolActuallyCallsIt_CostOneStatement()
+    {
+        var memo = new DarlingDataReader.PerServerCollectionHealthMemo();
+        var scan = new CountingScan();
+
+        /* Exactly the production shape: each call reads its own clock, then cuts its own trailing seven days
+           from it. 250 ms apart, so both are comfortably inside the 60 s lifetime. */
+        var firstClock = T0;
+        var first = memo.GetAsync(7, WindowFrom(firstClock), firstClock, scan.Run, CancellationToken.None);
+        scan.Release(totalRuns: 77);
+        var week = await first;
+
+        var secondClock = T0.AddMilliseconds(250);
+        var repeatCall = memo.GetAsync(7, WindowFrom(secondClock), secondClock, scan.Run, CancellationToken.None);
+
+        /* Asserted BEFORE awaiting, deliberately. A memo miss would start a second scan synchronously and
+           then park on a gate nobody releases — so an await here would turn the defect into a hang, and a
+           hang in CI reads as "something is slow", not "the memo missed". Counting first makes the pre-#3894
+           key fail as an assertion that names the problem. The release below only matters on that failure
+           path, so a regression reports instead of timing out. */
+        Assert.Equal(1, scan.Calls);
+        if (!repeatCall.IsCompleted)
+        {
+            scan.Release(totalRuns: 0);
+        }
+
+        var repeat = await repeatCall;
+
+        /* One statement, and the second caller was served the first's rows from memory rather than its own
+           scan of a window 250 ms to the left. */
+        Assert.Equal(1, memo.ScansStarted);
+        Assert.Same(week.Rows, repeat.Rows);
+        Assert.Equal(77, repeat.Rows[0].TotalRuns);
+
+        /* And the key space did not grow with the call count — the other half of #3894. */
+        Assert.Equal(1, memo.TrackedKeys);
+    }
+
+    /// <summary>
+    /// The dictionary is BOUNDED: a key whose reading has aged out and which has no statement in flight is
+    /// dropped rather than held for the life of the process.
+    ///
+    /// <para>#3894's second half. The memo had no eviction of any kind — no <c>Remove</c>, no cap, no sweep —
+    /// which was survivable only under the belief that the key space was one entry per server. With a moving
+    /// window start it was one entry per CALL, each holding its rows list, in a host that runs for weeks. The
+    /// bound is not a nicety: it is the difference between a memo and a leak, and nothing above could observe
+    /// it because nothing above asked how many keys were left.</para>
+    ///
+    /// <para>Eviction runs on whether the KEY is in use, not on whether its reading is still servable. The
+    /// first version of this sweep used the reading's age and deleted the last good reading a failed re-read
+    /// is contractually forbidden to destroy — <c>AFailedReRead_DoesNotEvictTheLastGoodReading</c> caught it
+    /// by hanging, which is why the retention here is ten lifetimes and keyed on last touch.</para>
+    /// </summary>
+    [Fact]
+    public async Task KeysThatHaveAgedOut_AreDropped_SoTheDictionaryDoesNotGrowForever()
+    {
+        var memo = new DarlingDataReader.PerServerCollectionHealthMemo();
+        var scan = new CountingScan();
+
+        /* Five genuinely different windows at one instant — five legitimate keys, each with a completed
+           reading. Distinct LENGTHS, since that is the key: one through five days. */
+        for (var days = 1; days <= 5; days++)
+        {
+            var call = memo.GetAsync(7, T0.AddDays(-days), T0, scan.Run, CancellationToken.None);
+            scan.Release(totalRuns: days);
+            await call;
+        }
+
+        Assert.Equal(5, scan.Calls);
+        Assert.Equal(5, memo.TrackedKeys);
+
+        /* Eleven minutes later nobody has asked for any of those five windows, so the next call sweeps them
+           and keeps only its own. Before #3894 this would have read 6 and kept climbing for the life of the
+           host. Eleven minutes because retention is ten reading-lifetimes: long enough that an in-use key is
+           never yanked, short enough that a one-off window does not occupy the host. */
+        var later = T0.AddMinutes(11);
+        var fresh = memo.GetAsync(7, WindowFrom(later), later, scan.Run, CancellationToken.None);
+        scan.Release(totalRuns: 99);
+        await fresh;
+
+        Assert.Equal(1, memo.TrackedKeys);
+        Assert.Equal(6, scan.Calls);
+    }
     /* ───────────────────────── the primitive, copied ───────────────────────── */
 
     /// <summary>A failed scan is not memoized: every waiter present sees the ORIGINAL exception — the 57014
