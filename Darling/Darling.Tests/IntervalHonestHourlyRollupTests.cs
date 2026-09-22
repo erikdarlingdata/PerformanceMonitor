@@ -516,6 +516,11 @@ public sealed class IntervalHonestHourlyRollupLiveTests
         Assert.SkipWhen(!timescaleEnabled,
             "The live interval-honest rollup test needs TimescaleDB: the difference it measures exists only between materializations.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* #3893: collection_log too, as the worker's "collection_log hypertable" step does before its aggregate ensure
+           (pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate is sourced from it. On a
+           store whose migrations ran before CREATE EXTENSION (CI's bundled PostgreSQL), it is still a plain table here,
+           and the aggregate's CREATE fails with 0A000. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
         /* One closed hour, well inside the raw horizon and aligned so refresh windows land on its bounds. */
         var hour = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-1).AddHours(10), DateTimeKind.Unspecified);
