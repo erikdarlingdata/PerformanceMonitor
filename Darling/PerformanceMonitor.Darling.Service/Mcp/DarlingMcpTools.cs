@@ -660,15 +660,15 @@ public sealed class DarlingMcpTools
                     {
                         var advice = FactAdvice.Compose(fact.Key, pgFactsByKey);
 
-                        /* not_applicable comes from the FACT where the collector stamped it (max_wal_size, lane
-                           15 / #3728 §A4) and from the ENGINE for checkpoint_timeout, which the collector emits
-                           unstamped because it is base-0 context there and nothing was grading it. It is graded
-                           by nothing here either — but this tool RENDERS it as a setting with a recommendation,
-                           and the composed context sentence says "tune it with max_wal_size", which on Aurora
-                           sends an operator to a knob the storage layer ignores. Rider 1 of Erik's ruling names
-                           both keys for exactly that reason. Stamping the fact itself (so get_analysis_facts
-                           said it too) is the collector's change and lane 15's file; this arm is where the
-                           advice is being handed to a reader, so this is where it is made true. */
+                        /* not_applicable comes from the FACT, where the collector stamps BOTH keys on an Aurora
+                           target (max_wal_size since lane 15 / #3728 §A4; checkpoint_timeout since #3868, which
+                           moved the truth into the collector so get_analysis_facts says it too). The
+                           checkpoint_timeout arm below is belt and braces: the fact is stamped since #3868, and
+                           this tool is the surface that guarantees rider 1 of Erik's ruling — it RENDERS the
+                           setting with a recommendation whose composed context sentence says "tune it with
+                           max_wal_size", which on Aurora sends an operator to a knob the storage layer ignores.
+                           One read of an already-true flag costs nothing and keeps the guarantee stated where
+                           it is made. */
                         var notApplicable = fact.Metadata.GetValueOrDefault("not_applicable") > 0
                             || (isAurora && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout);
 
@@ -680,17 +680,20 @@ public sealed class DarlingMcpTools
                                 : fact.Severity >= 0.5 ? "warning"
                                 : fact.Severity > 0 ? "review"
                                 : "ok",
-                            /* Headline + remediation. The stamped fact needs no special case: lane 15 composed
-                               the not-applicable sentence INTO the advice block, so the same two fields carry
-                               it. The engine-side case above has no such block, so the sentence is appended —
-                               the headline still states the value, which is what the parameter group says, and
-                               the rider says who actually decides it. A key with no composed block (none today;
+                            /* Headline + remediation. max_wal_size needs no special case: lane 15 composed the
+                               not-applicable sentence INTO its advice block, so the same two fields carry it.
+                               checkpoint_timeout's block is the base-0 context one ("tune it with
+                               max_wal_size"), which has no Aurora arm — so the sentence is appended here, where
+                               the headline still states the value the parameter group holds and the rider says
+                               who actually decides it. The discriminator is the KEY, not the stamp: #3868
+                               stamped the fact, so "unstamped" would have silently stopped appending the one
+                               sentence rider 1 exists to guarantee. A key with no composed block (none today;
                                a future key added without an advice arm) says so rather than rendering an empty
                                sentence. */
                             Recommendation: advice is null
                                 ? $"No composed advice for {fact.Key} in this build — get_analysis_facts carries the fact and its metadata."
                                 : advice.Headline + " " + advice.Remediation
-                                    + (notApplicable && fact.Metadata.GetValueOrDefault("not_applicable") == 0
+                                    + (notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout
                                         ? " Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead."
                                         : string.Empty),
                             /* The fact's own lineage stamp, passed through: 0 = the bar was chosen, not
