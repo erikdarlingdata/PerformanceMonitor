@@ -49,7 +49,11 @@ public partial class DrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                /* #3859: the finding's OWN typed keys, not a re-parse of its display string. This line used to
+                   split StoryPath on " → " — one of six such readers — so a fact key containing the arrow, or a
+                   change to the engine's join separator, would have quietly stopped every key test below from
+                   matching. Same keys, same order, nothing here can mis-parse. */
+                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
                 /* D7: the config drill-down is a single cheap config-table read and is
                    required to build config/RCSI/db-config advice, which legitimately scores

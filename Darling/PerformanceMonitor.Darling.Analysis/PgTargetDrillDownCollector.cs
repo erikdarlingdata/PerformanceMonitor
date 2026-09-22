@@ -61,7 +61,10 @@ public sealed partial class PgTargetDrillDownCollector : IDrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+                /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
+                   AnalysisFinding.PathKeys. The PostgreSQL keys are the ones with prefixes long enough that a
+                   half-split key would still have looked plausible in a debugger. Same keys, same order. */
+                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
                 if (finding.Severity >= 0.5)
                 {

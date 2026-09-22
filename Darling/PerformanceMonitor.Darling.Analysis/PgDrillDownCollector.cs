@@ -114,7 +114,10 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                /* #3859: the finding's OWN typed keys, not a re-parse of its display string — see
+                   DrillDownCollector's twin of this line and AnalysisFinding.PathKeys for the six-site
+                   corruption surface this retired. Same keys, same order. */
+                var pathKeys = finding.PathKeys.ToHashSet(StringComparer.Ordinal);
 
                 /* D7: the config drill-down is a single cheap config-table read and is
                    required to build config/RCSI/db-config advice, which legitimately scores
