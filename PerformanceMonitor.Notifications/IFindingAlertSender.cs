@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Notifications;
@@ -54,6 +57,57 @@ public interface IFindingAlertSender
     /// caught an exception, which is read as not delivered.</para>
     /// </summary>
     Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert);
+
+    /// <summary>
+    /// #3916: sends ONE message naming every page in <paramref name="named"/> (already ordered newest first,
+    /// then by severity) — the analysis service's over-the-cap arm of a hold-back window — and records ONE row
+    /// per named incident under that incident's own metric name, each carrying the SUMMARY's real
+    /// <see cref="AlertDelivery"/>, so the restart seed (<see cref="GetLastDeliveredPageUtcAsync"/>) finds every
+    /// named story. Returns that delivery; null only when the sender caught. Never throws.
+    /// </summary>
+    Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named);
+}
+
+/// <summary>
+/// The shared composition of a #3916 page summary: one message naming every held page, and the row each
+/// named page records. Every SKU's <see cref="IFindingAlertSender.SendFindingSummaryAsync"/> composes
+/// through here so the three cannot drift in what a summary says.
+/// </summary>
+public static class FindingSummary
+{
+    /// <summary>The summary message's metric name (the send core's cooldown/budget key alongside the
+    /// per-incident fingerprints on the context).</summary>
+    public const string MetricName = "Analysis: page summary";
+
+    /// <summary>The fingerprint kind each named page carries on the summary's context.</summary>
+    public const string IncidentKind = "analysis";
+
+    /// <summary>Composes the one summary message: a server label, a headline value, and a context with one
+    /// detail item and one dedup incident per named page, so the send core's per-fingerprint cooldown
+    /// (#1154) and repeat budget (#3430) treat each named page individually.</summary>
+    public static (string ServerName, string CurrentValue, AlertContext Context) Compose(IReadOnlyList<FindingAlert> named)
+    {
+        var servers = named.Select(a => a.ServerName).Distinct(StringComparer.Ordinal).ToList();
+        var serverName = servers.Count == 1 ? servers[0] : $"{servers.Count} servers";
+        var currentValue = $"{named.Count} analysis findings held in one window";
+        var context = new AlertContext { Incidents = new List<AlertIncident>() };
+        foreach (var a in named)
+        {
+            var item = new AlertDetailItem { Heading = $"{a.ServerName} — {a.MetricName}" };
+            item.Fields.Add(("Severity", a.Severity.ToString("F2", CultureInfo.InvariantCulture)));
+            item.Fields.Add(("Finding", a.CurrentValue));
+            context.Details.Add(item);
+            var incident = AlertFingerprint.ForKey(a.ServerName, IncidentKind, $"{a.ServerId}:{a.MetricName}",
+                new[] { a.MetricName });
+            if (incident is not null)
+                context.Incidents.Add(incident);
+        }
+        return (serverName, currentValue, context);
+    }
+
+    /// <summary>The detail text a named page's own row persists: its own prose, noting the summary.</summary>
+    public static string RowDetailText(FindingAlert alert, int summaryCount) =>
+        $"{alert.DetailText}\n  Delivered in a summary of {summaryCount}.";
 }
 
 /// <summary>

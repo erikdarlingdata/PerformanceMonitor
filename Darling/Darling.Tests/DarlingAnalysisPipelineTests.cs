@@ -440,6 +440,7 @@ public sealed class DarlingAnalysisPipelineTests
                 f => f.ServerId.ToString(),
                 NullLogger<AnalysisNotificationService>.Instance);
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
 
             var expectedNotified = findings.Where(f => f.Severity >= 0.3).ToList();
             Assert.NotEmpty(expectedNotified);
@@ -473,6 +474,7 @@ public sealed class DarlingAnalysisPipelineTests
 
             /* Inside the cooldown, an identical batch does not re-notify. */
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
             Assert.Equal(expectedNotified.Count, sender.Sent.Count);
 
             /* ---- mute: the second run re-detects the same story and the mute filter drops
@@ -551,6 +553,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
             return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }

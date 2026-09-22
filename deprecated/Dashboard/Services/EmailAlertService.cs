@@ -5,6 +5,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -209,6 +210,42 @@ namespace PerformanceMonitorDashboard.Services
         /// <summary>
         /// Gets email delivery health summary (from the shared send core).
         /// </summary>
+        /// <summary>
+        /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
+        /// row per named page under its own metric name carrying the summary's delivery. The shared service
+        /// raises ONE tray balloon for the summary through its wired sink, so the rows say the tray showed.
+        /// Never throws.
+        /// </summary>
+        public async Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            if (named is null || named.Count == 0)
+                return null;
+            try
+            {
+                var (serverName, currentValue, context) = FindingSummary.Compose(named);
+                var result = await _core.TrySendAsync(
+                    FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
+                    named[0].ServerId, context, attemptChannels: true);
+                var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: true);
+                foreach (var alert in named)
+                {
+                    await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                        alert.ServerId, alert.ServerName, alert.MetricName,
+                        alert.CurrentValue, alert.ThresholdValue,
+                        null, null,
+                        delivery,
+                        false, FindingSummary.RowDetailText(alert, named.Count),
+                        AlertContextSerializer.Serialize(alert.Context)));
+                }
+                return delivery;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"SendFindingSummaryAsync error: {ex.Message}");
+                return null;
+            }
+        }
+
         public (int ConsecutiveFailures, string? LastError) GetEmailHealth()
             => _core.GetEmailHealth();
     }

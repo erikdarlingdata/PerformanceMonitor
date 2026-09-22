@@ -108,6 +108,7 @@ public class AnalysisProseDeliveryTests
             new AppLoggerAdapter<AnalysisNotificationService>());
 
         await notifier.NotifyAsync(new[] { Finding() });
+        await notifier.FlushPendingAsync();
 
         return Assert.Single(sender.Sent);
     }
@@ -354,6 +355,13 @@ public class AnalysisProseDeliveryTests
         public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
             return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
