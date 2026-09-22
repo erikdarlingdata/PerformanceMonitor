@@ -12,7 +12,9 @@ using System.Globalization;
 namespace PerformanceMonitor.Analysis;
 
 /// <summary>
-/// Advice for the memory-composition family (design §4b; filled by lane 32 of #3691). Value-stated from the facts —
+/// Advice for the memory-composition family (design §4b; filled by lane 32 of #3691; since lane 47 the overcommit card
+/// has three shapes — graded at the window's peak backend count with the configured permission as its own sentence,
+/// graded on the configured permission because no backend count was sampled, and the fact-less static). Value-stated from the facts —
 /// each knob's value as read (<c>shared_buffers</c>, <c>max_connections</c>, <c>work_mem</c>,
 /// <c>max_parallel_workers_per_gather</c>, <c>maintenance_work_mem</c> / <c>autovacuum_work_mem</c>,
 /// <c>autovacuum_max_workers</c>, <c>wal_buffers</c>), each term's product, the sum, and the host's
@@ -35,7 +37,10 @@ public static partial class PgTargetAdvice
             "or hash at work_mem and each parallel worker another — plus autovacuum_max_workers × maintenance_work_mem " +
             "(autovacuum_work_mem when set), plus wal_buffers; measured against the host's memory_total_bytes from " +
             "pg_cpu_utilization (AWS Performance Insights, Aurora only — a stock target has no host-memory source and " +
-            "this check reads unavailable there). work_mem is a per-operation budget, not a per-connection allocation, so " +
+            "this check reads unavailable there). The backend term that is graded uses the window's peak " +
+            "pg_database_stats.numbackends (clamped to max_connections) whenever an instant sampled it, and the all-slots " +
+            "figure is stated beside it; with no sampled backend count the configured permission is what is graded, and " +
+            "the card says so. work_mem is a per-operation budget, not a per-connection allocation, so " +
             "the sum is a CEILING the workload may never approach: at or past 1.0× the configuration CAN exceed physical " +
             "memory if every backend spills once. That is arithmetic (engine-defined), which is why the card is advisory " +
             "alone and reaches the incident line only when a workload co-fire says it is being felt — the host's " +
@@ -102,9 +107,19 @@ public static partial class PgTargetAdvice
         var headlineHost = serverless
             ? $"the smallest memory this instance ran with ({KnobBytes(totalMin)})"
             : $"the host's {KnobBytes(totalMin)}";
+        /* Which worst case was graded (#3691 lane 47, Erik's ruling on the D2 read): basis 1 = the backend term formed at
+           the window's peak numbackends, the configured permission stated as its own sentence; basis 0 (or a fact from
+           before the stamp) = no backend count was sampled, so the permission is what was graded, and the card says so. */
+        var observed = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryOvercommitBasisKey) > 0
+                       && sum.Metadata.ContainsKey(PgTargetScorer.MemoryPeakBackendsKey);
+        var peak = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryPeakBackendsKey);
+        var graded = observed ? sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryObservedWorstCaseBytesKey, ratio * totalMin) : worst;
+        var subject = observed
+            ? $"The worst-case memory at the window's peak of {Num(peak)} backends is {KnobBytes(graded)}"
+            : $"The configured memory worst case is {KnobBytes(worst)}";
         var headline = exceeds
-            ? $"The configured memory worst case is {KnobBytes(worst)} — {Ratio(ratio)} {headlineHost}" + (critical ? " — more than double" : string.Empty)
-            : $"The configured memory worst case is {KnobBytes(worst)} — {Ratio(ratio)} {headlineHost}, within the box";
+            ? $"{subject} — {Ratio(ratio)} {headlineHost}" + (critical ? " — more than double" : string.Empty)
+            : $"{subject} — {Ratio(ratio)} {headlineHost}, within the box";
 
         var coFire = exceeds
             ? (pressureFired, spillFired) switch
@@ -120,9 +135,10 @@ public static partial class PgTargetAdvice
         {
             Headline = headline,
             Investigation =
-                $"{TermsSentence(sum)} The sum, {KnobBytes(worst)}, is {Ratio(ratio)} of {hostClause}." +
+                $"{TermsSentence(sum)} " + (observed ? ObservedSentence(sum, ratio, graded, hostClause) : ConfiguredOnlySentence(worst, ratio, hostClause)) +
                 (exceeds
-                    ? " At or past 1.0× the configuration CAN exceed physical memory if every backend spills once — PostgreSQL's own per-backend allocation model, arithmetic rather than a judgment (engine-defined)."
+                    ? (observed ? " At or past 1.0× the backends this window actually ran CAN exceed physical memory if each spills once" : " At or past 1.0× the configuration CAN exceed physical memory if every backend spills once")
+                      + " — PostgreSQL's own per-backend allocation model, arithmetic rather than a judgment (engine-defined)."
                     : " Under 1.0× the model fits the box and this fact is context.")
                 + (critical ? " The 2× band is a chosen line, not a measured one (threshold_lineage = 0)." : string.Empty)
                 + " work_mem is a per-sort / per-hash budget, not a per-connection allocation, so the product is a CEILING the workload may never approach."
@@ -131,6 +147,34 @@ public static partial class PgTargetAdvice
                 + SamplesSentence(sum),
             Remediation = RemediationFor(sum, serverless, pressureFired, spillFired),
         };
+    }
+
+    /// <summary>Basis 1: the graded sum at the window's peak backend count, then the configured permission as its own
+    /// sentence — stated, not graded — with how close the window's concurrency came to it. A peak at or above
+    /// <c>max_connections</c> is said to be clamped (the level also counts workers that hold no slot).</summary>
+    private static string ObservedSentence(Fact sum, double ratio, double graded, string hostClause)
+    {
+        var peak = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryPeakBackendsKey);
+        var instants = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryPeakBackendsSamplesKey);
+        var mc = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryMaxConnectionsKey);
+        var observedBackend = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryObservedBackendTermBytesKey);
+        var configuredRatio = sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryConfiguredOvercommitRatioKey);
+        var clamped = mc > 0 && peak >= mc;
+        var reach = clamped
+            ? $"a ceiling the window's concurrency reached: peak {Num(peak)} of {Num(mc)}, counted as {Num(mc)} (numbackends also counts autovacuum and parallel workers, which hold no connection slot)"
+            : mc > 0 && peak / mc >= 0.5
+                ? $"a ceiling the window's concurrency approached: peak {Num(peak)} of {Num(mc)}"
+                : $"a ceiling the window's concurrency never approached: peak {Num(peak)} of {Num(mc)}";
+        return $"At the window's peak of {Num(peak)} backends (pg_database_stats.numbackends summed across databases at one instant, over {Num(instants)} sampled instants — the same peak PG_SESSION_SATURATION divides by) the backend term is {KnobBytes(observedBackend)} and the sum is {KnobBytes(graded)}, {Ratio(ratio)} of {hostClause}; that is the ratio graded." +
+               $" The settings permit {Ratio(configuredRatio)} if all max_connections sorted at once — {reach}; stated, not graded.";
+    }
+
+    /// <summary>Basis 0: no backend level was sampled in the window, so the configured permission is what was graded,
+    /// and the card says so rather than letting the reader assume the concurrency was measured.</summary>
+    private static string ConfiguredOnlySentence(double worst, double ratio, string hostClause)
+    {
+        return $"The sum, {KnobBytes(worst)}, is {Ratio(ratio)} of {hostClause}." +
+               " No backend count was sampled in the window (pg_database_stats.numbackends carried no value), so this is the configured permission — every max_connections slot sorting at once — and that is what was graded, not the concurrency this server actually reached.";
     }
 
     private static string TermsSentence(Fact sum)
